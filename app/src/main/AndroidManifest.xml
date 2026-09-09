@@ -5,6 +5,7 @@
          This ROM-specific probe verifies permission and every settings write. -->
     <uses-permission android:name="android.permission.WRITE_SECURE_SETTINGS"
         tools:ignore="ProtectedPermissions" />
+    <uses-permission android:name="android.permission.INTERNET" />
 
     <queries>
         <intent>

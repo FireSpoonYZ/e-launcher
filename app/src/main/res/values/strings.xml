@@ -1,4 +1,4 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="gesture_service_description">固定边缘手势：左右内滑返回，底边上滑回桌面，上滑停留打开最近任务。不读取窗口内容；未识别的边缘触摸会回放。请回到 App 点击启用；停用时先恢复三键。</string>
+    <string name="gesture_service_description">提供固定边缘导航，并在助手明确调用工具时读取当前界面的有限结构、点击、输入非密码文字或滚动。密码文字会隐藏。请回到 App 点击启用；停用时先恢复三键。</string>
 </resources>

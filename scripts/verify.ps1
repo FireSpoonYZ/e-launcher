@@ -10,13 +10,27 @@ $gradle = "$env:LOCALAPPDATA\e-launcher-tools\gradle-8.11.1\bin\gradle.bat"
 $classes = '.pi\test-classes'
 New-Item -ItemType Directory -Force $classes | Out-Null
 & "$env:JAVA_HOME\bin\javac.exe" '-J-Duser.language=en' -encoding UTF-8 -d $classes `
+    app/src/main/java/com/example/launcherprobe/AgentLoop.java `
+    app/src/main/java/com/example/launcherprobe/ActionFence.java `
+    app/src/main/java/com/example/launcherprobe/AgentHistory.java `
     app/src/main/java/com/example/launcherprobe/AttemptAll.java `
+    app/src/main/java/com/example/launcherprobe/AppSearch.java `
+    app/src/main/java/com/example/launcherprobe/ExactText.java `
+    app/src/main/java/com/example/launcherprobe/ObservationRegistry.java `
+    app/src/main/java/com/example/launcherprobe/ProviderConfig.java `
+    app/src/main/java/com/example/launcherprobe/ReasoningEffort.java `
+    app/src/main/java/com/example/launcherprobe/RunEpoch.java `
     app/src/main/java/com/example/launcherprobe/SwipeDetector.java `
-    app/src/main/java/com/example/launcherprobe/AttemptAll.java `
     app/src/main/java/com/example/launcherprobe/NavigationSession.java `
+    app/src/main/java/com/example/launcherprobe/SearchConfig.java `
+    app/src/main/java/com/example/launcherprobe/SearchParser.java `
+    app/src/main/java/com/example/launcherprobe/WebAddressPolicy.java `
+    tests/com/example/launcherprobe/AgentChecks.java `
     tests/com/example/launcherprobe/GestureChecks.java
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 & "$env:JAVA_HOME\bin\java.exe" -ea -cp $classes com.example.launcherprobe.GestureChecks
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+& "$env:JAVA_HOME\bin\java.exe" -ea -cp $classes com.example.launcherprobe.AgentChecks
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 & $gradle --no-daemon :app:testDebugUnitTest :app:assembleDebug :app:lintDebug

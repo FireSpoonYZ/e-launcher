@@ -21,22 +21,45 @@ public final class GestureChecks {
         }
     }
 
+    private static final class FeedbackRecorder implements SwipeDetector.Feedback {
+        boolean visible;
+        boolean crossed;
+        float progress;
+        SwipeDetector.Zone zone;
+        int hides;
+        public void show(SwipeDetector.Zone value, float x, float y, float valueProgress,
+                boolean valueCrossed) {
+            visible = true;
+            zone = value;
+            progress = valueProgress;
+            crossed = valueCrossed;
+        }
+        public void hide() { visible = false; hides++; }
+    }
+
     private static void gestures() {
         Clock clock = new Clock();
         List<String> actions = new ArrayList<>();
+        FeedbackRecorder feedback = new FeedbackRecorder();
         SwipeDetector bottom = new SwipeDetector(SwipeDetector.Zone.BOTTOM, 1, clock,
                 () -> actions.add("home"), () -> actions.add("recents"),
-                samples -> actions.add("replay"));
+                samples -> actions.add("replay"), feedback);
         bottom.down(100, 200, 0);
+        assert feedback.visible && feedback.zone == SwipeDetector.Zone.BOTTOM
+                && feedback.progress == 0 && !feedback.crossed;
         bottom.move(100, 191, 20);
+        assert feedback.visible && Math.abs(feedback.progress - .9f) < .001f
+                && !feedback.crossed;
         bottom.up(100, 191, 40);
         assert actions.toString().equals("[replay]") : actions;
         actions.clear();
         bottom.down(100, 200, 50);
         bottom.move(100, 190, 70);
+        assert feedback.visible && feedback.progress == 1 && feedback.crossed;
         bottom.up(100, 180, 90);
         clock.advance(400);
         assert actions.toString().equals("[home]") : actions;
+        assert !feedback.visible;
         actions.clear();
         bottom.down(100, 200, 100);
         bottom.move(100, 180, 120);
@@ -45,7 +68,11 @@ public final class GestureChecks {
         clock.advance(250);
         assert actions.isEmpty();
         clock.advance(50);
-        bottom.up(100, 160, 700);
+        assert !feedback.visible;
+        bottom.move(100, 140, 680);
+        assert !feedback.visible;
+        bottom.up(100, 140, 700);
+        assert !feedback.visible;
         assert actions.toString().equals("[recents]") : actions;
         actions.clear();
         for (int i = 0; i < 3; i++) {
@@ -54,6 +81,7 @@ public final class GestureChecks {
             // Android CANCEL, POINTER_DOWN and teardown/rotation share this reset.
             Runnable staleHold = clock.pending;
             bottom.cancel();
+            assert !feedback.visible;
             staleHold.run(); // A late callback must also be inert.
             clock.advance(500);
             bottom.up(100, 180, 600);
@@ -61,13 +89,16 @@ public final class GestureChecks {
         assert actions.isEmpty();
         bottom.down(100, 200, 0);
         bottom.move(100, 180, 1001);
+        assert !feedback.visible;
         bottom.up(100, 180, 1100);
         assert actions.toString().equals("[replay]");
         actions.clear();
         for (SwipeDetector.Zone zone : new SwipeDetector.Zone[]{
                 SwipeDetector.Zone.LEFT, SwipeDetector.Zone.RIGHT}) {
+            FeedbackRecorder sideFeedback = new FeedbackRecorder();
             SwipeDetector side = new SwipeDetector(zone, 1, clock,
-                    () -> actions.add("back"), null, samples -> actions.add("replay"));
+                    () -> actions.add("back"), null, samples -> actions.add("replay"),
+                    sideFeedback);
             int dx = zone == SwipeDetector.Zone.LEFT ? 24 : -24;
             side.down(100, 200, 0);
             side.move(100 - dx, 200, 20);
@@ -77,9 +108,30 @@ public final class GestureChecks {
             side.up(100 + dx, 230, 30);
             side.down(100, 200, 0);
             side.move(100 + dx, 200, 20);
-            side.up(100 + dx, 200, 30);
+            assert sideFeedback.visible && sideFeedback.zone == zone
+                    && sideFeedback.progress == 1 && sideFeedback.crossed;
+            side.move(100 + dx * 2, 200, 1100);
+            assert sideFeedback.visible && sideFeedback.crossed;
+            side.up(100 + dx * 2, 200, 1120);
+            assert !sideFeedback.visible;
         }
         assert actions.toString().equals("[replay, replay, back, replay, replay, back]");
+        actions.clear();
+
+        Clock slowClock = new Clock();
+        SwipeDetector slowBottom = new SwipeDetector(SwipeDetector.Zone.BOTTOM, 1, slowClock,
+                () -> actions.add("home"), () -> actions.add("recents"),
+                samples -> actions.add("replay"), feedback);
+        slowBottom.down(100, 200, 0);
+        for (int step = 1; step <= 4; step++) {
+            slowBottom.move(100, 200 - step * 20, 20 + (step - 1) * 250);
+            slowClock.advance(250);
+        }
+        slowBottom.move(100, 100, 1020);
+        slowBottom.up(100, 100, 1030);
+        slowClock.advance(400);
+        assert !feedback.visible;
+        assert actions.toString().equals("[home]") : actions;
     }
 
     private static final class Ports implements NavigationSession.Ports {
@@ -170,9 +222,18 @@ public final class GestureChecks {
         assert !p.calls.contains("hide");
     }
 
+    private static void appSearch() {
+        assert AppSearch.matches("相机", "com.android.camera", "相机");
+        assert AppSearch.matches("Camera", "com.android.camera", " CAMERA ");
+        assert AppSearch.matches("相机", "com.android.camera", "android.camera");
+        assert AppSearch.matches("相机", "com.android.camera", "  ");
+        assert !AppSearch.matches("相机", "com.android.camera", "地图");
+    }
+
     public static void main(String[] args) {
         gestures();
         lifecycle();
-        System.out.println("PASS: gestures/cancellation, all-window attempts and navigation fail-safe ordering");
+        appSearch();
+        System.out.println("PASS: gestures, navigation fail-safe ordering and local app search");
     }
 }

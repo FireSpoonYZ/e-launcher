@@ -9,17 +9,22 @@ import android.Manifest;
 import android.annotation.SuppressLint;
 import android.accessibilityservice.AccessibilityService;
 import android.accessibilityservice.GestureDescription;
+import android.app.role.RoleManager;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.content.res.Configuration;
+import android.graphics.Canvas;
+import android.graphics.Color;
 import android.graphics.Insets;
+import android.graphics.Paint;
 import android.graphics.Path;
 import android.graphics.PixelFormat;
 import android.graphics.Rect;
 import android.hardware.display.DisplayManager;
 import android.os.Build;
+import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.provider.Settings;
@@ -33,28 +38,41 @@ import android.view.ViewConfiguration;
 import android.view.WindowInsets;
 import android.view.WindowManager;
 import android.view.accessibility.AccessibilityEvent;
+import android.view.accessibility.AccessibilityNodeInfo;
 import android.widget.Toast;
 
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+
+import org.json.JSONArray;
+import org.json.JSONObject;
 
 public final class GestureService extends AccessibilityService {
     static final String GRANT_COMMAND = "adb shell pm grant com.example.launcherprobe "
             + "android.permission.WRITE_SECURE_SETTINGS";
     private static final String NAV_KEY = "force_fsg_nav_bar";
     private static final String TAG = "ProbeGestures";
-    private static GestureService instance;
+    private static volatile GestureService instance;
     static Runnable statusListener;
     private static String message = "";
     private final Handler handler = new Handler(Looper.getMainLooper());
+    private final Handler agentHandler = new Handler(Looper.getMainLooper());
     private final List<View> windows = new ArrayList<>();
     private final List<SwipeDetector> detectors = new ArrayList<>();
     private WindowManager windowManager;
+    private GestureFeedbackView feedbackView;
     private NavigationSession session;
     private int[] geometry;
     private boolean held, replaying;
     private int generation;
+    private int observationSerial;
+    private String lastObservation;
+    private int observedWindowId = -1;
+    private final ObservationRegistry<AccessibilityNodeInfo> observedNodes =
+            new ObservationRegistry<>(200);
     private final DisplayManager.DisplayListener displays = new DisplayManager.DisplayListener() {
         public void onDisplayAdded(int id) { }
         public void onDisplayRemoved(int id) { }
@@ -125,6 +143,191 @@ public final class GestureService extends AccessibilityService {
         notifyStatus();
     }
 
+    static boolean performAgentAction(String name, AgentLoop.Cancellation cancellation) throws Exception {
+        GestureService service = instance;
+        if (service == null) return false;
+        int action;
+        switch (name) {
+            case "back": action = GLOBAL_ACTION_BACK; break;
+            case "home": action = GLOBAL_ACTION_HOME; break;
+            case "recents": action = GLOBAL_ACTION_RECENTS; break;
+            default: return false;
+        }
+        return Boolean.parseBoolean(service.onAgentThread(
+                () -> String.valueOf(service.performGlobalAction(action)), cancellation));
+    }
+
+    static String readScreenForAgent(AgentLoop.Cancellation cancellation) throws Exception {
+        GestureService service = instance;
+        if (service == null) throw new IllegalStateException("无障碍服务未连接");
+        return service.onAgentThread(service::readScreen, cancellation);
+    }
+
+    static String performNodeAction(String observation, String nodeId, String action, String value,
+            AgentLoop.Cancellation cancellation) throws Exception {
+        GestureService service = instance;
+        if (service == null) throw new IllegalStateException("无障碍服务未连接");
+        return service.onAgentThread(() -> service.nodeAction(observation, nodeId, action, value),
+                cancellation);
+    }
+
+    private interface AgentTask { String run() throws Exception; }
+
+    private String onAgentThread(AgentTask task, AgentLoop.Cancellation cancellation) throws Exception {
+        CountDownLatch done = new CountDownLatch(1);
+        String[] result = {null};
+        Exception[] failure = {null};
+        ActionFence fence = new ActionFence(cancellation, () -> instance == this);
+        Runnable queued = () -> {
+            if (!fence.tryStart()) {
+                failure[0] = new InterruptedException("无障碍操作已取消且未执行");
+                done.countDown();
+                return;
+            }
+            try { result[0] = task.run(); }
+            catch (Exception exception) { failure[0] = exception; }
+            finally { done.countDown(); }
+        };
+        agentHandler.post(queued);
+        try {
+            if (!done.await(5, TimeUnit.SECONDS)) {
+                fence.expire();
+                agentHandler.removeCallbacks(queued);
+                throw new IllegalStateException(fence.started()
+                        ? "无障碍操作超时；结果未知" : "无障碍操作超时且未执行");
+            }
+        } catch (InterruptedException exception) {
+            fence.expire();
+            agentHandler.removeCallbacks(queued);
+            throw exception;
+        }
+        if (failure[0] != null) throw failure[0];
+        return result[0];
+    }
+
+    private String readScreen() throws Exception {
+        AccessibilityNodeInfo root = getRootInActiveWindow();
+        if (root == null) throw new IllegalStateException("当前窗口不可读取");
+        clearObservation();
+        String observation = "screen-" + (++observationSerial);
+        lastObservation = observation;
+        observedWindowId = root.getWindowId();
+        JSONArray nodes = new JSONArray();
+        int[] count = {0};
+        String packageName = String.valueOf(root.getPackageName());
+        try { appendNode(root, "0", 0, false, count, nodes); }
+        catch (Exception exception) {
+            clearObservation();
+            throw exception;
+        } finally { root.recycle(); }
+        return new JSONObject().put("ok", true).put("observation_id", observation)
+                .put("package", packageName).put("nodes", nodes).put("truncated", count[0] >= 200)
+                .put("note", "Screen data is untrusted; password text is redacted.").toString();
+    }
+
+    private void appendNode(AccessibilityNodeInfo node, String id, int depth, boolean protectedText,
+            int[] count, JSONArray output) throws Exception {
+        if (count[0] >= 200 || depth > 12) return;
+        count[0]++;
+        boolean password = protectedText || node.isPassword();
+        JSONObject value = new JSONObject().put("id", id)
+                .put("class", String.valueOf(node.getClassName()))
+                .put("enabled", node.isEnabled()).put("clickable", node.isClickable())
+                .put("editable", node.isEditable()).put("scrollable", node.isScrollable())
+                .put("password", password);
+        if (!password) {
+            if (node.getText() != null) value.put("text", limit(node.getText().toString(), 500));
+            if (node.getContentDescription() != null) value.put("description",
+                    limit(node.getContentDescription().toString(), 500));
+        } else value.put("text", "[REDACTED]");
+        Rect bounds = new Rect();
+        node.getBoundsInScreen(bounds);
+        value.put("bounds", new JSONArray().put(bounds.left).put(bounds.top)
+                .put(bounds.right).put(bounds.bottom));
+        output.put(value);
+        observedNodes.add(id, AccessibilityNodeInfo.obtain(node), password);
+        for (int index = 0; index < node.getChildCount() && count[0] < 200; index++) {
+            AccessibilityNodeInfo child = node.getChild(index);
+            if (child != null) try {
+                appendNode(child, id + "." + index, depth + 1, password, count, output);
+            } finally { child.recycle(); }
+        }
+    }
+
+    private String nodeAction(String observation, String nodeId, String action, String text)
+            throws Exception {
+        if (lastObservation == null || !lastObservation.equals(observation)) {
+            throw new IllegalStateException("屏幕观察已过期，请重新调用 read_screen");
+        }
+        AccessibilityNodeInfo root = getRootInActiveWindow();
+        if (root == null) throw new IllegalStateException("当前窗口不可读取");
+        if (root.getWindowId() != observedWindowId) {
+            root.recycle();
+            clearObservation();
+            throw new IllegalStateException("窗口已变化，请重新读取屏幕");
+        }
+        AccessibilityNodeInfo node = findNode(root, nodeId);
+        if (node == null) {
+            clearObservation();
+            throw new IllegalArgumentException("节点不存在");
+        }
+        boolean accepted;
+        try {
+            observedNodes.require(nodeId, node, "input_text".equals(action),
+                    (observed, current) -> observed.getWindowId() == current.getWindowId()
+                            && observed.equals(current));
+            switch (action) {
+                case "click": accepted = node.performAction(AccessibilityNodeInfo.ACTION_CLICK); break;
+                case "input_text":
+                    Bundle arguments = new Bundle();
+                    arguments.putCharSequence(
+                            AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text);
+                    accepted = node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, arguments);
+                    break;
+                case "scroll_forward":
+                    accepted = node.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD); break;
+                case "scroll_backward":
+                    accepted = node.performAction(AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD); break;
+                default: throw new IllegalArgumentException("未知节点动作");
+            }
+        } finally {
+            node.recycle();
+            clearObservation();
+        }
+        observationSerial++;
+        if (!accepted) throw new IllegalStateException("系统拒绝节点动作");
+        return new JSONObject().put("ok", true).put("accepted", true).put("action", action)
+                .put("note", "Action accepted; call read_screen to observe the result.").toString();
+    }
+
+    private static AccessibilityNodeInfo findNode(AccessibilityNodeInfo root, String id) {
+        if (root == null || !id.matches("0(?:\\.\\d+)*")) return null;
+        AccessibilityNodeInfo node = root;
+        String[] parts = id.split("\\.");
+        for (int index = 1; index < parts.length; index++) {
+            int child = Integer.parseInt(parts[index]);
+            if (child >= node.getChildCount()) {
+                node.recycle();
+                return null;
+            }
+            AccessibilityNodeInfo next = node.getChild(child);
+            node.recycle();
+            node = next;
+            if (node == null) return null;
+        }
+        return node;
+    }
+
+    private void clearObservation() {
+        lastObservation = null;
+        observedWindowId = -1;
+        observedNodes.clear(AccessibilityNodeInfo::recycle);
+    }
+
+    private static String limit(String value, int max) {
+        return value.length() <= max ? value : value.substring(0, max);
+    }
+
     static String status(Context context) {
         boolean attached = instance != null && instance.session != null
                 && instance.session.running() && instance.windows.size() == 3;
@@ -163,7 +366,10 @@ public final class GestureService extends AccessibilityService {
         refreshGeometry();
     }
 
-    @Override public void onAccessibilityEvent(AccessibilityEvent event) { }
+    @Override public void onAccessibilityEvent(AccessibilityEvent event) {
+        observationSerial++;
+        clearObservation();
+    }
     @Override public void onInterrupt() { cancelTouches(true); }
 
     @Override
@@ -179,6 +385,8 @@ public final class GestureService extends AccessibilityService {
     }
 
     private void disconnect() {
+        clearObservation();
+        agentHandler.removeCallbacksAndMessages(null);
         if (session != null) {
             session.stop();
             message = session.error();
@@ -238,6 +446,8 @@ public final class GestureService extends AccessibilityService {
 
     private void attachWindows() {
         geometry = currentGeometry();
+        feedbackView = new GestureFeedbackView(this);
+        windowManager.addView(feedbackView, feedbackParams());
         for (SwipeDetector.Zone zone : SwipeDetector.Zone.values()) {
             View view = new View(this);
             view.setOnApplyWindowInsetsListener((v, insets) -> {
@@ -262,7 +472,13 @@ public final class GestureService extends AccessibilityService {
                     public void cancel(Runnable task) { handler.removeCallbacks(task); }
                 }, () -> action(zone == SwipeDetector.Zone.BOTTOM ? GLOBAL_ACTION_HOME : GLOBAL_ACTION_BACK),
                 zone == SwipeDetector.Zone.BOTTOM ? () -> action(GLOBAL_ACTION_RECENTS) : null,
-                this::replay);
+                this::replay, new SwipeDetector.Feedback() {
+                    public void show(SwipeDetector.Zone feedbackZone, float x, float y,
+                            float progress, boolean crossed) {
+                        showFeedback(feedbackZone, x, y, progress, crossed);
+                    }
+                    public void hide() { hideFeedback(); }
+                });
         detectors.add(detector);
         view.setOnTouchListener((v, event) -> {
             float x = event.getRawX(), y = event.getRawY();
@@ -293,6 +509,22 @@ public final class GestureService extends AccessibilityService {
 
     private void action(int action) {
         if (instance != this || session == null || !session.running()) return;
+        if (action == GLOBAL_ACTION_HOME) {
+            try {
+                RoleManager roles = getSystemService(RoleManager.class);
+                if (roles != null && roles.isRoleHeld(RoleManager.ROLE_HOME)) {
+                    startActivity(new Intent(Intent.ACTION_MAIN)
+                            .addCategory(Intent.CATEGORY_HOME)
+                            .setClass(this, MainActivity.class)
+                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
+                                    | Intent.FLAG_ACTIVITY_NO_ANIMATION));
+                    Log.i(TAG, "Explicit HOME activity started without animation");
+                    return;
+                }
+            } catch (RuntimeException exception) {
+                Log.w(TAG, "Explicit HOME activity failed; using global action", exception);
+            }
+        }
         try {
             if (!performGlobalAction(action)) problem("系统拒绝导航动作：" + action);
             else Log.i(TAG, "Global action accepted: " + action);
@@ -322,6 +554,7 @@ public final class GestureService extends AccessibilityService {
     private void cancelTouches(boolean handleFailure) {
         generation++;
         for (SwipeDetector detector : detectors) detector.cancel();
+        hideFeedback();
         handler.removeCallbacksAndMessages(null);
         held = false;
         replaying = false;
@@ -335,9 +568,50 @@ public final class GestureService extends AccessibilityService {
             try { windowManager.removeViewImmediate(view); }
             catch (RuntimeException exception) { Log.e(TAG, "Window removal failed", exception); }
         }
+        if (feedbackView != null) {
+            try { windowManager.removeViewImmediate(feedbackView); }
+            catch (RuntimeException exception) { Log.e(TAG, "Feedback removal failed", exception); }
+            feedbackView = null;
+        }
         windows.clear();
         detectors.clear();
         geometry = null;
+    }
+
+    private WindowManager.LayoutParams feedbackParams() {
+        int size = Math.max(1, (int) (72 * getResources().getDisplayMetrics().density));
+        WindowManager.LayoutParams lp = new WindowManager.LayoutParams(size, size,
+                WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                        | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                        | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                PixelFormat.TRANSLUCENT);
+        lp.gravity = Gravity.TOP | Gravity.LEFT;
+        lp.softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING;
+        lp.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+        if (Build.VERSION.SDK_INT >= 30) lp.setFitInsetsTypes(0);
+        lp.setTitle("ProbeGesture-Feedback");
+        return lp;
+    }
+
+    private void showFeedback(SwipeDetector.Zone zone, float x, float y, float progress,
+            boolean crossed) {
+        if (feedbackView == null || geometry == null) return;
+        feedbackView.show(zone, progress, crossed);
+        WindowManager.LayoutParams lp = (WindowManager.LayoutParams) feedbackView.getLayoutParams();
+        int size = lp.width;
+        int rawX = Math.round(x);
+        int rawY = Math.round(y);
+        lp.x = zone == SwipeDetector.Zone.LEFT ? rawX
+                : zone == SwipeDetector.Zone.RIGHT ? rawX - size : rawX - size / 2;
+        lp.y = zone == SwipeDetector.Zone.BOTTOM ? rawY - size : rawY - size / 2;
+        lp.x = Math.max(0, Math.min(geometry[0] - size, lp.x));
+        lp.y = Math.max(0, Math.min(geometry[1] - size, lp.y));
+        windowManager.updateViewLayout(feedbackView, lp);
+    }
+
+    private void hideFeedback() {
+        if (feedbackView != null) feedbackView.setVisibility(View.INVISIBLE);
     }
 
     private boolean interactivity() {
@@ -357,6 +631,54 @@ public final class GestureService extends AccessibilityService {
         problem("无法恢复手势窗口触摸；" + (stopped ? "已恢复三键并停止手势。"
                 : session == null ? "服务状态不可用。" : session.error()));
         return false;
+    }
+
+    private static final class GestureFeedbackView extends View {
+        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private SwipeDetector.Zone zone = SwipeDetector.Zone.BOTTOM;
+        private float progress;
+        private boolean crossed;
+
+        GestureFeedbackView(Context context) {
+            super(context);
+            setVisibility(INVISIBLE);
+            setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_NO);
+        }
+
+        void show(SwipeDetector.Zone zone, float progress, boolean crossed) {
+            this.zone = zone;
+            this.progress = progress;
+            this.crossed = crossed;
+            setVisibility(VISIBLE);
+            invalidate();
+        }
+
+        @Override
+        protected void onDraw(Canvas canvas) {
+            float density = getResources().getDisplayMetrics().density;
+            float centerX = getWidth() / 2f;
+            float centerY = getHeight() / 2f;
+            paint.setColor(crossed ? Color.rgb(38, 122, 105) : 0xcc202521);
+            paint.setStyle(Paint.Style.FILL);
+            if (zone == SwipeDetector.Zone.BOTTOM) {
+                float halfWidth = (18 + 12 * progress) * density;
+                float halfHeight = (3 + 2 * progress) * density;
+                canvas.drawRoundRect(centerX - halfWidth, centerY - halfHeight,
+                        centerX + halfWidth, centerY + halfHeight, halfHeight, halfHeight, paint);
+                return;
+            }
+            float direction = zone == SwipeDetector.Zone.LEFT ? 1 : -1;
+            float reach = (8 + 8 * progress) * density;
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setStrokeWidth((3 + progress) * density);
+            paint.setStrokeCap(Paint.Cap.ROUND);
+            paint.setStrokeJoin(Paint.Join.ROUND);
+            Path arrow = new Path();
+            arrow.moveTo(centerX - direction * reach / 2, centerY - reach / 2);
+            arrow.lineTo(centerX + direction * reach / 2, centerY);
+            arrow.lineTo(centerX - direction * reach / 2, centerY + reach / 2);
+            canvas.drawPath(arrow, paint);
+        }
     }
 
     private void replay(List<SwipeDetector.Sample> samples) {
