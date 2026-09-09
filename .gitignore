@@ -1,0 +1,8 @@
+.gradle/
+**/build/
+local.properties
+.idea/
+*.iml
+.pi/
+# 本地截图、日志、设备序列号等测试证据不进版本库。
+evidence/
