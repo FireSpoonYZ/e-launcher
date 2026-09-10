@@ -9,10 +9,9 @@ import org.json.JSONObject;
 import java.util.ArrayList;
 import java.util.List;
 
-/** Bounded app-private transcript and provider settings. Backups are disabled in the manifest. */
+/** App-private conversation trees and provider settings. Backups are disabled in the manifest. */
 public final class ChatStore {
-    private static final int MAX_MESSAGES = 100;
-    private static final int MAX_CONTENT = 50_000;
+    private static final int MAX_TOOL_ARGUMENTS = 50_000;
     private final SharedPreferences preferences;
 
     public ChatStore(Context context) {
@@ -87,48 +86,83 @@ public final class ChatStore {
         return SearchConfig.provider(preferences.getString("search_provider", ""));
     }
     public String searchBaseUrl() { return preferences.getString("search_base_url", ""); }
+    public boolean piTextMode() { return preferences.getBoolean("pi_text_mode", false); }
 
     public void settings(String baseUrl, String model, String apiKey, String reasoningEffort,
-            String searchProvider, String searchBaseUrl) {
+            String searchProvider, String searchBaseUrl, boolean piTextMode) {
         preferences.edit().putString("base_url", baseUrl.trim()).putString("model", model.trim())
                 .putString("api_key", apiKey.trim())
                 .putString("reasoning_effort", ReasoningEffort.normalize(reasoningEffort))
                 .putString("search_provider", SearchConfig.provider(searchProvider))
-                .putString("search_base_url", searchBaseUrl.trim()).apply();
+                .putString("search_base_url", searchBaseUrl.trim())
+                .putBoolean("pi_text_mode", piTextMode).apply();
     }
 
-    public List<AgentLoop.Message> load() {
-        List<AgentLoop.Message> messages = new ArrayList<>();
+    public List<AgentLoop.Message> load() { return tree().path(); }
+
+    public ConversationTree tree() {
         try {
-            JSONArray values = new JSONArray(preferences.getString(historyKey(), "[]"));
-            for (int index = 0; index < values.length(); index++) {
-                JSONObject value = values.getJSONObject(index);
-                List<AgentLoop.ToolCall> calls = new ArrayList<>();
-                JSONArray storedCalls = value.optJSONArray("tool_calls");
-                if (storedCalls != null) for (int callIndex = 0; callIndex < storedCalls.length(); callIndex++) {
-                    JSONObject call = storedCalls.getJSONObject(callIndex);
-                    calls.add(new AgentLoop.ToolCall(call.getString("id"), call.getString("name"),
-                            call.optString("arguments", "{}")));
-                }
-                messages.add(new AgentLoop.Message(value.getString("role"),
-                        value.isNull("content") ? null : value.optString("content", ""),
-                        value.optString("tool_call_id", null), calls));
+            Object stored = new org.json.JSONTokener(preferences.getString(historyKey(), "[]")).nextValue();
+            boolean legacy = stored instanceof JSONArray;
+            JSONObject envelope = legacy ? null : (JSONObject) stored;
+            if (!legacy && envelope.getInt("version") != 1) throw new IllegalArgumentException("未知历史版本");
+            JSONArray values = legacy ? (JSONArray) stored : envelope.getJSONArray("nodes");
+            List<ConversationTree.Node> nodes = new ArrayList<>();
+            String parent = null;
+            for (int i = 0; i < values.length(); i++) {
+                JSONObject value = values.getJSONObject(i);
+                AgentLoop.Message message = readMessage(value);
+                nodes.add(new ConversationTree.Node(legacy ? parent : value.optString("parent_id", null), message));
+                parent = message.id;
             }
-            return AgentHistory.trimCompleteTurns(messages, MAX_MESSAGES);
-        } catch (Exception ignored) {
-            throw new IllegalStateException("无法读取聊天记录", ignored);
+            ConversationTree tree = new ConversationTree(nodes, legacy ? parent : envelope.optString("leaf", null));
+            // Persist generated identities once, before any caller can hold a path containing them.
+            if (legacy && !nodes.isEmpty()) preferences.edit().putString(historyKey(), encodeTree(tree).toString()).apply();
+            return tree;
+        } catch (Exception exception) {
+            throw new IllegalStateException("无法读取聊天记录", exception);
         }
     }
 
+    private static AgentLoop.Message readMessage(JSONObject value) throws Exception {
+        List<AgentLoop.ToolCall> calls = new ArrayList<>();
+        JSONArray storedCalls = value.optJSONArray("tool_calls");
+        if (storedCalls != null) for (int i = 0; i < storedCalls.length(); i++) {
+            JSONObject call = storedCalls.getJSONObject(i);
+            calls.add(new AgentLoop.ToolCall(call.getString("id"), call.getString("name"),
+                    call.optString("arguments", "{}")));
+        }
+        return new AgentLoop.Message(value.optString("id", java.util.UUID.randomUUID().toString()),
+                value.getString("role"), value.isNull("content") ? null : value.optString("content", ""),
+                value.optString("tool_call_id", null), calls, value.optBoolean("incomplete", false));
+    }
+
+    private static JSONObject encodeTree(ConversationTree tree) throws Exception {
+        JSONArray values = new JSONArray();
+        for (ConversationTree.Node node : tree.nodes()) {
+            put(values, node.message);
+            values.getJSONObject(values.length() - 1).put("id", node.id).put("parent_id", node.parentId);
+        }
+        return new JSONObject().put("version", 1).put("nodes", values).put("leaf", tree.leaf());
+    }
+
+    public void selectNode(String id) {
+        ConversationTree tree = tree();
+        tree.select(id);
+        writeTree(tree);
+    }
+
     public void save(List<AgentLoop.Message> messages) {
+        ConversationTree tree = tree();
+        tree.merge(messages);
+        writeTree(tree);
+    }
+
+    private void writeTree(ConversationTree tree) {
         try {
-            JSONArray values = new JSONArray();
-            for (AgentLoop.Message message : AgentHistory.trimCompleteTurns(messages, MAX_MESSAGES)) {
-                put(values, message);
-            }
             JSONObject index = conversationIndex();
             String title = "新对话";
-            for (AgentLoop.Message message : messages) {
+            for (AgentLoop.Message message : tree.path()) {
                 if ("user".equals(message.role) && message.content != null) {
                     title = message.content.replace('\n', ' ').trim();
                     title = title.substring(0, Math.min(title.length(), 40));
@@ -137,9 +171,8 @@ public final class ChatStore {
             }
             JSONObject previous = index.optJSONObject(activeId());
             if (previous != null) title = previous.optString("title", title);
-            index.put(activeId(), new JSONObject().put("title", title)
-                    .put("updated", System.currentTimeMillis()));
-            preferences.edit().putString(historyKey(), values.toString())
+            index.put(activeId(), new JSONObject().put("title", title).put("updated", System.currentTimeMillis()));
+            preferences.edit().putString(historyKey(), encodeTree(tree).toString())
                     .putString("conversations", index.toString()).apply();
         } catch (Exception exception) {
             throw new IllegalStateException("无法保存聊天记录", exception);
@@ -149,13 +182,14 @@ public final class ChatStore {
     private static void put(JSONArray values, AgentLoop.Message message) throws Exception {
         JSONObject value = new JSONObject().put("role", message.role)
                 .put("content", message.content == null
-                        ? JSONObject.NULL : truncate(message.content));
+                        ? JSONObject.NULL : message.content);
+        if (message.incomplete) value.put("incomplete", true);
         if (message.toolCallId != null) value.put("tool_call_id", message.toolCallId);
         if (!message.toolCalls.isEmpty()) {
             JSONArray calls = new JSONArray();
             for (AgentLoop.ToolCall call : message.toolCalls) calls.put(new JSONObject()
                     .put("id", call.id).put("name", call.name)
-                    .put("arguments", truncate(call.arguments)));
+                    .put("arguments", truncateArguments(call.arguments)));
             value.put("tool_calls", calls);
         }
         values.put(value);
@@ -169,7 +203,7 @@ public final class ChatStore {
                 .putString("active_chat", java.util.UUID.randomUUID().toString()).apply();
     }
 
-    private static String truncate(String value) {
-        return value.length() <= MAX_CONTENT ? value : value.substring(0, MAX_CONTENT);
+    private static String truncateArguments(String value) {
+        return value.length() <= MAX_TOOL_ARGUMENTS ? value : value.substring(0, MAX_TOOL_ARGUMENTS);
     }
 }

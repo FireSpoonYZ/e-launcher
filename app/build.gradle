@@ -5,6 +5,19 @@ plugins {
 android {
     namespace 'com.example.launcherprobe'
     compileSdk 35
+    ndkVersion '28.2.13676358'
+
+    signingConfigs {
+        debug {
+            storeFile rootProject.file('debug.keystore')
+            if (!storeFile.isFile()) {
+                throw new GradleException('Missing debug.keystore in project root. Copy the shared development keystore from another development machine.')
+            }
+            storePassword 'android'
+            keyAlias 'androiddebugkey'
+            keyPassword 'android'
+        }
+    }
 
     defaultConfig {
         applicationId 'com.example.launcherprobe'
@@ -13,9 +26,29 @@ android {
         versionCode 1
         versionName '1.0'
         testInstrumentationRunner 'com.example.launcherprobe.ChatStoreChecks'
+        ndk { abiFilters 'arm64-v8a' }
+        externalNativeBuild {
+            cmake {
+                cppFlags '-std=c++20'
+                arguments '-DANDROID_STL=c++_shared'
+            }
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path file('src/main/cpp/CMakeLists.txt')
+            version '3.22.1'
+        }
     }
 }
 
 dependencies {
     implementation 'com.squareup.okhttp3:okhttp:3.14.9'
+    implementation 'io.noties.markwon:core:4.6.2'
+    implementation 'io.noties.markwon:ext-tables:4.6.2'
+    implementation 'io.noties.markwon:ext-strikethrough:4.6.2'
+    implementation 'io.noties.markwon:ext-tasklist:4.6.2'
+    implementation 'io.noties.markwon:inline-parser:4.6.2'
+    implementation 'io.noties.markwon:ext-latex:4.6.2'
 }

@@ -46,16 +46,30 @@ public final class AgentLoop {
         public final String content;
         public final String toolCallId;
         public final List<ToolCall> toolCalls;
+        public final boolean incomplete;
+        public final String id;
 
         public Message(String role, String content) {
             this(role, content, null, Collections.emptyList());
         }
 
         public Message(String role, String content, String toolCallId, List<ToolCall> toolCalls) {
+            this(role, content, toolCallId, toolCalls, false);
+        }
+
+        public Message(String role, String content, String toolCallId, List<ToolCall> toolCalls,
+                boolean incomplete) {
+            this(java.util.UUID.randomUUID().toString(), role, content, toolCallId, toolCalls, incomplete);
+        }
+
+        public Message(String id, String role, String content, String toolCallId,
+                List<ToolCall> toolCalls, boolean incomplete) {
+            this.id = id;
             this.role = role;
             this.content = content;
             this.toolCallId = toolCallId;
             this.toolCalls = Collections.unmodifiableList(new ArrayList<>(toolCalls));
+            this.incomplete = incomplete;
         }
     }
 

@@ -1,0 +1,21 @@
+{
+  "name": "e-launcher-pi-runtime",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:android": "node build.js",
+    "check": "node check.js",
+    "test": "node check.js && node build.js && node check-bridge.js"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "dependencies": {
+    "@earendil-works/pi-agent-core": "0.85.1",
+    "@earendil-works/pi-ai": "0.85.1"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.11"
+  }
+}

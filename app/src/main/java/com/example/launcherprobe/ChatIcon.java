@@ -26,6 +26,12 @@ final class ChatIcon extends Drawable {
         canvas.translate(getBounds().left, getBounds().top);
         canvas.scale(getBounds().width() / 24f, getBounds().height() / 24f);
         switch (name) {
+            case "tree":
+                canvas.drawCircle(12, 4, 2.5f, paint);
+                canvas.drawCircle(5, 19, 2.5f, paint);
+                canvas.drawCircle(19, 19, 2.5f, paint);
+                line(canvas, 12, 6.5f, 12, 11);
+                path(canvas, 5, 16.5f, 5, 11, 19, 11, 19, 16.5f); break;
             case "menu":
                 line(canvas, 3, 7, 21, 7); line(canvas, 3, 16, 16, 16); break;
             case "close":

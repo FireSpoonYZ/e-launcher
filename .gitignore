@@ -1,8 +1,17 @@
 .gradle/
 **/build/
 local.properties
+*.keystore
+*.jks
+keystore.properties
 .idea/
 *.iml
 .pi/
 # 本地截图、日志、设备序列号等测试证据不进版本库。
 evidence/
+pi-runtime/node_modules/
+app/src/main/assets/pi-runtime.mjs
+app/src/main/assets/pi-runtime.cjs
+app/src/main/jniLibs/
+app/src/main/cpp/node-include/
+app/.cxx/
