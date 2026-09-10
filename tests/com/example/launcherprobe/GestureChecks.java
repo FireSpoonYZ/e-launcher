@@ -134,6 +134,32 @@ public final class GestureChecks {
         assert actions.toString().equals("[home]") : actions;
     }
 
+    private static void fluidGeometry() {
+        assert FluidGestureGeometry.depth(-10f, 1f) == 0f;
+        assert FluidGestureGeometry.depth(0f, 1f) == 0f;
+        float bottomThreshold = FluidGestureGeometry.depth(10f, 1f);
+        float at20 = FluidGestureGeometry.depth(20f, 1f);
+        float at30 = FluidGestureGeometry.depth(30f, 1f);
+        float near = FluidGestureGeometry.depth(24f, 1f);
+        float far = FluidGestureGeometry.depth(240f, 1f);
+        assert bottomThreshold > 12f; // Recognized bottom gesture remains a visible edge shape.
+        assert bottomThreshold > at20 - bottomThreshold;
+        assert at20 - bottomThreshold > at30 - at20; // Equal pulls add progressively less depth.
+        assert near > bottomThreshold && far > near && far < 40f : near + ", " + far;
+        assert FluidGestureGeometry.halfWidth(40f) < 152f; // Fits the 304dp canvas.
+
+        float[] flat = new float[14];
+        FluidGestureGeometry.points(0f, flat);
+        for (float value : flat) assert value == 0f;
+        float[] curve = new float[14];
+        FluidGestureGeometry.points(32f, curve);
+        assert curve[1] == 0f && curve[3] == 0f && curve[11] == 0f && curve[13] == 0f;
+        for (int i = 1; i < curve.length; i += 2) assert curve[i] >= 0f;
+        assert curve[5] == curve[7] && curve[7] == curve[9]; // Horizontal, C1 apex.
+        assert curve[0] < curve[2] && curve[2] <= curve[4] && curve[4] < curve[6];
+        assert curve[6] < curve[8] && curve[8] <= curve[10] && curve[10] < curve[12];
+    }
+
     private static final class Ports implements NavigationSession.Ports {
         final List<String> calls = new ArrayList<>();
         boolean allowed = true;
@@ -232,8 +258,9 @@ public final class GestureChecks {
 
     public static void main(String[] args) {
         gestures();
+        fluidGeometry();
         lifecycle();
         appSearch();
-        System.out.println("PASS: gestures, navigation fail-safe ordering and local app search");
+        System.out.println("PASS: gestures, fluid geometry, navigation fail-safe ordering and local app search");
     }
 }

@@ -81,6 +81,7 @@ public class MainActivity extends Activity {
     private RoleManager roles;
     private final List<ResolveInfo> apps = new ArrayList<>();
     private FrameLayout root;
+    private View homeWallpaper;
     private LinearLayout pageShell;
     private FrameLayout contentStage;
     private LinearLayout composerDock;
@@ -232,9 +233,11 @@ public class MainActivity extends Activity {
         contentStage.removeAllViews();
         contentStage.addView(content, match());
         boolean chat = "search".equals(page);
+        root.setBackgroundColor(chat ? Color.WHITE : IVORY);
+        homeWallpaper.setVisibility(chat ? View.INVISIBLE : View.VISIBLE);
         getWindow().setStatusBarColor(chat ? Color.WHITE : IVORY);
         getWindow().setNavigationBarColor(Color.WHITE);
-        composerInput.setShowSoftInputOnFocus(chat);
+        composerInput.setShowSoftInputOnFocus(true);
         if (!firstPage) enterMotion(content, chat ? 24 : -16);
         updateAgentControls();
     }
@@ -242,6 +245,9 @@ public class MainActivity extends Activity {
     private void createPageShell() {
         root = new FrameLayout(this);
         root.setBackgroundColor(Color.WHITE);
+        homeWallpaper = new WallpaperView();
+        homeWallpaper.setBackgroundColor(IVORY);
+        root.addView(homeWallpaper, match());
         pageShell = column();
         pageShell.setFocusableInTouchMode(true);
         contentStage = new FrameLayout(this);
@@ -320,8 +326,6 @@ public class MainActivity extends Activity {
         scroll.addView(column, new ScrollView.LayoutParams(-1, -2));
         column.setPadding(dp(22), 0, dp(22), dp(8));
         FrameLayout homeContent = new FrameLayout(this);
-        homeContent.setBackgroundColor(IVORY);
-        homeContent.addView(new WallpaperView(), match());
         homeContent.addView(scroll, match());
 
         LinearLayout top = row();
@@ -437,10 +441,11 @@ public class MainActivity extends Activity {
 
     private void createComposer() {
         composerDock = column();
-        composerDock.setBackgroundColor(Color.WHITE);
+        composerDock.setBackgroundColor(Color.TRANSPARENT);
         LinearLayout composer = row();
         composer.setPadding(dp(4), dp(4), dp(4), dp(4));
-        composer.setBackground(shape(0xFFF7F7F8, 26, 0, 0));
+        composer.setBackground(shape(0xF2F7F7F8, 26, 1, 0x6678787C));
+        composer.setElevation(dp(3));
         composer.addView(chatIcon("plus", "搜索与打开应用", view -> showAppPicker()));
         composerInput = new EditText(this);
         composerInput.setHint("发送消息");
@@ -457,20 +462,6 @@ public class MainActivity extends Activity {
         composerInput.setBackgroundColor(Color.TRANSPARENT);
         composerInput.setPadding(dp(4), dp(10), dp(4), dp(10));
         composerInput.setText(savedDraft);
-        composerInput.setOnClickListener(view -> {
-            if ("home".equals(page)) {
-                // Open above the stationary dock; the next tap starts typing.
-                showSearch();
-            } else {
-                getSystemService(android.view.inputmethod.InputMethodManager.class)
-                        .showSoftInput(composerInput, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT);
-            }
-        });
-        composerInput.setOnTouchListener((view, event) -> {
-            if (!"home".equals(page)) return false;
-            if (event.getActionMasked() == android.view.MotionEvent.ACTION_UP) view.performClick();
-            return true;
-        });
         composerInput.addTextChangedListener(new TextWatcher() {
             public void beforeTextChanged(CharSequence s, int start, int count, int after) { }
             public void onTextChanged(CharSequence s, int start, int before, int count) {

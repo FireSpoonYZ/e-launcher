@@ -6,6 +6,9 @@
 package com.example.launcherprobe;
 
 import android.Manifest;
+import android.animation.Animator;
+import android.animation.AnimatorListenerAdapter;
+import android.animation.ValueAnimator;
 import android.annotation.SuppressLint;
 import android.accessibilityservice.AccessibilityService;
 import android.accessibilityservice.GestureDescription;
@@ -37,6 +40,7 @@ import android.view.View;
 import android.view.ViewConfiguration;
 import android.view.WindowInsets;
 import android.view.WindowManager;
+import android.view.animation.DecelerateInterpolator;
 import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
 import android.widget.Toast;
@@ -66,7 +70,8 @@ public final class GestureService extends AccessibilityService {
     private GestureFeedbackView feedbackView;
     private NavigationSession session;
     private int[] geometry;
-    private boolean held, replaying;
+    private boolean held, replaying, feedbackStarts = true;
+    private float feedbackStartAlong;
     private int generation;
     private int observationSerial;
     private String lastObservation;
@@ -634,7 +639,8 @@ public final class GestureService extends AccessibilityService {
     }
 
     private WindowManager.LayoutParams feedbackParams() {
-        int size = Math.max(1, (int) (72 * getResources().getDisplayMetrics().density));
+        int desired = Math.max(1, (int) (304 * getResources().getDisplayMetrics().density));
+        int size = Math.min(desired, Math.min(geometry[0], geometry[1]));
         WindowManager.LayoutParams lp = new WindowManager.LayoutParams(size, size,
                 WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
@@ -652,21 +658,29 @@ public final class GestureService extends AccessibilityService {
     private void showFeedback(SwipeDetector.Zone zone, float x, float y, float progress,
             boolean crossed) {
         if (feedbackView == null || geometry == null) return;
-        feedbackView.show(zone, progress, crossed);
+        float along = zone == SwipeDetector.Zone.BOTTOM ? x : y;
+        boolean starting = feedbackStarts;
+        if (starting) {
+            feedbackStartAlong = along;
+            feedbackStarts = false;
+        }
+        along = feedbackStartAlong + .25f * (along - feedbackStartAlong);
+        feedbackView.show(zone, x, y, crossed, starting);
         WindowManager.LayoutParams lp = (WindowManager.LayoutParams) feedbackView.getLayoutParams();
         int size = lp.width;
-        int rawX = Math.round(x);
-        int rawY = Math.round(y);
-        lp.x = zone == SwipeDetector.Zone.LEFT ? rawX
-                : zone == SwipeDetector.Zone.RIGHT ? rawX - size : rawX - size / 2;
-        lp.y = zone == SwipeDetector.Zone.BOTTOM ? rawY - size : rawY - size / 2;
+        lp.x = zone == SwipeDetector.Zone.LEFT ? 0
+                : zone == SwipeDetector.Zone.RIGHT ? geometry[0] - size
+                : Math.round(along - size / 2f);
+        lp.y = zone == SwipeDetector.Zone.BOTTOM ? geometry[1] - size
+                : Math.round(along - size / 2f);
         lp.x = Math.max(0, Math.min(geometry[0] - size, lp.x));
         lp.y = Math.max(0, Math.min(geometry[1] - size, lp.y));
         windowManager.updateViewLayout(feedbackView, lp);
     }
 
     private void hideFeedback() {
-        if (feedbackView != null) feedbackView.setVisibility(View.INVISIBLE);
+        feedbackStarts = true;
+        if (feedbackView != null) feedbackView.hide();
     }
 
     private boolean interactivity() {
@@ -690,8 +704,12 @@ public final class GestureService extends AccessibilityService {
 
     private static final class GestureFeedbackView extends View {
         private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Path shape = new Path();
+        private final Path icon = new Path();
+        private final float[] shapePoints = new float[14];
         private SwipeDetector.Zone zone = SwipeDetector.Zone.BOTTOM;
-        private float progress;
+        private ValueAnimator retraction;
+        private float startX, startY, depth;
         private boolean crossed;
 
         GestureFeedbackView(Context context) {
@@ -700,39 +718,116 @@ public final class GestureService extends AccessibilityService {
             setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_NO);
         }
 
-        void show(SwipeDetector.Zone zone, float progress, boolean crossed) {
+        void show(SwipeDetector.Zone zone, float x, float y, boolean crossed, boolean starting) {
+            if (retraction != null) {
+                ValueAnimator old = retraction;
+                retraction = null;
+                old.cancel();
+            }
+            if (starting || this.zone != zone) {
+                startX = x;
+                startY = y;
+            }
             this.zone = zone;
-            this.progress = progress;
             this.crossed = crossed;
+            float inward = zone == SwipeDetector.Zone.BOTTOM ? startY - y
+                    : zone == SwipeDetector.Zone.LEFT ? x - startX : startX - x;
+            depth = FluidGestureGeometry.depth(inward,
+                    getResources().getDisplayMetrics().density);
             setVisibility(VISIBLE);
             invalidate();
         }
 
-        @Override
-        protected void onDraw(Canvas canvas) {
-            float density = getResources().getDisplayMetrics().density;
-            float centerX = getWidth() / 2f;
-            float centerY = getHeight() / 2f;
-            paint.setColor(crossed ? Color.rgb(38, 122, 105) : 0xcc202521);
-            paint.setStyle(Paint.Style.FILL);
-            if (zone == SwipeDetector.Zone.BOTTOM) {
-                float halfWidth = (18 + 12 * progress) * density;
-                float halfHeight = (3 + 2 * progress) * density;
-                canvas.drawRoundRect(centerX - halfWidth, centerY - halfHeight,
-                        centerX + halfWidth, centerY + halfHeight, halfHeight, halfHeight, paint);
+        void hide() {
+            if (getVisibility() != VISIBLE || retraction != null) return;
+            if (!ValueAnimator.areAnimatorsEnabled() || depth <= 0f) {
+                depth = 0f;
+                setVisibility(INVISIBLE);
                 return;
             }
-            float direction = zone == SwipeDetector.Zone.LEFT ? 1 : -1;
-            float reach = (8 + 8 * progress) * density;
+            ValueAnimator animation = ValueAnimator.ofFloat(depth, 0f);
+            retraction = animation;
+            animation.setDuration(crossed ? 190 : 160);
+            animation.setInterpolator(new DecelerateInterpolator(1.5f));
+            animation.addUpdateListener(value -> {
+                depth = (float) value.getAnimatedValue();
+                invalidate();
+            });
+            animation.addListener(new AnimatorListenerAdapter() {
+                @Override public void onAnimationEnd(Animator ended) {
+                    if (retraction != animation) return;
+                    retraction = null;
+                    depth = 0f;
+                    setVisibility(INVISIBLE);
+                }
+            });
+            animation.start();
+        }
+
+        @Override
+        protected void onDetachedFromWindow() {
+            if (retraction != null) {
+                ValueAnimator old = retraction;
+                retraction = null;
+                old.cancel();
+            }
+            depth = 0f;
+            super.onDetachedFromWindow();
+        }
+
+        @Override
+        protected void onDraw(Canvas canvas) {
+            if (depth <= 0f) return;
+            float density = getResources().getDisplayMetrics().density;
+            FluidGestureGeometry.points(depth, shapePoints);
+            float[] p = shapePoints;
+            float centerX = getWidth() / 2f;
+            float centerY = getHeight() / 2f;
+            shape.reset();
+            if (zone == SwipeDetector.Zone.BOTTOM) {
+                float edge = getHeight();
+                shape.moveTo(centerX + p[0], edge - p[1]);
+                shape.cubicTo(centerX + p[2], edge - p[3], centerX + p[4], edge - p[5],
+                        centerX + p[6], edge - p[7]);
+                shape.cubicTo(centerX + p[8], edge - p[9], centerX + p[10], edge - p[11],
+                        centerX + p[12], edge - p[13]);
+            } else {
+                float edge = zone == SwipeDetector.Zone.LEFT ? 0f : getWidth();
+                float direction = zone == SwipeDetector.Zone.LEFT ? 1f : -1f;
+                shape.moveTo(edge + direction * p[1], centerY + p[0]);
+                shape.cubicTo(edge + direction * p[3], centerY + p[2],
+                        edge + direction * p[5], centerY + p[4],
+                        edge + direction * p[7], centerY + p[6]);
+                shape.cubicTo(edge + direction * p[9], centerY + p[8],
+                        edge + direction * p[11], centerY + p[10],
+                        edge + direction * p[13], centerY + p[12]);
+            }
+            shape.close();
+            paint.setStyle(Paint.Style.FILL);
+            paint.setColor(Color.rgb(15, 17, 18));
+            canvas.drawPath(shape, paint);
+
+            if (depth < 6f * density) return;
+            paint.setColor(0xffe4e7e7);
             paint.setStyle(Paint.Style.STROKE);
-            paint.setStrokeWidth((3 + progress) * density);
             paint.setStrokeCap(Paint.Cap.ROUND);
             paint.setStrokeJoin(Paint.Join.ROUND);
-            Path arrow = new Path();
-            arrow.moveTo(centerX - direction * reach / 2, centerY - reach / 2);
-            arrow.lineTo(centerX + direction * reach / 2, centerY);
-            arrow.lineTo(centerX - direction * reach / 2, centerY + reach / 2);
-            canvas.drawPath(arrow, paint);
+            paint.setStrokeWidth(2.5f * density);
+            if (zone == SwipeDetector.Zone.BOTTOM) {
+                float y = getHeight() - .52f * depth;
+                float half = Math.min(15f * density, .42f * depth);
+                canvas.drawLine(centerX - half, y, centerX + half, y, paint);
+            } else {
+                float direction = zone == SwipeDetector.Zone.LEFT ? 1f : -1f;
+                float x = (zone == SwipeDetector.Zone.LEFT ? 0f : getWidth())
+                        + direction * .52f * depth;
+                float reach = Math.min(9f * density, .3f * depth);
+                icon.reset();
+                icon.moveTo(x + reach * .45f, centerY - reach);
+                icon.lineTo(x - reach * .45f, centerY);
+                icon.lineTo(x + reach * .45f, centerY + reach);
+                canvas.drawPath(icon, paint);
+            }
         }
     }
 

@@ -16,6 +16,7 @@ New-Item -ItemType Directory -Force $classes | Out-Null
     app/src/main/java/com/example/launcherprobe/AttemptAll.java `
     app/src/main/java/com/example/launcherprobe/AppSearch.java `
     app/src/main/java/com/example/launcherprobe/ExactText.java `
+    app/src/main/java/com/example/launcherprobe/FluidGestureGeometry.java `
     app/src/main/java/com/example/launcherprobe/ObservationRegistry.java `
     app/src/main/java/com/example/launcherprobe/ProviderConfig.java `
     app/src/main/java/com/example/launcherprobe/ReasoningEffort.java `

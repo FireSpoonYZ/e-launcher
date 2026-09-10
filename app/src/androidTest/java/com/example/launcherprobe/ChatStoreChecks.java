@@ -9,7 +9,7 @@ import android.os.Bundle;
 import java.util.Arrays;
 import java.util.Collections;
 
-/** Runs against isolated test-package preferences; never changes the user's chats or keys. */
+/** Store checks use test-package preferences; the target-Activity UI check is read-only. */
 public final class ChatStoreChecks extends Instrumentation {
     @Override public void onCreate(Bundle arguments) {
         super.onCreate(arguments);
@@ -21,7 +21,7 @@ public final class ChatStoreChecks extends Instrumentation {
         try {
             checkConversations();
             checkStationaryComposer();
-            result.putString("stream", "PASS: conversations and drafts; shared composer identity/bounds across home/chat and rapid navigation\n");
+            result.putString("stream", "PASS: conversations and drafts; read-only composer focus and identity/bounds across home/chat\n");
             finish(Activity.RESULT_OK, result);
         } catch (Throwable failure) {
             result.putString("stream", "FAIL: " + android.util.Log.getStackTraceString(failure));
@@ -77,11 +77,33 @@ public final class ChatStoreChecks extends Instrumentation {
         waitForIdleSync();
         android.view.View[] dock = new android.view.View[1];
         android.widget.EditText[] input = new android.widget.EditText[1];
-        int[] original = new int[2];
         runOnMainSync(() -> {
             dock[0] = (android.view.View) field(activity, "composerDock");
             input[0] = (android.widget.EditText) field(activity, "composerInput");
-            dock[0].getLocationOnScreen(original);
+            android.view.View wallpaper = (android.view.View) field(activity, "homeWallpaper");
+            android.view.View pageShell = (android.view.View) field(activity, "pageShell");
+            android.view.ViewGroup root = (android.view.ViewGroup) field(activity, "root");
+            require(wallpaper.getVisibility() == android.view.View.VISIBLE,
+                    "home wallpaper visible behind composer");
+            require(wallpaper.getLeft() == pageShell.getLeft()
+                    && wallpaper.getTop() == pageShell.getTop()
+                    && wallpaper.getRight() == pageShell.getRight()
+                    && wallpaper.getBottom() == pageShell.getBottom(),
+                    "home wallpaper covers padded page shell");
+            int[] wallpaperLocation = new int[2];
+            int[] dockLocation = new int[2];
+            wallpaper.getLocationOnScreen(wallpaperLocation);
+            dock[0].getLocationOnScreen(dockLocation);
+            require(dockLocation[0] >= wallpaperLocation[0]
+                    && dockLocation[1] >= wallpaperLocation[1]
+                    && dockLocation[0] + dock[0].getWidth()
+                            <= wallpaperLocation[0] + wallpaper.getWidth()
+                    && dockLocation[1] + dock[0].getHeight()
+                            <= wallpaperLocation[1] + wallpaper.getHeight(),
+                    "home wallpaper covers composer");
+            require(root.indexOfChild(wallpaper) < root.indexOfChild(pageShell),
+                    "wallpaper is behind shell");
+            require(input[0].getShowSoftInputOnFocus(), "home input allows soft keyboard");
             long time = android.os.SystemClock.uptimeMillis();
             android.view.MotionEvent down = android.view.MotionEvent.obtain(time, time,
                     android.view.MotionEvent.ACTION_DOWN, input[0].getWidth() / 2f, input[0].getHeight() / 2f, 0);
@@ -91,31 +113,33 @@ public final class ChatStoreChecks extends Instrumentation {
             input[0].dispatchTouchEvent(up);
             down.recycle();
             up.recycle();
-            require("search".equals(field(activity, "page")), "home input touch opens chat");
+            require("home".equals(field(activity, "page")), "home input touch stays home");
+            require(input[0].hasFocus(), "home input touch focuses editor");
+            invoke(activity, "showSearch");
         });
         waitForIdleSync();
         runOnMainSync(() -> {
-            int[] current = new int[2];
-            dock[0].getLocationOnScreen(current);
             require(field(activity, "composerInput") == input[0], "input identity retained");
             require(field(activity, "composerDock") == dock[0], "dock identity retained");
-            require(Arrays.equals(original, current), "dock does not move during page change");
             require(dock[0].getTranslationY() == 0 && dock[0].getAlpha() == 1f,
                     "page animation excludes dock");
             activity.onBackPressed();
             input[0].performClick();
-            activity.onBackPressed();
-            require("home".equals(field(activity, "page")), "rapid navigation ends on home");
+            require("home".equals(field(activity, "page")), "home input click stays home");
             require(((android.view.ViewGroup) field(activity, "contentStage")).getChildCount() == 1,
                     "rapid navigation leaves only one page");
-        });
-        waitForIdleSync();
-        runOnMainSync(() -> {
-            int[] current = new int[2];
-            dock[0].getLocationOnScreen(current);
-            require(Arrays.equals(original, current), "return keeps dock bounds");
             activity.finish();
         });
+    }
+
+    private static void invoke(MainActivity activity, String name) {
+        try {
+            java.lang.reflect.Method method = MainActivity.class.getDeclaredMethod(name);
+            method.setAccessible(true);
+            method.invoke(activity);
+        } catch (ReflectiveOperationException exception) {
+            throw new AssertionError(exception);
+        }
     }
 
     private static Object field(MainActivity activity, String name) {
