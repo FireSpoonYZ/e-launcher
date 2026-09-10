@@ -150,6 +150,7 @@ public final class AgentChecks {
         assert observed.add("0", "window1-node1", false);
         assert observed.add("0.0", "window1-password-child", true);
         assert !observed.add("0.1", "excluded", false);
+        observed.require("0", "window1-node1", false, String::equals);
         boolean rejected = false;
         try { observed.require("0.1", "excluded", false, String::equals); }
         catch (IllegalArgumentException expected) { rejected = true; }

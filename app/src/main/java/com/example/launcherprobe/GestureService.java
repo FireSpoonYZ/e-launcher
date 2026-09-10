@@ -273,9 +273,11 @@ public final class GestureService extends AccessibilityService {
         }
         boolean accepted;
         try {
-            observedNodes.require(nodeId, node, "input_text".equals(action),
-                    (observed, current) -> observed.getWindowId() == current.getWindowId()
-                            && observed.equals(current));
+            boolean textAction = "input_text".equals(action);
+            observedNodes.require(nodeId, node, textAction, GestureService::sameTarget);
+            if (textAction && hasProtectedAncestor(node)) {
+                throw new IllegalArgumentException("拒绝向密码字段自动输入");
+            }
             switch (action) {
                 case "click": accepted = node.performAction(AccessibilityNodeInfo.ACTION_CLICK); break;
                 case "input_text":
@@ -316,6 +318,40 @@ public final class GestureService extends AccessibilityService {
             if (node == null) return null;
         }
         return node;
+    }
+
+    private static boolean sameTarget(AccessibilityNodeInfo observed,
+            AccessibilityNodeInfo current) {
+        return observed.getWindowId() == current.getWindowId() && observed.equals(current)
+                && sameText(observed.getPackageName(), current.getPackageName())
+                && sameText(observed.getClassName(), current.getClassName())
+                && sameText(observed.getViewIdResourceName(), current.getViewIdResourceName())
+                && sameText(observed.getText(), current.getText())
+                && sameText(observed.getContentDescription(), current.getContentDescription())
+                && observed.isEnabled() == current.isEnabled()
+                && observed.isClickable() == current.isClickable()
+                && observed.isEditable() == current.isEditable()
+                && observed.isScrollable() == current.isScrollable()
+                && observed.isPassword() == current.isPassword();
+    }
+
+    private static boolean sameText(CharSequence left, CharSequence right) {
+        return left == null ? right == null : right != null && left.toString().contentEquals(right);
+    }
+
+    private static boolean hasProtectedAncestor(AccessibilityNodeInfo node) {
+        AccessibilityNodeInfo current = AccessibilityNodeInfo.obtain(node);
+        try {
+            while (current != null) {
+                if (current.isPassword()) return true;
+                AccessibilityNodeInfo parent = current.getParent();
+                current.recycle();
+                current = parent;
+            }
+            return false;
+        } finally {
+            if (current != null) current.recycle();
+        }
     }
 
     private void clearObservation() {
@@ -366,10 +402,7 @@ public final class GestureService extends AccessibilityService {
         refreshGeometry();
     }
 
-    @Override public void onAccessibilityEvent(AccessibilityEvent event) {
-        observationSerial++;
-        clearObservation();
-    }
+    @Override public void onAccessibilityEvent(AccessibilityEvent event) { }
     @Override public void onInterrupt() { cancelTouches(true); }
 
     @Override
