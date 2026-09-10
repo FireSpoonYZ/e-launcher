@@ -24,6 +24,7 @@ New-Item -ItemType Directory -Force $classes | Out-Null
     app/src/main/java/com/example/launcherprobe/NavigationSession.java `
     app/src/main/java/com/example/launcherprobe/SearchConfig.java `
     app/src/main/java/com/example/launcherprobe/SearchParser.java `
+    app/src/main/java/com/example/launcherprobe/ScreenNodePolicy.java `
     app/src/main/java/com/example/launcherprobe/WebAddressPolicy.java `
     tests/com/example/launcherprobe/AgentChecks.java `
     tests/com/example/launcherprobe/GestureChecks.java

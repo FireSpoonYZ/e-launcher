@@ -32,6 +32,16 @@ public final class AgentHistory {
         return result;
     }
 
+    static AgentLoop.Message toolResultAfter(List<AgentLoop.Message> source, int assistantIndex,
+            String toolCallId) {
+        for (int index = assistantIndex + 1; index < source.size(); index++) {
+            AgentLoop.Message candidate = source.get(index);
+            if (!"tool".equals(candidate.role)) break;
+            if (toolCallId.equals(candidate.toolCallId)) return candidate;
+        }
+        return null;
+    }
+
     public static List<AgentLoop.Message> trimCompleteTurns(List<AgentLoop.Message> source, int max) {
         if (max < 1) throw new IllegalArgumentException("max");
         List<AgentLoop.Message> repaired = repair(source);

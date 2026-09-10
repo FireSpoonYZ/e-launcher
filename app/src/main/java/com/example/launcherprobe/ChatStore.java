@@ -17,6 +17,64 @@ public final class ChatStore {
 
     public ChatStore(Context context) {
         preferences = context.getSharedPreferences("chat", Context.MODE_PRIVATE);
+        if (!preferences.contains("conversations") && preferences.contains("history")) {
+            List<AgentLoop.Message> legacy = load();
+            if (!legacy.isEmpty()) save(legacy);
+        }
+    }
+
+    public String activeId() { return preferences.getString("active_chat", "legacy"); }
+
+    public String draft() { return preferences.getString("draft_" + activeId(), ""); }
+
+    public void saveDraft(String text) {
+        preferences.edit().putString("draft_" + activeId(), text).apply();
+    }
+
+    private String historyKey() {
+        return "legacy".equals(activeId()) ? "history" : "history_" + activeId();
+    }
+
+    public static final class Conversation {
+        public final String id;
+        public final String title;
+        public final long updated;
+
+        Conversation(String id, String title, long updated) {
+            this.id = id;
+            this.title = title;
+            this.updated = updated;
+        }
+    }
+
+    public List<Conversation> conversations() {
+        List<Conversation> result = new ArrayList<>();
+        JSONObject index = conversationIndex();
+        java.util.Iterator<String> ids = index.keys();
+        while (ids.hasNext()) {
+            String id = ids.next();
+            JSONObject item = index.optJSONObject(id);
+            if (item != null) result.add(new Conversation(id, item.optString("title", "新对话"),
+                    item.optLong("updated")));
+        }
+        result.sort((left, right) -> Long.compare(right.updated, left.updated));
+        return result;
+    }
+
+    private JSONObject conversationIndex() {
+        try { return new JSONObject(preferences.getString("conversations", "{}")); }
+        catch (org.json.JSONException exception) {
+            throw new IllegalStateException("无法读取会话列表", exception);
+        }
+    }
+
+    public void newConversation() {
+        preferences.edit().putString("active_chat", java.util.UUID.randomUUID().toString()).apply();
+    }
+
+    public void selectConversation(String id) {
+        if (!conversationIndex().has(id)) throw new IllegalArgumentException("会话不存在");
+        preferences.edit().putString("active_chat", id).apply();
     }
 
     public String baseUrl() { return preferences.getString("base_url", "https://api.openai.com/v1"); }
@@ -42,7 +100,7 @@ public final class ChatStore {
     public List<AgentLoop.Message> load() {
         List<AgentLoop.Message> messages = new ArrayList<>();
         try {
-            JSONArray values = new JSONArray(preferences.getString("history", "[]"));
+            JSONArray values = new JSONArray(preferences.getString(historyKey(), "[]"));
             for (int index = 0; index < values.length(); index++) {
                 JSONObject value = values.getJSONObject(index);
                 List<AgentLoop.ToolCall> calls = new ArrayList<>();
@@ -58,8 +116,7 @@ public final class ChatStore {
             }
             return AgentHistory.trimCompleteTurns(messages, MAX_MESSAGES);
         } catch (Exception ignored) {
-            preferences.edit().remove("history").apply();
-            return new ArrayList<>();
+            throw new IllegalStateException("无法读取聊天记录", ignored);
         }
     }
 
@@ -69,7 +126,21 @@ public final class ChatStore {
             for (AgentLoop.Message message : AgentHistory.trimCompleteTurns(messages, MAX_MESSAGES)) {
                 put(values, message);
             }
-            preferences.edit().putString("history", values.toString()).apply();
+            JSONObject index = conversationIndex();
+            String title = "新对话";
+            for (AgentLoop.Message message : messages) {
+                if ("user".equals(message.role) && message.content != null) {
+                    title = message.content.replace('\n', ' ').trim();
+                    title = title.substring(0, Math.min(title.length(), 40));
+                    break;
+                }
+            }
+            JSONObject previous = index.optJSONObject(activeId());
+            if (previous != null) title = previous.optString("title", title);
+            index.put(activeId(), new JSONObject().put("title", title)
+                    .put("updated", System.currentTimeMillis()));
+            preferences.edit().putString(historyKey(), values.toString())
+                    .putString("conversations", index.toString()).apply();
         } catch (Exception exception) {
             throw new IllegalStateException("无法保存聊天记录", exception);
         }
@@ -91,7 +162,11 @@ public final class ChatStore {
     }
 
     public void clear() {
-        preferences.edit().remove("history").apply();
+        JSONObject index = conversationIndex();
+        index.remove(activeId());
+        preferences.edit().remove(historyKey()).remove("draft_" + activeId())
+                .putString("conversations", index.toString())
+                .putString("active_chat", java.util.UUID.randomUUID().toString()).apply();
     }
 
     private static String truncate(String value) {

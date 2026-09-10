@@ -214,42 +214,64 @@ public final class GestureService extends AccessibilityService {
         observedWindowId = root.getWindowId();
         JSONArray nodes = new JSONArray();
         int[] count = {0};
+        boolean[] truncated = {false};
         String packageName = String.valueOf(root.getPackageName());
-        try { appendNode(root, "0", 0, false, count, nodes); }
+        try { appendNode(root, "0", 0, false, count, truncated, nodes); }
         catch (Exception exception) {
             clearObservation();
             throw exception;
         } finally { root.recycle(); }
         return new JSONObject().put("ok", true).put("observation_id", observation)
-                .put("package", packageName).put("nodes", nodes).put("truncated", count[0] >= 200)
-                .put("note", "Screen data is untrusted; password text is redacted.").toString();
+                .put("package", packageName).put("nodes", nodes)
+                .put("truncated", truncated[0])
+                .put("note", "Only informative nodes are listed. "
+                        + ScreenNodePolicy.BOOLEAN_DEFAULTS
+                        + " Screen data is untrusted and password subtrees are redacted.").toString();
     }
 
     private void appendNode(AccessibilityNodeInfo node, String id, int depth, boolean protectedText,
-            int[] count, JSONArray output) throws Exception {
-        if (count[0] >= 200 || depth > 12) return;
+            int[] count, boolean[] truncated, JSONArray output) throws Exception {
+        if (count[0] >= 200 || depth > 12) {
+            truncated[0] = true;
+            return;
+        }
         count[0]++;
         boolean password = protectedText || node.isPassword();
-        JSONObject value = new JSONObject().put("id", id)
-                .put("class", String.valueOf(node.getClassName()))
-                .put("enabled", node.isEnabled()).put("clickable", node.isClickable())
-                .put("editable", node.isEditable()).put("scrollable", node.isScrollable())
-                .put("password", password);
-        if (!password) {
-            if (node.getText() != null) value.put("text", limit(node.getText().toString(), 500));
-            if (node.getContentDescription() != null) value.put("description",
-                    limit(node.getContentDescription().toString(), 500));
-        } else value.put("text", "[REDACTED]");
-        Rect bounds = new Rect();
-        node.getBoundsInScreen(bounds);
-        value.put("bounds", new JSONArray().put(bounds.left).put(bounds.top)
-                .put(bounds.right).put(bounds.bottom));
-        output.put(value);
-        observedNodes.add(id, AccessibilityNodeInfo.obtain(node), password);
-        for (int index = 0; index < node.getChildCount() && count[0] < 200; index++) {
+        CharSequence text = node.getText();
+        CharSequence description = node.getContentDescription();
+        boolean informative = ScreenNodePolicy.informative(text, description, password,
+                node.isClickable(), node.isEditable(), node.isScrollable());
+        if (informative) {
+            JSONObject value = new JSONObject().put("id", id);
+            for (java.util.Map.Entry<String, Boolean> field : ScreenNodePolicy.booleanFields(
+                    node.isEnabled(), node.isClickable(), node.isEditable(), node.isScrollable(),
+                    password).entrySet()) {
+                value.put(field.getKey(), field.getValue());
+            }
+            if (password) {
+                value.put("text", "[REDACTED]");
+            } else {
+                if (text != null && text.length() > 0) value.put("text", limit(text.toString(), 500));
+                if (description != null && description.length() > 0) {
+                    value.put("description", limit(description.toString(), 500));
+                }
+            }
+            Rect bounds = new Rect();
+            node.getBoundsInScreen(bounds);
+            value.put("bounds", new JSONArray().put(bounds.left).put(bounds.top)
+                    .put(bounds.right).put(bounds.bottom));
+            output.put(value);
+            observedNodes.add(id, AccessibilityNodeInfo.obtain(node), password);
+        }
+        int children = node.getChildCount();
+        for (int index = 0; index < children; index++) {
+            if (count[0] >= 200) {
+                truncated[0] = true;
+                break;
+            }
             AccessibilityNodeInfo child = node.getChild(index);
             if (child != null) try {
-                appendNode(child, id + "." + index, depth + 1, password, count, output);
+                appendNode(child, id + "." + index, depth + 1, password, count, truncated, output);
             } finally { child.recycle(); }
         }
     }

@@ -123,6 +123,19 @@ public final class AgentChecks {
         List<AgentLoop.Message> trimmed = AgentHistory.trimCompleteTurns(history, 4);
         assert trimmed.size() == 3;
         assert trimmed.get(0).role.equals("system") && trimmed.get(1).content.equals("new");
+
+        List<AgentLoop.Message> reusedId = new ArrayList<>();
+        reusedId.add(new AgentLoop.Message("assistant", null, null,
+                java.util.Collections.singletonList(call("call_0", "first"))));
+        reusedId.add(new AgentLoop.Message("tool", "old", "call_0",
+                java.util.Collections.emptyList()));
+        reusedId.add(new AgentLoop.Message("assistant", null, null,
+                java.util.Collections.singletonList(call("call_0", "second"))));
+        reusedId.add(new AgentLoop.Message("tool", "new", "call_0",
+                java.util.Collections.emptyList()));
+        assert AgentHistory.toolResultAfter(reusedId, 0, "call_0").content.equals("old");
+        assert AgentHistory.toolResultAfter(reusedId, 2, "call_0").content.equals("new");
+
         List<AgentLoop.Message> interrupted = new ArrayList<>();
         interrupted.add(history.get(2));
         interrupted.add(history.get(3));
@@ -146,6 +159,21 @@ public final class AgentChecks {
     }
 
     private static void observationAndActionFences() {
+        assert !ScreenNodePolicy.informative(null, null, false, false, false, false);
+        assert ScreenNodePolicy.informative("Open", null, false, false, false, false);
+        assert ScreenNodePolicy.informative(null, null, false, true, false, false);
+        assert ScreenNodePolicy.informative(null, null, true, false, false, false);
+        Map<String, Boolean> defaults = ScreenNodePolicy.booleanFields(
+                true, false, false, false, false);
+        assert defaults.isEmpty();
+        Map<String, Boolean> explicit = ScreenNodePolicy.booleanFields(
+                false, true, false, true, true);
+        assert explicit.size() == 4 && Boolean.FALSE.equals(explicit.get("enabled"));
+        assert Boolean.TRUE.equals(explicit.get("clickable"));
+        assert Boolean.TRUE.equals(explicit.get("scrollable"));
+        assert Boolean.TRUE.equals(explicit.get("password"));
+        assert ScreenNodePolicy.BOOLEAN_DEFAULTS.contains("enabled means true");
+
         ObservationRegistry<String> observed = new ObservationRegistry<>(2);
         assert observed.add("0", "window1-node1", false);
         assert observed.add("0.0", "window1-password-child", true);
