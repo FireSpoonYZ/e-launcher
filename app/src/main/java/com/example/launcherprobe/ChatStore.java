@@ -30,9 +30,14 @@ public final class ChatStore {
     String piSelection() { return preferences.getString("pi_selection_" + activeId(), "{}"); }
 
     void setPiSelection(String provider, String model, String thinkingLevel) throws org.json.JSONException {
+        setPiSelection(activeId(), provider, model, thinkingLevel);
+    }
+
+    void setPiSelection(String conversationId, String provider, String model, String thinkingLevel)
+            throws org.json.JSONException {
         JSONObject selection = new JSONObject().put("provider", provider).put("model", model);
         if (thinkingLevel != null) selection.put("thinkingLevel", thinkingLevel);
-        preferences.edit().putString("pi_selection_" + activeId(), selection.toString()).apply();
+        preferences.edit().putString("pi_selection_" + conversationId, selection.toString()).apply();
     }
 
     public String draft() { return preferences.getString("draft_" + activeId(), ""); }

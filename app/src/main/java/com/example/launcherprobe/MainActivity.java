@@ -80,6 +80,7 @@ public class MainActivity extends Activity {
     };
 
     private RoleManager roles;
+    private ShizukuRepair shizukuRepair;
     private final List<ResolveInfo> apps = new ArrayList<>();
     private FrameLayout root;
     private View homeWallpaper;
@@ -116,7 +117,12 @@ public class MainActivity extends Activity {
     private FrameLayout chatDrawer;
     private ConversationTreeSheet treeSheet;
     private TextView voiceButton;
+    private TextView thinkingLevelButton;
     private TextView newerMessages;
+    private final Object thinkingLevelQueryLock = new Object();
+    private volatile PiAgentBridge thinkingLevelBridge;
+    private volatile String thinkingLevelRequestId;
+    private String thinkingLevelQueryToken;
     private final Set<String> expandedTools = new HashSet<>();
     private boolean agentRunning;
     private boolean forceScrollToBottom;
@@ -141,6 +147,8 @@ public class MainActivity extends Activity {
         suppressHomeEnterTransition(getIntent());
         activityEpoch = ACTIVITY_EPOCH.acquire();
         roles = getSystemService(RoleManager.class);
+        shizukuRepair = new ShizukuRepair(this, refreshGestures);
+        shizukuRepair.register();
         chatStore = new ChatStore(this);
         markdown = ResponseMarkdown.create(this, uri -> launch(new Intent(Intent.ACTION_VIEW, uri)));
         agentTools = new AgentTools(this);
@@ -192,6 +200,7 @@ public class MainActivity extends Activity {
         if (!agentRunning && !appearanceRevision.equals(AppAppearance.revision(this))) { recreate(); return; }
         GestureService.statusListener = refreshGestures;
         GestureService.recover(this);
+        shizukuRepair.resume();
         refreshGestures.run();
         clockHandler.removeCallbacks(clockTick);
         clockTick.run();
@@ -200,6 +209,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onPause() {
         savePiPreview();
+        shizukuRepair.pause();
         if (GestureService.statusListener == refreshGestures) GestureService.statusListener = null;
         clockHandler.removeCallbacks(clockTick);
         super.onPause();
@@ -218,7 +228,12 @@ public class MainActivity extends Activity {
         if (treeSheet != null) treeSheet.dismiss();
         ACTIVITY_EPOCH.retire(activityEpoch);
         cancelAgent();
+        synchronized (thinkingLevelQueryLock) {
+            PiAgentBridge queryBridge = thinkingLevelBridge;
+            if (queryBridge != null) queryBridge.abort(thinkingLevelRequestId);
+        }
         agentExecutor.shutdownNow();
+        shizukuRepair.destroy();
         super.onDestroy();
     }
 
@@ -427,7 +442,6 @@ public class MainActivity extends Activity {
         });
         title.setFocusable(true);
         header.addView(title, new LinearLayout.LayoutParams(0, dp(52), 1));
-        header.addView(chatIcon("tree", t("打开对话树"), view -> openConversationTree()));
         header.addView(chatIcon("compose", t("新建对话"), view -> newConversation()));
         pageColumn.addView(header);
 
@@ -474,11 +488,10 @@ public class MainActivity extends Activity {
     private void createComposer() {
         composerDock = column();
         composerDock.setBackgroundColor(Color.TRANSPARENT);
-        LinearLayout composer = row();
-        composer.setPadding(dp(4), dp(4), dp(4), dp(4));
-        composer.setBackground(shape((appearance.panel & 0x00ffffff) | 0xf2000000, 26, 1, appearance.border));
+        LinearLayout composer = column();
+        composer.setPadding(dp(8), dp(6), dp(8), dp(6));
+        composer.setBackground(shape(appearance.panel, 30, 1, appearance.border));
         composer.setElevation(dp(3));
-        composer.addView(chatIcon("plus", t("搜索与打开应用"), view -> showAppPicker()));
         composerInput = new EditText(this);
         composerInput.setHint(t("发送消息"));
         composerInput.setContentDescription(t("消息输入框"));
@@ -492,7 +505,7 @@ public class MainActivity extends Activity {
         composerInput.setMinHeight(dp(48));
         composerInput.setMinLines(1);
         composerInput.setBackgroundColor(Color.TRANSPARENT);
-        composerInput.setPadding(dp(4), dp(10), dp(4), dp(10));
+        composerInput.setPadding(dp(10), dp(8), dp(10), dp(8));
         composerInput.setText(savedDraft);
         composerInput.addTextChangedListener(new TextWatcher() {
             public void beforeTextChanged(CharSequence s, int start, int count, int after) { }
@@ -503,21 +516,26 @@ public class MainActivity extends Activity {
             }
             public void afterTextChanged(Editable value) { }
         });
-        composer.addView(composerInput, new LinearLayout.LayoutParams(0, -2, 1));
+        composer.addView(composerInput, new LinearLayout.LayoutParams(-1, -2));
+        LinearLayout actions = row();
+        actions.addView(chatIcon("tree", t("打开对话树"), view -> openConversationTree()));
+        actions.addView(chatIcon("plus", t("搜索与打开应用"), view -> showAppPicker()));
+        actions.addView(new View(this), new LinearLayout.LayoutParams(0, 1, 1));
+        thinkingLevelButton = chatIcon("gauge", t("切换当前会话思考强度"),
+                view -> showThinkingLevelPicker());
+        actions.addView(thinkingLevelButton);
         voiceButton = chatIcon("mic", t("语音输入"), view -> startDictation());
-        composer.addView(voiceButton);
+        actions.addView(voiceButton);
         sendButton = chatIcon("send", t("发送消息"), view -> sendMessage());
         sendButton.setBackground(shape(CHARCOAL, 24, 0, 0));
-        composer.addView(sendButton);
+        actions.addView(sendButton);
         stopButton = chatIcon("stop", t("停止生成"), view -> cancelAgent());
         stopButton.setBackground(shape(CHARCOAL, 24, 0, 0));
-        composer.addView(stopButton);
-        LinearLayout composerRow = row();
-        LinearLayout.LayoutParams inputParams = new LinearLayout.LayoutParams(0, -2, 1);
-        composerRow.addView(composer, inputParams);
+        actions.addView(stopButton);
+        composer.addView(actions, new LinearLayout.LayoutParams(-1, dp(48)));
         LinearLayout.LayoutParams composerParams = new LinearLayout.LayoutParams(-1, -2);
         composerParams.setMargins(dp(12), dp(4), dp(12), 0);
-        composerDock.addView(composerRow, composerParams);
+        composerDock.addView(composer, composerParams);
         TextView footer = label(t("AI 生成内容，请核对重要信息"), 11, MUTED);
         footer.setGravity(Gravity.CENTER);
         footer.setPadding(0, dp(8), 0, dp(10));
@@ -525,7 +543,8 @@ public class MainActivity extends Activity {
     }
 
     private void openConversationTree() {
-        if (treeSheet != null || !"search".equals(page)) return;
+        if (treeSheet != null) return;
+        if (!"search".equals(page)) showSearch();
         getSystemService(InputMethodManager.class).hideSoftInputFromWindow(composerInput.getWindowToken(), 0);
         treeSheet = new ConversationTreeSheet(this, chatStore.tree(), node -> {
             if (!canChangeConversation()) return;
@@ -610,6 +629,157 @@ public class MainActivity extends Activity {
         button.setOnClickListener(listener);
         pressFeedback(button);
         return button;
+    }
+
+    private void showThinkingLevelPicker() {
+        if (!chatStore.piTextMode() || !canChangeConversation()
+                || thinkingLevelQueryToken != null) return;
+        if ("home".equals(page)) showSearch();
+        final String conversationId = chatStore.activeId();
+        final long owner = activityEpoch;
+        final String provider;
+        final String model;
+        final String selectionSource = chatStore.piSelection();
+        final String snapshot;
+        try {
+            PiConfigStore store = new PiConfigStore(this);
+            store.initialize(getSharedPreferences("chat", MODE_PRIVATE));
+            JSONObject selection = new JSONObject(selectionSource);
+            java.util.Map<String, Object> settings = store.effectiveSettings();
+            provider = selection.optString("provider",
+                    String.valueOf(settings.getOrDefault("defaultProvider", "")));
+            model = selection.optString("model",
+                    String.valueOf(settings.getOrDefault("defaultModel", "")));
+            snapshot = store.snapshot();
+        } catch (Exception exception) {
+            failure(t("无法读取 Pi 配置：") + exception.getMessage());
+            return;
+        }
+        final String token = java.util.UUID.randomUUID().toString();
+        thinkingLevelQueryToken = token;
+        updateAgentControls();
+        agentExecutor.execute(() -> {
+            try {
+                if (!ACTIVITY_EPOCH.owns(owner)) return;
+                PiAgentBridge bridge = PiAgentBridge.get(this);
+                final Object[] result = {null};
+                final String[] error = {""};
+                JSONObject arguments = new JSONObject().put("refresh", false);
+                synchronized (thinkingLevelQueryLock) {
+                    if (!ACTIVITY_EPOCH.owns(owner)) return;
+                    thinkingLevelBridge = bridge;
+                    thinkingLevelRequestId = bridge.query("catalog", snapshot, arguments, event -> {
+                        String type = event.optString("type");
+                        if ("result".equals(type)) result[0] = event.opt("result");
+                        else if ("error".equals(type)) error[0] = event.optString("message");
+                        else if ("end".equals(type)) runOnUiThread(() -> {
+                            if (!token.equals(thinkingLevelQueryToken)) return;
+                            thinkingLevelQueryToken = null;
+                            thinkingLevelBridge = null;
+                            thinkingLevelRequestId = null;
+                            updateAgentControls();
+                            if (!ACTIVITY_EPOCH.owns(owner)
+                                    || !conversationId.equals(chatStore.activeId())) return;
+                            if (!thinkingSelectionMatches(conversationId, selectionSource,
+                                    provider, model)) {
+                                failure(t("模型或思考强度已更改，请重新选择"));
+                                return;
+                            }
+                            if (!error[0].isEmpty()) { failure(error[0]); return; }
+                            if (!(result[0] instanceof JSONArray)) {
+                                failure(t("当前模型不在 SDK 模型目录中"));
+                                return;
+                            }
+                            showThinkingLevelChoices((JSONArray) result[0], conversationId,
+                                    provider, model, selectionSource, owner);
+                        });
+                    });
+                }
+            } catch (Exception exception) {
+                runOnUiThread(() -> {
+                    if (!token.equals(thinkingLevelQueryToken)) return;
+                    thinkingLevelQueryToken = null;
+                    thinkingLevelBridge = null;
+                    thinkingLevelRequestId = null;
+                    updateAgentControls();
+                    if (ACTIVITY_EPOCH.owns(owner)) failure(exception.getMessage());
+                });
+            }
+        });
+    }
+
+    private boolean thinkingSelectionMatches(String conversationId, String selectionSource,
+            String providerId, String modelId) {
+        if (!conversationId.equals(chatStore.activeId())
+                || !selectionSource.equals(chatStore.piSelection())) return false;
+        try {
+            JSONObject selection = new JSONObject(selectionSource);
+            java.util.Map<String, Object> settings = new PiConfigStore(this).effectiveSettings();
+            String currentProvider = selection.optString("provider",
+                    String.valueOf(settings.getOrDefault("defaultProvider", "")));
+            String currentModel = selection.optString("model",
+                    String.valueOf(settings.getOrDefault("defaultModel", "")));
+            return providerId.equals(currentProvider) && modelId.equals(currentModel);
+        } catch (Exception exception) { return false; }
+    }
+
+    private void showThinkingLevelChoices(JSONArray providers, String conversationId,
+            String providerId, String modelId, String selectionSource, long owner) {
+        JSONObject selectedModel = null;
+        if (providers != null) for (int i = 0; i < providers.length(); i++) {
+            JSONObject provider = providers.optJSONObject(i);
+            if (provider == null || !providerId.equals(provider.optString("id"))) continue;
+            JSONArray models = provider.optJSONArray("models");
+            if (models == null) break;
+            for (int j = 0; j < models.length(); j++) {
+                JSONObject candidate = models.optJSONObject(j);
+                if (candidate != null && modelId.equals(candidate.optString("id"))) {
+                    selectedModel = candidate;
+                    break;
+                }
+            }
+            break;
+        }
+        if (selectedModel == null) {
+            failure(t("当前模型不在 SDK 模型目录中"));
+            return;
+        }
+        JSONArray levels = selectedModel.optJSONArray("thinkingLevels");
+        if (levels == null) {
+            failure(t("当前模型不在 SDK 模型目录中"));
+            return;
+        }
+        String[] choices = new String[levels.length() + 1];
+        choices[0] = t("继承默认强度");
+        int checked = 0;
+        String current;
+        try { current = new JSONObject(selectionSource).optString("thinkingLevel", ""); }
+        catch (Exception ignored) { current = ""; }
+        for (int i = 0; i < levels.length(); i++) {
+            choices[i + 1] = levels.optString(i);
+            if (choices[i + 1].equals(current)) checked = i + 1;
+        }
+        final int checkedChoice = checked;
+        new android.app.AlertDialog.Builder(this).setTitle(t("当前会话思考强度"))
+                .setSingleChoiceItems(choices, checkedChoice, (dialog, which) -> {
+                    if (!ACTIVITY_EPOCH.owns(owner)
+                            || !conversationId.equals(chatStore.activeId())) {
+                        dialog.dismiss();
+                        return;
+                    }
+                    if (!thinkingSelectionMatches(conversationId, selectionSource,
+                            providerId, modelId)) {
+                        dialog.dismiss();
+                        failure(t("模型或思考强度已更改，请重新选择"));
+                        return;
+                    }
+                    try {
+                        chatStore.setPiSelection(conversationId, providerId, modelId,
+                                which == 0 ? null : choices[which]);
+                        if (chatModelTitle != null) chatModelTitle.setText(currentModelLabel());
+                        dialog.dismiss();
+                    } catch (Exception exception) { failure(exception.getMessage()); }
+                }).setNegativeButton(t("取消"), null).show();
     }
 
     private void startDictation() {
@@ -889,7 +1059,7 @@ public class MainActivity extends Activity {
 
     private void sendMessage() {
         String text = composerInput == null ? "" : composerInput.getText().toString().trim();
-        if (text.isEmpty() || agentRunning) return;
+        if (text.isEmpty() || agentRunning || thinkingLevelQueryToken != null) return;
         if ("home".equals(page)) {
             chatStore.newConversation();
             history = immutable(chatStore.load());
@@ -1093,13 +1263,20 @@ public class MainActivity extends Activity {
         if (sendButton != null) {
             boolean hasText = composerInput != null
                     && !composerInput.getText().toString().trim().isEmpty();
-            sendButton.setEnabled(!agentRunning && hasText);
-            sendButton.setAlpha(hasText ? 1f : .35f);
+            boolean enabled = !agentRunning && thinkingLevelQueryToken == null && hasText;
+            sendButton.setEnabled(enabled);
+            sendButton.setAlpha(enabled ? 1f : .35f);
             sendButton.setVisibility(agentRunning ? View.GONE : View.VISIBLE);
         }
         if (stopButton != null) {
             stopButton.setEnabled(agentRunning);
             stopButton.setVisibility(agentRunning ? View.VISIBLE : View.GONE);
+        }
+        if (thinkingLevelButton != null) {
+            boolean enabled = chatStore.piTextMode() && !agentRunning
+                    && thinkingLevelQueryToken == null;
+            thinkingLevelButton.setEnabled(enabled);
+            thinkingLevelButton.setAlpha(enabled ? 1f : .35f);
         }
         if (state != null && agentRunning && state.getText().length() == 0) {
             state.setText(t("正在等待助手…"));
@@ -1497,6 +1674,7 @@ public class MainActivity extends Activity {
             boolean piMode = selectedMode != null && "pi".equals(selectedMode.getTag());
             chatStore.settings(value, model.getText().toString(), key.getText().toString(), effort,
                     search, configuredSearch, piMode);
+            updateAgentControls();
             dialog.dismiss();
         });
         ScrollView scroll = new ScrollView(this);
@@ -1586,8 +1764,10 @@ public class MainActivity extends Activity {
         gestureState.setTextIsSelectable(true);
         gestureState.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
         sheet.addView(gestureState, new LinearLayout.LayoutParams(-1, -2));
+        button(sheet, t("使用 Shizuku 修复授权与无障碍"),
+                view -> shizukuRepair.repairFromButton());
 
-        button(sheet, t("请求成为默认桌面"), view -> requestHome());
+        button(sheet, t("使用 Shizuku 设为默认桌面"), view -> requestHome());
         button(sheet, t("默认桌面设置 / 恢复系统桌面"),
                 view -> launch(new Intent(Settings.ACTION_HOME_SETTINGS)));
         button(sheet, t("打开系统设置"), view -> launch(new Intent(Settings.ACTION_SETTINGS)));
@@ -1604,7 +1784,7 @@ public class MainActivity extends Activity {
         details.setClickable(true);
         details.setFocusable(true);
         sheet.addView(details);
-        TextView safety = label(t("启用前须先在系统无障碍设置中连接服务，并通过电脑 ADB 授予写设置权限：\n")
+        TextView safety = label(t("可使用 Shizuku 修复写设置授权和本应用的无障碍服务；也可通过电脑 ADB 手动授权：\n")
                 + GestureService.GRANT_COMMAND + t("\n\n左右内滑返回；底边上滑回桌面；上滑停留打开最近任务。")
                 + t("启用会改变 HyperOS 导航设置。停用后请目视确认三键已恢复，再撤权或卸载。"), 14, MUTED);
         safety.setTextIsSelectable(true);
@@ -1654,7 +1834,7 @@ public class MainActivity extends Activity {
             failure(t("已经是默认桌面。"));
             return;
         }
-        launch(roles.createRequestRoleIntent(RoleManager.ROLE_HOME));
+        shizukuRepair.requestHomeFromButton();
     }
 
     private void launchApp(ComponentName component) {

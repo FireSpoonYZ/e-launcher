@@ -1,11 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
-    <!-- Development permission granted once through ADB; not a runtime dialog.
-         This ROM-specific probe verifies permission and every settings write. -->
+    <!-- Granted through Shizuku or ADB; every repair verifies the resulting state. -->
     <uses-permission android:name="android.permission.WRITE_SECURE_SETTINGS"
         tools:ignore="ProtectedPermissions" />
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="moe.shizuku.manager.permission.API_V23" />
 
     <queries>
         <intent>
@@ -19,6 +19,13 @@
         android:label="Launcher Probe"
         android:supportsRtl="true"
         android:theme="@android:style/Theme.Material.Light.NoActionBar">
+        <provider
+            android:name="rikka.shizuku.ShizukuProvider"
+            android:authorities="${applicationId}.shizuku"
+            android:multiprocess="false"
+            android:enabled="true"
+            android:exported="true"
+            android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
         <service
             android:name=".GestureService"
             android:exported="false"

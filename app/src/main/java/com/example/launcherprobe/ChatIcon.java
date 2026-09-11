@@ -48,6 +48,10 @@ final class ChatIcon extends Drawable {
                 canvas.drawRoundRect(9, 3, 15, 14, 3, 3, paint);
                 canvas.drawArc(6, 6, 18, 18, 0, 180, false, paint);
                 line(canvas, 12, 18, 12, 21); break;
+            case "gauge":
+                canvas.drawArc(3, 5, 21, 23, 180, 180, false, paint);
+                line(canvas, 12, 14, 17, 10);
+                canvas.drawCircle(12, 14, 1.5f, paint); break;
             case "search":
                 canvas.drawCircle(10, 10, 6, paint); line(canvas, 15, 15, 21, 21); break;
             case "compose":

@@ -75,7 +75,7 @@ Debug 构建固定使用项目根目录的 `debug.keystore`，不再使用各电
 
 ## 安装与一次授权
 
-先保留三键作为备用导航、关闭 UbikiTouch 等替代工具，以免混淆测试归属。默认桌面由用户通过 HOME 对话框确认，单纯打开 App 不会自动选择默认桌面。
+先保留三键作为备用导航、关闭 UbikiTouch 等替代工具，以免混淆测试归属。默认桌面由用户点击设置页“使用 Shizuku 设为默认桌面”，通过已授权的 Shizuku 为本应用设置 HOME 角色并读回确认；单纯打开 App 不会自动选择默认桌面。“默认桌面设置 / 恢复系统桌面”仍可打开系统设置。
 
 ```powershell
 $adb = "$env:LOCALAPPDATA\Android\Sdk\platform-tools\adb.exe"
@@ -86,9 +86,9 @@ $serial = '<已授权设备序列号>'
 & $adb -s $serial shell am start -n com.example.launcherprobe/.MainActivity
 ```
 
-手机可能要求额外允许 USB 安装/调试安全设置；授权是否被 ROM 接受必须看实际结果。`WRITE_SECURE_SETTINGS` **不是普通运行时权限弹窗可以授予的权限**。本 App 不接入 Shizuku，不尝试自行提权。
+手机可能要求额外允许 USB 安装/调试安全设置；授权是否被 ROM 接受必须看实际结果。`WRITE_SECURE_SETTINGS` **不是普通运行时权限弹窗可以授予的权限**。也可安装并启动官方 Shizuku：App 首次检测到 Shizuku 后会请求本 App 的 Shizuku 授权；授权后通过受限 UserService 为本包执行固定的 `WRITE_SECURE_SETTINGS` 授权；设置默认桌面则仅在点击对应按钮后执行本包的 `cmd role add-role-holder` 命令。自动修复会检查权限，并保留其他无障碍服务来修复 **Launcher Probe 手势**。设置页“使用 Shizuku 修复授权与无障碍”可重试；状态以权限读回、系统启用列表及服务真实连接为准。Shizuku 未运行、拒绝或 ROM 阻止命令时会显示失败，不持续后台轮询。
 
-在 App 点击“打开无障碍授权设置”，由用户开启 **Launcher Probe 手势**，返回 App 确认“已连接”和写设置授权，再点击“启用”。服务使用 `TYPE_ACCESSIBILITY_OVERLAY`，不需要普通悬浮窗权限或独立前台服务；授权说明会明确窗口结构与节点动作能力，`canPerformGestures` 仅用于回放被边缘区域截获但未识别为导航的单指触摸。取消/多指触摸不回放。
+自动修复不会启用固定导航手势。确认状态为“已连接”和写设置授权后，仍须由用户点击“启用固定导航手势”；也可点击“打开无障碍授权设置”手动处理。服务使用 `TYPE_ACCESSIBILITY_OVERLAY`，不需要普通悬浮窗权限或独立前台服务；授权说明会明确窗口结构与节点动作能力，`canPerformGestures` 仅用于回放被边缘区域截获但未识别为导航的单指触摸。取消/多指触摸不回放。
 
 ## 启停、安全恢复和已知边界
 

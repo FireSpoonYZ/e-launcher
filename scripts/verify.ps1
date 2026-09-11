@@ -12,6 +12,7 @@ New-Item -ItemType Directory -Force $classes | Out-Null
 & "$env:JAVA_HOME\bin\javac.exe" '-J-Duser.language=en' -encoding UTF-8 -d $classes `
     app/src/main/java/com/example/launcherprobe/AgentLoop.java `
     app/src/main/java/com/example/launcherprobe/ActionFence.java `
+    app/src/main/java/com/example/launcherprobe/AccessibilityServices.java `
     app/src/main/java/com/example/launcherprobe/AgentHistory.java `
     app/src/main/java/com/example/launcherprobe/ConversationTree.java `
     app/src/main/java/com/example/launcherprobe/AttemptAll.java `
@@ -30,9 +31,12 @@ New-Item -ItemType Directory -Force $classes | Out-Null
     app/src/main/java/com/example/launcherprobe/WebAddressPolicy.java `
     tests/com/example/launcherprobe/AgentChecks.java `
     tests/com/example/launcherprobe/ConversationTreeChecks.java `
-    tests/com/example/launcherprobe/GestureChecks.java
+    tests/com/example/launcherprobe/GestureChecks.java `
+    tests/com/example/launcherprobe/ShizukuRepairChecks.java
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 & "$env:JAVA_HOME\bin\java.exe" -ea -cp $classes com.example.launcherprobe.GestureChecks
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+& "$env:JAVA_HOME\bin\java.exe" -ea -cp $classes com.example.launcherprobe.ShizukuRepairChecks
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 & "$env:JAVA_HOME\bin\java.exe" -ea -cp $classes com.example.launcherprobe.AgentChecks
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

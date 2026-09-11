@@ -192,6 +192,7 @@
   "应用主题": "App theme",
   "开启": "Turn on",
   "当前会话思考强度": "Current session Thinking level",
+  "当前模型不在 SDK 模型目录中": "The current model is not in the SDK model catalog",
   "当前对话操作": "Current conversation actions",
   "当前运行方式": "Current runtime mode",
   "思考强度": "Thinking level",
@@ -270,6 +271,7 @@
   "模型专家配置": "Expert model configuration",
   "模型服务截断了回复，已保留生成内容": "The model service truncated the response. Generated content has been kept.",
   "模型配置无效：": "Invalid model configuration: ",
+  "模型或思考强度已更改，请重新选择": "The model or Thinking level changed. Please select again.",
   "模型，如 gpt-4o-mini": "Model, e.g. gpt-4o-mini",
   "正在": "In progress",
   "正在停止…": "Stopping…",
@@ -338,8 +340,9 @@
   "说出你的消息": "Speak your message",
   "请从 SDK 模型目录选择模型": "Select a model from the SDK model catalog",
   "请先停止当前生成，再切换会话": "Stop generation before switching sessions",
+  "切换当前会话思考强度": "Change Thinking level for the current session",
   "请求与消息": "Requests and messages",
-  "请求成为默认桌面": "Request to be the default launcher",
+  "使用 Shizuku 设为默认桌面": "Set as default launcher with Shizuku",
   "请求成功 · ": "Request successful · ",
   "请等待当前操作完成": "Wait for the current operation to finish",
   "请输入 JSON 对象": "Enter a JSON object",
@@ -464,5 +467,7 @@
   "技能路径": "Skills",
   "提示词路径": "Prompts",
   "主题路径": "Themes",
-  "启用技能命令": "Enable skill commands"
+  "启用技能命令": "Enable skill commands",
+  "使用 Shizuku 修复授权与无障碍": "Repair permissions and accessibility with Shizuku",
+  "可使用 Shizuku 修复写设置授权和本应用的无障碍服务；也可通过电脑 ADB 手动授权：\n": "Use Shizuku to repair write-settings permission and this app's accessibility service, or grant it manually using ADB on a computer:\n"
 }

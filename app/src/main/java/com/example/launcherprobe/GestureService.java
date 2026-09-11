@@ -106,9 +106,15 @@ public final class GestureService extends AccessibilityService {
         });
     }
 
-    private static boolean canWrite(Context context) {
+    static boolean canWrite(Context context) {
         return context.checkSelfPermission(Manifest.permission.WRITE_SECURE_SETTINGS)
                 == PackageManager.PERMISSION_GRANTED;
+    }
+
+    static boolean isConnected() { return instance != null; }
+
+    static boolean safeToRebind(Context context) {
+        return instance == null && !prefs(context).getBoolean("pending_restore", false);
     }
 
     private static boolean writeNavigation(Context context, boolean hidden) {
@@ -401,6 +407,7 @@ public final class GestureService extends AccessibilityService {
                 + "；隐藏设置：" + value
                 + (attached && instance.session.enabled() && value == 1 ? "（ON，仍需实机确认）" : "")
                 + (prefs(context).getBoolean("pending_restore", false) ? "\n持有三键恢复责任" : "")
+                + "\n" + ShizukuRepair.statusText()
                 + (message.isEmpty() ? "" : "\n" + message);
     }
 
