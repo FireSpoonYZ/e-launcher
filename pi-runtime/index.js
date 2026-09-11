@@ -1,4 +1,5 @@
 import { Agent } from "@earendil-works/pi-agent-core";
+import { resolveConfig } from "./config.js";
 import { stream as streamOpenAICompletions } from "@earendil-works/pi-ai/api/openai-completions";
 
 const EMPTY_COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
@@ -8,27 +9,29 @@ function requireText(value, name) {
   return value;
 }
 
-function makeModel({ baseUrl, modelId }) {
+function makeModel({ baseUrl, modelId, reasoningEffort, modelConfig = {} }) {
   return {
     id: modelId,
     name: modelId,
     api: "openai-completions",
     provider: "host-openai-compatible",
     baseUrl,
-    reasoning: false,
+    reasoning: Boolean(reasoningEffort && reasoningEffort !== "off"),
     input: ["text"],
     cost: EMPTY_COST,
     // Custom endpoint capabilities are unknown; the direct adapter sends no output budget.
     contextWindow: 0,
     maxTokens: 0,
+    ...modelConfig,
     compat: {
       supportsDeveloperRole: false,
-      supportsReasoningEffort: false,
+      supportsReasoningEffort: Boolean(reasoningEffort && reasoningEffort !== "off"),
+      ...modelConfig.compat,
     },
   };
 }
 
-function toAgentHistory(history) {
+export function toAgentHistory(history) {
   if (!Array.isArray(history)) throw new TypeError("history must be an array");
   return history.map((message, index) => {
     if (message?.role !== "user" && message?.role !== "assistant") {
@@ -58,19 +61,26 @@ function messageText(message) {
  * Creates a text-only pi Agent boundary. Events are transport-neutral objects:
  * text_delta, message, error, and end. No pi user config or extensions are read.
  */
-export function createPiRuntime({ baseUrl, apiKey, modelId, systemPrompt = "You are a helpful assistant.", history = [], streamFn } = {}) {
+export function createPiRuntime(options = {}) {
+  const { baseUrl, apiKey, modelId, systemPrompt = "You are a helpful assistant.", history = [], streamFn,
+    reasoningEffort = "", modelConfig, thinkingBudgets } = options.config
+      ? { ...options, ...resolveConfig(options.config) } : options;
+  if (!["", "off", "minimal", "low", "medium", "high", "xhigh", "max"].includes(reasoningEffort)) {
+    throw new TypeError("不支持的思考强度");
+  }
   requireText(baseUrl, "baseUrl");
   requireText(apiKey, "apiKey");
   requireText(modelId, "modelId");
-  const model = makeModel({ baseUrl, modelId });
+  const model = makeModel({ baseUrl, modelId, reasoningEffort, modelConfig });
   const listeners = new Set();
   const emit = (event) => {
     for (const listener of listeners) listener(event);
   };
   const effectiveStreamFn = streamFn ?? ((requestModel, context, options) =>
-    streamOpenAICompletions(requestModel, context, { ...options, apiKey }));
+    streamOpenAICompletions(requestModel, context, { ...options, apiKey, thinkingBudgets,
+      reasoningEffort: reasoningEffort || undefined }));
   const agent = new Agent({
-    initialState: { systemPrompt, model, tools: [], messages: toAgentHistory(history) },
+    initialState: { systemPrompt, model, thinkingLevel: reasoningEffort || "off", tools: [], messages: toAgentHistory(history) },
     streamFn: effectiveStreamFn,
   });
 

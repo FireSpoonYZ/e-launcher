@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import http from "node:http";
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai/utils/event-stream";
 import { createPiRuntime } from "./index.js";
+import { resolveConfig } from "./config.js";
 
 const usage = { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
 
@@ -105,6 +106,7 @@ async function checkInterruptedContent() {
 
 async function checkOpenAIAdapter() {
   let requestSeen = false;
+  let expectedEffort;
   const server = http.createServer((request, response) => {
     let body = "";
     request.setEncoding("utf8");
@@ -114,6 +116,8 @@ async function checkOpenAIAdapter() {
       assert.equal(request.url, "/v1/chat/completions");
       assert.equal(request.headers.authorization, "Bearer mock-key-not-real");
       assert.equal(payload.model, "mock-model");
+      assert.equal(payload.reasoning_effort, expectedEffort);
+      assert.equal(Object.hasOwn(payload, "reasoning_effort"), expectedEffort !== undefined);
       assert.equal(Object.hasOwn(payload, "max_tokens"), false, "no app output token cap");
       assert.equal(Object.hasOwn(payload, "max_completion_tokens"), false, "no app completion token cap");
       requestSeen = true;
@@ -127,17 +131,36 @@ async function checkOpenAIAdapter() {
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   try {
     const { port } = server.address();
-    const events = [];
-    const pi = createPiRuntime({ baseUrl: `http://127.0.0.1:${port}/v1`, apiKey: "mock-key-not-real", modelId: "mock-model" });
-    pi.subscribe((event) => events.push(event));
-    await pi.prompt("local mock only");
-    assert.equal(requestSeen, true);
-    assert.equal(events.find((event) => event.type === "message").message.content, "adapter ok");
-    assert.equal(events.at(-1).status, "completed");
+    for (const effort of ["", "low", "medium", "high"]) {
+      expectedEffort = effort || undefined;
+      requestSeen = false;
+      const events = [];
+      const pi = createPiRuntime({ config: {
+        settings: { defaultProvider: "test", defaultModel: "mock-model", ...(effort ? { defaultThinkingLevel: effort } : {}) },
+        models: { providers: { test: { baseUrl: `http://127.0.0.1:${port}/v1`, models: [{ id: "mock-model" }] } } },
+        auth: { test: { type: "api_key", key: "mock-key-not-real" } },
+      } });
+      pi.subscribe((event) => events.push(event));
+      await pi.prompt("local mock only");
+      assert.equal(requestSeen, true);
+      assert.equal(events.find((event) => event.type === "message").message.content, "adapter ok");
+      assert.equal(events.at(-1).status, "completed");
+    }
   } finally {
     await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   }
 }
+
+const config = {
+  settings: { defaultProvider: "test", defaultModel: "model", defaultThinkingLevel: "low", modelThinkingLevels: { "test/model": "high" } },
+  models: { providers: { test: { baseUrl: "https://example.com/v1", models: [{ id: "model" }], headers: { "x-test": "$VALUE" } } } },
+  auth: { test: { type: "api_key", key: "$KEY", env: { KEY: "mock", VALUE: "value" } } },
+};
+assert.equal(resolveConfig(config).reasoningEffort, "high");
+assert.equal(resolveConfig(config).apiKey, "mock");
+assert.equal(resolveConfig(config).modelConfig.headers["x-test"], "value");
+assert.throws(() => resolveConfig({ ...config, auth: { test: { type: "api_key", key: "!command", env: { VALUE: "value" } } } }), /命令引用/);
+assert.throws(() => resolveConfig({ ...config, settings: { defaultProvider: "missing" } }), /未配置服务商/);
 
 await checkMemoryAgent();
 await checkAbort();

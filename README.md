@@ -2,13 +2,23 @@
 
 原生 Java Android 桌面、固定导航手势与小型聊天 Agent。保留默认 HOME 请求、按本地语言排序的当前用户应用入口、显式组件启动和失败提示。固定导航手势直接适配自 [Ogesture](https://github.com/tanujnotes/Ogesture)，不恢复 HyperOS 原生桌面动画。
 
-## 聊天与工具
+## Pi Agent 与设置
+
+Pi 模式接入固定版本 **0.85.1** 的完整 coding-agent SDK，提供模型、思考强度、原生工具与扩展、压缩重试、资源及包管理和 OAuth。当前聊天的模型选择与启动默认值分开保存。历史树位于聊天页顶部的新建对话之前，首页不显示该入口。
+
+独立设置页保留通用、外观、服务商、技能、MCP、扩展、关于七类，其余配置放入高级配置，覆盖文档中的 65 个 settings 字段。全局／工作区表单与 JSON 编辑器共用私有文件；支持自动格式化、未知字段和数字写法保留、草稿、冲突检查及上一版。开放式模型与兼容性结构可直接编辑完整 models.json。
+
+界面支持跟随系统／中英文、浅色／深色、首页图片预览和遮罩。扩展社区使用 npm 公开元数据，提供搜索和分页；配置状态、SDK 找到的安装路径与成功加载分别说明。关于页可查看实际应用版本和 GitHub 最新公开发布。npm／Git 安装仍需要 Android 运行环境具备对应命令，失败会显示实际错误。
+
+参见 [运行时与构建说明](pi-runtime/README.md)、[设计](design/pi-settings/README.md) 和 [实施／验证记录](design/pi-settings/IMPLEMENTATION.md)。本次 Pi 设置改动按用户要求仅做本地验证，以下早期 ADB 记录不代表新版 Pi SDK、OAuth 或设置界面已完成真机验收。
+
+## Android 工具模式
 
 助手使用可配置的 HTTPS OpenAI Chat Completions 兼容端点（默认 `https://api.openai.com/v1`）和经典循环：模型返回 `tool_calls`，App 逐项执行并按调用 ID 回填，直到模型返回无工具调用的最终文本。模型设置和每个会话最多 100 条消息保存在应用私有存储；系统备份已关闭。思考强度可选默认/低/中/高：默认不发送额外字段，其余选项向兼容服务发送顶层 `reasoning_effort=low/medium/high`；不支持此参数的模型或服务可能拒绝请求。停止按钮会取消循环并断开当前模型或网页连接。
 
 内置工具为 `list_apps`、`launch_app`、`back`、`home`、`recents`、`read_screen`、`click`、`input_text`、`scroll`、`web_search` 和 `web_fetch`。搜索可选择无需密钥的 [DuckDuckGo Lite](https://lite.duckduckgo.com/lite/)，或用户配置的 SearXNG HTTPS Base URL；二者都返回有长度/数量限制的标题、URL 与摘要，失败不会静默切换服务。SearXNG 通过 `GET /search?q=...&format=json` 请求，配置地址可解析到运营者信任的内网，但任何重定向必须保持同源。通用 `web_fetch` 仍只允许公网 HTTPS，限制超时、重定向和 128 KiB 响应；OkHttp 的自定义 DNS 只把完成公网检查的解析结果交给实际连接。网页、屏幕和工具输出均是不可信数据。屏幕读取最多返回 200 个节点、深度 12，使用单次观察 ID；界面事件或任一动作会使 ID 失效。密码文字会隐藏且拒绝向密码节点自动输入，动作被系统接受后仍须再次读取验证。
 
-当前原生单 Activity 界面提供暖色桌面、本地时间日期、应用图标网格，以及白底助手对话页。助手页采用浅灰用户气泡、直接排版的回复、底部圆角输入框与左侧会话抽屉；旧记录自动作为一个会话保留，新会话与未发送草稿独立保存，抽屉可按标题搜索、切换会话和删除当前会话。生成期间须先停止，再新建或切换会话。首页与助手页共用底部透明停靠区中的悬浮圆角输入栏，加号、输入文字、麦克风和发送按钮默认横排一行，长文本最多展开三行。点击首页输入栏只聚焦并唤起键盘，非空草稿仅在点击发送后打开对话页并提交；页面切换只让上方内容淡入移入，输入栏保持同一实例和位置。顶部标题打开模型配置，输入框加号和首页“全部应用”打开本地应用搜索，麦克风调用系统语音识别（设备未提供时提示使用键盘语音），回复支持复制与系统分享。侧栏滑入/滑出、遮罩渐变、新消息出现、详情展开、按钮按压和设置弹窗使用 Android 原生动画，并遵循系统动画开关。发送内容及工具结果会交给用户配置的模型服务；公开网页请求会直接访问相应站点。
+原生主界面提供桌面、本地时间日期、应用图标网格，以及使用主题背景的助手对话页。助手页采用浅灰用户气泡、直接排版的回复、底部圆角输入框与左侧会话抽屉；旧记录自动作为一个会话保留，新会话与未发送草稿独立保存，抽屉可按标题搜索、切换会话和删除当前会话。生成期间须先停止，再新建或切换会话。首页与助手页共用底部透明停靠区中的悬浮圆角输入栏，加号、输入文字、麦克风和发送按钮默认横排一行，长文本最多展开三行。点击首页输入栏只聚焦并唤起键盘，非空草稿仅在点击发送后打开对话页并提交；页面切换只让上方内容淡入移入，输入栏保持同一实例和位置。顶部标题打开模型配置，输入框加号和首页“全部应用”打开本地应用搜索，麦克风调用系统语音识别（设备未提供时提示使用键盘语音），回复支持复制与系统分享。侧栏滑入/滑出、遮罩渐变、新消息出现、详情展开、按钮按压和设置弹窗使用 Android 原生动画，并遵循系统动画开关。发送内容及工具结果会交给用户配置的模型服务；公开网页请求会直接访问相应站点。
 
 “设置”底部面板保留默认桌面请求、系统/无障碍设置入口、固定手势启停、实时状态与 ADB 授权说明。每次 Activity 恢复仍先执行中断恢复检查。
 
@@ -45,13 +55,13 @@
 
 ## 构建与检查（Windows PowerShell）
 
-JDK17、Gradle8.11.1、SDK Platform35 / Build Tools35.0.0；AGP8.9.1，minSdk29、targetSdk35。运行时网络使用 OkHttp 3.14.9，不包含 Gradle Wrapper 二进制。首次构建需下载构建依赖并接受 SDK 许可。工具目录与当前开发环境一致：
+JDK17、Gradle8.11.1、SDK Platform35 / Build Tools35.0.0；AGP8.9.1，minSdk29、targetSdk35。运行时网络使用 OkHttp 3.14.9，不包含 Gradle Wrapper 二进制。首次构建需下载构建依赖并接受 SDK 许可。先运行 `scripts/prepare-pi-runtime.ps1` 准备 Node Mobile 和 SDK 资源，JavaScript 改动后运行 `npm --prefix pi-runtime test` 重建并测试 bundle。工具目录与当前开发环境一致：
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/verify.ps1
 ```
 
-脚本设置 `JAVA_HOME=$env:LOCALAPPDATA\e-launcher-tools\jdk-17` 和 `ANDROID_HOME=$env:LOCALAPPDATA\Android\Sdk`，运行纯 Java 断言检查、Gradle `:app:testDebugUnitTest :app:assembleDebug :app:lintDebug` 以及空白/行尾风格检查。逻辑检查在 `tests/com/example/launcherprobe/GestureChecks.java` 和 `AgentChecks.java`，不使用 Android stub 或第三方测试框架；Gradle unit-test 任务目前没有另设的测试源。纯 Java 检查覆盖反馈进度/阈值与各类清理状态，但不能证明 WindowManager、MotionEvent 或 ROM 转场行为。成功构建的调试 APK 位于 `app/build/outputs/apk/debug/app-debug.apk`。
+脚本设置 `JAVA_HOME=$env:LOCALAPPDATA\e-launcher-tools\jdk-17` 和 `ANDROID_HOME=$env:LOCALAPPDATA\Android\Sdk`，运行纯 Java 断言检查、Gradle `:app:testDebugUnitTest :app:assembleDebug :app:lintDebug` 以及空白/行尾风格检查。逻辑检查在 `tests/com/example/launcherprobe/GestureChecks.java` 和 `AgentChecks.java`，不使用 Android stub 或第三方测试框架；Gradle unit-test 任务运行 `app/src/test` 下的 Robolectric 回归，覆盖凭据、请求持久化、设置重建和公开元数据边界；Windows 测试仅适配 AtomicFile 的底层替换操作，不替换业务逻辑。纯 Java 检查覆盖反馈进度/阈值与各类清理状态，但不能证明 WindowManager、MotionEvent 或 ROM 转场行为。成功构建的调试 APK 位于 `app/build/outputs/apk/debug/app-debug.apk`。
 
 ### 跨电脑使用同一开发签名
 

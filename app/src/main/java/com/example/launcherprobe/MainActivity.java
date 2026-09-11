@@ -8,9 +8,7 @@ import android.content.ComponentName;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
-import android.graphics.Canvas;
 import android.graphics.Color;
-import android.graphics.Paint;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Build;
 import android.os.Bundle;
@@ -38,6 +36,7 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import org.json.JSONObject;
+import org.json.JSONArray;
 
 import java.text.Collator;
 import java.text.SimpleDateFormat;
@@ -52,10 +51,9 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 public class MainActivity extends Activity {
-    private static final int IVORY = Color.rgb(246, 245, 240);
-    private static final int CHARCOAL = Color.rgb(32, 37, 33);
-    private static final int TEAL = Color.rgb(38, 122, 105);
-    private static final int MUTED = Color.rgb(101, 109, 105);
+    private int IVORY, CHARCOAL, TEAL, MUTED;
+    private AppAppearance appearance;
+    private String appearanceRevision;
     private static final String PAGE_KEY = "page";
     private static final String QUERY_KEY = "query";
     private static final String DRAFT_KEY = "chat_draft";
@@ -104,7 +102,9 @@ public class MainActivity extends Activity {
     private OpenAiProvider activeProvider;
     private volatile PiAgentBridge activePiBridge;
     private String activePiRequestId;
+    private PiTurnPersistence activePiPersistence;
     private String activePiMessageId;
+    private TextView chatModelTitle;
     private LinearLayout messageList;
     private TextView piStreamingBody;
     private io.noties.markwon.Markwon markdown;
@@ -129,8 +129,14 @@ public class MainActivity extends Activity {
     private String savedQuery = "";
     private String savedDraft = "";
 
+    @Override protected void attachBaseContext(android.content.Context base) { super.attachBaseContext(UiText.wrap(base)); }
+    private String t(String literal) { return UiText.get(this, literal); }
+
     @Override
     public void onCreate(Bundle savedInstanceState) {
+        appearance = AppAppearance.read(this); appearance.apply(this);
+        IVORY = appearance.background; CHARCOAL = appearance.ink; TEAL = appearance.accent; MUTED = appearance.muted;
+        appearanceRevision = AppAppearance.revision(this);
         super.onCreate(savedInstanceState);
         suppressHomeEnterTransition(getIntent());
         activityEpoch = ACTIVITY_EPOCH.acquire();
@@ -144,8 +150,7 @@ public class MainActivity extends Activity {
         getWindow().setStatusBarColor(IVORY);
         getWindow().setNavigationBarColor(IVORY);
         getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
-        getWindow().getDecorView().setSystemUiVisibility(
-                View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR | View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR);
+        getWindow().getDecorView().setSystemUiVisibility(appearance.systemBarFlags());
         if (savedInstanceState != null) {
             page = savedInstanceState.getString(PAGE_KEY, "home");
             savedQuery = savedInstanceState.getString(QUERY_KEY, "");
@@ -184,6 +189,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        if (!agentRunning && !appearanceRevision.equals(AppAppearance.revision(this))) { recreate(); return; }
         GestureService.statusListener = refreshGestures;
         GestureService.recover(this);
         refreshGestures.run();
@@ -248,10 +254,10 @@ public class MainActivity extends Activity {
         contentStage.removeAllViews();
         contentStage.addView(content, match());
         boolean chat = "search".equals(page);
-        root.setBackgroundColor(chat ? Color.WHITE : IVORY);
+        root.setBackgroundColor(chat ? appearance.surface : IVORY);
         homeWallpaper.setVisibility(chat ? View.INVISIBLE : View.VISIBLE);
-        getWindow().setStatusBarColor(chat ? Color.WHITE : IVORY);
-        getWindow().setNavigationBarColor(Color.WHITE);
+        getWindow().setStatusBarColor(chat ? appearance.surface : IVORY);
+        getWindow().setNavigationBarColor(appearance.surface);
         composerInput.setShowSoftInputOnFocus(true);
         if (!firstPage) enterMotion(content, chat ? 24 : -16);
         updateAgentControls();
@@ -259,8 +265,8 @@ public class MainActivity extends Activity {
 
     private void createPageShell() {
         root = new FrameLayout(this);
-        root.setBackgroundColor(Color.WHITE);
-        homeWallpaper = new WallpaperView();
+        root.setBackgroundColor(appearance.surface);
+        homeWallpaper = createWallpaper();
         homeWallpaper.setBackgroundColor(IVORY);
         root.addView(homeWallpaper, match());
         pageShell = column();
@@ -314,6 +320,7 @@ public class MainActivity extends Activity {
     }
 
     private void showHome() {
+        if (treeSheet != null) treeSheet.dismiss();
         View focused = getCurrentFocus();
         if (focused != null) {
             android.view.inputmethod.InputMethodManager keyboard =
@@ -340,6 +347,9 @@ public class MainActivity extends Activity {
         scroll.setClipToPadding(false);
         scroll.addView(column, new ScrollView.LayoutParams(-1, -2));
         column.setPadding(dp(22), 0, dp(22), dp(8));
+        // Keep labels readable even when the photo mask is only 20%.
+        if (getSharedPreferences("ui", MODE_PRIVATE).getString("background", "circles").equals("image"))
+            column.setBackgroundColor((appearance.background & 0xffffff) | 0xe6000000);
         FrameLayout homeContent = new FrameLayout(this);
         homeContent.addView(scroll, match());
 
@@ -347,22 +357,22 @@ public class MainActivity extends Activity {
         clock = label("", 64, CHARCOAL);
         clock.setGravity(Gravity.BOTTOM);
         top.addView(clock, new LinearLayout.LayoutParams(0, -2, 1));
-        TextView settings = pill("设置", view -> showControls());
-        settings.setContentDescription("打开桌面与手势设置");
+        TextView settings = pill(t("设置"), view -> showControls());
+        settings.setContentDescription(t("打开桌面与手势设置"));
         top.addView(settings);
         column.addView(top);
         date = label("", 21, CHARCOAL);
         column.addView(date);
-        TextView capability = label("本地桌面 · 可选联网助手", 14, MUTED);
+        TextView capability = label(t("本地桌面 · 可选联网助手"), 14, MUTED);
         capability.setPadding(0, dp(6), 0, dp(30));
         column.addView(capability);
 
         LinearLayout section = row();
-        TextView title = label("应用", 25, CHARCOAL);
+        TextView title = label(t("应用"), 25, CHARCOAL);
         title.setTypeface(null, android.graphics.Typeface.BOLD);
         section.addView(title, new LinearLayout.LayoutParams(0, -2, 1));
-        TextView all = pill("全部应用  ›", view -> showAppPicker());
-        all.setContentDescription("查看并搜索全部应用");
+        TextView all = pill(t("全部应用  ›"), view -> showAppPicker());
+        all.setContentDescription(t("查看并搜索全部应用"));
         section.addView(all);
         column.addView(section);
 
@@ -371,7 +381,7 @@ public class MainActivity extends Activity {
         gridParams.topMargin = dp(12);
         column.addView(grid, gridParams);
         if (apps.isEmpty()) {
-            TextView empty = label("没有找到可启动的应用。", 17, MUTED);
+            TextView empty = label(t("没有找到可启动的应用。"), 17, MUTED);
             empty.setPadding(0, dp(24), 0, dp(24));
             column.addView(empty);
         }
@@ -380,7 +390,7 @@ public class MainActivity extends Activity {
         state.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_ASSERTIVE);
         state.setPadding(0, dp(12), 0, dp(8));
         column.addView(state);
-        if (agentRunning) button(column, "停止正在运行的助手", view -> {
+        if (agentRunning) button(column, t("停止正在运行的助手"), view -> {
             cancelAgent();
             showSearch();
         });
@@ -403,15 +413,22 @@ public class MainActivity extends Activity {
         LinearLayout pageColumn = column();
         LinearLayout header = row();
         header.setPadding(dp(8), dp(4), dp(8), dp(4));
-        header.addView(chatIcon("menu", "打开会话菜单", view -> showChatDrawer()));
-        TextView title = label("E Launcher ⌄", 20, CHARCOAL);
+        header.addView(chatIcon("menu", t("打开会话菜单"), view -> showChatDrawer()));
+        TextView title = label(currentModelLabel(), 18, CHARCOAL);
+        chatModelTitle = title;
+        title.setSingleLine(true);
+        title.setEllipsize(android.text.TextUtils.TruncateAt.END);
         title.setGravity(Gravity.CENTER);
         title.setTypeface(null, android.graphics.Typeface.BOLD);
-        title.setContentDescription("选择模型与配置服务");
-        title.setOnClickListener(view -> showProviderSettings());
+        title.setContentDescription(t("选择模型与配置服务"));
+        title.setOnClickListener(view -> {
+            if (!chatStore.piTextMode()) { showProviderSettings(); return; }
+            if (canChangeConversation()) startActivityForResult(new Intent(this, PiSettingsActivity.class).putExtra("pickModel", true), 702);
+        });
         title.setFocusable(true);
         header.addView(title, new LinearLayout.LayoutParams(0, dp(52), 1));
-        header.addView(chatIcon("compose", "新建对话", view -> newConversation()));
+        header.addView(chatIcon("tree", t("打开对话树"), view -> openConversationTree()));
+        header.addView(chatIcon("compose", t("新建对话"), view -> newConversation()));
         pageColumn.addView(header);
 
         messageList = column();
@@ -431,12 +448,12 @@ public class MainActivity extends Activity {
         messageScroll.addView(messageList, new ScrollView.LayoutParams(-1, -2));
         pageColumn.addView(messageScroll, new LinearLayout.LayoutParams(-1, 0, 1));
 
-        newerMessages = pill("↓ 有新消息", view -> scrollToLatest());
+        newerMessages = pill(t("↓ 有新消息"), view -> scrollToLatest());
         newerMessages.setVisibility(View.GONE);
-        newerMessages.setContentDescription("滚动到最新消息");
+        newerMessages.setContentDescription(t("滚动到最新消息"));
         pageColumn.addView(newerMessages, new LinearLayout.LayoutParams(-1, -2));
 
-        state = label(agentRunning ? "正在运行…" : "", 12, MUTED);
+        state = label(agentRunning ? t("正在运行…") : "", 12, MUTED);
         state.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_ASSERTIVE);
         state.setPadding(dp(20), 0, dp(20), dp(4));
         pageColumn.addView(state);
@@ -459,12 +476,12 @@ public class MainActivity extends Activity {
         composerDock.setBackgroundColor(Color.TRANSPARENT);
         LinearLayout composer = row();
         composer.setPadding(dp(4), dp(4), dp(4), dp(4));
-        composer.setBackground(shape(0xF2F7F7F8, 26, 1, 0x6678787C));
+        composer.setBackground(shape((appearance.panel & 0x00ffffff) | 0xf2000000, 26, 1, appearance.border));
         composer.setElevation(dp(3));
-        composer.addView(chatIcon("plus", "搜索与打开应用", view -> showAppPicker()));
+        composer.addView(chatIcon("plus", t("搜索与打开应用"), view -> showAppPicker()));
         composerInput = new EditText(this);
-        composerInput.setHint("发送消息");
-        composerInput.setContentDescription("消息输入框");
+        composerInput.setHint(t("发送消息"));
+        composerInput.setContentDescription(t("消息输入框"));
         composerInput.setTextColor(CHARCOAL);
         composerInput.setHintTextColor(MUTED);
         composerInput.setTextSize(16);
@@ -487,33 +504,28 @@ public class MainActivity extends Activity {
             public void afterTextChanged(Editable value) { }
         });
         composer.addView(composerInput, new LinearLayout.LayoutParams(0, -2, 1));
-        voiceButton = chatIcon("mic", "语音输入", view -> startDictation());
+        voiceButton = chatIcon("mic", t("语音输入"), view -> startDictation());
         composer.addView(voiceButton);
-        sendButton = chatIcon("send", "发送消息", view -> sendMessage());
+        sendButton = chatIcon("send", t("发送消息"), view -> sendMessage());
         sendButton.setBackground(shape(CHARCOAL, 24, 0, 0));
         composer.addView(sendButton);
-        stopButton = chatIcon("stop", "停止生成", view -> cancelAgent());
+        stopButton = chatIcon("stop", t("停止生成"), view -> cancelAgent());
         stopButton.setBackground(shape(CHARCOAL, 24, 0, 0));
         composer.addView(stopButton);
         LinearLayout composerRow = row();
-        TextView treeButton = chatIcon("tree", "打开对话树", view -> openConversationTree());
-        treeButton.setBackground(shape(0xF2F7F7F8, 24, 1, 0x6678787C));
-        composerRow.addView(treeButton);
         LinearLayout.LayoutParams inputParams = new LinearLayout.LayoutParams(0, -2, 1);
-        inputParams.leftMargin = dp(6);
         composerRow.addView(composer, inputParams);
         LinearLayout.LayoutParams composerParams = new LinearLayout.LayoutParams(-1, -2);
         composerParams.setMargins(dp(12), dp(4), dp(12), 0);
         composerDock.addView(composerRow, composerParams);
-        TextView footer = label("AI 生成内容，请核对重要信息", 11, MUTED);
+        TextView footer = label(t("AI 生成内容，请核对重要信息"), 11, MUTED);
         footer.setGravity(Gravity.CENTER);
         footer.setPadding(0, dp(8), 0, dp(10));
         composerDock.addView(footer);
     }
 
     private void openConversationTree() {
-        if (treeSheet != null) return;
-        if ("home".equals(page)) showSearch();
+        if (treeSheet != null || !"search".equals(page)) return;
         getSystemService(InputMethodManager.class).hideSoftInputFromWindow(composerInput.getWindowToken(), 0);
         treeSheet = new ConversationTreeSheet(this, chatStore.tree(), node -> {
             if (!canChangeConversation()) return;
@@ -587,9 +599,9 @@ public class MainActivity extends Activity {
         button.setLayoutParams(new LinearLayout.LayoutParams(dp(48), dp(48)));
         button.setBackground(new android.graphics.drawable.RippleDrawable(
                 android.content.res.ColorStateList.valueOf(0x18000000), null,
-                shape(Color.WHITE, 24, 0, 0)));
+                shape(appearance.surface, 24, 0, 0)));
         ChatIcon drawable = new ChatIcon(icon,
-                "send".equals(icon) || "stop".equals(icon) ? Color.WHITE : CHARCOAL);
+                "send".equals(icon) || "stop".equals(icon) ? (appearance.dark ? appearance.surface : Color.WHITE) : CHARCOAL);
         drawable.setBounds(0, 0, dp(24), dp(24));
         button.setCompoundDrawables(drawable, null, null, null);
         button.setPadding(dp(12), dp(12), dp(12), dp(12));
@@ -608,12 +620,21 @@ public class MainActivity extends Activity {
                 .putExtra(android.speech.RecognizerIntent.EXTRA_PROMPT, "说出你的消息");
         try { startActivityForResult(intent, 41); }
         catch (ActivityNotFoundException exception) {
-            failure("系统未提供语音输入，请使用键盘麦克风");
+            failure(t("系统未提供语音输入，请使用键盘麦克风"));
         }
     }
 
     @Override protected void onActivityResult(int request, int result, Intent data) {
         super.onActivityResult(request, result, data);
+        if (request == 701 && result == RESULT_OK && data != null && data.getBooleanExtra("legacy", false)) {
+            showLegacyProviderSettings();
+        }
+        if (request == 702 && result == RESULT_OK && data != null) {
+            try {
+                chatStore.setPiSelection(data.getStringExtra("provider"), data.getStringExtra("model"), data.getStringExtra("thinkingLevel"));
+                if (chatModelTitle != null) chatModelTitle.setText(currentModelLabel());
+            } catch (Exception exception) { Toast.makeText(this, exception.getMessage(), Toast.LENGTH_LONG).show(); }
+        }
         if (request == 41 && result == RESULT_OK && data != null) {
             ArrayList<String> words = data.getStringArrayListExtra(
                     android.speech.RecognizerIntent.EXTRA_RESULTS);
@@ -629,7 +650,7 @@ public class MainActivity extends Activity {
 
     private boolean canChangeConversation() {
         if (!agentRunning) return true;
-        Toast.makeText(this, "请先停止当前生成，再切换会话", Toast.LENGTH_SHORT).show();
+        Toast.makeText(this, t("请先停止当前生成，再切换会话"), Toast.LENGTH_SHORT).show();
         return false;
     }
 
@@ -693,11 +714,11 @@ public class MainActivity extends Activity {
         chatDrawer = new FrameLayout(this);
         View scrim = new View(this);
         scrim.setBackgroundColor(0x66000000);
-        scrim.setContentDescription("关闭会话菜单");
+        scrim.setContentDescription(t("关闭会话菜单"));
         scrim.setOnClickListener(view -> closeChatDrawer());
         chatDrawer.addView(scrim, match());
         LinearLayout drawer = column();
-        drawer.setBackgroundColor(Color.WHITE);
+        drawer.setBackgroundColor(appearance.surface);
         drawer.setPadding(dp(12), dp(4), dp(12), dp(8));
         drawer.setClickable(true);
         int width = Math.min(dp(360), Math.round(getResources().getDisplayMetrics().widthPixels * .84f));
@@ -709,17 +730,17 @@ public class MainActivity extends Activity {
         title.setTypeface(null, android.graphics.Typeface.BOLD);
         heading.addView(title, new LinearLayout.LayoutParams(0, dp(52), 1));
         title.setGravity(Gravity.CENTER_VERTICAL);
-        heading.addView(chatIcon("close", "关闭会话菜单", view -> closeChatDrawer()));
+        heading.addView(chatIcon("close", t("关闭会话菜单"), view -> closeChatDrawer()));
         drawer.addView(heading);
         EditText query = new EditText(this);
         query.setTextSize(15);
         query.setSingleLine(true);
-        query.setHint("搜索对话");
-        query.setContentDescription("搜索对话");
+        query.setHint(t("搜索对话"));
+        query.setContentDescription(t("搜索对话"));
         query.setTextColor(CHARCOAL);
         query.setHintTextColor(MUTED);
         query.setPadding(dp(18), 0, dp(16), 0);
-        query.setBackground(shape(0xFFF7F7F8, 24, 0, 0));
+        query.setBackground(shape(appearance.panel, 24, 0, 0));
         ChatIcon searchIcon = new ChatIcon("search", MUTED);
         searchIcon.setBounds(0, 0, dp(20), dp(20));
         query.setCompoundDrawables(searchIcon, null, null, null);
@@ -727,7 +748,7 @@ public class MainActivity extends Activity {
         LinearLayout.LayoutParams queryParams = new LinearLayout.LayoutParams(-1, dp(48));
         queryParams.setMargins(0, dp(12), 0, dp(12));
         drawer.addView(query, queryParams);
-        drawer.addView(drawerAction("compose", "新建对话", view -> newConversation()));
+        drawer.addView(drawerAction("compose", t("新建对话"), view -> newConversation()));
         ScrollView scroll = new ScrollView(this);
         scroll.setVerticalScrollBarEnabled(false);
         LinearLayout entries = column();
@@ -742,13 +763,13 @@ public class MainActivity extends Activity {
             public void afterTextChanged(Editable value) { }
         });
         View divider = new View(this);
-        divider.setBackgroundColor(0xFFE8E8EA);
+        divider.setBackgroundColor(appearance.border);
         drawer.addView(divider, new LinearLayout.LayoutParams(-1, dp(1)));
-        drawer.addView(drawerAction("home", "返回桌面", view -> showHome()));
-        drawer.addView(drawerAction("settings", "设置", view -> {
+        drawer.addView(drawerAction("home", t("返回桌面"), view -> showHome()));
+        drawer.addView(drawerAction("settings", t("设置"), view -> {
             closeChatDrawer();
-            new android.app.AlertDialog.Builder(this).setTitle("设置")
-                    .setItems(new String[]{"模型与搜索服务", "桌面与手势", "删除当前对话"},
+            new android.app.AlertDialog.Builder(this).setTitle(t("设置"))
+                    .setItems(new String[]{t("模型与搜索服务"), t("桌面与手势"), t("删除当前对话")},
                             (dialog, which) -> {
                                 if (which == 0) showProviderSettings();
                                 else if (which == 1) showControls();
@@ -789,8 +810,8 @@ public class MainActivity extends Activity {
             if (!conversation.title.toLowerCase(Locale.ROOT).contains(query.trim().toLowerCase(Locale.ROOT))) continue;
             java.time.LocalDate date = java.time.Instant.ofEpochMilli(conversation.updated)
                     .atZone(java.time.ZoneId.systemDefault()).toLocalDate();
-            String group = date.equals(today) ? "今天" : date.equals(today.minusDays(1)) ? "昨天"
-                    : !date.isBefore(today.minusDays(7)) ? "过去 7 天" : "更早";
+            String group = date.equals(today) ? t("今天") : date.equals(today.minusDays(1)) ? t("昨天")
+                    : !date.isBefore(today.minusDays(7)) ? t("过去 7 天") : t("更早");
             if (!group.equals(lastGroup)) {
                 TextView section = label(group, 12, MUTED);
                 section.setPadding(dp(12), dp(24), 0, dp(10));
@@ -799,13 +820,13 @@ public class MainActivity extends Activity {
             }
             LinearLayout item = row();
             boolean selected = conversation.id.equals(chatStore.activeId());
-            if (selected) item.setBackground(shape(0xFFF1F1F2, 14, 0, 0));
+            if (selected) item.setBackground(shape(appearance.panel, 14, 0, 0));
             TextView title = label(conversation.title, 15, CHARCOAL);
             title.setSingleLine(true);
             title.setEllipsize(android.text.TextUtils.TruncateAt.END);
             title.setPadding(dp(12), 0, dp(8), 0);
             title.setGravity(Gravity.CENTER_VERTICAL);
-            title.setContentDescription(conversation.title + (selected ? "，当前对话" : ""));
+            title.setContentDescription(conversation.title + (selected ? t("，当前对话") : ""));
             title.setFocusable(true);
             title.setOnClickListener(view -> {
                 if (!canChangeConversation()) return;
@@ -814,11 +835,11 @@ public class MainActivity extends Activity {
                 changeConversation();
             });
             item.addView(title, new LinearLayout.LayoutParams(0, dp(52), 1));
-            if (selected) item.addView(chatIcon("more", "当前对话操作", view -> confirmDeleteConversation()));
+            if (selected) item.addView(chatIcon("more", t("当前对话操作"), view -> confirmDeleteConversation()));
             entries.addView(item);
         }
         if (entries.getChildCount() == 0) {
-            TextView empty = label(query.isEmpty() ? "还没有历史对话" : "没有找到匹配的对话", 14, MUTED);
+            TextView empty = label(query.isEmpty() ? t("还没有历史对话") : t("没有找到匹配的对话"), 14, MUTED);
             empty.setPadding(dp(12), dp(24), dp(12), dp(24));
             entries.addView(empty);
         }
@@ -826,9 +847,9 @@ public class MainActivity extends Activity {
 
     private void confirmDeleteConversation() {
         if (!canChangeConversation()) return;
-        new android.app.AlertDialog.Builder(this).setTitle("删除当前对话？")
-                .setMessage("删除后无法恢复。其他对话不会受影响。")
-                .setNegativeButton("取消", null).setPositiveButton("删除", (dialog, which) -> {
+        new android.app.AlertDialog.Builder(this).setTitle(t("删除当前对话？"))
+                .setMessage(t("删除后无法恢复。其他对话不会受影响。"))
+                .setNegativeButton(t("取消"), null).setPositiveButton(t("删除"), (dialog, which) -> {
                     clearHistory();
                     changeConversation();
                 }).show();
@@ -839,9 +860,9 @@ public class MainActivity extends Activity {
         LinearLayout column = column();
         column.setPadding(dp(18), dp(18), dp(18), dp(18));
         EditText query = new EditText(this);
-        query.setHint("搜索应用");
+        query.setHint(t("搜索应用"));
         column.addView(query);
-        TextView countView = label("全部应用 · " + apps.size(), 18, CHARCOAL);
+        TextView countView = label(t("全部应用 · ") + apps.size(), 18, CHARCOAL);
         column.addView(countView);
         GridLayout results = appGrid(apps);
         column.addView(results);
@@ -890,7 +911,7 @@ public class MainActivity extends Activity {
                 searchBaseUrl = SearchConfig.validateBaseUrl(searchBaseUrl);
             }
         } catch (RuntimeException exception) {
-            failure("模型配置无效：" + exception.getMessage());
+            failure(t("模型配置无效：") + exception.getMessage());
             return;
         }
         List<AgentLoop.Message> fullPath = new ArrayList<>(AgentHistory.repair(chatStore.load()));
@@ -924,9 +945,9 @@ public class MainActivity extends Activity {
                     });
                 });
             } catch (InterruptedException exception) {
-                outcome = "已停止";
+                outcome = t("已停止");
             } catch (Exception exception) {
-                outcome = cancellation.cancelled() ? "已停止" : "错误：" + (exception.getMessage() == null
+                outcome = cancellation.cancelled() ? t("已停止") : t("错误：") + (exception.getMessage() == null
                         ? exception.getClass().getSimpleName() : exception.getMessage());
             }
             List<AgentLoop.Message> snapshot = immutable(
@@ -940,7 +961,7 @@ public class MainActivity extends Activity {
     }
 
     private void cancelAgent() {
-        if (agentRunning && state != null) state.setText("正在停止…");
+        if (agentRunning && state != null) state.setText(t("正在停止…"));
         if (stopButton != null) stopButton.setEnabled(false);
         if (agentCancellation != null) {
             synchronized (agentCancellation) {
@@ -953,6 +974,17 @@ public class MainActivity extends Activity {
     }
 
     private void sendPiMessage(String text) {
+        final String config;
+        final String sdkHistory;
+        try {
+            PiConfigStore store = new PiConfigStore(this);
+            store.initialize(getSharedPreferences("chat", MODE_PRIVATE));
+            config = new JSONObject(store.snapshot()).put("selection", new JSONObject(chatStore.piSelection())).toString();
+            sdkHistory = chatStore.piResume(chatStore.load());
+        } catch (Exception exception) {
+            Toast.makeText(this, t("无法读取 Pi 配置：") + exception.getMessage(), Toast.LENGTH_LONG).show();
+            return;
+        }
         List<AgentLoop.Message> fullPath = new ArrayList<>(AgentHistory.repair(chatStore.load()));
         List<AgentLoop.Message> prior = new ArrayList<>(AgentHistory.trimCompleteTurns(fullPath, 49));
         AgentLoop.Message userMessage = new AgentLoop.Message("user", text);
@@ -966,64 +998,70 @@ public class MainActivity extends Activity {
         composerInput.setText("");
         agentRunning = true;
         updateAgentControls();
-        if (state != null) state.setText("pi 文本模式 · 正在启动本机 Agent…");
+        if (state != null) state.setText(t("Pi Agent · 正在启动…"));
         long owner = activityEpoch;
         AgentLoop.CancelToken cancellation = new AgentLoop.CancelToken();
         agentCancellation = cancellation;
         String requestId = java.util.UUID.randomUUID().toString();
         activePiRequestId = requestId;
         activePiMessageId = java.util.UUID.randomUUID().toString();
+        PiTurnPersistence persistence = new PiTurnPersistence(chatStore, chatStore.activeId(), userMessage.id, activePiMessageId, work);
+        activePiPersistence = persistence;
         final boolean[] ended = {false};
         agentExecutor.execute(() -> {
             try {
                 PiAgentBridge bridge = PiAgentBridge.get(this);
                 StringBuilder delta = new StringBuilder();
-                final String[] complete = {null};
                 final String[] error = {""};
                 synchronized (cancellation) {
                     if (cancellation.cancelled() || !ACTIVITY_EPOCH.owns(owner)) {
-                        throw new InterruptedException("pi 启动已取消");
+                        throw new InterruptedException(t("pi 启动已取消"));
                     }
                     activePiBridge = bridge;
-                    bridge.prompt(requestId, chatStore.baseUrl(), chatStore.apiKey(), chatStore.model(), text, prior,
-                        event -> runOnUiThread(() -> {
+                    bridge.prompt(requestId, config, text, sdkHistory, prior,
+                        event -> {
+                            try { persistence.accept(event); }
+                            catch (Exception exception) {
+                                try { event.put("persistenceError", "Pi 会话未保存：" + exception.getMessage()); }
+                                catch (org.json.JSONException ignored) { }
+                            }
+                            runOnUiThread(() -> {
                             if (!ACTIVITY_EPOCH.owns(owner) || ended[0]
                                     || !requestId.equals(activePiRequestId)) return;
                             String type = event.optString("type");
                             if ("text_delta".equals(type)) {
                                 delta.append(event.optString("delta"));
                                 updatePiPreview(work, delta.toString());
-                            } else if ("message".equals(type)) {
-                                JSONObject message = event.optJSONObject("message");
-                                complete[0] = message == null ? "" : message.optString("content");
+
+                            } else if ("tool_start".equals(type) || "tool_end".equals(type)) {
+                                if (state != null) state.setText(("tool_start".equals(type) ? t("正在执行工具：") : t("工具已结束：")) + event.optString("name"));
+                            } else if ("status".equals(type)) {
+                                if (state != null) state.setText(event.optString("message"));
                             } else if ("error".equals(type)) {
-                                error[0] = event.optBoolean("aborted") ? "已停止"
-                                        : "pi 错误：" + event.optString("message", "未知错误");
+                                error[0] = event.optBoolean("aborted") ? t("已停止")
+                                        : t("pi 错误：") + event.optString("message", "未知错误");
                             } else if ("end".equals(type)) {
                                 ended[0] = true;
                                 String status = event.optString("status");
-                                boolean incomplete = cancellation.cancelled() || !"completed".equals(status);
-                                String reply = complete[0] == null || complete[0].isEmpty()
-                                        ? delta.toString() : complete[0];
-                                if (!reply.isEmpty()) work.add(new AgentLoop.Message(activePiMessageId, "assistant", reply,
-                                        null, Collections.emptyList(), incomplete));
-                                if ("truncated".equals(status)) error[0] = "模型服务截断了回复，已保留生成内容";
-                                List<AgentLoop.Message> snapshot = immutable(
-                                        AgentHistory.trimCompleteTurns(AgentHistory.repair(work), 100));
-                                ACTIVITY_EPOCH.runIfOwned(owner, () -> chatStore.save(snapshot));
+                                if ("truncated".equals(status)) error[0] = t("模型服务截断了回复，已保留生成内容");
+                                if (event.has("persistenceError")) error[0] = event.optString("persistenceError");
+                                List<AgentLoop.Message> snapshot = immutable(chatStore.load());
                                 finishAgent(snapshot, cancellation.cancelled()
-                                        || "aborted".equals(event.optString("status")) ? "已停止"
-                                        : error[0].isEmpty() ? "pi 文本模式" : error[0]);
+                                        || "aborted".equals(event.optString("status")) ? t("已停止")
+                                        : error[0].isEmpty() ? "Pi Agent" : error[0]);
                             }
-                        }));
+                            });
+                        });
                 }
             } catch (Throwable exception) {
+                try { persistence.accept(new JSONObject().put("type", "end").put("status", "error")); }
+                catch (Exception saving) { exception.addSuppressed(saving); }
                 runOnUiThread(() -> {
                     if (!ACTIVITY_EPOCH.owns(owner) || ended[0]
                             || !requestId.equals(activePiRequestId)) return;
                     ended[0] = true;
-                    finishAgent(immutable(work), cancellation.cancelled() ? "已停止"
-                            : "pi 启动失败：" + (exception.getMessage() == null
+                    finishAgent(immutable(work), cancellation.cancelled() ? t("已停止")
+                            : t("pi 启动失败：") + (exception.getMessage() == null
                                     ? exception.getClass().getSimpleName() : exception.getMessage()));
                 });
             }
@@ -1032,13 +1070,10 @@ public class MainActivity extends Activity {
 
     /** Save visible progress at lifecycle boundaries, without writing on every token. */
     private void savePiPreview() {
-        if (activePiRequestId == null || history.isEmpty()) return;
+        PiTurnPersistence persistence = activePiPersistence;
+        if (persistence == null || history.isEmpty()) return;
         AgentLoop.Message last = history.get(history.size() - 1);
-        if (!"assistant".equals(last.role) || last.content == null || last.content.isEmpty()) return;
-        List<AgentLoop.Message> snapshot = new ArrayList<>(history);
-        snapshot.set(snapshot.size() - 1, new AgentLoop.Message(last.id, last.role, last.content,
-                last.toolCallId, last.toolCalls, true));
-        ACTIVITY_EPOCH.runIfOwned(activityEpoch, () -> chatStore.save(snapshot));
+        ACTIVITY_EPOCH.runIfOwned(activityEpoch, () -> persistence.savePreview(last));
     }
 
     private void finishAgent(List<AgentLoop.Message> snapshot, String message) {
@@ -1047,9 +1082,11 @@ public class MainActivity extends Activity {
         activeProvider = null;
         activePiBridge = null;
         activePiRequestId = null;
+        activePiPersistence = null;
         showSnapshot(snapshot);
         if (state != null) state.setText(message);
         updateAgentControls();
+        if (!appearanceRevision.equals(AppAppearance.revision(this))) recreate();
     }
 
     private void updateAgentControls() {
@@ -1065,7 +1102,7 @@ public class MainActivity extends Activity {
             stopButton.setVisibility(agentRunning ? View.VISIBLE : View.GONE);
         }
         if (state != null && agentRunning && state.getText().length() == 0) {
-            state.setText("正在等待助手…");
+            state.setText(t("正在等待助手…"));
         }
     }
 
@@ -1127,7 +1164,7 @@ public class MainActivity extends Activity {
             boolean user = "user".equals(message.role);
             LinearLayout bubble = column();
             if (user) {
-                bubble.setBackground(shape(0xFFF1F1F2, 22, 0, 0));
+                bubble.setBackground(shape(appearance.panel, 22, 0, 0));
                 bubble.setPadding(dp(16), dp(12), dp(16), dp(12));
             }
             String messageKey = messageKey(message, visibleIndex++);
@@ -1151,22 +1188,22 @@ public class MainActivity extends Activity {
                         messageKey + ":tool:" + callIndex);
             }
             if (!user && !streaming && message.incomplete) {
-                TextView interrupted = label("回复未完成 · 已保留生成内容", 12, MUTED);
+                TextView interrupted = label(t("回复未完成 · 已保留生成内容"), 12, MUTED);
                 interrupted.setPadding(0, dp(8), 0, 0);
                 bubble.addView(interrupted);
             }
             if (!user && !streaming && !content.isEmpty()) {
                 LinearLayout actions = row();
                 actions.setPadding(0, dp(8), 0, 0);
-                actions.addView(chatIcon("copy", "复制回复", view -> {
+                actions.addView(chatIcon("copy", t("复制回复"), view -> {
                     android.content.ClipboardManager clipboard = getSystemService(
                             android.content.ClipboardManager.class);
-                    clipboard.setPrimaryClip(android.content.ClipData.newPlainText("助手回复", content));
-                    Toast.makeText(this, "已复制", Toast.LENGTH_SHORT).show();
+                    clipboard.setPrimaryClip(android.content.ClipData.newPlainText(t("助手回复"), content));
+                    Toast.makeText(this, t("已复制"), Toast.LENGTH_SHORT).show();
                 }));
-                actions.addView(chatIcon("share", "分享回复", view -> launch(Intent.createChooser(
+                actions.addView(chatIcon("share", t("分享回复"), view -> launch(Intent.createChooser(
                         new Intent(Intent.ACTION_SEND).setType("text/plain")
-                                .putExtra(Intent.EXTRA_TEXT, content), "分享回复"))));
+                                .putExtra(Intent.EXTRA_TEXT, content), t("分享回复")))));
                 bubble.addView(actions);
             }
             LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(user ? -2 : -1, -2);
@@ -1182,21 +1219,21 @@ public class MainActivity extends Activity {
             LinearLayout empty = column();
             empty.setGravity(Gravity.CENTER);
             empty.setTag("empty");
-            TextView greeting = label("有什么可以帮你？", 28, CHARCOAL);
+            TextView greeting = label(t("有什么可以帮你？"), 28, CHARCOAL);
             greeting.setTypeface(null, android.graphics.Typeface.BOLD);
             greeting.setGravity(Gravity.CENTER);
             empty.addView(greeting);
-            TextView subtitle = label("提问、整理思路，或开始一个新任务", 14, MUTED);
+            TextView subtitle = label(t("提问、整理思路，或开始一个新任务"), 14, MUTED);
             subtitle.setGravity(Gravity.CENTER);
             subtitle.setPadding(0, dp(12), 0, dp(28));
             empty.addView(subtitle);
             LinearLayout suggestions = row();
-            for (String suggestion : new String[]{"整理今天的安排", "帮我写一段文字"}) {
+            for (String suggestion : new String[]{t("整理今天的安排"), t("帮我写一段文字")}) {
                 TextView chip = label(suggestion, 13, CHARCOAL);
                 chip.setGravity(Gravity.CENTER);
                 chip.setPadding(dp(8), dp(12), dp(8), dp(12));
                 chip.setMinHeight(dp(48));
-                chip.setBackground(shape(Color.WHITE, 24, 1, 0xFFE8E8EA));
+                chip.setBackground(shape(appearance.surface, 24, 1, appearance.border));
                 chip.setOnClickListener(view -> {
                     composerInput.setText(suggestion);
                     composerInput.setSelection(composerInput.length());
@@ -1231,8 +1268,8 @@ public class MainActivity extends Activity {
         summary.setGravity(Gravity.CENTER_VERTICAL);
         summary.setClickable(true);
         summary.setFocusable(true);
-        String detailText = "参数\n" + displayText(call.arguments, 1200)
-                + (result == null ? "" : "\n\n结果\n" + displayText(resultText, 4000));
+        String detailText = t("参数\n") + displayText(call.arguments, 1200)
+                + (result == null ? "" : t("\n\n结果\n") + displayText(resultText, 4000));
         TextView detail = label(detailText, 13, MUTED);
         detail.setTextIsSelectable(true);
         detail.setPadding(dp(12), 0, 0, dp(8));
@@ -1240,8 +1277,8 @@ public class MainActivity extends Activity {
         detail.setVisibility(expanded ? View.VISIBLE : View.GONE);
         summary.setText((expanded ? "▾ " : "▸ ") + toolLabel(call.name) + " · "
                 + toolOutcome(call.name, resultText));
-        summary.setContentDescription((expanded ? "收起" : "展开") + toolLabel(call.name)
-                + "详情，" + toolOutcome(call.name, resultText));
+        summary.setContentDescription((expanded ? t("收起") : t("展开")) + toolLabel(call.name)
+                + t("详情，") + toolOutcome(call.name, resultText));
         summary.setOnClickListener(view -> {
             boolean expand = detail.getVisibility() != View.VISIBLE;
             animateExpansion(bubble);
@@ -1249,49 +1286,49 @@ public class MainActivity extends Activity {
             if (expand) expandedTools.add(expansionKey); else expandedTools.remove(expansionKey);
             summary.setText((expand ? "▾ " : "▸ ") + toolLabel(call.name) + " · "
                     + toolOutcome(call.name, resultText));
-            summary.setContentDescription((expand ? "收起" : "展开") + toolLabel(call.name)
-                    + "详情，" + toolOutcome(call.name, resultText));
+            summary.setContentDescription((expand ? t("收起") : t("展开")) + toolLabel(call.name)
+                    + t("详情，") + toolOutcome(call.name, resultText));
         });
         bubble.addView(summary);
         bubble.addView(detail);
     }
 
     private String toolOutcome(String name, String result) {
-        if (result.isEmpty()) return "正在执行";
+        if (result.isEmpty()) return t("正在执行");
         if (result.contains("\"ok\":false") || result.startsWith("Tool failed")
                 || result.startsWith("Tool unavailable") || result.startsWith("Tool cancelled")) {
-            return "错误 · " + displayText(result, 100).replace('\n', ' ');
+            return t("错误 · ") + displayText(result, 100).replace('\n', ' ');
         }
         if ("read_screen".equals(name)) try {
             org.json.JSONObject value = new org.json.JSONObject(result);
             org.json.JSONArray nodes = value.optJSONArray("nodes");
-            return "成功 · " + (nodes == null ? 0 : nodes.length()) + " 个节点"
-                    + (value.optBoolean("truncated") ? " · 已截断" : "");
+            return t("成功 · ") + (nodes == null ? 0 : nodes.length()) + t(" 个节点")
+                    + (value.optBoolean("truncated") ? t(" · 已截断") : "");
         } catch (org.json.JSONException ignored) { }
-        return "成功";
+        return t("成功");
     }
 
-    private static String toolLabel(String name) {
+    private String toolLabel(String name) {
         switch (name) {
-            case "read_screen": return "读取屏幕";
-            case "click": return "点击节点";
-            case "input_text": return "输入文字";
-            case "scroll": return "滚动界面";
-            case "launch_app": return "启动应用";
-            case "list_apps": return "列出应用";
-            case "web_search": return "网页搜索";
-            case "web_fetch": return "读取网页";
-            case "back": return "返回";
-            case "home": return "回到桌面";
-            case "recents": return "最近任务";
+            case "read_screen": return t("读取屏幕");
+            case "click": return t("点击节点");
+            case "input_text": return t("输入文字");
+            case "scroll": return t("滚动界面");
+            case "launch_app": return t("启动应用");
+            case "list_apps": return t("列出应用");
+            case "web_search": return t("网页搜索");
+            case "web_fetch": return t("读取网页");
+            case "back": return t("返回");
+            case "home": return t("回到桌面");
+            case "recents": return t("最近任务");
             default: return name;
         }
     }
 
-    private static String displayText(String value, int limit) {
+    private String displayText(String value, int limit) {
         if (value == null) return "";
         return value.length() <= limit ? value
-                : value.substring(0, limit) + "\n…（详情显示已截断）";
+                : value.substring(0, limit) + t("\n…（详情显示已截断）");
     }
 
     private static String messageKey(AgentLoop.Message message, int index) {
@@ -1308,11 +1345,11 @@ public class MainActivity extends Activity {
         if (!snapshot.isEmpty()) {
             AgentLoop.Message last = snapshot.get(snapshot.size() - 1);
             if (!last.toolCalls.isEmpty()) {
-                return "正在" + toolLabel(last.toolCalls.get(last.toolCalls.size() - 1).name) + "…";
+                return t("正在") + toolLabel(last.toolCalls.get(last.toolCalls.size() - 1).name) + "…";
             }
-            if ("tool".equals(last.role)) return "正在等待助手…";
+            if ("tool".equals(last.role)) return t("正在等待助手…");
         }
-        return "正在思考…";
+        return t("正在思考…");
     }
 
     private boolean nearLatest() {
@@ -1371,26 +1408,40 @@ public class MainActivity extends Activity {
         expandedTools.clear();
         forceScrollToBottom = true;
         renderMessages();
-        if (state != null) state.setText("记录已清空");
+        if (state != null) state.setText(t("记录已清空"));
+    }
+
+    private String currentModelLabel() {
+        if (!chatStore.piTextMode()) return "E Launcher ⌄";
+        try {
+            JSONObject selection = new JSONObject(chatStore.piSelection());
+            String model = selection.optString("model", "");
+            if (model.isEmpty()) model = String.valueOf(new PiConfigStore(this).effectiveSettings().getOrDefault("defaultModel", t("选择模型")));
+            return model + " · " + selection.optString("thinkingLevel", "默认") + " ⌄";
+        } catch (Exception exception) { return t("选择模型 ⌄"); }
     }
 
     private void showProviderSettings() {
+        startActivityForResult(new Intent(this, PiSettingsActivity.class), 701);
+    }
+
+    private void showLegacyProviderSettings() {
         final Dialog dialog = new Dialog(this);
         LinearLayout sheet = column();
         sheet.setPadding(dp(24), dp(20), dp(24), dp(24));
-        sheet.addView(label("OpenAI 兼容模型", 24, CHARCOAL));
-        sheet.addView(label("Agent 模式", 16, CHARCOAL));
+        sheet.addView(label(t("OpenAI 兼容模型"), 24, CHARCOAL));
+        sheet.addView(label(t("Agent 模式"), 16, CHARCOAL));
         RadioGroup agentMode = new RadioGroup(this);
         agentMode.setOrientation(RadioGroup.HORIZONTAL);
-        optionChoice(agentMode, "工具模式", "tools", chatStore.piTextMode() ? "pi" : "tools");
-        optionChoice(agentMode, "pi 文本模式", "pi", chatStore.piTextMode() ? "pi" : "tools");
+        optionChoice(agentMode, t("工具模式"), "tools", chatStore.piTextMode() ? "pi" : "tools");
+        optionChoice(agentMode, "Pi Agent", "pi", chatStore.piTextMode() ? "pi" : "tools");
         sheet.addView(agentMode);
         EditText base = new EditText(this);
         base.setHint("Base URL");
         base.setText(chatStore.baseUrl());
         sheet.addView(base);
         EditText model = new EditText(this);
-        model.setHint("模型，如 gpt-4o-mini");
+        model.setHint(t("模型，如 gpt-4o-mini"));
         model.setText(chatStore.model());
         sheet.addView(model);
         EditText key = new EditText(this);
@@ -1399,16 +1450,16 @@ public class MainActivity extends Activity {
                 | android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD);
         key.setText(chatStore.apiKey());
         sheet.addView(key);
-        sheet.addView(label("思考强度", 16, CHARCOAL));
+        sheet.addView(label(t("思考强度"), 16, CHARCOAL));
         RadioGroup reasoning = new RadioGroup(this);
         reasoning.setOrientation(RadioGroup.HORIZONTAL);
         String currentReasoning = chatStore.reasoningEffort();
-        optionChoice(reasoning, "默认", ReasoningEffort.DEFAULT, currentReasoning);
-        optionChoice(reasoning, "低", ReasoningEffort.LOW, currentReasoning);
-        optionChoice(reasoning, "中", ReasoningEffort.MEDIUM, currentReasoning);
-        optionChoice(reasoning, "高", ReasoningEffort.HIGH, currentReasoning);
+        optionChoice(reasoning, t("默认"), ReasoningEffort.DEFAULT, currentReasoning);
+        optionChoice(reasoning, t("低"), ReasoningEffort.LOW, currentReasoning);
+        optionChoice(reasoning, t("中"), ReasoningEffort.MEDIUM, currentReasoning);
+        optionChoice(reasoning, t("高"), ReasoningEffort.HIGH, currentReasoning);
         sheet.addView(reasoning);
-        sheet.addView(label("搜索服务", 16, CHARCOAL));
+        sheet.addView(label(t("搜索服务"), 16, CHARCOAL));
         RadioGroup searchProvider = new RadioGroup(this);
         searchProvider.setOrientation(RadioGroup.HORIZONTAL);
         String currentSearchProvider = chatStore.searchProvider();
@@ -1420,8 +1471,8 @@ public class MainActivity extends Activity {
         searchBase.setHint("SearXNG HTTPS Base URL");
         searchBase.setText(chatStore.searchBaseUrl());
         sheet.addView(searchBase);
-        sheet.addView(label("默认不发送 reasoning_effort；低/中/高发送 low/medium/high。仅支持该参数的模型与兼容服务会接受它。SearXNG 地址由用户配置且不会由模型更改；不会静默回退到 DuckDuckGo。密钥保存在应用私有存储中；系统备份已关闭。", 13, MUTED));
-        button(sheet, "保存", view -> {
+        sheet.addView(label(t("默认不发送 reasoning_effort；低/中/高发送 low/medium/high。仅支持该参数的模型与兼容服务会接受它。SearXNG 地址由用户配置且不会由模型更改；不会静默回退到 DuckDuckGo。密钥保存在应用私有存储中；系统备份已关闭。"), 13, MUTED));
+        button(sheet, t("保存"), view -> {
             String value;
             try { value = ProviderConfig.validateBaseUrl(base.getText().toString()); }
             catch (IllegalArgumentException exception) {
@@ -1476,7 +1527,7 @@ public class MainActivity extends Activity {
             item.setTag(new String[]{appLabel, component.getPackageName()});
             item.setClickable(true);
             item.setFocusable(true);
-            item.setContentDescription("打开 " + appLabel);
+            item.setContentDescription(t("打开 ") + appLabel);
             item.setOnClickListener(view -> launchApp(component));
             pressFeedback(item);
             android.util.TypedValue selectable = new android.util.TypedValue();
@@ -1512,7 +1563,7 @@ public class MainActivity extends Activity {
             child.setVisibility(matches ? View.VISIBLE : View.GONE);
             if (matches) visible++;
         }
-        label.setText(query.trim().isEmpty() ? "全部应用 · " + visible : "搜索结果 · " + visible);
+        label.setText(query.trim().isEmpty() ? t("全部应用 · ") + visible : t("搜索结果 · ") + visible);
         label.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
     }
 
@@ -1520,14 +1571,14 @@ public class MainActivity extends Activity {
         controls = new Dialog(this);
         LinearLayout sheet = column();
         sheet.setPadding(dp(24), dp(20), dp(24), dp(24));
-        sheet.setBackground(shape(Color.WHITE, 28, 0, 0));
+        sheet.setBackground(shape(appearance.surface, 28, 0, 0));
         TextView handle = label("—", 28, Color.LTGRAY);
         handle.setGravity(Gravity.CENTER);
         sheet.addView(handle);
-        TextView title = label("桌面与手势", 26, CHARCOAL);
+        TextView title = label(t("桌面与手势"), 26, CHARCOAL);
         title.setTypeface(null, android.graphics.Typeface.BOLD);
         sheet.addView(title);
-        TextView boundary = label("无障碍授权支持固定导航，并允许助手按工具调用读取当前界面结构、点击、输入非密码文字和滚动；密码字段会隐藏。", 15, MUTED);
+        TextView boundary = label(t("无障碍授权支持固定导航，并允许助手按工具调用读取当前界面结构、点击、输入非密码文字和滚动；密码字段会隐藏。"), 15, MUTED);
         boundary.setPadding(0, dp(8), 0, dp(16));
         sheet.addView(boundary);
         gestureState = roundedText(GestureService.status(this), 15, CHARCOAL, IVORY, 18);
@@ -1536,26 +1587,26 @@ public class MainActivity extends Activity {
         gestureState.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
         sheet.addView(gestureState, new LinearLayout.LayoutParams(-1, -2));
 
-        button(sheet, "请求成为默认桌面", view -> requestHome());
-        button(sheet, "默认桌面设置 / 恢复系统桌面",
+        button(sheet, t("请求成为默认桌面"), view -> requestHome());
+        button(sheet, t("默认桌面设置 / 恢复系统桌面"),
                 view -> launch(new Intent(Settings.ACTION_HOME_SETTINGS)));
-        button(sheet, "打开系统设置", view -> launch(new Intent(Settings.ACTION_SETTINGS)));
-        button(sheet, "打开无障碍授权设置",
+        button(sheet, t("打开系统设置"), view -> launch(new Intent(Settings.ACTION_SETTINGS)));
+        button(sheet, t("打开无障碍授权设置"),
                 view -> launch(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)));
-        button(sheet, "启用固定导航手势", view -> GestureService.enable(this));
-        Button stop = button(sheet, "停止手势并恢复三键", view -> GestureService.disable(this));
-        stop.setTextColor(Color.WHITE);
+        button(sheet, t("启用固定导航手势"), view -> GestureService.enable(this));
+        Button stop = button(sheet, t("停止手势并恢复三键"), view -> GestureService.disable(this));
+        stop.setTextColor(appearance.dark ? appearance.surface : Color.WHITE);
         stop.setBackground(shape(CHARCOAL, 14, 0, 0));
 
-        TextView details = label("展开安全说明", 16, TEAL);
+        TextView details = label(t("展开安全说明"), 16, TEAL);
         details.setGravity(Gravity.CENTER_VERTICAL);
         details.setMinHeight(dp(48));
         details.setClickable(true);
         details.setFocusable(true);
         sheet.addView(details);
-        TextView safety = label("启用前须先在系统无障碍设置中连接服务，并通过电脑 ADB 授予写设置权限：\n"
-                + GestureService.GRANT_COMMAND + "\n\n左右内滑返回；底边上滑回桌面；上滑停留打开最近任务。"
-                + "启用会改变 HyperOS 导航设置。停用后请目视确认三键已恢复，再撤权或卸载。", 14, MUTED);
+        TextView safety = label(t("启用前须先在系统无障碍设置中连接服务，并通过电脑 ADB 授予写设置权限：\n")
+                + GestureService.GRANT_COMMAND + t("\n\n左右内滑返回；底边上滑回桌面；上滑停留打开最近任务。")
+                + t("启用会改变 HyperOS 导航设置。停用后请目视确认三键已恢复，再撤权或卸载。"), 14, MUTED);
         safety.setTextIsSelectable(true);
         safety.setVisibility(View.GONE);
         sheet.addView(safety);
@@ -1563,7 +1614,7 @@ public class MainActivity extends Activity {
             boolean expand = safety.getVisibility() != View.VISIBLE;
             animateExpansion(sheet);
             safety.setVisibility(expand ? View.VISIBLE : View.GONE);
-            details.setText(expand ? "收起安全说明" : "展开安全说明");
+            details.setText(expand ? t("收起安全说明") : t("展开安全说明"));
         });
 
         ScrollView scroll = new ScrollView(this);
@@ -1596,11 +1647,11 @@ public class MainActivity extends Activity {
 
     private void requestHome() {
         if (roles == null || !roles.isRoleAvailable(RoleManager.ROLE_HOME)) {
-            failure("系统未提供 HOME 角色请求，请使用默认桌面设置入口。");
+            failure(t("系统未提供 HOME 角色请求，请使用默认桌面设置入口。"));
             return;
         }
         if (roles.isRoleHeld(RoleManager.ROLE_HOME)) {
-            failure("已经是默认桌面。");
+            failure(t("已经是默认桌面。"));
             return;
         }
         launch(roles.createRequestRoleIntent(RoleManager.ROLE_HOME));
@@ -1617,8 +1668,8 @@ public class MainActivity extends Activity {
         try {
             startActivity(intent);
         } catch (ActivityNotFoundException | SecurityException exception) {
-            failure("无法打开：" + exception.getClass().getSimpleName()
-                    + "。请从系统设置手动操作；应用也可能已被卸载或禁用。");
+            failure(t("无法打开：") + exception.getClass().getSimpleName()
+                    + t("。请从系统设置手动操作；应用也可能已被卸载或禁用。"));
         }
     }
 
@@ -1628,14 +1679,14 @@ public class MainActivity extends Activity {
     }
 
     private String homeRoleText() {
-        return "默认桌面：" + (roles != null && roles.isRoleHeld(RoleManager.ROLE_HOME) ? "已设置" : "未设置")
-                + " · 手势状态可在设置中查看";
+        return t("默认桌面：") + (roles != null && roles.isRoleHeld(RoleManager.ROLE_HOME) ? t("已设置") : t("未设置"))
+                + t(" · 手势状态可在设置中查看");
     }
 
     private void updateClock() {
         Date now = new Date();
         if (clock != null) clock.setText(new SimpleDateFormat("HH:mm", Locale.getDefault()).format(now));
-        if (date != null) date.setText(new SimpleDateFormat("EEEE，M月d日", Locale.getDefault()).format(now));
+        if (date != null) date.setText(new SimpleDateFormat(t("EEEE，M月d日"), getResources().getConfiguration().getLocales().get(0)).format(now));
     }
 
     private LinearLayout column() {
@@ -1707,19 +1758,5 @@ public class MainActivity extends Activity {
         return Math.round(value * getResources().getDisplayMetrics().density);
     }
 
-    private final class WallpaperView extends View {
-        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
-
-        WallpaperView() {
-            super(MainActivity.this);
-            setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_NO);
-        }
-
-        @Override protected void onDraw(Canvas canvas) {
-            paint.setColor(0x12267A69);
-            canvas.drawCircle(getWidth() * .78f, getHeight() * .13f, getWidth() * .24f, paint);
-            paint.setColor(0x0D92B7A2);
-            canvas.drawCircle(getWidth() * .93f, getHeight() * .29f, getWidth() * .32f, paint);
-        }
-    }
+    private View createWallpaper() { return appearance.wallpaper(this); }
 }

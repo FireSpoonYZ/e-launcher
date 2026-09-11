@@ -22,8 +22,10 @@ public final class ChatStoreChecks extends Instrumentation {
     @Override public void onStart() {
         Bundle result = new Bundle();
         try {
+            PiConfigChecks.run(getContext());
             checkConversations();
             checkTreePersistence();
+            checkPiContexts();
             checkMarkdown();
             if (!storageOnly) {
                 checkStationaryComposer();
@@ -70,6 +72,21 @@ public final class ChatStoreChecks extends Instrumentation {
         reopened.selectConversation(previousConversation);
         require(reopened.tree().nodes().size() == 5, "new conversation leaves the previous tree intact");
         prefs.edit().clear().commit();
+    }
+
+    private void checkPiContexts() throws Exception {
+        Context context = getContext();
+        ChatStore store = new ChatStore(context);
+        store.newConversation();
+        org.json.JSONArray nativeMessages = new org.json.JSONArray("[{\"role\":\"toolResult\",\"toolCallId\":\"read-1\",\"content\":[{\"type\":\"text\",\"text\":\"kept\"}]}]");
+        store.savePiContext("first", nativeMessages);
+        store.savePiContext("second", new org.json.JSONArray());
+        require(new ChatStore(context).piContext("first").equals(nativeMessages.toString()), "native tool context survives reopening");
+        require(store.piContext("second").equals("[]") && store.piContext("missing") == null, "branches have independent native context");
+        java.io.File directory = new java.io.File(new java.io.File(context.getFilesDir(), "pi-contexts"),
+                java.util.UUID.nameUUIDFromBytes(store.activeId().getBytes(java.nio.charset.StandardCharsets.UTF_8)).toString());
+        store.clear();
+        require(!directory.exists(), "clearing chat removes native snapshots");
     }
 
     private void checkMarkdown() {

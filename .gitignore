@@ -12,6 +12,7 @@ evidence/
 pi-runtime/node_modules/
 app/src/main/assets/pi-runtime.mjs
 app/src/main/assets/pi-runtime.cjs
+app/src/main/assets/pi-sdk/
 app/src/main/jniLibs/
 app/src/main/cpp/node-include/
 app/.cxx/

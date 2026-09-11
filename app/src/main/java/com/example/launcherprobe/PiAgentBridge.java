@@ -25,6 +25,7 @@ final class PiAgentBridge {
     private static boolean attempted;
     private final LocalSocket socket;
     private final OutputStreamWriter writer;
+    private final PiConfigStore configStore;
     private Listener listener;
     private String requestId;
     private boolean closed;
@@ -39,6 +40,7 @@ final class PiAgentBridge {
     }
 
     private PiAgentBridge(Context context) throws Exception {
+        configStore = new PiConfigStore(context);
         System.loadLibrary("node");
         System.loadLibrary("launcher_node");
         File home = new File(context.getFilesDir(), "node");
@@ -49,6 +51,7 @@ final class PiAgentBridge {
             byte[] buffer = new byte[16_384];
             for (int count; (count = in.read(buffer)) >= 0;) out.write(buffer, 0, count);
         }
+        copyAssets(context, "pi-sdk", new File(home, "pi-sdk"));
         String endpoint = "e-launcher-pi-" + UUID.randomUUID();
         CountDownLatch ready = new CountDownLatch(1);
         final LocalSocket[] accepted = new LocalSocket[1];
@@ -107,7 +110,21 @@ final class PiAgentBridge {
         }
     }
 
-    synchronized void prompt(String id, String baseUrl, String apiKey, String model, String text,
+    private static void copyAssets(Context context, String source, File target) throws Exception {
+        String[] entries = context.getAssets().list(source);
+        if (entries != null && entries.length > 0) {
+            if (!target.isDirectory() && !target.mkdirs()) throw new IllegalStateException("无法创建 Pi 资源目录");
+            for (String entry : entries) copyAssets(context, source + "/" + entry, new File(target, entry));
+        } else {
+            try (java.io.InputStream input = context.getAssets().open(source);
+                 FileOutputStream output = new FileOutputStream(target)) {
+                byte[] buffer = new byte[16_384];
+                for (int count; (count = input.read(buffer)) >= 0;) output.write(buffer, 0, count);
+            }
+        }
+    }
+
+    synchronized void prompt(String id, String config, String text, String sdkHistory,
             List<AgentLoop.Message> history, Listener nextListener) throws Exception {
         if (closed) throw new IllegalStateException("pi 连接已关闭，请重新启动应用进程");
         if (listener != null) throw new IllegalStateException("pi 正在结束上一轮请求，请稍后重试");
@@ -116,19 +133,42 @@ final class PiAgentBridge {
             if ("system".equals(message.role)) continue;
             if ((!"user".equals(message.role) && !"assistant".equals(message.role))
                     || !message.toolCalls.isEmpty() || message.content == null) {
-                throw new IllegalStateException("pi 文本模式使用纯文本历史；当前对话含工具消息，请新建对话或切回工具模式。");
+                throw new IllegalStateException("Pi Agent 无法续接 Android 工具消息，请新建对话或切回 Android 工具模式。");
             }
             converted.put(new JSONObject().put("role", message.role).put("content", message.content));
         }
+        JSONObject command = new JSONObject().put("type", "prompt").put("id", id).put("sdk", true)
+                .put("config", new JSONObject(config)).put("history", converted).put("prompt", text);
+        if (sdkHistory != null) {
+            JSONObject resume = new JSONObject(sdkHistory);
+            command.put("sdkHistory", resume.getJSONArray("entries")).put("sdkHistoryTail", resume.getJSONArray("tail"));
+        }
+        sendRequest(command, nextListener);
+    }
+
+    synchronized String query(String type, String config, JSONObject arguments, Listener nextListener) throws Exception {
+        arguments.put("id", UUID.randomUUID().toString()).put("type", type).put("config", new JSONObject(config));
+        sendRequest(arguments, nextListener);
+        return arguments.getString("id");
+    }
+
+    private synchronized void sendRequest(JSONObject command, Listener nextListener) throws Exception {
+        if (closed) throw new IllegalStateException("Pi 连接已关闭，请重新启动应用进程");
+        if (listener != null) throw new IllegalStateException("Pi 正在处理请求，请稍后重试");
         listener = nextListener;
-        requestId = id;
+        requestId = command.getString("id");
         try {
-            write(new JSONObject().put("type", "prompt").put("id", id).put("baseUrl", baseUrl)
-                    .put("apiKey", apiKey).put("modelId", model).put("history", converted).put("prompt", text));
+            write(command);
         } catch (Exception exception) {
             fail("pi 请求发送失败");
             throw exception;
         }
+    }
+
+    synchronized void replyAuth(String id, String promptId, String value, boolean cancelled) throws Exception {
+        if (closed || !id.equals(requestId)) throw new IllegalStateException("登录请求已结束");
+        write(new JSONObject().put("type", "auth_reply").put("id", id).put("promptId", promptId)
+                .put("value", value).put("cancelled", cancelled));
     }
 
     synchronized void abort(String id) {
@@ -149,6 +189,26 @@ final class PiAgentBridge {
                 synchronized (this) {
                     if (closed || requestId == null || !requestId.equals(event.optString("id"))) continue;
                     Listener current = listener;
+                    if ("credential".equals(event.optString("type"))) {
+                        try {
+                            configStore.updateCredential(event.getString("providerId"), event.isNull("value") ? null : event.getJSONObject("value").toString(),
+                                    event.isNull("previous") ? null : event.getJSONObject("previous").toString());
+                        } catch (Exception exception) {
+                            if (current != null) current.event(new JSONObject().put("id", requestId).put("type", "error")
+                                    .put("message", "凭据刷新未保存：" + exception.getMessage()));
+                        }
+                        continue;
+                    }
+                    if ("setting".equals(event.optString("type"))) {
+                        try {
+                            configStore.updateSetting(event.optBoolean("project"), event.getString("key"),
+                                    event.get("value").toString(), event.get("previous").toString());
+                        } catch (Exception exception) {
+                            if (current != null) current.event(new JSONObject().put("id", requestId).put("type", "error")
+                                    .put("message", "配置未保存：" + exception.getMessage()));
+                        }
+                        continue;
+                    }
                     if ("end".equals(event.optString("type"))) { listener = null; requestId = null; }
                     if (current != null) current.event(event);
                 }

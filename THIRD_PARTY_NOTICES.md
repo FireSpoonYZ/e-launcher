@@ -21,6 +21,10 @@ Network requests use [OkHttp 3.14.9](https://github.com/square/okhttp/tree/paren
 
 The selected upstream source files contain no individual copyright headers. Their attribution is retained here and at the heads of the derived Java files; the Free Software Foundation copyright in the license text refers to that document, not authorship of Ogesture's code. No upstream license notice has been removed.
 
+## Pi runtime
+
+The Android Pi runtime bundles `@earendil-works/pi-coding-agent`, `pi-agent-core` and `pi-ai` at version **0.85.1**, together with their transitive dependencies. The Pi packages identify their license as **MIT** and their author as Mario Zechner; source is available at https://github.com/earendil-works/pi. Exact npm dependency versions and source locations are recorded in `pi-runtime/package-lock.json`. The build retains bundled legal comments and copies SDK resources from the pinned npm package. Generated SDK assets and the JavaScript bundle are reproduced by `pi-runtime/build.js`, not maintained as separate source copies.
+
 ## Distribution
 
 When conveying this APK, satisfy AGPLv3's corresponding-source requirements, including these modifications and the material needed to build them. A link to the unmodified upstream repository alone is not corresponding source for this APK. Preserve this notice and the complete license; consult `LICENSE` for the applicable source-delivery options and the network-interaction provisions if functionality later changes. This project makes no warranty of compatibility with a particular ROM.
