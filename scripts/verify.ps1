@@ -2,14 +2,14 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 Set-Location (Split-Path $PSScriptRoot -Parent)
 if (-not $env:JAVA_HOME) { throw 'JAVA_HOME must point to JDK 21' }
-$javaVersion = & "$env:JAVA_HOME\bin\java.exe" -version 2>&1 | Select-Object -First 1
-if ($javaVersion -notmatch 'version "21[.]') { throw "JDK 21 is required; found $javaVersion" }
+$javaVersion = & "$env:JAVA_HOME\bin\java.exe" --version | Select-Object -First 1
+if ($LASTEXITCODE -ne 0 -or $javaVersion -notmatch '^(openjdk|java) 21[.]') { throw "JDK 21 is required; found $javaVersion" }
 $env:ANDROID_HOME = if ($env:ANDROID_HOME) { $env:ANDROID_HOME } else { "$env:LOCALAPPDATA\Android\Sdk" }
 $env:PATH = "$env:JAVA_HOME\bin;$env:PATH"
-$gradle = if ($env:GRADLE_HOME) { "$env:GRADLE_HOME\bin\gradle.bat" } else { 'gradle.bat' }
+$gradle = Join-Path (Get-Location) 'gradlew.bat'
 
 # Pure Java production code, no Android stubs or test dependencies.
-$classes = '.pi\test-classes'
+$classes = 'build\test-classes'
 New-Item -ItemType Directory -Force $classes | Out-Null
 & "$env:JAVA_HOME\bin\javac.exe" '-J-Duser.language=en' -encoding UTF-8 -d $classes `
     app/src/main/java/com/example/launcherprobe/AgentLoop.java `

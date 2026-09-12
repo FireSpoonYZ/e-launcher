@@ -7,8 +7,11 @@ keystore.properties
 .idea/
 *.iml
 .pi/
-# 本地截图、日志、设备序列号等测试证据不进版本库。
+# 设计稿、临时验证产物与 JVM 堆转储不进版本库。
+/design/
 evidence/
+*.hprof
+/NUL
 pi-runtime/node_modules/
 node_modules/
 web/dist/

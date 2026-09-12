@@ -71,12 +71,13 @@ android {
 }
 
 ['Debug', 'Release'].each { buildType ->
+    def cmakeBuildType = buildType == 'Release' ? 'RelWithDebInfo' : buildType
     def syncTask = tasks.register("syncNodeLauncher${buildType}") {
-        dependsOn "buildCMake${buildType}"
+        dependsOn "buildCMake${cmakeBuildType}"
         outputs.dir "$buildDir/generated/jniLibs/nodeLauncher/${buildType.toLowerCase()}"
         outputs.upToDateWhen { false }
         doLast {
-            def binaries = fileTree("$buildDir/intermediates/cxx/${buildType}") { include '**/obj/arm64-v8a/node_launcher' }.files
+            def binaries = fileTree("$buildDir/intermediates/cxx/${cmakeBuildType}") { include '**/obj/arm64-v8a/node_launcher' }.files
             if (binaries.isEmpty()) throw new GradleException('Missing arm64 node_launcher')
             def binary = binaries.max { it.lastModified() }
             copy {

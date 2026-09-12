@@ -2,19 +2,19 @@
 
 原生 Java Android 桌面、固定导航手势与小型聊天 Agent。保留默认 HOME 请求、按本地语言排序的当前用户应用入口、显式组件启动和失败提示。固定导航手势直接适配自 [Ogesture](https://github.com/tanujnotes/Ogesture)，不恢复 HyperOS 原生桌面动画。
 
-## 界面迁移方案
+## 界面结构
 
-计划保留原生 Launcher，将其余应用自绘页面迁移到 Capacitor + React + Tailwind CSS + TypeScript。范围、Android 接入、原生插件和分阶段验收见 [非 Launcher 界面迁移方案](design/capacitor-migration/README.md)。目前仅完成技术选型文档，尚未实施。
+Launcher 首页使用原生 Java Android View；聊天与设置页面使用 Capacitor + React + Tailwind CSS + TypeScript，通过原生插件访问设备与 Pi runtime。前端代码位于 `web/src/`，Android 代码位于 `app/src/main/`。
 
 ## Pi Agent 与设置
 
-Pi 模式接入固定版本 **0.85.1** 的完整 coding-agent SDK，提供模型、思考强度、原生工具与扩展、压缩重试、资源及包管理和 OAuth。当前聊天的模型选择与启动默认值分开保存。历史树位于聊天页顶部的新建对话之前，首页不显示该入口。
+Pi 模式接入固定版本 **0.85.1** 的完整 coding-agent SDK，提供模型、思考强度、原生工具与扩展、压缩重试、资源及包管理和 OAuth。当前聊天的模型选择与启动默认值分开保存。聊天输入栏的历史分支和思考强度按钮仅在键盘显示时出现；调整思考强度后浮窗保持打开，点击窗外返回输入栏。
 
 独立设置页保留通用、外观、服务商、技能、MCP、扩展、关于七类，其余配置放入高级配置，覆盖文档中的 65 个 settings 字段。全局／工作区表单与 JSON 编辑器共用私有文件；支持自动格式化、未知字段和数字写法保留、草稿、冲突检查及上一版。开放式模型与兼容性结构可直接编辑完整 models.json。
 
 界面支持跟随系统／中英文、浅色／深色、首页图片预览和遮罩。扩展页可直接输入 npm 包名安装，扩展社区使用 npm 公开元数据并提供搜索和分页；配置状态、SDK 找到的安装路径与成功加载分别说明。APK 内置与 Node 24 兼容的官方 npm 11.6.2，无需 Termux 或系统 npm；Git 来源仍需要对应系统命令。安装第三方包可能执行 lifecycle 脚本和代码，请仅使用可信来源。安装成功后会重新读取资源并报告加载、停用／过滤或错误状态，当前聊天下一次发送时使用新扩展。
 
-参见 [运行时与构建说明](pi-runtime/README.md)、[设计](design/pi-settings/README.md) 和 [实施／验证记录](design/pi-settings/IMPLEMENTATION.md)。本次 Pi 设置改动按用户要求仅做本地验证，以下早期 ADB 记录不代表新版 Pi SDK、OAuth 或设置界面已完成真机验收。
+运行时集成和依赖准备见 [运行时与构建说明](pi-runtime/README.md)。
 
 ## Android 工具模式
 
@@ -22,22 +22,13 @@ Pi 模式接入固定版本 **0.85.1** 的完整 coding-agent SDK，提供模型
 
 内置工具为 `list_apps`、`launch_app`、`back`、`home`、`recents`、`read_screen`、`click`、`input_text`、`scroll`、`web_search` 和 `web_fetch`。搜索可选择无需密钥的 [DuckDuckGo Lite](https://lite.duckduckgo.com/lite/)，或用户配置的 SearXNG HTTPS Base URL；二者都返回有长度/数量限制的标题、URL 与摘要，失败不会静默切换服务。SearXNG 通过 `GET /search?q=...&format=json` 请求，配置地址可解析到运营者信任的内网，但任何重定向必须保持同源。通用 `web_fetch` 仍只允许公网 HTTPS，限制超时、重定向和 128 KiB 响应；OkHttp 的自定义 DNS 只把完成公网检查的解析结果交给实际连接。网页、屏幕和工具输出均是不可信数据。屏幕读取最多返回 200 个节点、深度 12，使用单次观察 ID；界面事件或任一动作会使 ID 失效。密码文字会隐藏且拒绝向密码节点自动输入，动作被系统接受后仍须再次读取验证。
 
-原生主界面提供桌面、本地时间日期、应用图标网格，以及使用主题背景的助手对话页。助手页采用浅灰用户气泡、直接排版的回复、底部圆角输入框与左侧会话抽屉；旧记录自动作为一个会话保留，新会话与未发送草稿独立保存，抽屉可按标题搜索、切换会话和删除当前会话。生成期间须先停止，再新建或切换会话。首页与助手页共用底部透明停靠区中的悬浮圆角输入栏，加号、输入文字、麦克风和发送按钮默认横排一行，长文本最多展开三行。点击首页输入栏只聚焦并唤起键盘，非空草稿仅在点击发送后打开对话页并提交；页面切换只让上方内容淡入移入，输入栏保持同一实例和位置。顶部标题打开模型配置，输入框加号和首页“全部应用”打开本地应用搜索，麦克风调用系统语音识别（设备未提供时提示使用键盘语音），回复支持复制与系统分享。侧栏滑入/滑出、遮罩渐变、新消息出现、详情展开、按钮按压和设置弹窗使用 Android 原生动画，并遵循系统动画开关。发送内容及工具结果会交给用户配置的模型服务；公开网页请求会直接访问相应站点。
+原生首页提供本地时间日期、应用图标网格和输入栏；首页输入栏与 React 聊天输入栏目前是独立实现。点击首页输入栏会聚焦并唤起键盘，非空草稿在点击发送后打开聊天页并提交。
+
+聊天页采用浅灰用户气泡、直接排版的回复、底部圆角输入框与左侧会话抽屉；新会话与未发送草稿独立保存，抽屉可按标题搜索、切换和删除会话。生成期间须先停止，再新建或切换会话。顶部标题打开模型配置，输入框加号和首页“全部应用”打开本地应用列表，麦克风调用系统语音识别，回复支持复制与系统分享。发送内容及工具结果会交给用户配置的模型服务；公开网页请求会直接访问相应站点。
 
 “设置”底部面板保留默认桌面请求、系统/无障碍设置入口、固定手势启停、实时状态与 ADB 授权说明。每次 Activity 恢复仍先执行中断恢复检查。
 
-检查脚本验证纯 Java Agent 循环、搜索与手势逻辑、APK 构建和 Lint。2026-09-09 已在 REDMI K80 / Android 16 上完成下述有限范围的 ADB 界面验收；不代表完整手势或所有设备验收通过。
-
-### 新 UI 的 ADB 实机记录（2026-09-09）
-
-- 旧包与新包的 debug 签名不同。经用户确认，先停用旧手势、观察三键并切回系统桌面，再卸载旧包安装当前 APK，重新将本 App 设置为默认 HOME。
-- 首页显示真实时间、日期及应用图标；全部应用页显示 176 个启动入口。输入 `settings` 匹配系统设置，点击结果后 UI 层级确认进入 `com.android.settings`。
-- 从搜索启动设置后发送 `KEYCODE_HOME`，以及打开本 App 设置面板时发送 Home，均回到首页。键盘显示时发送 Home 后也回到首页。
-- 竖屏微信输入法显示时，单个搜索结果可见；全部应用列表能在键盘上方滚动。横屏可显示搜索页；字体比例 1.5 的横屏中，输入区与结果可通过整体滚动到达。横屏输入法自行使用浮动模式，因此该场景不作为停靠式键盘 inset 验收证据。
-- 字体比例、旋转设置已恢复为测试前的 `1.0`、竖屏锁定。UI 验收结束时曾保留三键且未恢复卸载清除的授权；随后按用户要求补回无障碍与写设置授权，并从面板启用固定手势。已确认服务绑定、`force_fsg_nav_bar=1`，最终截图 `restored-final.png` 中三键已隐藏（系统手势指示条仍显示）。ADB 左边缘内滑从显示设置返回本桌面，底部短滑从系统设置回到桌面；这两项是注入测试，未代替真实手指或 Recents 完整验收。
-- 本次截图、UI XML 和应用日志保存在忽略目录 `evidence/ui-device/`。关键证据：`new-home.png`、`launched-settings.xml`、`after-app-home.xml`、`controls-home.xml`、`portrait-ime.png`、`all-ime-scrolled.png`、`large-font-scrolled.png`、`ui-finished.png`。
-- 后续转场对比中，服务原有的 `GLOBAL_ACTION_HOME` 在 HyperOS 上出现跨 task 横移（`home-transition-contact.png`）；通过 shell 显式发送 `ACTION_MAIN + CATEGORY_HOME` 到 `MainActivity` 并加 `FLAG_ACTIVITY_NO_ANIMATION` 后未再横移（`home-noanim-test.png`）。随后覆盖安装修正版，使用 ADB 底部短滑触发真实服务路径；`service-home-final.mp4` 和逐帧图 `service-home-final.png` 显示底部胶囊随拖动移动，松手后直接回到桌面，未再出现横向转场。
-- 未覆盖：真实手指体验、TalkBack、API 29、全部应用列表末尾的键盘遮挡、1.5 倍字体与停靠键盘同时显示，以及新版授权后的固定手势启停与恢复。ADB 高速输入曾被输入法转换或打乱，改用英文模式逐字注入后搜索成功；一轮批量滚动误入其他应用，未计为通过证据。
+检查脚本验证纯 Java Agent 循环、搜索与手势逻辑、APK 构建和 Lint。历史设计稿及本地截图、录像、日志已清理；设备验证范围见下文，不能据此认定所有机型和场景均已通过。
 
 | 操作 | 固定动作 |
 | --- | --- |
@@ -51,21 +42,39 @@ Pi 模式接入固定版本 **0.85.1** 的完整 coding-agent SDK，提供模型
 
 底边 Home 只有在 `RoleManager` 确认本 App 持有默认 HOME 角色时，才由服务显式启动 `MainActivity`，Intent 使用 `ACTION_MAIN + CATEGORY_HOME + FLAG_ACTIVITY_NEW_TASK + FLAG_ACTIVITY_NO_ANIMATION`；不是默认桌面或显式启动异常时仍执行系统 `GLOBAL_ACTION_HOME`，不会劫持其他默认桌面。Activity 收到 HOME Intent 时保留公开转场 API 作为补充，但实机已确认它单独不能消除本机横移。修改后的服务路径已在 REDMI K80 / Android 16 上通过 ADB 短滑和录屏对照验证，不能承诺所有 ROM 均无横移。首页 Back 现在完全无操作，搜索页 Back 只回首页，设置 Dialog 的 Back 仍只关闭 Dialog。
 
-本轮还通过 `feedback-left.png` 确认边缘箭头可见；`home-back-final.mp4` 中连续三次 Back 及一次左边缘返回未使首页退出或横移。底部停留后继续 MOVE/UP，前台保持系统 RecentsActivity，未额外触发 Home；再次短滑可回桌面。最终手势服务仍绑定，隐藏设置为 1。以上均为 ADB 注入证据；真实手指观感、非默认 HOME 回退和异常启动回退仍待进一步验收。
-
 这里的“跟手”仅指本 App 绘制的箭头/胶囊指示器。普通 APK + AccessibilityService 的公开 API 不能逐帧控制其他 App 的任务 Surface，也不能忠实恢复 HyperOS/Quickstep 的窗口缩放回桌面动画；项目不截图或伪造其他 App 窗口；仅在助手工具调用时读取有限的无障碍节点结构。
 
 退出页面、上滑回桌面不会停用。停用不撤销系统里的无障碍授权。不提供手势配置、应用排除或底边横滑切换。左右区域为屏幕高度的80% × 16dp，底部为宽度的80% × 12dp；会随屏幕、旋转与导航栏 inset 更新。窗口不随键盘上移，键盘边缘触摸也可能被截获。
 
 ## 构建与检查（Windows PowerShell）
 
-JDK17、Gradle8.11.1、SDK Platform35 / Build Tools35.0.0；AGP8.9.1，minSdk29、targetSdk35。运行时网络使用 OkHttp 3.14.9，不包含 Gradle Wrapper 二进制。首次构建需下载构建依赖并接受 SDK 许可。先运行 `scripts/prepare-pi-runtime.ps1` 准备 Node Mobile、SDK 资源和锁定完整性的官方 npm 11.6.2 payload；JavaScript 改动后运行 `npm --prefix pi-runtime test` 重建并测试 bundle。构建会把真实 arm64 Node executable 以 `libnode_launcher.so` 打入 APK 的 native library 目录；npm 的完整目录保存在版本化 asset 中并仅在版本首次使用时原子展开。工具目录与当前开发环境一致：
+JDK 21、Gradle 8.14.3（仓库内 `gradlew`）、SDK Platform 36、AGP 8.13.0，minSdk29、targetSdk36。运行时网络使用 OkHttp 3.14.9。首次构建需下载 Gradle 发行包与构建依赖并接受 SDK 许可。先运行 `scripts/prepare-pi-runtime.ps1` 准备 Node Mobile、SDK 资源和锁定完整性的官方 npm 11.6.2 payload；JavaScript 改动后运行 `npm --prefix pi-runtime test` 重建并测试 bundle。构建会把真实 arm64 Node executable 以 `libnode_launcher.so` 打入 APK 的 native library 目录；npm 的完整目录保存在版本化 asset 中并仅在版本首次使用时原子展开。
+
+首次构建或修改前端后，先安装依赖、构建并同步 Web 资源：
+
+```powershell
+npm ci
+npm run build
+npm run sync:android
+```
+
+Windows PowerShell 下使用仓库内的 Gradle Wrapper 编译：
+
+```powershell
+$env:ANDROID_HOME = "$env:LOCALAPPDATA\Android\Sdk"
+$env:JAVA_HOME = "$env:ProgramFiles\Microsoft\jdk-21.0.9.10-hotspot"
+.\gradlew.bat build
+```
+
+需要完整检查时再运行：
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/verify.ps1
 ```
 
-脚本设置 `JAVA_HOME=$env:LOCALAPPDATA\e-launcher-tools\jdk-17` 和 `ANDROID_HOME=$env:LOCALAPPDATA\Android\Sdk`，运行纯 Java 断言检查、Gradle `:app:testDebugUnitTest :app:assembleDebug :app:lintDebug` 以及空白/行尾风格检查。逻辑检查在 `tests/com/example/launcherprobe/GestureChecks.java` 和 `AgentChecks.java`，不使用 Android stub 或第三方测试框架；Gradle unit-test 任务运行 `app/src/test` 下的 Robolectric 回归，覆盖凭据、请求持久化、设置重建和公开元数据边界；Windows 测试仅适配 AtomicFile 的底层替换操作，不替换业务逻辑。纯 Java 检查覆盖反馈进度/阈值与各类清理状态，但不能证明 WindowManager、MotionEvent 或 ROM 转场行为。成功构建的调试 APK 位于 `app/build/outputs/apk/debug/app-debug.apk`。
+脚本要求 `JAVA_HOME` 指向 JDK 21，`ANDROID_HOME` 未设置时使用 `$env:LOCALAPPDATA\Android\Sdk`，并通过仓库内 `gradlew.bat` 运行纯 Java 断言检查、Gradle `:app:testDebugUnitTest :app:assembleDebug :app:lintDebug` 以及空白/行尾风格检查。逻辑检查在 `tests/com/example/launcherprobe/GestureChecks.java` 和 `AgentChecks.java`，不使用 Android stub 或第三方测试框架；Gradle unit-test 任务运行 `app/src/test` 下的 Robolectric 回归，覆盖凭据、请求持久化、设置重建和公开元数据边界；Windows 测试仅适配 AtomicFile 的底层替换操作，不替换业务逻辑。纯 Java 检查覆盖反馈进度/阈值与各类清理状态，但不能证明 WindowManager、MotionEvent 或 ROM 转场行为。成功构建的调试 APK 位于 `app/build/outputs/apk/debug/app-debug.apk`。
+
+纯 Java 检查的编译产物位于 `build/test-classes/`。思考强度浮窗的真机触摸回归脚本为 `scripts/check-thinking-slider.mjs`，设备连接和运行方式见文件开头的说明。
 
 ### 跨电脑使用同一开发签名
 
@@ -130,7 +139,7 @@ ADB 救援（保持电脑授权和连接；若设备不接受命令，从通知�
 
 ### 后续验收步骤
 
-此前原生 HyperOS 限制和第三方 UbikiTouch 测试不能作为本 App 通过的证据。源码、自动检查和构建成功同样不是实机结果。截图/日志存放在被忽略的 `evidence/`，避免提交设备与个人信息。
+此前原生 HyperOS 限制和第三方 UbikiTouch 测试不能作为本 App 通过的证据。源码、自动检查和构建成功同样不是实机结果。新的截图和日志应保存在仓库外的临时目录。
 
 1. 记录机型/ROM、当前默认桌面、三键状态；关闭其他手势工具。授权前点击启用必须显示缺少权限，不能报告 ON。
 2. 在 Probe 默认桌面下启用，观察三键实际消失；左右 Back、底边 Home、停留 Recents 各重复测试，并能点选任务切换。确认没有一次停留触发两项动作。
