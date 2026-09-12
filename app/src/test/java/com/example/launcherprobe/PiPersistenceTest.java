@@ -24,6 +24,27 @@ public class PiPersistenceTest {
         context.getSharedPreferences("chat", Context.MODE_PRIVATE).edit().clear().commit();
     }
 
+    @Test public void snapshotProvidesBuiltInNpmWithoutPersistingOrOverridingUserCommand() throws Exception {
+        PiConfigStore store = new PiConfigStore(context);
+        store.save(false, "settings.json", "{}", null);
+        JSONObject snapshot = new JSONObject(store.snapshot());
+        JSONArray command = snapshot.getJSONObject("globalSettings").getJSONArray("npmCommand");
+        assertTrue(command.getString(0).endsWith("libnode_launcher.so"));
+        assertTrue(command.getString(1).replace('\\', '/').endsWith("npm/11.6.2/bin/npm-cli.js"));
+        assertFalse(store.settings(false).containsKey("npmCommand"));
+        store.save(false, "settings.json", "{\"npmCommand\":[\"custom-npm\"]}", store.read(false, "settings.json"));
+        assertEquals("custom-npm", new JSONObject(store.snapshot()).getJSONObject("globalSettings")
+                .getJSONArray("npmCommand").getString(0));
+        store.save(true, "settings.json", "{\"npmCommand\":[\"workspace-npm\"]}", null);
+        assertEquals("workspace-npm", new JSONObject(store.snapshot()).getJSONObject("projectSettings")
+                .getJSONArray("npmCommand").getString(0));
+        store.save(true, "settings.json", "{\"npmCommand\":[]}", null);
+        snapshot = new JSONObject(store.snapshot());
+        assertTrue(snapshot.getJSONObject("globalSettings").getJSONArray("npmCommand").getString(0).endsWith("libnode_launcher.so"));
+        assertFalse(snapshot.getJSONObject("projectSettings").has("npmCommand"));
+        assertEquals("[]", new JSONObject(store.read(true, "settings.json")).getJSONArray("npmCommand").toString());
+    }
+
     @Test public void oauthRotationAndLogoutCompareNumericExpiryByValue() throws Exception {
         PiConfigStore store = new PiConfigStore(context);
         String old = "{\"type\":\"oauth\",\"access\":\"old\",\"refresh\":\"r1\",\"expires\":1700000000000}";

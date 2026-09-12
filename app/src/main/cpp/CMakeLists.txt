@@ -5,3 +5,9 @@ set_target_properties(node PROPERTIES IMPORTED_LOCATION ${CMAKE_SOURCE_DIR}/../j
 add_library(launcher_node SHARED node_bridge.cpp)
 target_include_directories(launcher_node PRIVATE node-include)
 target_link_libraries(launcher_node node log)
+
+# Gradle packages this real executable under a .so name so Android extracts it
+# into the executable nativeLibraryDir rather than the noexec app data area.
+add_executable(node_launcher node_launcher.cpp)
+target_include_directories(node_launcher PRIVATE node-include)
+target_link_libraries(node_launcher node log)

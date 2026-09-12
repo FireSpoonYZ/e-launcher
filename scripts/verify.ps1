@@ -1,10 +1,12 @@
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 Set-Location (Split-Path $PSScriptRoot -Parent)
-$env:JAVA_HOME = "$env:LOCALAPPDATA\e-launcher-tools\jdk-17"
-$env:ANDROID_HOME = "$env:LOCALAPPDATA\Android\Sdk"
+if (-not $env:JAVA_HOME) { throw 'JAVA_HOME must point to JDK 21' }
+$javaVersion = & "$env:JAVA_HOME\bin\java.exe" -version 2>&1 | Select-Object -First 1
+if ($javaVersion -notmatch 'version "21[.]') { throw "JDK 21 is required; found $javaVersion" }
+$env:ANDROID_HOME = if ($env:ANDROID_HOME) { $env:ANDROID_HOME } else { "$env:LOCALAPPDATA\Android\Sdk" }
 $env:PATH = "$env:JAVA_HOME\bin;$env:PATH"
-$gradle = "$env:LOCALAPPDATA\e-launcher-tools\gradle-8.11.1\bin\gradle.bat"
+$gradle = if ($env:GRADLE_HOME) { "$env:GRADLE_HOME\bin\gradle.bat" } else { 'gradle.bat' }
 
 # Pure Java production code, no Android stubs or test dependencies.
 $classes = '.pi\test-classes'

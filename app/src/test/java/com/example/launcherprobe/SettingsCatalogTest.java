@@ -30,6 +30,14 @@ public class SettingsCatalogTest {
         assertThrows(IllegalArgumentException.class, () -> SettingsCatalog.installSource(item));
     }
 
+    @Test public void npmInputIsNormalizedWithoutAcceptingOptionsOrCommands() {
+        assertEquals("npm:demo", SettingsCatalog.normalizeNpmSource(" demo "));
+        assertEquals("npm:@scope/demo@1.2.3-beta.1", SettingsCatalog.normalizeNpmSource("npm:@scope/demo@1.2.3-beta.1"));
+        assertEquals("npm:demo@^2.0.0", SettingsCatalog.normalizeNpmSource("demo@^2.0.0"));
+        for (String source : new String[]{"", "--help", "npm:", "../demo", "demo;id", "git:owner/repo", "demo | id"})
+            assertThrows(IllegalArgumentException.class, () -> SettingsCatalog.normalizeNpmSource(source));
+    }
+
     @Test public void release404IsEmptyButOtherHttpErrorsRemainErrors() throws Exception {
         assertNull(SettingsCatalog.read(response(404, "{}"), true));
         assertThrows(IOException.class, () -> SettingsCatalog.read(response(404, "{}"), false));

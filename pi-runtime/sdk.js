@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, writeFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile, rm } from "node:fs/promises";
 import { join, resolve, relative, dirname } from "node:path";
 import {
   createAgentSessionServices, createAgentSessionFromServices, ModelRuntime, SettingsManager, SessionManager, DefaultPackageManager,
@@ -10,6 +10,10 @@ import { applyHttpProxySettings, configureHttpDispatcher } from "./node_modules/
 
 async function services(config, signal) {
   if (!config?.agentDir || !config?.cwd || !config?.cacheDir) throw new Error("缺少应用私有运行目录");
+  for (const [key, value] of Object.entries(config.runtimeEnvironment ?? {})) {
+    if (typeof value !== "string") throw new Error("运行环境配置无效");
+    process.env[key] = value;
+  }
   const agentDir = resolve(config.agentDir), cwd = resolve(config.cwd), cacheDir = resolve(config.cacheDir);
   await mkdir(agentDir, { recursive: true });
   await mkdir(cwd, { recursive: true });
@@ -202,11 +206,27 @@ export async function sdkQuery(command, signal, emit = () => {}, interact = asyn
     if (command.type === "resources") {
       const loader = s.resourceLoader;
       const extensions = loader.getExtensions();
+      const loadedPaths = new Set(extensions.extensions.map((extension) => resolve(extension.path)));
+      const manager = new DefaultPackageManager(s);
+      const resolved = await manager.resolve(async () => "skip");
+      const packages = await Promise.all(manager.listConfiguredPackages().map(async (item) => {
+        if (!item.installedPath || !item.source.startsWith("npm:")) return item;
+        try {
+          const manifest = JSON.parse(await readFile(join(item.installedPath, "package.json"), "utf8"));
+          return { ...item, version: manifest.version };
+        } catch (error) {
+          return { ...item, manifestError: error.message };
+        }
+      }));
+      const packageExtensions = resolved.extensions.filter((item) => item.metadata?.origin === "package")
+        .map((item) => ({ path: item.path, source: item.metadata.source, scope: item.metadata.scope,
+          enabled: item.enabled, loaded: loadedPaths.has(resolve(item.path)),
+          errors: extensions.errors.filter((error) => error.path && resolve(error.path) === resolve(item.path)) }));
       return { skills: loader.getSkills(), prompts: loader.getPrompts(), themes: loader.getThemes(),
         extensions: extensions.extensions.map((extension) => ({ path: extension.path,
           tools: extension.tools?.size ?? 0, commands: extension.commands?.size ?? 0,
           flags: extension.flags?.size ?? 0, shortcuts: extension.shortcuts?.size ?? 0 })),
-        errors: [...extensions.errors, ...s.diagnostics] };
+        packages, packageExtensions, errors: [...extensions.errors, ...s.diagnostics] };
     }
     if (command.type === "test_provider") {
       const model = s.modelRuntime.getModels(command.providerId)[0];

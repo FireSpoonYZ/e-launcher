@@ -52,7 +52,7 @@ public final class PiSettingsActivity extends Activity {
     private boolean queryRunning;
     private okhttp3.Call publicCall;
     private int publicRequest;
-    private String communityQuery = "", communityKind = "";
+    private String communityQuery = "", communityKind = "", npmPackageSource = "";
     private int communityOffset;
     private JSONArray packageSnapshot;
     private android.app.ProgressDialog queryProgress;
@@ -75,6 +75,8 @@ public final class PiSettingsActivity extends Activity {
         getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
         getWindow().getDecorView().setSystemUiVisibility(appearance.systemBarFlags());
         store = new PiConfigStore(this);
+        if (android.os.Build.VERSION.SDK_INT >= 33) getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
+                android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT, this::handleBack);
         try {
             store.initialize(getSharedPreferences("chat", MODE_PRIVATE));
             try (InputStream input = getAssets().open("pi-settings-fields.json")) {
@@ -84,6 +86,7 @@ public final class PiSettingsActivity extends Activity {
                 project = state.getBoolean("project");
                 communityQuery = state.getString("communityQuery", "");
                 communityKind = state.getString("communityKind", "");
+                npmPackageSource = state.getString("npmPackageSource", "");
                 communityOffset = state.getInt("communityOffset", 0);
                 page = state.getString("page", "设置");
                 ArrayList<String> stack = state.getStringArrayList("back");
@@ -105,6 +108,7 @@ public final class PiSettingsActivity extends Activity {
         out.putBoolean("project", project);
         out.putString("communityQuery", communityQuery);
         out.putString("communityKind", communityKind);
+        out.putString("npmPackageSource", npmPackageSource);
         out.putInt("communityOffset", communityOffset);
         out.putStringArrayList("back", new ArrayList<>(back));
         super.onSaveInstanceState(out);
@@ -148,7 +152,10 @@ public final class PiSettingsActivity extends Activity {
                 .setNeutralButton(t("继续编辑"), null).show();
     }
 
-    @Override public void onBackPressed() {
+    @Override @android.annotation.SuppressLint("GestureBackNavigation")
+    public void onBackPressed() { handleBack(); }
+
+    private void handleBack() {
         leave(() -> {
             if (back.isEmpty()) finish();
             else { page = back.removeLast(); render(); }
@@ -249,9 +256,10 @@ public final class PiSettingsActivity extends Activity {
             } else if (page.equals("技能") || page.equals("扩展") || page.equals("MCP")) {
                 note(page.equals("MCP") ? t("Pi 核心不内置 MCP，通过扩展接入。") : t("Pi SDK 按全局与工作区资源配置加载。"));
                 scope();
+                if (page.equals("扩展")) npmInstaller();
                 action(t("启用或停用资源"), this::resourceControls);
                 action(t("管理已配置的包"), this::packages);
-                action(t("安装包"), this::installPackage);
+                if (!page.equals("扩展")) action(t("安装包"), this::installPackage);
                 action(t("扩展社区"), () -> go("扩展社区"));
                 action(t("读取资源与诊断"), this::resources);
                 link(t("资源配置"), t("保存路径与包过滤配置"), () -> go("资源与包"));
@@ -463,7 +471,7 @@ public final class PiSettingsActivity extends Activity {
                     catch (Exception exception) { toast(t("包数据无效，无法安装")); return; }
                     boolean local = project;
                     new AlertDialog.Builder(this).setTitle(local ? t("安装到工作区") : t("全局安装"))
-                            .setMessage(source + "\n" + t("第三方包可能执行代码。需要运行环境中有 npm 命令；失败会显示实际错误。"))
+                            .setMessage(source + "\n" + t("第三方包可能执行代码。APK 已内置官方 npm；失败会显示实际错误。"))
                             .setPositiveButton(t("安装"), (d, w) -> packageOperation("install", source, local))
                             .setNegativeButton(t("取消"), null).show();
                 }));
@@ -639,9 +647,10 @@ public final class PiSettingsActivity extends Activity {
         queryRunning = true;
         authUrl = ""; authInstructions = "";
         java.util.concurrent.atomic.AtomicBoolean cancelled = new java.util.concurrent.atomic.AtomicBoolean();
-        android.app.ProgressDialog progress = android.app.ProgressDialog.show(this, "Pi", t("正在处理…"), true, true);
+        boolean cancellable = !operation.equals("install") && !operation.equals("update") && !operation.equals("remove");
+        android.app.ProgressDialog progress = android.app.ProgressDialog.show(this, "Pi", t("正在处理…"), true, cancellable);
         queryProgress = progress;
-        progress.setOnCancelListener(dialog -> {
+        if (cancellable) progress.setOnCancelListener(dialog -> {
             cancelled.set(true);
             if (queryBridge != null) queryBridge.abort(queryRequestId);
         });
@@ -798,10 +807,24 @@ public final class PiSettingsActivity extends Activity {
         runQuery(operation, arguments, result -> toast(operation.equals("login") ? t("登录完成") : t("已移除应用内凭据")));
     }
 
+    private void npmInstaller() {
+        note(t("APK 内置官方 npm 11.6.2。安装第三方包可能执行代码，请仅安装可信来源。"));
+        EditText source = input(t("npm 包名，可附带版本"), npmPackageSource);
+        source.setInputType(android.text.InputType.TYPE_CLASS_TEXT | android.text.InputType.TYPE_TEXT_VARIATION_URI);
+        source.setSingleLine(true);
+        source.addTextChangedListener(watcher(() -> npmPackageSource = source.getText().toString()));
+        action(t("安装 npm 扩展"), () -> {
+            final String normalized;
+            try { normalized = SettingsCatalog.normalizeNpmSource(npmPackageSource); }
+            catch (IllegalArgumentException exception) { toast(t(exception.getMessage())); return; }
+            packageOperation("install", normalized, project);
+        });
+    }
+
     private void installPackage() {
         EditText source = new EditText(this); source.setHint(t("npm:package / git:host/repo / 本地路径"));
         new AlertDialog.Builder(this).setTitle(project ? t("安装到工作区") : t("全局安装"))
-                .setMessage(t("npm / Git 来源使用 Pi 的原生包管理器，需要运行环境中有对应命令。本地包使用应用可访问的路径。"))
+                .setMessage(t("npm 使用 APK 内置的官方运行时；Git 来源需要系统中有对应命令。本地包使用应用可访问的路径。"))
                 .setView(source).setPositiveButton(t("安装"), (d, w) -> packageOperation("install", source.getText().toString().trim(), project))
                 .setNegativeButton(t("取消"), null).show();
     }
@@ -832,7 +855,51 @@ public final class PiSettingsActivity extends Activity {
         JSONObject arguments = new JSONObject();
         try { arguments.put("source", source).put("project", local); }
         catch (Exception exception) { toast(exception.getMessage()); return; }
-        runQuery(operation, arguments, result -> { packageSnapshot = null; toast(t("操作完成")); render(); });
+        runQuery(operation, arguments, result -> {
+            packageSnapshot = null;
+            if (!operation.equals("install")) { toast(t("操作完成")); render(); return; }
+            toast(t("安装和配置已保存，正在检查扩展…"));
+            diagnosePackage(source, local);
+        });
+    }
+
+    private void diagnosePackage(String source, boolean local) {
+        runQuery("resources", new JSONObject(), result -> {
+            JSONObject resources = (JSONObject) result;
+            JSONArray entries = resources.optJSONArray("packageExtensions");
+            int found = 0, loaded = 0, disabled = 0; StringBuilder errors = new StringBuilder();
+            if (entries != null) for (int i = 0; i < entries.length(); i++) {
+                JSONObject entry = entries.optJSONObject(i);
+                if (entry == null || !source.equals(entry.optString("source"))
+                        || !(local ? "project" : "user").equals(entry.optString("scope"))) continue;
+                found++;
+                if (!entry.optBoolean("enabled", true)) disabled++;
+                if (entry.optBoolean("loaded")) loaded++;
+                JSONArray itemErrors = entry.optJSONArray("errors");
+                if (itemErrors != null && itemErrors.length() > 0) errors.append(itemErrors).append('\n');
+            }
+            String version = "";
+            JSONArray packages = resources.optJSONArray("packages");
+            if (packages != null) for (int i = 0; i < packages.length(); i++) {
+                JSONObject item = packages.optJSONObject(i);
+                if (item != null && source.equals(item.optString("source"))
+                        && (local ? "project" : "user").equals(item.optString("scope"))) {
+                    version = item.optString("version");
+                    if (item.has("manifestError")) errors.append(item.optString("manifestError")).append('\n');
+                }
+            }
+            String state = found == 0 ? t("未发现当前生效的 Pi 扩展；请检查包内容、过滤配置或工作区同名包。")
+                    : disabled == found ? t("发现扩展，但已被过滤或停用。")
+                    : loaded + disabled == found && errors.length() == 0 ? t("扩展加载检查通过；当前聊天下一次发送时生效。")
+                    : t("扩展加载检查未全部通过，请查看相关错误。");
+            String message = source + (version.isEmpty() ? "" : "\n" + t("已安装版本：") + version)
+                    + "\n" + t("配置范围：") + (local ? t("工作区") : t("全局"))
+                    + "\n" + t("发现扩展：") + found + t("，成功加载：") + loaded + t("，已停用：") + disabled + "\n" + state;
+            if (errors.length() > 0) message += "\n" + t("相关错误：") + errors;
+            new AlertDialog.Builder(this).setTitle(t("安装诊断")).setMessage(message)
+                    .setPositiveButton(t("关闭"), null).show();
+            render();
+        });
     }
 
     private void resourceControls() {

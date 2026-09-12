@@ -12,16 +12,33 @@ import java.util.Collections;
 /** Store checks use test-package preferences; the target-Activity UI check is read-only. */
 public final class ChatStoreChecks extends Instrumentation {
     private boolean storageOnly;
+    private boolean npmOnly;
 
     @Override public void onCreate(Bundle arguments) {
         super.onCreate(arguments);
         storageOnly = arguments != null && "store".equals(arguments.getString("checks"));
+        npmOnly = arguments != null && "npm".equals(arguments.getString("checks"));
         start();
     }
 
     @Override public void onStart() {
         Bundle result = new Bundle();
         try {
+            if (npmOnly) {
+                ActivityMonitor monitor = addMonitor(MainActivity.class.getName(), null, false);
+                try (android.os.ParcelFileDescriptor launch = getUiAutomation(android.app.UiAutomation.FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES)
+                        .executeShellCommand("am start -W -n com.example.launcherprobe/.MainActivity");
+                        java.io.InputStream output = new android.os.ParcelFileDescriptor.AutoCloseInputStream(launch)) {
+                    output.readNBytes(4096);
+                }
+                Activity foreground = monitor.waitForActivityWithTimeout(15000);
+                removeMonitor(monitor);
+                if (foreground == null) throw new AssertionError("Could not foreground the test application");
+                runOnMainSync(() -> foreground.getWindow().addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON));
+                result.putString("stream", NpmRuntimeChecks.run(getTargetContext(), getContext()) + "\n");
+                finish(Activity.RESULT_OK, result);
+                return;
+            }
             PiConfigChecks.run(getContext());
             checkConversations();
             checkTreePersistence();

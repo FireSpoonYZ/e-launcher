@@ -18,11 +18,16 @@ final class PiConfigStore {
     private final File global;
     private final File workspace;
     private final File cache;
+    private final File home;
+    private final File nativeLibraryDir;
 
     PiConfigStore(Context context) {
-        global = new File(context.getFilesDir(), "node/.pi/agent");
+        home = new File(context.getFilesDir(), "node");
+        global = new File(home, ".pi/agent");
         workspace = new File(context.getFilesDir(), "pi-workspace/.pi");
         cache = new File(context.getCacheDir(), "pi-runtime");
+        String nativePath = context.getApplicationInfo().nativeLibraryDir;
+        nativeLibraryDir = nativePath == null ? new File(context.getFilesDir(), "native") : new File(nativePath);
     }
 
     File directory(boolean project) { return project ? workspace : global; }
@@ -166,13 +171,37 @@ final class PiConfigStore {
 
     String snapshot() throws IOException {
         synchronized (LOCK) {
+            Map<String, Object> globalSettings = settings(false);
+            Map<String, Object> projectSettings = settings(true);
+            Map<String, Object> effective = effectiveSettings();
+            Object configuredNpm = effective.get("npmCommand");
+            if (configuredNpm == null || (configuredNpm instanceof java.util.List && ((java.util.List<?>) configuredNpm).isEmpty())) {
+                java.util.List<String> command = java.util.Arrays.asList(
+                        new File(nativeLibraryDir, "libnode_launcher.so").getAbsolutePath(),
+                        new File(home, "npm/11.6.2/bin/npm-cli.js").getAbsolutePath());
+                globalSettings.put("npmCommand", command);
+                projectSettings.remove("npmCommand");
+                effective.put("npmCommand", command);
+            }
+            File npmCache = new File(cache, "npm");
+            Map<String, Object> environment = new LinkedHashMap<>();
+            environment.put("HOME", home.getAbsolutePath());
+            environment.put("TMPDIR", cache.getAbsolutePath());
+            String inheritedPath = System.getenv("PATH");
+            environment.put("PATH", new File(home, "bin").getAbsolutePath() + File.pathSeparator
+                    + (inheritedPath == null ? "/system/bin" : inheritedPath));
+            environment.put("LD_LIBRARY_PATH", nativeLibraryDir.getAbsolutePath());
+            environment.put("npm_config_cache", npmCache.getAbsolutePath());
+            environment.put("npm_config_userconfig", new File(home, "npmrc").getAbsolutePath());
+            environment.put("npm_config_script_shell", "/system/bin/sh");
             Map<String, Object> snapshot = new LinkedHashMap<>();
             snapshot.put("agentDir", global.getAbsolutePath());
             snapshot.put("cwd", workspace.getParentFile().getAbsolutePath());
             snapshot.put("cacheDir", cache.getAbsolutePath());
-            snapshot.put("settings", effectiveSettings());
-            snapshot.put("globalSettings", settings(false));
-            snapshot.put("projectSettings", settings(true));
+            snapshot.put("runtimeEnvironment", environment);
+            snapshot.put("settings", effective);
+            snapshot.put("globalSettings", globalSettings);
+            snapshot.put("projectSettings", projectSettings);
             snapshot.put("models", ConfigJson.object(read(false, "models.json")));
             snapshot.put("auth", ConfigJson.object(read(false, "auth.json")));
             snapshot.put("systemPrompt", read(false, "SYSTEM.md"));
@@ -198,9 +227,9 @@ final class PiConfigStore {
             String source = read(project, "settings.json");
             Map<String, Object> settings = ConfigJson.object(source);
             Object expected = ConfigJson.object("{\"value\":" + previous + "}").get("value");
-            if (!ConfigJson.sameValue(settings.get(key), expected)) throw new IOException("设置已变化，请重新读取后重试");
+            if (!ConfigJson.sameValue(ConfigJson.get(settings, key), expected)) throw new IOException("设置已变化，请重新读取后重试");
             Object value = ConfigJson.object("{\"value\":" + next + "}").get("value");
-            settings.put(key, value);
+            ConfigJson.set(settings, key, value, false);
             save(project, "settings.json", ConfigJson.encode(settings), source);
         }
     }

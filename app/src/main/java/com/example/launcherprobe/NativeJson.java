@@ -1,0 +1,67 @@
+package com.example.launcherprobe;
+
+import org.json.JSONArray;
+import org.json.JSONObject;
+
+import java.util.List;
+import java.util.Map;
+
+final class NativeJson {
+    private NativeJson() { }
+
+    static JSONObject conversation(ChatStore store) {
+        ConversationTree tree = store.tree();
+        JSONArray nodes = new JSONArray();
+        for (ConversationTree.Node node : tree.nodes()) nodes.put(object("id", node.id,
+                "parentId", node.parentId == null ? JSONObject.NULL : node.parentId, "message", message(node.message)));
+        return object("id", store.activeId(), "leaf", tree.leaf() == null ? JSONObject.NULL : tree.leaf(),
+                "nodes", nodes, "draft", store.draft(), "piSelection", object(store.piSelection()));
+    }
+
+    static JSONObject message(AgentLoop.Message message) {
+        JSONArray calls = new JSONArray();
+        for (AgentLoop.ToolCall call : message.toolCalls) calls.put(object("id", call.id, "name", call.name, "arguments", call.arguments));
+        return object("id", message.id, "role", message.role,
+                "content", message.content == null ? JSONObject.NULL : message.content,
+                "toolCallId", message.toolCallId == null ? JSONObject.NULL : message.toolCallId,
+                "toolCalls", calls, "incomplete", message.incomplete);
+    }
+
+    static JSONArray conversations(List<ChatStore.Conversation> values) {
+        JSONArray result = new JSONArray();
+        for (ChatStore.Conversation value : values) result.put(object("id", value.id, "title", value.title, "updated", value.updated));
+        return result;
+    }
+
+    static JSONObject object(String source) {
+        try { return new JSONObject(source); }
+        catch (Exception exception) { throw new IllegalStateException(exception); }
+    }
+
+    static JSONObject object(Object... values) {
+        JSONObject result = new JSONObject();
+        try { for (int i = 0; i < values.length; i += 2) result.put(String.valueOf(values[i]), values[i + 1]); }
+        catch (Exception exception) { throw new IllegalStateException(exception); }
+        return result;
+    }
+
+    static Object jsonValue(Object value) {
+        if (value == null) return JSONObject.NULL;
+        if (value instanceof Map) {
+            JSONObject result = new JSONObject();
+            for (Map.Entry<?, ?> item : ((Map<?, ?>) value).entrySet()) put(result, String.valueOf(item.getKey()), jsonValue(item.getValue()));
+            return result;
+        }
+        if (value instanceof Iterable) {
+            JSONArray result = new JSONArray();
+            for (Object item : (Iterable<?>) value) result.put(jsonValue(item));
+            return result;
+        }
+        return value;
+    }
+
+    private static void put(JSONObject target, String key, Object value) {
+        try { target.put(key, value); }
+        catch (Exception exception) { throw new IllegalStateException(exception); }
+    }
+}

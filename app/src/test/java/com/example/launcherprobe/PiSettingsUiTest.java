@@ -77,6 +77,22 @@ public class PiSettingsUiTest {
         } finally { bitmap.recycle(); controller.pause().stop().destroy(); }
     }
 
+    @Test public void extensionPageKeepsPermanentNpmInstallerInputAcrossRecreation() {
+        Context context = RuntimeEnvironment.getApplication();
+        context.getSharedPreferences("ui", 0).edit().clear().putString("language", "en").commit();
+        Bundle state = new Bundle(); state.putString("page", "扩展");
+        ActivityController<PiSettingsActivity> controller = Robolectric.buildActivity(PiSettingsActivity.class).create(state).start().resume().visible();
+        try {
+            View root = controller.get().getWindow().getDecorView();
+            EditText npm = findInput(root, "npm package name, optionally with a version"); assertNotNull(npm);
+            assertTrue(hasButton(root, "Install npm extension"));
+            npm.setText("@scope/demo@1.2.3");
+            controller.recreate();
+            npm = findInput(controller.get().getWindow().getDecorView(), "npm package name, optionally with a version");
+            assertNotNull(npm); assertEquals("@scope/demo@1.2.3", npm.getText().toString());
+        } finally { controller.pause().stop().destroy(); }
+    }
+
     @Test public void communityFiltersSurviveRecreationWithoutIssuingNetworkRequests() {
         ActivityController<PiSettingsActivity> controller = Robolectric.buildActivity(PiSettingsActivity.class).create().start().resume().visible();
         try {
@@ -103,6 +119,14 @@ public class PiSettingsUiTest {
         if (view instanceof EditText) return (EditText) view;
         if (view instanceof ViewGroup) for (int i = 0; i < ((ViewGroup) view).getChildCount(); i++) {
             EditText found = findEditor(((ViewGroup) view).getChildAt(i)); if (found != null) return found;
+        }
+        return null;
+    }
+
+    private static EditText findInput(View view, String hint) {
+        if (view instanceof EditText && hint.equals(((EditText) view).getHint())) return (EditText) view;
+        if (view instanceof ViewGroup) for (int i = 0; i < ((ViewGroup) view).getChildCount(); i++) {
+            EditText found = findInput(((ViewGroup) view).getChildAt(i), hint); if (found != null) return found;
         }
         return null;
     }

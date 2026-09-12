@@ -45,6 +45,7 @@ final class PiAgentBridge {
         System.loadLibrary("launcher_node");
         File home = new File(context.getFilesDir(), "node");
         if (!home.isDirectory() && !home.mkdirs()) throw new IllegalStateException("无法创建 Node 私有目录");
+        prepareNpm(context, home);
         File script = new File(home, "pi-runtime.cjs");
         try (java.io.InputStream in = context.getAssets().open("pi-runtime.cjs");
              FileOutputStream out = new FileOutputStream(script)) {
@@ -110,7 +111,7 @@ final class PiAgentBridge {
         }
     }
 
-    private static void copyAssets(Context context, String source, File target) throws Exception {
+    static void copyAssets(Context context, String source, File target) throws Exception {
         String[] entries = context.getAssets().list(source);
         if (entries != null && entries.length > 0) {
             if (!target.isDirectory() && !target.mkdirs()) throw new IllegalStateException("无法创建 Pi 资源目录");
@@ -122,6 +123,44 @@ final class PiAgentBridge {
                 for (int count; (count = input.read(buffer)) >= 0;) output.write(buffer, 0, count);
             }
         }
+    }
+
+    static void prepareNpm(Context context, File home) throws Exception {
+        String version = "11.6.2";
+        File root = new File(home, "npm"), target = new File(root, version);
+        if (!new File(target, "payload-complete.txt").isFile() || !new File(target, "bin/npm-cli.js").isFile()) {
+            File temporary = new File(root, "." + version + "-installing");
+            deleteTree(temporary);
+            try {
+                copyAssets(context, "npm/" + version, temporary);
+                if (!new File(temporary, "payload-complete.txt").isFile() || !new File(temporary, "bin/npm-cli.js").isFile())
+                    throw new IllegalStateException("内置 npm 资源不完整");
+                deleteTree(target);
+                if (!temporary.renameTo(target)) throw new IllegalStateException("无法启用内置 npm");
+            } catch (Exception exception) {
+                deleteTree(temporary);
+                throw exception;
+            }
+        }
+        File bin = new File(home, "bin");
+        if (!bin.isDirectory() && !bin.mkdirs()) throw new IllegalStateException("无法创建 Node 命令目录");
+        File launcher = new File(context.getApplicationInfo().nativeLibraryDir, "libnode_launcher.so");
+        if (!launcher.isFile()) throw new IllegalStateException("内置 Node 启动器缺失");
+        File node = new File(bin, "node");
+        // APK replacement changes nativeLibraryDir; Files.exists without following links
+        // also finds the dangling entry left after Android removes the old installation.
+        if (java.nio.file.Files.exists(node.toPath(), java.nio.file.LinkOption.NOFOLLOW_LINKS)
+                && !node.getCanonicalFile().equals(launcher.getCanonicalFile())) java.nio.file.Files.delete(node.toPath());
+        if (!node.exists()) android.system.Os.symlink(launcher.getAbsolutePath(), node.getAbsolutePath());
+    }
+
+    private static void deleteTree(File file) throws Exception {
+        if (!file.exists()) return;
+        if (file.isDirectory()) {
+            File[] children = file.listFiles();
+            if (children != null) for (File child : children) deleteTree(child);
+        }
+        if (!file.delete()) throw new IllegalStateException("无法清理未完成的 npm 资源");
     }
 
     synchronized void prompt(String id, String config, String text, String sdkHistory,

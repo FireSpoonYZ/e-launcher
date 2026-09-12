@@ -6,7 +6,7 @@
   "scripts": {
     "build:android": "node build.js",
     "check": "node check.js",
-    "test": "node settings-check.js && node check.js && node sdk-check.js && node build.js && node check-bridge.js"
+    "test": "node settings-check.js && node check.js && node sdk-check.js && node build.js && node check-bridge.js && node ../app/src/androidTest/assets/npm-check.cjs node_modules/npm/bin/npm-cli.js ../app/src/main/assets/pi-runtime.cjs"
   },
   "engines": {
     "node": ">=22.19.0"
@@ -14,7 +14,8 @@
   "dependencies": {
     "@earendil-works/pi-agent-core": "0.85.1",
     "@earendil-works/pi-ai": "0.85.1",
-    "@earendil-works/pi-coding-agent": "0.85.1"
+    "@earendil-works/pi-coding-agent": "0.85.1",
+    "npm": "11.6.2"
   },
   "devDependencies": {
     "esbuild": "0.25.11"

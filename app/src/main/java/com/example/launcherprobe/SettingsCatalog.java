@@ -58,6 +58,19 @@ final class SettingsCatalog {
         return source.equals("npm:" + name) || source.startsWith("npm:" + name + "@");
     }
 
+    static String normalizeNpmSource(String value) {
+        String source = value.trim();
+        if (source.startsWith("npm:")) source = source.substring(4);
+        String name = "(?:@[a-z0-9][a-z0-9._-]*/)?[a-z0-9][a-z0-9._-]*";
+        String version = "[A-Za-z0-9*~^<>=][A-Za-z0-9._*+~^<>=-]*";
+        int versionAt = source.startsWith("@") ? source.indexOf('@', source.indexOf('/') + 1) : source.indexOf('@');
+        String packageName = versionAt < 0 ? source : source.substring(0, versionAt);
+        String packageVersion = versionAt < 0 ? null : source.substring(versionAt + 1);
+        if (!packageName.matches(name) || (packageVersion != null && !packageVersion.matches(version)))
+            throw new IllegalArgumentException("请输入有效的 npm 包名，可附带版本");
+        return "npm:" + source;
+    }
+
     static boolean keyword(JSONObject item, String kind) {
         if (kind.isEmpty()) return true;
         JSONArray words = item.optJSONArray("keywords");

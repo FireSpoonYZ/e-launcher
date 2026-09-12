@@ -2,13 +2,17 @@
 
 原生 Java Android 桌面、固定导航手势与小型聊天 Agent。保留默认 HOME 请求、按本地语言排序的当前用户应用入口、显式组件启动和失败提示。固定导航手势直接适配自 [Ogesture](https://github.com/tanujnotes/Ogesture)，不恢复 HyperOS 原生桌面动画。
 
+## 界面迁移方案
+
+计划保留原生 Launcher，将其余应用自绘页面迁移到 Capacitor + React + Tailwind CSS + TypeScript。范围、Android 接入、原生插件和分阶段验收见 [非 Launcher 界面迁移方案](design/capacitor-migration/README.md)。目前仅完成技术选型文档，尚未实施。
+
 ## Pi Agent 与设置
 
 Pi 模式接入固定版本 **0.85.1** 的完整 coding-agent SDK，提供模型、思考强度、原生工具与扩展、压缩重试、资源及包管理和 OAuth。当前聊天的模型选择与启动默认值分开保存。历史树位于聊天页顶部的新建对话之前，首页不显示该入口。
 
 独立设置页保留通用、外观、服务商、技能、MCP、扩展、关于七类，其余配置放入高级配置，覆盖文档中的 65 个 settings 字段。全局／工作区表单与 JSON 编辑器共用私有文件；支持自动格式化、未知字段和数字写法保留、草稿、冲突检查及上一版。开放式模型与兼容性结构可直接编辑完整 models.json。
 
-界面支持跟随系统／中英文、浅色／深色、首页图片预览和遮罩。扩展社区使用 npm 公开元数据，提供搜索和分页；配置状态、SDK 找到的安装路径与成功加载分别说明。关于页可查看实际应用版本和 GitHub 最新公开发布。npm／Git 安装仍需要 Android 运行环境具备对应命令，失败会显示实际错误。
+界面支持跟随系统／中英文、浅色／深色、首页图片预览和遮罩。扩展页可直接输入 npm 包名安装，扩展社区使用 npm 公开元数据并提供搜索和分页；配置状态、SDK 找到的安装路径与成功加载分别说明。APK 内置与 Node 24 兼容的官方 npm 11.6.2，无需 Termux 或系统 npm；Git 来源仍需要对应系统命令。安装第三方包可能执行 lifecycle 脚本和代码，请仅使用可信来源。安装成功后会重新读取资源并报告加载、停用／过滤或错误状态，当前聊天下一次发送时使用新扩展。
 
 参见 [运行时与构建说明](pi-runtime/README.md)、[设计](design/pi-settings/README.md) 和 [实施／验证记录](design/pi-settings/IMPLEMENTATION.md)。本次 Pi 设置改动按用户要求仅做本地验证，以下早期 ADB 记录不代表新版 Pi SDK、OAuth 或设置界面已完成真机验收。
 
@@ -55,7 +59,7 @@ Pi 模式接入固定版本 **0.85.1** 的完整 coding-agent SDK，提供模型
 
 ## 构建与检查（Windows PowerShell）
 
-JDK17、Gradle8.11.1、SDK Platform35 / Build Tools35.0.0；AGP8.9.1，minSdk29、targetSdk35。运行时网络使用 OkHttp 3.14.9，不包含 Gradle Wrapper 二进制。首次构建需下载构建依赖并接受 SDK 许可。先运行 `scripts/prepare-pi-runtime.ps1` 准备 Node Mobile 和 SDK 资源，JavaScript 改动后运行 `npm --prefix pi-runtime test` 重建并测试 bundle。工具目录与当前开发环境一致：
+JDK17、Gradle8.11.1、SDK Platform35 / Build Tools35.0.0；AGP8.9.1，minSdk29、targetSdk35。运行时网络使用 OkHttp 3.14.9，不包含 Gradle Wrapper 二进制。首次构建需下载构建依赖并接受 SDK 许可。先运行 `scripts/prepare-pi-runtime.ps1` 准备 Node Mobile、SDK 资源和锁定完整性的官方 npm 11.6.2 payload；JavaScript 改动后运行 `npm --prefix pi-runtime test` 重建并测试 bundle。构建会把真实 arm64 Node executable 以 `libnode_launcher.so` 打入 APK 的 native library 目录；npm 的完整目录保存在版本化 asset 中并仅在版本首次使用时原子展开。工具目录与当前开发环境一致：
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/verify.ps1
