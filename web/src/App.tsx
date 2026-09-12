@@ -9,8 +9,36 @@ import { SettingsHome, GeneralPage, AppearancePage, DevicePage, AboutPage } from
 import { ProvidersPage, ResourcesPage } from './Resources';
 import { AdvancedPage, EditorPage } from './Editor';
 
+declare global {
+  interface Window { PagerGesture?: {gestureId(): number; setBlocked(id: number, blocked: boolean): void}; }
+}
+
 function Navigation() {
   const back = useBack(); const location = useLocation();
+  useEffect(() => {
+    const gestureTarget = 'textarea,input,select,[contenteditable],[role="dialog"],.composer-popover,.attachment-popover';
+    const blockPager = (event: TouchEvent) => {
+      const bridge = window.PagerGesture;
+      if (!bridge) return;
+      const target = event.target instanceof Element ? event.target : null;
+      const horizontal = target?.closest('pre,.table-scroll,.katex-display,.attachments');
+      const scrollsHorizontally = !!horizontal && horizontal.scrollWidth > horizontal.clientWidth;
+      bridge.setBlocked(bridge.gestureId(), event.touches.length !== 1
+        || !!target?.closest(gestureTarget) || scrollsHorizontally || !!window.getSelection()?.toString()
+        || !!document.querySelector('[role="dialog"],.composer-popover,.attachment-popover')
+        || !window.location.hash.startsWith('#/chat'));
+    };
+    const selectionChanged = () => {
+      const bridge = window.PagerGesture;
+      if (bridge && window.getSelection()?.toString()) bridge.setBlocked(bridge.gestureId(), true);
+    };
+    document.addEventListener('touchstart', blockPager, true);
+    document.addEventListener('selectionchange', selectionChanged);
+    return () => {
+      document.removeEventListener('touchstart', blockPager, true);
+      document.removeEventListener('selectionchange', selectionChanged);
+    };
+  }, []);
   useEffect(() => {
     const viewport = window.visualViewport;
     let keyboardVisible = window.screen.height - (viewport?.height ?? window.innerHeight) > 140;

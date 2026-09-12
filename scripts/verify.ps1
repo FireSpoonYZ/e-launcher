@@ -2,16 +2,22 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 Set-Location (Split-Path $PSScriptRoot -Parent)
 if (-not $env:JAVA_HOME) { throw 'JAVA_HOME must point to JDK 21' }
-$javaVersion = & "$env:JAVA_HOME\bin\java.exe" --version | Select-Object -First 1
-if ($LASTEXITCODE -ne 0 -or $javaVersion -notmatch '^(openjdk|java) 21[.]') { throw "JDK 21 is required; found $javaVersion" }
+$releaseFile = Join-Path $env:JAVA_HOME 'release'
+$javaVersion = if (Test-Path $releaseFile) {
+    (Get-Content $releaseFile | Where-Object { $_ -match '^JAVA_VERSION=' } | Select-Object -First 1)
+} else { '' }
+if ($javaVersion -notmatch '^JAVA_VERSION="21(?:[.]|\")') { throw "JDK 21 is required; found $javaVersion" }
 $env:ANDROID_HOME = if ($env:ANDROID_HOME) { $env:ANDROID_HOME } else { "$env:LOCALAPPDATA\Android\Sdk" }
 $env:PATH = "$env:JAVA_HOME\bin;$env:PATH"
 $gradle = Join-Path (Get-Location) 'gradlew.bat'
+$androidJar = Join-Path $env:ANDROID_HOME 'platforms\android-36\android.jar'
+if (-not (Test-Path $androidJar)) { throw "Android 36 platform is required; missing $androidJar" }
 
-# Pure Java production code, no Android stubs or test dependencies.
+# Production logic checks use only the Android JSON API required by chat message metadata.
 $classes = 'build\test-classes'
 New-Item -ItemType Directory -Force $classes | Out-Null
-& "$env:JAVA_HOME\bin\javac.exe" '-J-Duser.language=en' -encoding UTF-8 -d $classes `
+& "$env:JAVA_HOME\bin\javac.exe" '-J-Duser.language=en' -encoding UTF-8 -cp $androidJar -d $classes `
+    app/src/main/java/com/example/launcherprobe/ChatAttachment.java `
     app/src/main/java/com/example/launcherprobe/AgentLoop.java `
     app/src/main/java/com/example/launcherprobe/ActionFence.java `
     app/src/main/java/com/example/launcherprobe/AccessibilityServices.java `
@@ -26,6 +32,7 @@ New-Item -ItemType Directory -Force $classes | Out-Null
     app/src/main/java/com/example/launcherprobe/ReasoningEffort.java `
     app/src/main/java/com/example/launcherprobe/RunEpoch.java `
     app/src/main/java/com/example/launcherprobe/SwipeDetector.java `
+    app/src/main/java/com/example/launcherprobe/PagerState.java `
     app/src/main/java/com/example/launcherprobe/NavigationSession.java `
     app/src/main/java/com/example/launcherprobe/SearchConfig.java `
     app/src/main/java/com/example/launcherprobe/SearchParser.java `

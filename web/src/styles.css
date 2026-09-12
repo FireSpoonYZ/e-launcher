@@ -66,6 +66,7 @@ small, .secondary { font-size: .85rem; color: var(--muted); }
 
 /* Open reading surface; only user turns and the composer have a container. */
 .chat-page { display: flex; flex-direction: column; position: relative; }
+.chat-header, .messages, .composer-wrap { touch-action: pan-y; }
 .chat-header { display: flex; align-items: center; justify-content: space-between; padding: 10px 16px; min-height: 74px; flex: none; }
 .chat-header > .icon-button:first-child svg { width: 25px; height: 25px; }
 .model-title { min-width: 0; max-width: 70%; text-align: center; line-height: 1.3; }
@@ -124,8 +125,9 @@ small, .secondary { font-size: .85rem; color: var(--muted); }
 .chat-empty { display: flex; flex-direction: column; min-height: 85%; align-items: center; justify-content: center; text-align: center; }
 .empty-mark { font-weight: 500; font-size: 2.5rem; letter-spacing: -.08em; line-height: 1; display: inline-block; color: var(--accent); margin-bottom: 24px; }
 .chat-empty h1 { font-size: 1.5rem; font-weight: 600; letter-spacing: -.025em; margin-bottom: 8px; }.chat-empty p { color: var(--muted); font-size: .9rem; }
-.composer-wrap { position: relative; flex: none; padding: 6px 12px 5px; background: var(--bg); }
-.composer { background: var(--surface); border-radius: 24px; padding: 8px 10px; }
+.composer-wrap { position: relative; flex: none; padding: 6px 20px 8px; background: var(--bg); }
+.composer { position: relative; background: var(--surface); border-radius: 20px; padding: 8px 10px; }
+.composer:has(.attachment-popover) > textarea, .composer:has(.attachment-popover) > .attachments, .composer:has(.attachment-popover) > .composer-tools { position: relative; z-index: 26; }
 .composer textarea { display: block; width: 100%; min-height: 42px; max-height: 160px; padding: 8px 8px 2px; background: transparent; border: 0; border-radius: 0; outline: none; resize: none; }
 .composer-tools { display: flex; align-items: center; gap: 1px; }.composer-spacer { flex: 1; }
 .send-button { display: grid; place-items: center; width: 40px; height: 40px; border-radius: 50%; background: var(--text); color: var(--bg); margin: 2px; }
@@ -134,6 +136,30 @@ small, .secondary { font-size: .85rem; color: var(--muted); }
 .scroll-latest { position: absolute; right: 20px; top: -48px; background: var(--bg); border: 1px solid var(--line); box-shadow: 0 3px 12px #0001; }
 .run-status { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: .8rem; padding: 0 10px 8px; }
 .pulse-dot { width: 6px; height: 6px; background: var(--accent); border-radius: 50%; }
+.attachments { display: flex; gap: 8px; max-height: min(34vh,260px); overflow: auto; padding: 2px 0 8px; flex-direction: column; }
+.attachments:not(.sent) { flex-direction: row; align-items: center; max-height: none; overflow-x: auto; overflow-y: hidden; overscroll-behavior-x: contain; scrollbar-width: none; }
+.attachments:not(.sent)::-webkit-scrollbar { display: none; }
+.attachments:not(.sent) .image-attachment { width: 88px; height: 104px; }
+.attachments:not(.sent) .image-attachment img { height: 104px; }
+.attachments:not(.sent) .file-attachment { width: 240px; height: 104px; }
+.attachments:not(.sent) .remove-attachment { top: 0; right: 0; background: transparent; color: #202320; }
+.attachments:not(.sent) .remove-attachment svg { width: 28px; height: 28px; padding: 4px; border-radius: 50%; background: #f5f5f5; }
+.attachments.sent { margin-bottom: 10px; max-height: none; overflow: visible; }
+.image-attachment { position: relative; flex: none; }
+.image-attachment > button:first-child { display: block; width: 100%; }
+.image-attachment img { display: block; width: 100%; max-height: 210px; object-fit: cover; border-radius: 12px; }
+.remove-attachment { position: absolute; right: 4px; top: 4px; width: 44px; height: 44px; display: grid; place-items: center; color: #fff; border-radius: 50%; background: rgb(0 0 0/.58); }
+.file-attachment { display: flex; min-height: 68px; border: 1px solid var(--line); border-radius: 12px; background: color-mix(in srgb,var(--bg) 80%,transparent); overflow: hidden; flex: none; }
+.file-open { display: flex; align-items: center; gap: 12px; text-align: left; padding: 8px 4px 8px 12px; flex: 1; min-width: 0; }
+.file-open > svg { color: var(--accent); width: 28px; height: 28px; }.file-open span { min-width: 0; }.file-open strong,.file-open small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.file-open strong { font-weight: 550; }.file-open small { margin-top: 2px; }
+.remove-file { width: 44px; flex: none; display: grid; place-items: center; color: var(--muted); }
+.attachment-popover-backdrop { position: fixed; z-index: 25; inset: 0; width: 100%; height: 100%; cursor: default; }
+.attachment-popover { position: absolute; z-index: 27; left: 0; bottom: calc(100% + 8px); width: min(280px,100%); padding: 6px 12px; border: 1px solid var(--line); border-radius: 16px; background: var(--bg); box-shadow: 0 12px 36px rgb(0 0 0/.18); }
+.attachment-popover button { display: flex; align-items: center; gap: 14px; width: 100%; height: 56px; text-align: left; }.attachment-popover svg { color: var(--accent); }
+.attachment-error { display: flex; align-items: center; gap: 8px; padding: 8px 10px; color: var(--danger); font-size: .82rem; }.attachment-error span { flex: 1; }.attachment-error button { min-height: 44px; display: flex; align-items: center; gap: 5px; }.attachment-error svg { width: 17px; }
+.preparing { display: block; padding: 2px 8px 4px; }
+.message.user .attachments { min-width: min(68vw,360px); }
+.message.user:has(.attachments) { width: min(88%,520px); }
 
 /* Drawers and sheets share typography, not nested card scaffolding. */
 .dialog-overlay { position: fixed; inset: 0; z-index: 50; background: rgb(0 0 0 / .45); animation: fade-in 150ms ease-out; }

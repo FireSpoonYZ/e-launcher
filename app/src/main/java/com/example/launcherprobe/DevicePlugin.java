@@ -6,6 +6,10 @@ import android.content.Intent;
 import android.net.Uri;
 import android.provider.Settings;
 import android.speech.RecognizerIntent;
+import android.provider.MediaStore;
+
+import androidx.activity.result.PickVisualMediaRequest;
+import androidx.activity.result.contract.ActivityResultContracts;
 
 import com.getcapacitor.JSObject;
 import com.getcapacitor.Plugin;
@@ -82,6 +86,95 @@ public final class DevicePlugin extends Plugin {
         call.resolve(object("text", text));
     }
 
+    @PluginMethod public void chooseAttachment(PluginCall call) {
+        try {
+            String kind = required(call, "kind");
+            required(call, "conversationId");
+            if ("camera".equals(kind)) {
+                java.io.File camera = new java.io.File(getContext().getCacheDir(), "chat-camera");
+                if (!camera.isDirectory() && !camera.mkdirs()) throw new IllegalStateException("无法准备相机文件");
+                java.io.File capture = new java.io.File(camera, java.util.UUID.randomUUID() + ".jpg");
+                Uri output = androidx.core.content.FileProvider.getUriForFile(getContext(), getContext().getPackageName() + ".files", capture);
+                call.getData().put("capturePath", capture.getAbsolutePath());
+                Intent intent = new Intent(MediaStore.ACTION_IMAGE_CAPTURE).putExtra(MediaStore.EXTRA_OUTPUT, output)
+                        .addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION | Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                if (intent.resolveActivity(getContext().getPackageManager()) == null) throw new IllegalStateException("没有可用的相机应用");
+                startActivityForResult(call, intent, "attachmentResult");
+            } else {
+                boolean image = "image".equals(kind);
+                if (!image && !"file".equals(kind)) throw new IllegalArgumentException("附件类型无效");
+                Intent intent = image
+                        ? new ActivityResultContracts.PickMultipleVisualMedia().createIntent(getContext(),
+                                new PickVisualMediaRequest.Builder()
+                                        .setMediaType(ActivityResultContracts.PickVisualMedia.ImageOnly.INSTANCE).build())
+                        : new Intent(Intent.ACTION_OPEN_DOCUMENT).setType("*/*")
+                                .addCategory(Intent.CATEGORY_OPENABLE).putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
+                startActivityForResult(call, intent, "attachmentResult");
+            }
+        } catch (Exception exception) { reject(call, exception); }
+    }
+
+    @ActivityCallback private void attachmentResult(PluginCall call, androidx.activity.result.ActivityResult result) {
+        if (call == null) return;
+        String capturePath = call.getString("capturePath");
+        if (result.getResultCode() != Activity.RESULT_OK) {
+            if (capturePath != null) new java.io.File(capturePath).delete();
+            call.reject("选择已取消"); return;
+        }
+        worker.execute(() -> {
+            java.util.List<ChatAttachment> imported = new java.util.ArrayList<>();
+            try {
+                String conversation = required(call, "conversationId");
+                ChatStore store = ChatCoordinator.get(getContext()).store();
+                store.beginAttachmentImport(conversation);
+                AttachmentStore files = new AttachmentStore(getContext());
+                if (capturePath != null) {
+                    java.io.File capture = new java.io.File(capturePath);
+                    imported.add(files.stageUri(androidx.core.content.FileProvider.getUriForFile(getContext(), getContext().getPackageName() + ".files", capture), true));
+                } else {
+                    Intent data = result.getData();
+                    if (data == null) throw new IllegalArgumentException("未选择附件");
+                    boolean image = "image".equals(call.getString("kind"));
+                    if (data.getClipData() != null) for (int i = 0; i < data.getClipData().getItemCount(); i++)
+                        imported.add(files.stageUri(data.getClipData().getItemAt(i).getUri(), image));
+                    else if (data.getData() != null) imported.add(files.stageUri(data.getData(), image));
+                }
+                java.util.List<ChatAttachment> published = store.publishDraftAttachments(conversation, imported);
+                call.resolve(object("attachments", AttachmentStore.json(published)));
+                imported.clear();
+            } catch (Exception exception) {
+                reject(call, exception);
+            } finally {
+                for (ChatAttachment item : imported) new java.io.File(item.path).delete();
+                if (capturePath != null) new java.io.File(capturePath).delete();
+            }
+        });
+    }
+
+    @PluginMethod public void removeAttachment(PluginCall call) {
+        try {
+            ChatStore store = ChatCoordinator.get(getContext()).store();
+            store.removeDraftAttachment(required(call, "conversationId"), required(call, "attachmentId"));
+            call.resolve();
+        } catch (Exception exception) { reject(call, exception); }
+    }
+
+    @PluginMethod public void openAttachment(PluginCall call) {
+        try {
+            String id = required(call, "attachmentId"); ChatAttachment found = null;
+            ChatStore store = ChatCoordinator.get(getContext()).store();
+            for (ChatAttachment item : store.draftAttachments()) if (id.equals(item.id)) found = item;
+            for (ConversationTree.Node node : store.tree().nodes())
+                for (ChatAttachment item : node.message.attachments) if (id.equals(item.id)) found = item;
+            if (found == null) throw new SecurityException("附件不存在");
+            java.io.File file = new AttachmentStore(getContext()).requireFile(found);
+            Uri uri = androidx.core.content.FileProvider.getUriForFile(getContext(), getContext().getPackageName() + ".files", file);
+            Intent intent = new Intent(Intent.ACTION_VIEW).setDataAndType(uri, found.mimeType).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            if (intent.resolveActivity(getContext().getPackageManager()) == null) throw new IllegalStateException("没有可打开此附件的应用");
+            getActivity().startActivity(intent); call.resolve();
+        } catch (Exception exception) { reject(call, exception); }
+    }
+
     @PluginMethod public void chooseBackground(PluginCall call) {
         startActivityForResult(call, new Intent(Intent.ACTION_OPEN_DOCUMENT).setType("image/*").addCategory(Intent.CATEGORY_OPENABLE), "backgroundResult");
     }
@@ -106,22 +199,6 @@ public final class DevicePlugin extends Plugin {
             if (background != null) { if (!Arrays.asList("circles", "solid", "image").contains(background)) throw new IllegalArgumentException("background 无效"); BackgroundImage.setMode(getContext(), background); }
             Integer mask = call.getInt("backgroundMask"); if (mask != null) edit.putInt("backgroundMask", Math.max(20, Math.min(100, mask)));
             edit.apply(); call.resolve(stateObject());
-        } catch (Exception exception) { reject(call, exception); }
-    }
-    @PluginMethod public void setAgentMode(PluginCall call) { getContext().getSharedPreferences("chat", android.content.Context.MODE_PRIVATE).edit().putBoolean("pi_text_mode", call.getBoolean("pi", false)).apply(); call.resolve(); }
-    @PluginMethod public void legacyProvider(PluginCall call) {
-        ChatStore store = ChatCoordinator.get(getContext()).store();
-        call.resolve(object("baseUrl", store.baseUrl(), "model", store.model(),
-                "reasoningEffort", store.reasoningEffort(), "searchProvider", store.searchProvider(),
-                "searchBaseUrl", store.searchBaseUrl()));
-    }
-    @PluginMethod public void setLegacyProvider(PluginCall call) {
-        try {
-            String searchProvider = call.getString("searchProvider", "");
-            String searchBaseUrl = call.getString("searchBaseUrl", "");
-            if (SearchConfig.SEARXNG.equals(SearchConfig.provider(searchProvider))) searchBaseUrl = SearchConfig.validateBaseUrl(searchBaseUrl);
-            ChatCoordinator.get(getContext()).store().settings(ProviderConfig.validateBaseUrl(required(call, "baseUrl")), required(call, "model"), call.getString("apiKey", ChatCoordinator.get(getContext()).store().apiKey()),
-                    call.getString("reasoningEffort", ""), searchProvider, searchBaseUrl, call.getBoolean("pi", false)); call.resolve();
         } catch (Exception exception) { reject(call, exception); }
     }
     @PluginMethod public void openSystemSettings(PluginCall call) {
@@ -165,18 +242,24 @@ public final class DevicePlugin extends Plugin {
             call.resolve();
         });
     }
-    @PluginMethod public void close(PluginCall call) { call.resolve(); getActivity().finish(); }
+    @PluginMethod public void close(PluginCall call) {
+        call.resolve();
+        if (getActivity() instanceof MainActivity) {
+            ((MainActivity) getActivity()).showHomeFromWeb();
+        } else {
+            getActivity().finish();
+        }
+    }
 
     private JSObject stateObject() {
         android.content.SharedPreferences ui = getContext().getSharedPreferences("ui", android.content.Context.MODE_PRIVATE);
         RoleManager roles = getContext().getSystemService(RoleManager.class);
-        String route = getActivity() instanceof WebAppActivity ? ((WebAppActivity) getActivity()).launchRoute() : null;
+        String route = getActivity() instanceof MainActivity ? ((MainActivity) getActivity()).launchRoute() : null;
         return object("launchRoute", route == null ? "/chat" : route,
                 "language", ui.getString("language", "system"), "theme", ui.getString("theme", "system"),
                 "background", ui.getString("background", "circles"), "backgroundMask", AppAppearance.maskStrength(getContext()),
                 "backgroundPath", new java.io.File(getContext().getFilesDir(), "appearance/background.png").isFile()
                     ? new java.io.File(getContext().getFilesDir(), "appearance/background.png").getAbsolutePath() : "",
-                "piMode", getContext().getSharedPreferences("chat", android.content.Context.MODE_PRIVATE).getBoolean("pi_text_mode", false),
                 "homeRole", roles != null && roles.isRoleHeld(RoleManager.ROLE_HOME), "gestureStatus", GestureService.status(getContext()),
                 "canWriteSecureSettings", GestureService.canWrite(getContext()), "accessibilityConnected", GestureService.isConnected());
     }

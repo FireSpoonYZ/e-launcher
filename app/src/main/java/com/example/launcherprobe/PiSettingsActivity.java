@@ -229,12 +229,6 @@ public final class PiSettingsActivity extends Activity {
                             getSharedPreferences("ui", MODE_PRIVATE).edit().putString("language", languages[which]).apply();
                             dialog.dismiss(); recreate();
                         }).setNegativeButton(t("取消"), null).show());
-                note(t("当前运行方式"));
-                boolean pi = getSharedPreferences("chat", MODE_PRIVATE).getBoolean("pi_text_mode", false);
-                link(t("Agent 模式"), pi ? "Pi Agent" : t("Android 工具模式"), () -> new AlertDialog.Builder(this)
-                        .setTitle(t("Agent 模式")).setSingleChoiceItems(new String[]{t("Android 工具模式"), "Pi Agent"}, pi ? 1 : 0,
-                                (dialog, which) -> { getSharedPreferences("chat", MODE_PRIVATE).edit().putBoolean("pi_text_mode", which == 1).apply(); dialog.dismiss(); render(); }).show());
-                action(t("Android 工具模式连接与搜索设置"), () -> { setResult(RESULT_OK, new Intent().putExtra("legacy", true)); finish(); });
                 action(t("Android 应用权限"), () -> startActivity(new Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
                         android.net.Uri.parse("package:" + getPackageName()))));
             } else if (page.equals("服务商")) providers();

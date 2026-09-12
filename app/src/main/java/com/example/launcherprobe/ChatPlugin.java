@@ -34,8 +34,10 @@ public final class ChatPlugin extends Plugin {
         try {
             requireIdle();
             ChatStore store = coordinator.store();
-            if (!store.tree().nodes().isEmpty()) store.newConversation();
+            store.newConversation();
             store.saveDraft("");
+            store.saveDraftAttachments(java.util.Collections.emptyList());
+            store.cleanupAttachments();
             resolve(call, coordinator.snapshot());
         } catch (Exception exception) { reject(call, exception); }
     }
@@ -79,6 +81,7 @@ public final class ChatPlugin extends Plugin {
             if (edit && "user".equals(node.message.role)) {
                 store.selectNode(node.parentId);
                 store.saveDraft(node.message.content == null ? "" : node.message.content);
+                store.saveDraftAttachments(node.message.attachments);
             } else store.selectNode(node.id);
             resolve(call, NativeJson.conversation(store));
         } catch (Exception exception) { reject(call, exception); }
@@ -88,7 +91,7 @@ public final class ChatPlugin extends Plugin {
         try {
             String id = required(call, "conversationId");
             if (!id.equals(coordinator.store().activeId())) throw new IllegalStateException("会话已切换");
-            String request = coordinator.send(required(call, "text"), call.getString("submissionId"));
+            String request = coordinator.send(call.getString("text", ""), call.getString("submissionId"));
             JSObject result = new JSObject();
             result.put("accepted", request != null);
             result.put("requestId", request == null ? JSONObject.NULL : request);

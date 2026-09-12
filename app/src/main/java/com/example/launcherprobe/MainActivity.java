@@ -29,8 +29,6 @@ import android.widget.FrameLayout;
 import android.widget.GridLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
-import android.widget.RadioButton;
-import android.widget.RadioGroup;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -50,7 +48,9 @@ import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
-public class MainActivity extends Activity {
+import com.getcapacitor.BridgeActivity;
+
+public class MainActivity extends BridgeActivity {
     private int IVORY, CHARCOAL, TEAL, MUTED;
     private AppAppearance appearance;
     private String appearanceRevision;
@@ -83,6 +83,10 @@ public class MainActivity extends Activity {
     private ShizukuRepair shizukuRepair;
     private final List<ResolveInfo> apps = new ArrayList<>();
     private FrameLayout root;
+    private PagerRoot pager;
+    private android.webkit.WebView chatWebView;
+    private String initialWebRoute;
+    private volatile boolean trustedWebContent;
     private View homeWallpaper;
     private LinearLayout pageShell;
     private FrameLayout contentStage;
@@ -98,7 +102,6 @@ public class MainActivity extends Activity {
     private final ExecutorService queryExecutor = Executors.newSingleThreadExecutor();
     private List<AgentLoop.Message> history = Collections.emptyList();
     private ChatStore chatStore;
-    private AgentTools agentTools;
     private String activePiRequestId;
     private ChatCoordinator chatCoordinator;
     private ChatCoordinator.Listener coordinatorListener;
@@ -138,10 +141,18 @@ public class MainActivity extends Activity {
 
     @Override
     public void onCreate(Bundle savedInstanceState) {
-        appearance = AppAppearance.read(this); appearance.apply(this);
+        appearance = AppAppearance.read(this);
         IVORY = appearance.background; CHARCOAL = appearance.ink; TEAL = appearance.accent; MUTED = appearance.muted;
         appearanceRevision = AppAppearance.revision(this);
+        initialWebRoute = "/chat/" + ChatCoordinator.get(this).store().activeId();
+        if (savedInstanceState != null && "search".equals(savedInstanceState.getString(PAGE_KEY))) {
+            initialWebRoute = savedInstanceState.getString("web_route", initialWebRoute);
+        }
+        registerPlugin(ChatPlugin.class);
+        registerPlugin(SettingsPlugin.class);
+        registerPlugin(DevicePlugin.class);
         super.onCreate(savedInstanceState);
+        appearance.apply(this);
         suppressHomeEnterTransition(getIntent());
         activityEpoch = ACTIVITY_EPOCH.acquire();
         roles = getSystemService(RoleManager.class);
@@ -161,7 +172,6 @@ public class MainActivity extends Activity {
         };
         chatCoordinator.addListener(coordinatorListener);
         markdown = ResponseMarkdown.create(this, uri -> launch(new Intent(Intent.ACTION_VIEW, uri)));
-        agentTools = new AgentTools(this);
         history = immutable(chatStore.load());
         savedDraft = chatStore.draft();
         loadApps();
@@ -178,26 +188,39 @@ public class MainActivity extends Activity {
             ArrayList<String> expanded = savedInstanceState.getStringArrayList(EXPANDED_TOOLS_KEY);
             if (expanded != null) expandedTools.addAll(expanded);
         }
-        if (Build.VERSION.SDK_INT >= 33) getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
-                android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT, this::handleBack);
-        if ("search".equals(page)) showSearch(); else showHome();
+        boolean restoreWebPage = "search".equals(page);
+        installPager();
+        getOnBackPressedDispatcher().addCallback(this, new androidx.activity.OnBackPressedCallback(true) {
+            @Override public void handleOnBackPressed() {
+                if (pager.page() == PagerState.Page.HOME) return;
+                setEnabled(false);
+                getOnBackPressedDispatcher().onBackPressed();
+                setEnabled(true);
+            }
+        });
+        showHome(false);
+        if (restoreWebPage) pager.show(PagerState.Page.CHAT, false);
     }
 
     @Override
     protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
         setIntent(intent);
-        if (isHomeIntent(intent)) {
+        // BridgeActivity.load delivers the initial intent before installPager().
+        if (pager != null && isHomeIntent(intent)) {
             suppressHomeEnterTransition(intent);
             if (controls != null && controls.isShowing()) controls.dismiss();
-            if (!"home".equals(page)) showHome();
+            showHome(false);
         }
     }
 
     @Override
-    protected void onSaveInstanceState(Bundle outState) {
+    public void onSaveInstanceState(Bundle outState) {
         super.onSaveInstanceState(outState);
         outState.putString(PAGE_KEY, page);
+        String webUrl = chatWebView.getUrl();
+        outState.putString("web_route", webUrl != null && webUrl.contains("#/")
+                ? webUrl.substring(webUrl.indexOf('#') + 1) : initialWebRoute);
         outState.putString(QUERY_KEY, search == null ? savedQuery : search.getText().toString());
         outState.putString(DRAFT_KEY, composerInput == null
                 ? savedDraft : composerInput.getText().toString());
@@ -207,7 +230,7 @@ public class MainActivity extends Activity {
     }
 
     @Override
-    protected void onResume() {
+    public void onResume() {
         super.onResume();
         if (!agentRunning && !appearanceRevision.equals(AppAppearance.revision(this))) { recreate(); return; }
         GestureService.statusListener = refreshGestures;
@@ -219,7 +242,7 @@ public class MainActivity extends Activity {
     }
 
     @Override
-    protected void onPause() {
+    public void onPause() {
         savePiPreview();
         shizukuRepair.pause();
         if (GestureService.statusListener == refreshGestures) GestureService.statusListener = null;
@@ -227,18 +250,9 @@ public class MainActivity extends Activity {
         super.onPause();
     }
 
-    @Override
-    @android.annotation.SuppressLint("GestureBackNavigation")
-    public void onBackPressed() { handleBack(); }
-
-    private void handleBack() {
-        if (treeSheet != null) treeSheet.dismiss();
-        else if (chatDrawer != null) closeChatDrawer();
-        else if ("search".equals(page)) showHome();
-    }
 
     @Override
-    protected void onDestroy() {
+    public void onDestroy() {
         savePiPreview();
         if (treeSheet != null) treeSheet.dismiss();
         ACTIVITY_EPOCH.retire(activityEpoch);
@@ -251,6 +265,63 @@ public class MainActivity extends Activity {
         shizukuRepair.destroy();
         super.onDestroy();
     }
+
+    @Override public void onConfigurationChanged(android.content.res.Configuration configuration) {
+        super.onConfigurationChanged(configuration);
+        if (chatWebView != null) chatWebView.getSettings().setTextZoom(
+                Math.round(configuration.fontScale * 100));
+    }
+
+    private void installPager() {
+        chatWebView = bridge.getWebView();
+        android.view.ViewParent parent = chatWebView.getParent();
+        if (parent instanceof android.view.ViewGroup) ((android.view.ViewGroup) parent).removeView(chatWebView);
+        chatWebView.getSettings().setTextZoom(Math.round(
+                getResources().getConfiguration().fontScale * 100));
+        trustedWebContent = trustedWebUrl(chatWebView.getUrl());
+        bridge.addWebViewListener(new com.getcapacitor.WebViewListener() {
+            @Override public void onPageStarted(android.webkit.WebView view) {
+                trustedWebContent = trustedWebUrl(view.getUrl());
+            }
+            @Override public void onPageCommitVisible(android.webkit.WebView view, String url) {
+                trustedWebContent = trustedWebUrl(url);
+            }
+        });
+        pager = new PagerRoot(this, chatWebView, PagerState.Page.HOME, changed -> {
+            if (changed == PagerState.Page.HOME && "search".equals(page)) {
+                // Settings/history are temporary routes, never the desktop's adjacent page.
+                initialWebRoute = "/chat/" + chatStore.activeId();
+                chatWebView.evaluateJavascript("if (!/^#\\/chat(?:\\/|$)/.test(location.hash)) location.replace("
+                        + JSONObject.quote("#" + initialWebRoute) + ")", null);
+            }
+            page = changed == PagerState.Page.CHAT ? "search" : "home";
+            getWindow().setStatusBarColor(changed == PagerState.Page.CHAT
+                    ? appearance.surface : IVORY);
+            getWindow().setNavigationBarColor(appearance.surface);
+        });
+        chatWebView.addJavascriptInterface(new Object() {
+            @android.webkit.JavascriptInterface public int gestureId() {
+                return trustedWebContent ? pager.gestureId() : -1;
+            }
+            @android.webkit.JavascriptInterface public void setBlocked(int gestureId, boolean blocked) {
+                if (trustedWebContent) pager.setGestureBlocked(gestureId, blocked);
+            }
+        }, "PagerGesture");
+        setContentView(pager);
+    }
+
+    private boolean trustedWebUrl(String value) {
+        if (value == null || bridge == null) return false;
+        android.net.Uri expected = android.net.Uri.parse(bridge.getLocalUrl());
+        android.net.Uri actual = android.net.Uri.parse(value);
+        return expected.getScheme() != null && expected.getScheme().equals(actual.getScheme())
+                && expected.getAuthority() != null
+                && expected.getAuthority().equals(actual.getAuthority());
+    }
+
+    String launchRoute() { return initialWebRoute == null ? "/chat" : initialWebRoute; }
+
+    void showHomeFromWeb() { runOnUiThread(() -> showHome(true)); }
 
     private static boolean isHomeIntent(Intent intent) {
         return intent != null && Intent.ACTION_MAIN.equals(intent.getAction())
@@ -279,6 +350,7 @@ public class MainActivity extends Activity {
         contentStage.removeAllViews();
         contentStage.addView(content, match());
         boolean chat = "search".equals(page);
+        composerDock.setVisibility(chat ? View.VISIBLE : View.GONE);
         root.setBackgroundColor(chat ? appearance.surface : IVORY);
         homeWallpaper.setVisibility(chat ? View.INVISIBLE : View.VISIBLE);
         getWindow().setStatusBarColor(chat ? appearance.surface : IVORY);
@@ -341,10 +413,14 @@ public class MainActivity extends Activity {
             }
             return insets;
         });
-        setContentView(root);
+        pager.setHome(root);
     }
 
     private void showHome() {
+        showHome(true);
+    }
+
+    private void showHome(boolean animated) {
         if (treeSheet != null) treeSheet.dismiss();
         View focused = getCurrentFocus();
         if (focused != null) {
@@ -353,9 +429,9 @@ public class MainActivity extends Activity {
             if (keyboard != null) keyboard.hideSoftInputFromWindow(focused.getWindowToken(), 0);
         }
         closeChatDrawer(false);
-        if (composerInput != null) {
-            composerInput.clearFocus();
-            pageShell.requestFocus();
+        if (root != null) {
+            pager.show(PagerState.Page.HOME, animated);
+            return;
         }
         page = "home";
         savedQuery = search == null ? savedQuery : search.getText().toString();
@@ -370,6 +446,7 @@ public class MainActivity extends Activity {
         LinearLayout column = column();
         ScrollView scroll = new ScrollView(this);
         scroll.setClipToPadding(false);
+        scroll.setPadding(0, 0, 0, dp(86));
         scroll.addView(column, new ScrollView.LayoutParams(-1, -2));
         column.setPadding(dp(22), 0, dp(22), dp(8));
         // Keep labels readable even when the photo mask is only 20%.
@@ -423,7 +500,24 @@ public class MainActivity extends Activity {
         compactStatus.setPadding(0, dp(8), 0, dp(16));
         column.addView(compactStatus);
 
+        LinearLayout chatEntry = row();
+        chatEntry.setGravity(Gravity.CENTER);
+        chatEntry.setPadding(dp(16), 0, dp(12), 0);
+        chatEntry.setBackground(shape(appearance.panel, 28, 1, appearance.border));
+        ImageView bubble = new ImageView(this); bubble.setImageDrawable(new ChatIcon("bubble", appearance.accent));
+        chatEntry.addView(bubble, new LinearLayout.LayoutParams(dp(28), dp(28)));
+        TextView chatLabel = label(t("聊天  ‹"), 16, CHARCOAL);
+        chatLabel.setGravity(Gravity.CENTER_VERTICAL);
+        chatLabel.setPadding(dp(10), 0, 0, 0);
+        chatEntry.addView(chatLabel, new LinearLayout.LayoutParams(-2, -1));
+        chatEntry.setContentDescription(t("打开聊天")); chatEntry.setFocusable(true); chatEntry.setClickable(true);
+        chatEntry.setOnClickListener(view -> showSearch());
+        FrameLayout.LayoutParams entryParams = new FrameLayout.LayoutParams(-2, dp(54), Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+        entryParams.bottomMargin = dp(16);
+        homeContent.addView(chatEntry, entryParams);
+
         setPage(homeContent);
+        pager.show(PagerState.Page.HOME, animated);
         updateClock();
     }
 
@@ -432,11 +526,16 @@ public class MainActivity extends Activity {
     }
 
     private void launchWeb(String route, String prompt, String submissionId) {
-        Intent intent = new Intent(this, WebAppActivity.class).putExtra("route", route);
-        if (prompt != null) intent.putExtra("prompt", prompt);
-        if (submissionId != null) intent.putExtra("submissionId", submissionId);
-        startActivity(intent);
-        overridePendingTransition(android.R.anim.fade_in, android.R.anim.fade_out);
+        if (route == null || !route.startsWith("/")) throw new IllegalArgumentException("route must be local");
+        initialWebRoute = route;
+        page = "search";
+        chatWebView.evaluateJavascript("location.hash=" + JSONObject.quote("#" + route), null);
+        pager.show(PagerState.Page.CHAT, true);
+        if (prompt != null && submissionId != null) try {
+            chatCoordinator.send(prompt, submissionId);
+        } catch (Exception ignored) {
+            // Snapshot/event recovery exposes the actual rejection to the Web UI.
+        }
     }
 
     private void showSearchNative() {
@@ -459,7 +558,6 @@ public class MainActivity extends Activity {
         title.setTypeface(null, android.graphics.Typeface.BOLD);
         title.setContentDescription(t("选择模型与配置服务"));
         title.setOnClickListener(view -> {
-            if (!chatStore.piTextMode()) { showProviderSettings(); return; }
             if (canChangeConversation()) startActivityForResult(new Intent(this, PiSettingsActivity.class).putExtra("pickModel", true), 702);
         });
         title.setFocusable(true);
@@ -662,8 +760,7 @@ public class MainActivity extends Activity {
     }
 
     private void showThinkingLevelPickerNative() {
-        if (!chatStore.piTextMode() || !canChangeConversation()
-                || thinkingLevelQueryToken != null) return;
+        if (!canChangeConversation() || thinkingLevelQueryToken != null) return;
         if ("home".equals(page)) showSearch();
         final String conversationId = chatStore.activeId();
         final long owner = activityEpoch;
@@ -826,9 +923,6 @@ public class MainActivity extends Activity {
 
     @Override protected void onActivityResult(int request, int result, Intent data) {
         super.onActivityResult(request, result, data);
-        if (request == 701 && result == RESULT_OK && data != null && data.getBooleanExtra("legacy", false)) {
-            showLegacyProviderSettings();
-        }
         if (request == 702 && result == RESULT_OK && data != null) {
             try {
                 chatStore.setPiSelection(data.getStringExtra("provider"), data.getStringExtra("model"), data.getStringExtra("thinkingLevel"));
@@ -1118,8 +1212,7 @@ public class MainActivity extends Activity {
             stopButton.setVisibility(agentRunning ? View.VISIBLE : View.GONE);
         }
         if (thinkingLevelButton != null) {
-            boolean enabled = chatStore.piTextMode() && !agentRunning
-                    && thinkingLevelQueryToken == null;
+            boolean enabled = !agentRunning && thinkingLevelQueryToken == null;
             thinkingLevelButton.setEnabled(enabled);
             thinkingLevelButton.setAlpha(enabled ? 1f : .35f);
         }
@@ -1434,7 +1527,6 @@ public class MainActivity extends Activity {
     }
 
     private String currentModelLabel() {
-        if (!chatStore.piTextMode()) return "E Launcher ⌄";
         try {
             JSONObject selection = new JSONObject(chatStore.piSelection());
             String model = selection.optString("model", "");
@@ -1445,97 +1537,6 @@ public class MainActivity extends Activity {
 
     private void showProviderSettings() {
         launchWeb("/settings", null, null);
-    }
-
-    private void showLegacyProviderSettings() {
-        final Dialog dialog = new Dialog(this);
-        LinearLayout sheet = column();
-        sheet.setPadding(dp(24), dp(20), dp(24), dp(24));
-        sheet.addView(label(t("OpenAI 兼容模型"), 24, CHARCOAL));
-        sheet.addView(label(t("Agent 模式"), 16, CHARCOAL));
-        RadioGroup agentMode = new RadioGroup(this);
-        agentMode.setOrientation(RadioGroup.HORIZONTAL);
-        optionChoice(agentMode, t("工具模式"), "tools", chatStore.piTextMode() ? "pi" : "tools");
-        optionChoice(agentMode, "Pi Agent", "pi", chatStore.piTextMode() ? "pi" : "tools");
-        sheet.addView(agentMode);
-        EditText base = new EditText(this);
-        base.setHint("Base URL");
-        base.setText(chatStore.baseUrl());
-        sheet.addView(base);
-        EditText model = new EditText(this);
-        model.setHint(t("模型，如 gpt-4o-mini"));
-        model.setText(chatStore.model());
-        sheet.addView(model);
-        EditText key = new EditText(this);
-        key.setHint("API Key");
-        key.setInputType(android.text.InputType.TYPE_CLASS_TEXT
-                | android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD);
-        key.setText(chatStore.apiKey());
-        sheet.addView(key);
-        sheet.addView(label(t("思考强度"), 16, CHARCOAL));
-        RadioGroup reasoning = new RadioGroup(this);
-        reasoning.setOrientation(RadioGroup.HORIZONTAL);
-        String currentReasoning = chatStore.reasoningEffort();
-        optionChoice(reasoning, t("默认"), ReasoningEffort.DEFAULT, currentReasoning);
-        optionChoice(reasoning, t("低"), ReasoningEffort.LOW, currentReasoning);
-        optionChoice(reasoning, t("中"), ReasoningEffort.MEDIUM, currentReasoning);
-        optionChoice(reasoning, t("高"), ReasoningEffort.HIGH, currentReasoning);
-        sheet.addView(reasoning);
-        sheet.addView(label(t("搜索服务"), 16, CHARCOAL));
-        RadioGroup searchProvider = new RadioGroup(this);
-        searchProvider.setOrientation(RadioGroup.HORIZONTAL);
-        String currentSearchProvider = chatStore.searchProvider();
-        optionChoice(searchProvider, "DuckDuckGo", SearchConfig.DUCKDUCKGO,
-                currentSearchProvider);
-        optionChoice(searchProvider, "SearXNG", SearchConfig.SEARXNG, currentSearchProvider);
-        sheet.addView(searchProvider);
-        EditText searchBase = new EditText(this);
-        searchBase.setHint("SearXNG HTTPS Base URL");
-        searchBase.setText(chatStore.searchBaseUrl());
-        sheet.addView(searchBase);
-        sheet.addView(label(t("默认不发送 reasoning_effort；低/中/高发送 low/medium/high。仅支持该参数的模型与兼容服务会接受它。SearXNG 地址由用户配置且不会由模型更改；不会静默回退到 DuckDuckGo。密钥保存在应用私有存储中；系统备份已关闭。"), 13, MUTED));
-        button(sheet, t("保存"), view -> {
-            String value;
-            try { value = ProviderConfig.validateBaseUrl(base.getText().toString()); }
-            catch (IllegalArgumentException exception) {
-                Toast.makeText(this, exception.getMessage(), Toast.LENGTH_LONG).show();
-                return;
-            }
-            RadioButton selected = reasoning.findViewById(reasoning.getCheckedRadioButtonId());
-            String effort = selected == null ? ReasoningEffort.DEFAULT
-                    : (String) selected.getTag();
-            RadioButton selectedSearch = searchProvider.findViewById(
-                    searchProvider.getCheckedRadioButtonId());
-            String search = selectedSearch == null ? SearchConfig.DUCKDUCKGO
-                    : (String) selectedSearch.getTag();
-            String configuredSearch = searchBase.getText().toString().trim();
-            if (SearchConfig.SEARXNG.equals(search)) try {
-                configuredSearch = SearchConfig.validateBaseUrl(configuredSearch);
-            } catch (IllegalArgumentException exception) {
-                Toast.makeText(this, exception.getMessage(), Toast.LENGTH_LONG).show();
-                return;
-            }
-            RadioButton selectedMode = agentMode.findViewById(agentMode.getCheckedRadioButtonId());
-            boolean piMode = selectedMode != null && "pi".equals(selectedMode.getTag());
-            chatStore.settings(value, model.getText().toString(), key.getText().toString(), effort,
-                    search, configuredSearch, piMode);
-            updateAgentControls();
-            dialog.dismiss();
-        });
-        ScrollView scroll = new ScrollView(this);
-        scroll.addView(sheet);
-        dialog.setContentView(scroll);
-        dialogMotion(dialog, false);
-        dialog.show();
-    }
-
-    private void optionChoice(RadioGroup group, String label, String value, String current) {
-        RadioButton choice = new RadioButton(this);
-        choice.setId(View.generateViewId());
-        choice.setText(label);
-        choice.setTag(value);
-        group.addView(choice);
-        if (value.equals(current)) group.check(choice.getId());
     }
 
     private GridLayout appGrid(List<ResolveInfo> entries) {

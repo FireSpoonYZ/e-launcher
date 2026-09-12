@@ -134,6 +134,33 @@ public final class GestureChecks {
         assert actions.toString().equals("[home]") : actions;
     }
 
+    private static void pager() {
+        float width = 1000;
+        float fling = 600;
+        assert PagerState.endpoint(PagerState.Page.HOME, width) == 0;
+        assert PagerState.endpoint(PagerState.Page.CHAT, width) == width;
+        assert PagerState.clamp(-1, width) == 0 && PagerState.clamp(1001, width) == width;
+        assert PagerState.settle(PagerState.Page.HOME, 100, width, 0, fling, false)
+                == PagerState.Page.HOME; // Short slow drag springs back.
+        assert PagerState.settle(PagerState.Page.HOME, 280, width, 0, fling, false)
+                == PagerState.Page.CHAT;
+        assert PagerState.settle(PagerState.Page.HOME, 20, width, fling, fling, false)
+                == PagerState.Page.CHAT;
+        assert PagerState.settle(PagerState.Page.HOME, 900, width, -fling, fling, false)
+                == PagerState.Page.HOME; // Reversing the fling returns toward the release direction.
+        assert PagerState.settle(PagerState.Page.CHAT, 100, width, fling, fling, false)
+                == PagerState.Page.CHAT;
+        assert PagerState.settle(PagerState.Page.CHAT, 900, width, 0, fling, false)
+                == PagerState.Page.CHAT;
+        assert PagerState.settle(PagerState.Page.CHAT, 720, width, 0, fling, false)
+                == PagerState.Page.HOME;
+        assert PagerState.settle(PagerState.Page.CHAT, 980, width, -fling, fling, false)
+                == PagerState.Page.HOME;
+        assert PagerState.settle(PagerState.Page.CHAT, 100, width, fling, fling, true)
+                == PagerState.Page.CHAT; // CANCEL restores the page enum, not the pixels.
+        assert PagerState.endpoint(PagerState.Page.CHAT, 700) == 700;
+    }
+
     private static void fluidGeometry() {
         assert FluidGestureGeometry.depth(-10f, 1f) == 0f;
         assert FluidGestureGeometry.depth(0f, 1f) == 0f;
@@ -258,9 +285,10 @@ public final class GestureChecks {
 
     public static void main(String[] args) {
         gestures();
+        pager();
         fluidGeometry();
         lifecycle();
         appSearch();
-        System.out.println("PASS: gestures, fluid geometry, navigation fail-safe ordering and local app search");
+        System.out.println("PASS: gestures, pager settle/restore, fluid geometry, navigation fail-safe ordering and local app search");
     }
 }

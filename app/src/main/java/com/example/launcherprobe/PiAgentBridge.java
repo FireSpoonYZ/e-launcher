@@ -163,21 +163,14 @@ final class PiAgentBridge {
         if (!file.delete()) throw new IllegalStateException("无法清理未完成的 npm 资源");
     }
 
-    synchronized void prompt(String id, String config, String text, String sdkHistory,
-            List<AgentLoop.Message> history, Listener nextListener) throws Exception {
+    synchronized void prompt(String id, String config, String text, List<ChatAttachment> attachments,
+            String sdkHistory, List<AgentLoop.Message> history, Listener nextListener) throws Exception {
         if (closed) throw new IllegalStateException("pi 连接已关闭，请重新启动应用进程");
         if (listener != null) throw new IllegalStateException("pi 正在结束上一轮请求，请稍后重试");
-        JSONArray converted = new JSONArray();
-        for (AgentLoop.Message message : history) {
-            if ("system".equals(message.role)) continue;
-            if ((!"user".equals(message.role) && !"assistant".equals(message.role))
-                    || !message.toolCalls.isEmpty() || message.content == null) {
-                throw new IllegalStateException("Pi Agent 无法续接 Android 工具消息，请新建对话或切回 Android 工具模式。");
-            }
-            converted.put(new JSONObject().put("role", message.role).put("content", message.content));
-        }
+        JSONArray converted = ChatStore.piHistory(history);
         JSONObject command = new JSONObject().put("type", "prompt").put("id", id).put("sdk", true)
-                .put("config", new JSONObject(config)).put("history", converted).put("prompt", text);
+                .put("config", new JSONObject(config)).put("history", converted).put("prompt", text)
+                .put("attachments", AttachmentStore.json(attachments));
         if (sdkHistory != null) {
             JSONObject resume = new JSONObject(sdkHistory);
             command.put("sdkHistory", resume.getJSONArray("entries")).put("sdkHistoryTail", resume.getJSONArray("tail"));

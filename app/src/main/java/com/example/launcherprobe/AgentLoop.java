@@ -48,6 +48,7 @@ public final class AgentLoop {
         public final List<ToolCall> toolCalls;
         public final boolean incomplete;
         public final String id;
+        public final List<ChatAttachment> attachments;
 
         public Message(String role, String content) {
             this(role, content, null, Collections.emptyList());
@@ -59,17 +60,23 @@ public final class AgentLoop {
 
         public Message(String role, String content, String toolCallId, List<ToolCall> toolCalls,
                 boolean incomplete) {
-            this(java.util.UUID.randomUUID().toString(), role, content, toolCallId, toolCalls, incomplete);
+            this(java.util.UUID.randomUUID().toString(), role, content, toolCallId, toolCalls, incomplete, Collections.emptyList());
         }
 
         public Message(String id, String role, String content, String toolCallId,
                 List<ToolCall> toolCalls, boolean incomplete) {
+            this(id, role, content, toolCallId, toolCalls, incomplete, Collections.emptyList());
+        }
+
+        public Message(String id, String role, String content, String toolCallId,
+                List<ToolCall> toolCalls, boolean incomplete, List<ChatAttachment> attachments) {
             this.id = id;
             this.role = role;
             this.content = content;
             this.toolCallId = toolCallId;
             this.toolCalls = Collections.unmodifiableList(new ArrayList<>(toolCalls));
             this.incomplete = incomplete;
+            this.attachments = Collections.unmodifiableList(new ArrayList<>(attachments));
         }
     }
 

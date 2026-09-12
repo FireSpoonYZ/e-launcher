@@ -132,6 +132,38 @@ public class PiPersistenceTest {
         assertEquals("complete", store.load().get(2).content);
     }
 
+    @Test public void legacyToolHistoryRemainsVisibleAndResumesAsTextWithoutReexecution() throws Exception {
+        ChatStore store = new ChatStore(context);
+        AgentLoop.Message user = new AgentLoop.Message("user", "check device");
+        AgentLoop.Message snapshot = new AgentLoop.Message("assistant", "checking");
+        AgentLoop.Message toolCall = new AgentLoop.Message("legacy-call", "assistant", "", null,
+                Collections.singletonList(new AgentLoop.ToolCall("call-1", "read_screen", "{\"refresh\":true}")), false);
+        AgentLoop.Message toolResult = new AgentLoop.Message("legacy-result", "tool", "screen text", "call-1",
+                Collections.emptyList(), false);
+        AgentLoop.Message followUp = new AgentLoop.Message("user", "continue");
+        store.save(Arrays.asList(user, snapshot, toolCall, toolResult, followUp));
+        store.savePiContext(snapshot.id, entries());
+
+        List<AgentLoop.Message> restored = new ChatStore(context).load();
+        assertEquals(Arrays.asList("user", "assistant", "assistant", "tool", "user"),
+                restored.stream().map(value -> value.role).collect(java.util.stream.Collectors.toList()));
+        assertEquals("screen text", restored.get(3).content);
+        JSONObject resume = new JSONObject(store.piResume(restored));
+        JSONArray tail = resume.getJSONArray("tail");
+        assertEquals(2, tail.length());
+        assertEquals("assistant", tail.getJSONObject(0).getString("role"));
+        String historical = tail.getJSONObject(0).getString("content");
+        assertTrue(historical.contains("read_screen; id=call-1"));
+        assertTrue(historical.contains("{\"refresh\":true}"));
+        assertTrue(historical.contains("screen text"));
+        assertFalse(tail.getJSONObject(0).has("toolCalls"));
+        JSONArray fullHistory = ChatStore.piHistory(restored);
+        assertTrue(fullHistory.getJSONObject(1).getString("content").contains("read_screen; id=call-1"));
+        assertEquals("continue", fullHistory.getJSONObject(2).getString("content"));
+        assertTrue(historical.contains("未重新执行"));
+        assertEquals("continue", tail.getJSONObject(1).getString("content"));
+    }
+
     @Test public void missingNativeContextIsNotSilentlyReplayedAsText() throws Exception {
         ChatStore store = new ChatStore(context);
         AgentLoop.Message user = new AgentLoop.Message("user", "question"); store.save(Collections.singletonList(user));
@@ -249,6 +281,118 @@ public class PiPersistenceTest {
 
     private static JSONObject call(String id, String name, String arguments) throws Exception {
         return new JSONObject().put("id", id).put("name", name).put("arguments", arguments);
+    }
+
+    @Test public void attachmentsRoundTripInDraftHistoryAndPiTail() throws Exception {
+        ChatStore store = new ChatStore(context);
+        ChatAttachment attachment = new ChatAttachment("safe-id", "notes.txt", "text/plain", "file", 12,
+                new java.io.File(context.getFilesDir(), "chat-attachments/safe-id").getAbsolutePath());
+        store.saveDraftAttachments(Collections.singletonList(attachment));
+        assertEquals("safe-id", store.draftAttachments().get(0).id);
+        AgentLoop.Message user = new AgentLoop.Message("message-id", "user", "read this", null,
+                Collections.emptyList(), false, Collections.singletonList(attachment));
+        store.save(Collections.singletonList(user));
+        assertEquals("notes.txt", new ChatStore(context).load().get(0).attachments.get(0).name);
+        JSONArray history = ChatStore.piHistory(store.load());
+        assertEquals("safe-id", history.getJSONObject(0).getJSONArray("attachments").getJSONObject(0).getString("id"));
+        assertEquals("safe-id", NativeJson.conversation(store).getJSONArray("draftAttachments").getJSONObject(0).getString("id"));
+    }
+
+    @Test public void draftOnlyAttachmentConversationCanBeRecoveredAfterSwitchAndNewConversation() throws Exception {
+        ChatStore store = new ChatStore(context);
+        String first = store.activeId();
+        ChatAttachment attachment = new ChatAttachment("draft-only", "photo.png", "image/png", "image", 68,
+                new java.io.File(context.getFilesDir(), "chat-attachments/draft-only").getAbsolutePath());
+        store.saveDraftAttachments(Collections.singletonList(attachment));
+        assertTrue(store.conversations().stream().anyMatch(item -> first.equals(item.id)));
+        store.newConversation();
+        String second = store.activeId();
+        assertNotEquals(first, second);
+        assertTrue(store.draftAttachments().isEmpty());
+        store.selectConversation(first);
+        assertEquals("draft-only", store.draftAttachments().get(0).id);
+    }
+
+    @Test public void draftOnlyPlaceholderIsReplacedByFirstMessageTitle() throws Exception {
+        ChatStore store = new ChatStore(context);
+        ChatAttachment attachment = new ChatAttachment("title-draft", "bill.pdf", "application/pdf", "file", 68,
+                new java.io.File(context.getFilesDir(), "chat-attachments/title-draft").getAbsolutePath());
+        store.saveDraftAttachments(Collections.singletonList(attachment));
+        store.save(Collections.singletonList(new AgentLoop.Message("user", "分析本月账单")));
+        assertEquals("分析本月账单", store.conversations().get(0).title);
+    }
+
+    @Test public void newConversationImportSurvivesSwitchAndCleanup() throws Exception {
+        ChatStore store = new ChatStore(context);
+        String first = store.activeId();
+        store.beginAttachmentImport(first);
+        store.newConversation();
+        String second = store.activeId();
+        java.io.File staging = new java.io.File(context.getCacheDir(), "chat-attachment-import");
+        assertTrue(staging.mkdirs() || staging.isDirectory());
+        java.io.File stagedFile = new java.io.File(staging, "staged-id");
+        java.nio.file.Files.write(stagedFile.toPath(), new byte[]{1, 2, 3});
+        ChatAttachment staged = new ChatAttachment("staged-id", "notes.txt", "text/plain", "file", 3,
+                stagedFile.getAbsolutePath());
+        store.cleanupAttachments();
+        assertTrue(stagedFile.isFile());
+        List<ChatAttachment> published = store.publishDraftAttachments(first, Collections.singletonList(staged));
+        assertTrue(new java.io.File(published.get(0).path).isFile());
+        assertEquals(second, store.activeId());
+        assertTrue(store.draftAttachments().isEmpty());
+        store.selectConversation(first);
+        assertEquals("staged-id", store.draftAttachments().get(0).id);
+        store.clear();
+        assertFalse(new java.io.File(published.get(0).path).exists());
+    }
+
+    @Test public void removeAndPublishSerializedOrdersKeepNewAttachments() throws Exception {
+        ChatStore store = new ChatStore(context);
+        ChatStore other = new ChatStore(context);
+        String conversation = store.activeId();
+        store.beginAttachmentImport(conversation);
+        java.io.File staging = new java.io.File(context.getCacheDir(), "chat-attachment-import");
+        assertTrue(staging.mkdirs() || staging.isDirectory());
+        java.io.File xFile = new java.io.File(staging, "remove-x");
+        java.nio.file.Files.write(xFile.toPath(), new byte[]{1});
+        ChatAttachment x = store.publishDraftAttachments(conversation, Collections.singletonList(
+                new ChatAttachment("remove-x", "x.txt", "text/plain", "file", 1, xFile.getAbsolutePath()))).get(0);
+        java.io.File yFile = new java.io.File(staging, "keep-y");
+        java.nio.file.Files.write(yFile.toPath(), new byte[]{2});
+        ChatAttachment y = other.publishDraftAttachments(conversation, Collections.singletonList(
+                new ChatAttachment("keep-y", "y.txt", "text/plain", "file", 1, yFile.getAbsolutePath()))).get(0);
+        store.removeDraftAttachment(conversation, x.id);
+        assertEquals(Collections.singletonList("keep-y"), store.draftAttachments().stream()
+                .map(item -> item.id).collect(java.util.stream.Collectors.toList()));
+        assertFalse(new java.io.File(x.path).exists());
+        assertTrue(new java.io.File(y.path).isFile());
+
+        java.io.File zFile = new java.io.File(staging, "keep-z");
+        java.nio.file.Files.write(zFile.toPath(), new byte[]{3});
+        store.removeDraftAttachment(conversation, "missing");
+        ChatAttachment z = other.publishDraftAttachments(conversation, Collections.singletonList(
+                new ChatAttachment("keep-z", "z.txt", "text/plain", "file", 1, zFile.getAbsolutePath()))).get(0);
+        assertEquals(Arrays.asList("keep-y", "keep-z"), store.draftAttachments().stream()
+                .map(item -> item.id).collect(java.util.stream.Collectors.toList()));
+        assertTrue(new java.io.File(z.path).isFile());
+    }
+
+    @Test public void stagedImportCannotRecreateDeletedConversation() throws Exception {
+        ChatStore store = new ChatStore(context);
+        String deleted = store.activeId();
+        store.beginAttachmentImport(deleted);
+        store.clear();
+        java.io.File staging = new java.io.File(context.getCacheDir(), "chat-attachment-import");
+        assertTrue(staging.mkdirs() || staging.isDirectory());
+        java.io.File stagedFile = new java.io.File(staging, "late-id");
+        java.nio.file.Files.write(stagedFile.toPath(), new byte[]{1});
+        ChatAttachment staged = new ChatAttachment("late-id", "late.txt", "text/plain", "file", 1,
+                stagedFile.getAbsolutePath());
+        assertThrows(IllegalStateException.class, () -> store.publishDraftAttachments(deleted,
+                Collections.singletonList(staged)));
+        assertFalse(new JSONObject(context.getSharedPreferences("chat", Context.MODE_PRIVATE)
+                .getString("conversations", "{}")).has(deleted));
+        stagedFile.delete();
     }
 
     @Test public void lateCompletionDoesNotRecreateDeletedConversation() throws Exception {

@@ -1,18 +1,19 @@
-import { memo, useContext, useEffect, useRef, useState } from 'react';
+import { memo, useEffect, useRef, useState } from 'react';
+import { Capacitor } from '@capacitor/core';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
-import { ArrowDown, ArrowUp, Check, ChevronDown, Copy, GitBranch, Menu, Mic, Plus, Search, Settings, Share2, Square, SquarePen, Trash2 } from 'lucide-react';
-import { Chat, Device, NativeSettings, type ChatSnapshot, type Conversation, type ConversationNode, type ConversationSummary, type NativeEvent } from './native';
+import { ArrowDown, ArrowUp, Camera, Check, ChevronDown, Copy, File, GitBranch, Image, Menu, Mic, Paperclip, Plus, RotateCcw, Search, Settings, Share2, Square, SquarePen, Trash2, X } from 'lucide-react';
+import { Chat, Device, NativeSettings, type Attachment, type ChatSnapshot, type Conversation, type ConversationNode, type ConversationSummary, type NativeEvent } from './native';
 import { pairToolResults, toolCallKey } from './toolResults';
 import { ToolCallView } from './ToolCallView';
 import { ConfirmDialog, Dialog } from './components/ui/dialog';
 import { ThinkingControl } from './ThinkingControl';
 import { ComposerPopover } from './ComposerPopover';
 import { useKeyboardVisible } from './useKeyboardVisible';
-import { Empty, Environment, ErrorNotice, Header, Loading, SearchField, errorText, query, useAction, useText } from './ui';
+import { Empty, ErrorNotice, Header, Loading, SearchField, errorText, query, useAction, useText } from './ui';
 
 export interface CatalogProvider { id: string; name: string; authMethods: string[]; auth: Record<string, unknown>; models: {id: string; name: string; reasoning: boolean; thinkingLevels: string[]; api: string}[] }
 export function useChat() {
@@ -46,7 +47,7 @@ export function useChat() {
         const existing = nodes.find(n => n.id === id);
         const updated: ConversationNode = existing
           ? {...existing, message: {...existing.message, content: (existing.message.content ?? '') + delta}}
-          : {id, parentId: current.conversation.leaf, message: {id, role:'assistant', content:delta, incomplete:true, toolCalls:[], toolCallId:null}};
+          : {id, parentId: current.conversation.leaf, message: {id, role:'assistant', content:delta, incomplete:true, toolCalls:[], toolCallId:null, attachments:[]}};
         commit({...current, sequence, conversation: {...current.conversation, leaf:id, nodes: existing ? nodes.map(n => n.id === id ? updated : n) : [...nodes, updated]}});
       } else {
         if (event.type === 'error') setError(String(event.payload?.message ?? ''));
@@ -76,11 +77,23 @@ export const Markdown = memo(function Markdown({text}: {text: string}) {
     table: ({children}) => <div className="table-scroll"><table>{children}</table></div>,
   }}>{text}</ReactMarkdown><ErrorNotice error={action.error}/></div>;
 });
+function formatBytes(size: number) {
+  if (size < 1024) return `${size} B`; if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+  return `${(size / 1024 / 1024).toFixed(1)} MB`;
+}
+function AttachmentList({attachments, sent=false, remove}: {attachments:Attachment[]; sent?:boolean; remove?:(id:string)=>void}) {
+  const t=useText(); const action=useAction();
+  return <><div className={`attachments ${sent?'sent':''}`}>{attachments.map(item => item.kind === 'image'
+    ? <div className="image-attachment" key={item.id}><button aria-label={t('查看图片','View image')} onClick={()=>action.run(()=>Device.openAttachment({attachmentId:item.id}))}><img src={Capacitor.convertFileSrc(item.path)} alt={item.name}/></button>{remove&&<button className="remove-attachment" aria-label={t('移除附件','Remove attachment')} onClick={()=>remove(item.id)}><X/></button>}</div>
+    : <div className="file-attachment" key={item.id}><button className="file-open" disabled={!sent} onClick={()=>sent&&action.run(()=>Device.openAttachment({attachmentId:item.id}))}><File/><span><strong>{item.name}</strong><small>{item.mimeType} · {formatBytes(item.size)}</small></span></button>{remove&&<button className="remove-file" aria-label={t('移除附件','Remove attachment')} onClick={()=>remove(item.id)}><X/></button>}</div>)}</div><ErrorNotice error={action.error}/></>;
+}
+
 const MessageView = memo(function MessageView({node, toolResults, pending}: {node: ConversationNode; toolResults: Map<string, ConversationNode[]>; pending: boolean}) {
   const t = useText(); const action = useAction(); const [copied, setCopied] = useState(false); const message = node.message;
   if (message.role === 'system') return null;
   if (message.role === 'tool') return <ToolCallView results={[node]}/>;
   return <article className={`message ${message.role}`}>
+    {!!message.attachments?.length && <AttachmentList attachments={message.attachments} sent/>}
     {message.content && <Markdown text={message.content}/>}
     {message.toolCalls.map((tool, index) => <ToolCallView key={toolCallKey(node.id, index)} tool={tool} results={toolResults.get(toolCallKey(node.id, index)) ?? []} pending={pending}/>)}
     {message.incomplete && <small className="secondary">{t('尚未完成','Not completed')}</small>}
@@ -89,12 +102,21 @@ const MessageView = memo(function MessageView({node, toolResults, pending}: {nod
   </article>;
 });
 export function ChatPage() {
-  const chat = useChat(); const action = useAction(); const t = useText(); const nav = useNavigate(); const {device} = useContext(Environment);
+  const chat = useChat(); const action = useAction(); const t = useText();
   const [params] = useSearchParams();
   const keyboardVisible = useKeyboardVisible();
-  const [composerPanel, setComposerPanel] = useState<'tree'|'thinking'|null>(null);
-  useEffect(() => { if (!keyboardVisible) setComposerPanel(null); }, [keyboardVisible]);
-  const [panel, setPanel] = useState<'conversations'|'models'|'apps'|null>(params.get('panel') === 'models' ? 'models' : null);
+  const [composerPanel, setComposerPanel] = useState<'tree'|'thinking'|'attachments'|null>(null);
+  const [attachmentError,setAttachmentError]=useState(''); const [retryKind,setRetryKind]=useState<'camera'|'image'|'file'>('file');
+  const [preparing,setPreparing]=useState(false);
+  useEffect(() => { if (!keyboardVisible && composerPanel !== 'attachments') setComposerPanel(null); }, [keyboardVisible]);
+  useEffect(() => {
+    if (composerPanel !== 'attachments') return;
+    const dismiss = (event: Event) => { event.preventDefault(); setComposerPanel(null); };
+    const key = (event: KeyboardEvent) => { if (event.key === 'Escape') dismiss(event); };
+    window.addEventListener('composer-back', dismiss); document.addEventListener('keydown', key, true);
+    return () => { window.removeEventListener('composer-back', dismiss); document.removeEventListener('keydown', key, true); };
+  }, [composerPanel]);
+  const [panel, setPanel] = useState<'conversations'|'models'|null>(params.get('panel') === 'models' ? 'models' : null);
   const [draft, setDraft] = useState(''); const [following, setFollowing] = useState(true);
   const [defaults, setDefaults] = useState<Record<string,unknown>>({});
   useEffect(() => { void NativeSettings.settings({effective:true}).then(result => setDefaults(result.settings)).catch(e => action.setError(errorText(e))); }, []);
@@ -106,8 +128,15 @@ export function ChatPage() {
   if (!chat.snapshot || !conversation) return <><Loading/><ErrorNotice error={chat.error}/></>;
   const running = chat.snapshot.running;
   const changeDraft = (value: string) => { setDraft(value); void Chat.saveDraft({conversationId:conversation.id,text:value}).catch(e => action.setError(errorText(e))); };
+  const chooseAttachment = async (kind:'camera'|'image'|'file') => {
+    setComposerPanel(null); setRetryKind(kind); setAttachmentError(''); setPreparing(true);
+    try { await Device.chooseAttachment({conversationId:conversation.id,kind}); await chat.refresh(); }
+    catch(e) { const message=errorText(e); if (!message.includes('取消')) setAttachmentError(message); }
+    finally { setPreparing(false); }
+  };
+  const removeAttachment = (id:string) => action.run(async()=>{await Device.removeAttachment({conversationId:conversation.id,attachmentId:id});await chat.refresh();});
   const send = () => action.run(async () => {
-    if (!draft.trim() || running) return;
+    if ((!draft.trim() && !conversation.draftAttachments.length) || running || preparing) return;
     await Chat.saveDraft({conversationId:conversation.id,text:draft});
     const accepted = await Chat.send({conversationId:conversation.id,text:draft,submissionId:crypto.randomUUID()});
     if (accepted.accepted) { setDraft(''); setFollowing(true); }
@@ -117,7 +146,7 @@ export function ChatPage() {
   const selection = {model: defaults.defaultModel, thinkingLevel: defaults.defaultThinkingLevel, ...conversation.piSelection};
   const path = lineage(conversation); const paired = pairToolResults(path);
   const activeMessage = path.filter(node => node.message.role !== 'tool').at(-1);
-  return <main className="chat-page"><header className="chat-header"><button className="icon-button" aria-label={t('会话列表','Conversations')} onClick={() => setPanel('conversations')}><Menu/></button><button className="model-title" onClick={() => device?.piMode ? setPanel('models') : nav('/settings/general')}><strong>{device?.piMode ? 'Pi' : 'Android Agent'}</strong><span>{String(selection.model || t('选择模型','Choose model'))}<ChevronDown/></span></button><button className="icon-button" aria-label={t('新会话','New conversation')} disabled={running || action.busy} onClick={() => action.run(async () => { await Chat.newConversation(); await chat.refresh(); })}><SquarePen/></button></header>
+  return <main className="chat-page"><header className="chat-header"><button className="icon-button" aria-label={t('会话列表','Conversations')} onClick={() => setPanel('conversations')}><Menu/></button><button className="model-title" onClick={() => setPanel('models')}><strong>Pi</strong><span>{String(selection.model || t('选择模型','Choose model'))}<ChevronDown/></span></button><button className="icon-button" aria-label={t('新会话','New conversation')} disabled={running || action.busy} onClick={() => action.run(async () => { await Chat.newConversation(); await chat.refresh(); })}><SquarePen/></button></header>
     <section className="messages" ref={scroll} onClick={e => {
       if (keyboardVisible && !composerPanel && !(e.target as HTMLElement).closest('button,a,input,textarea,summary,pre')) {
         textarea.current?.blur(); void Device.hideKeyboard();
@@ -127,12 +156,13 @@ export function ChatPage() {
     </section>
     <footer className="composer-wrap">{!following && <button className="scroll-latest icon-button" aria-label={t('回到最新消息','Latest message')} onClick={() => setFollowing(true)}><ArrowDown/></button>}
       <ErrorNotice error={action.error || chat.error}/>{running && <div className="run-status" role="status"><span className="pulse-dot"/>{chat.status || t('正在回复…','Working…')}</div>}
-      <div className="composer"><textarea ref={textarea} value={draft} rows={1} placeholder={t('发消息…','Message…')} aria-label={t('消息','Message')} onChange={e => changeDraft(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && !e.nativeEvent.isComposing) { e.preventDefault(); void send(); } }}/><div className="composer-tools"><button className="icon-button" aria-label={t('选择应用','Choose app')} onClick={() => setPanel('apps')}><Plus/></button>{keyboardVisible && <button className="icon-button" aria-label={t('历史分支','History')} aria-haspopup="dialog" aria-expanded={composerPanel === 'tree'} onPointerDown={e=>e.preventDefault()} onMouseDown={e=>e.preventDefault()} onClick={() => setComposerPanel('tree')}><GitBranch/></button>}<span className="composer-spacer"/>{keyboardVisible && device?.piMode && <ThinkingControl open={composerPanel === 'thinking'} onOpenChange={open=>setComposerPanel(open?'thinking':null)} conversation={conversation} level={String(selection.thinkingLevel || '')} disabled={running || action.busy} onChange={chat.refresh}/>}<button className="icon-button" aria-label={t('语音输入','Voice input')} onClick={() => action.run(async () => { await Chat.saveDraft({conversationId:conversation.id,text:draft}); const result = await Device.voice(); setDraft(result.text); })}><Mic/></button>{running ? <button className="send-button" aria-label={t('停止生成','Stop')} onClick={() => action.run(() => Chat.cancel())}><Square/></button> : <button className="send-button" aria-label={t('发送','Send')} disabled={!draft.trim() || action.busy} onClick={send}><ArrowUp/></button>}</div></div>
+      {attachmentError&&<div className="attachment-error" role="alert"><span>{attachmentError}</span><button onClick={()=>void chooseAttachment(retryKind)}><RotateCcw/>{t('重试','Retry')}</button></div>}
+      <div className="composer">{composerPanel === 'attachments'&&<><button className="attachment-popover-backdrop" aria-label={t('关闭附件菜单','Close attachment menu')} onClick={()=>setComposerPanel(null)}/><div className="attachment-popover" role="menu"><button onClick={()=>void chooseAttachment('camera')}><Camera/>{t('拍照','Take photo')}</button><button onClick={()=>void chooseAttachment('image')}><Image/>{t('上传图片','Upload image')}</button><button onClick={()=>void chooseAttachment('file')}><Paperclip/>{t('上传附件','Upload attachment')}</button></div></>}{!!conversation.draftAttachments.length&&<AttachmentList attachments={conversation.draftAttachments} remove={removeAttachment}/>}<textarea ref={textarea} value={draft} rows={1} placeholder={t('发消息…','Message…')} aria-label={t('消息','Message')} onFocus={()=>composerPanel==='attachments'&&setComposerPanel(null)} onChange={e => changeDraft(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && !e.nativeEvent.isComposing) { e.preventDefault(); void send(); } }}/><div className="composer-tools"><button className="icon-button" aria-label={t('添加附件','Add attachment')} aria-haspopup="menu" aria-expanded={composerPanel==='attachments'} onClick={() => setComposerPanel(composerPanel==='attachments'?null:'attachments')}><Plus/></button>{keyboardVisible && <button className="icon-button" aria-label={t('历史分支','History')} aria-haspopup="dialog" aria-expanded={composerPanel === 'tree'} onPointerDown={e=>e.preventDefault()} onMouseDown={e=>e.preventDefault()} onClick={() => setComposerPanel('tree')}><GitBranch/></button>}<span className="composer-spacer"/>{keyboardVisible && <ThinkingControl open={composerPanel === 'thinking'} onOpenChange={open=>setComposerPanel(open?'thinking':null)} conversation={conversation} level={String(selection.thinkingLevel || '')} disabled={running || action.busy} onChange={chat.refresh}/>}<button className="icon-button" aria-label={t('语音输入','Voice input')} onClick={() => action.run(async () => { await Chat.saveDraft({conversationId:conversation.id,text:draft}); const result = await Device.voice(); setDraft(result.text); })}><Mic/></button>{running ? <button className="send-button" aria-label={t('停止生成','Stop')} onClick={() => action.run(() => Chat.cancel())}><Square/></button> : <button className="send-button" aria-label={t('发送','Send')} disabled={(!draft.trim()&&!conversation.draftAttachments.length) || action.busy || preparing} onClick={send}><ArrowUp/></button>}</div>{preparing&&<small className="preparing" role="status">{t('正在准备附件…','Preparing attachment…')}</small>}</div>
     </footer>
     {composerPanel === 'tree' && keyboardVisible && <BranchPopover conversation={conversation} disabled={running} close={()=>setComposerPanel(null)} onChange={async next=>{setDraft(next.draft);await chat.refresh();setComposerPanel(null);}}/>}
     <ConversationDrawer open={panel === 'conversations'} close={() => setPanel(null)} conversation={conversation} running={running} onChange={changed}/>
     {panel === 'models' && <ModelSheet conversation={conversation} disabled={running} close={() => setPanel(null)} onChange={chat.refresh}/>}
-    {panel === 'apps' && <AppPicker close={() => setPanel(null)}/>}
+
   </main>;
 }
 function BranchPopover({conversation, disabled, close, onChange}: {conversation:Conversation; disabled:boolean; close():void; onChange(next:Conversation):Promise<void>}) {

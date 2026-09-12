@@ -17,7 +17,8 @@ final class NativeJson {
         for (ConversationTree.Node node : tree.nodes()) nodes.put(object("id", node.id,
                 "parentId", node.parentId == null ? JSONObject.NULL : node.parentId, "message", message(node.message)));
         return object("id", store.activeId(), "leaf", tree.leaf() == null ? JSONObject.NULL : tree.leaf(),
-                "nodes", nodes, "draft", store.draft(), "piSelection", object(store.piSelection()));
+                "nodes", nodes, "draft", store.draft(), "draftAttachments", AttachmentStore.json(store.draftAttachments()),
+                "piSelection", object(store.piSelection()));
     }
 
     static JSONObject message(AgentLoop.Message message) {
@@ -26,7 +27,7 @@ final class NativeJson {
         return object("id", message.id, "role", message.role,
                 "content", message.content == null ? JSONObject.NULL : message.content,
                 "toolCallId", message.toolCallId == null ? JSONObject.NULL : message.toolCallId,
-                "toolCalls", calls, "incomplete", message.incomplete);
+                "toolCalls", calls, "attachments", AttachmentStore.json(message.attachments), "incomplete", message.incomplete);
     }
 
     static AgentLoop.Message piMessage(JSONObject value, String id, boolean incomplete) throws Exception {

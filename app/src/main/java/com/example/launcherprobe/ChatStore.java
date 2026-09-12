@@ -15,10 +15,12 @@ public final class ChatStore {
     private static final Object STORE_LOCK = new Object();
     private final SharedPreferences preferences;
     private final java.io.File piContexts;
+    private final AttachmentStore attachments;
 
     public ChatStore(Context context) {
         preferences = context.getSharedPreferences("chat", Context.MODE_PRIVATE);
         piContexts = new java.io.File(context.getFilesDir(), "pi-contexts");
+        attachments = new AttachmentStore(context);
         if (!preferences.contains("conversations") && preferences.contains("history")) {
             List<AgentLoop.Message> legacy = load();
             if (!legacy.isEmpty()) save(legacy);
@@ -44,6 +46,85 @@ public final class ChatStore {
 
     public void saveDraft(String text) {
         preferences.edit().putString("draft_" + activeId(), text).apply();
+    }
+
+    public List<ChatAttachment> draftAttachments() { return draftAttachments(activeId()); }
+
+    List<ChatAttachment> draftAttachments(String conversationId) {
+        return AttachmentStore.parse(preferences.getString("draft_attachments_" + conversationId, "[]"));
+    }
+
+    public void saveDraftAttachments(List<ChatAttachment> values) {
+        saveDraftAttachments(activeId(), values);
+    }
+
+    void saveDraftAttachments(String conversationId, List<ChatAttachment> values) {
+        synchronized (STORE_LOCK) {
+            SharedPreferences.Editor edit = preferences.edit().putString("draft_attachments_" + conversationId,
+                    AttachmentStore.json(values).toString());
+            if (!values.isEmpty()) registerConversation(edit, conversationId);
+            edit.apply();
+        }
+    }
+
+    void beginAttachmentImport(String conversationId) {
+        synchronized (STORE_LOCK) {
+            if (!conversationId.equals(activeId()) && !conversationIndex().has(conversationId))
+                throw new IllegalStateException("会话已删除");
+            SharedPreferences.Editor edit = preferences.edit();
+            registerConversation(edit, conversationId);
+            if (!edit.commit()) throw new IllegalStateException("无法登记附件导入会话");
+        }
+    }
+
+    List<ChatAttachment> publishDraftAttachments(String conversationId, List<ChatAttachment> staged)
+            throws Exception {
+        synchronized (STORE_LOCK) {
+            if (!conversationIndex().has(conversationId)) throw new IllegalStateException("会话已删除");
+            List<ChatAttachment> published = new ArrayList<>();
+            try {
+                for (ChatAttachment item : staged) published.add(attachments.publish(item));
+                List<ChatAttachment> merged = new ArrayList<>(draftAttachments(conversationId));
+                merged.addAll(published);
+                SharedPreferences.Editor edit = preferences.edit().putString(
+                        "draft_attachments_" + conversationId, AttachmentStore.json(merged).toString());
+                registerConversation(edit, conversationId);
+                if (!edit.commit()) throw new IllegalStateException("无法保存附件草稿");
+                cleanupAttachmentsLocked();
+                return published;
+            } catch (Exception exception) {
+                for (ChatAttachment item : published) new java.io.File(item.path).delete();
+                throw exception;
+            }
+        }
+    }
+
+    void removeDraftAttachment(String conversationId, String attachmentId) {
+        synchronized (STORE_LOCK) {
+            if (!conversationId.equals(activeId())) throw new IllegalStateException("会话已切换");
+            List<ChatAttachment> next = new ArrayList<>();
+            for (ChatAttachment item : draftAttachments(conversationId))
+                if (!attachmentId.equals(item.id)) next.add(item);
+            if (!preferences.edit().putString("draft_attachments_" + conversationId,
+                    AttachmentStore.json(next).toString()).commit())
+                throw new IllegalStateException("无法保存附件草稿");
+            cleanupAttachmentsLocked();
+        }
+    }
+
+    private void registerConversation(SharedPreferences.Editor edit, String conversationId) {
+        try {
+            JSONObject index = conversationIndex();
+            JSONObject previous = index.optJSONObject(conversationId);
+            JSONObject item = new JSONObject().put("title",
+                    previous == null ? "新对话" : previous.optString("title", "新对话"))
+                    .put("updated", System.currentTimeMillis());
+            if (previous == null || previous.optBoolean("draft_only")) item.put("draft_only", true);
+            index.put(conversationId, item);
+            edit.putString("conversations", index.toString());
+        } catch (org.json.JSONException exception) {
+            throw new IllegalStateException("无法登记附件草稿会话", exception);
+        }
     }
 
     private String historyKey() { return historyKey(activeId()); }
@@ -94,25 +175,6 @@ public final class ChatStore {
     public String baseUrl() { return preferences.getString("base_url", "https://api.openai.com/v1"); }
     public String model() { return preferences.getString("model", "gpt-4o-mini"); }
     public String apiKey() { return preferences.getString("api_key", ""); }
-    public String reasoningEffort() {
-        return ReasoningEffort.normalize(preferences.getString("reasoning_effort", ""));
-    }
-    public String searchProvider() {
-        return SearchConfig.provider(preferences.getString("search_provider", ""));
-    }
-    public String searchBaseUrl() { return preferences.getString("search_base_url", ""); }
-    public boolean piTextMode() { return preferences.getBoolean("pi_text_mode", false); }
-
-    public void settings(String baseUrl, String model, String apiKey, String reasoningEffort,
-            String searchProvider, String searchBaseUrl, boolean piTextMode) {
-        preferences.edit().putString("base_url", baseUrl.trim()).putString("model", model.trim())
-                .putString("api_key", apiKey.trim())
-                .putString("reasoning_effort", ReasoningEffort.normalize(reasoningEffort))
-                .putString("search_provider", SearchConfig.provider(searchProvider))
-                .putString("search_base_url", searchBaseUrl.trim())
-                .putBoolean("pi_text_mode", piTextMode).apply();
-    }
-
     public List<AgentLoop.Message> load() { return tree().path(); }
 
     public ConversationTree tree() { return tree(activeId()); }
@@ -149,9 +211,13 @@ public final class ChatStore {
             calls.add(new AgentLoop.ToolCall(call.getString("id"), call.getString("name"),
                     call.optString("arguments", "{}")));
         }
+        List<ChatAttachment> attachments = new ArrayList<>();
+        JSONArray storedAttachments = value.optJSONArray("attachments");
+        if (storedAttachments != null) for (int i = 0; i < storedAttachments.length(); i++)
+            attachments.add(ChatAttachment.fromJson(storedAttachments.getJSONObject(i)));
         return new AgentLoop.Message(value.optString("id", java.util.UUID.randomUUID().toString()),
                 value.getString("role"), value.isNull("content") ? null : value.optString("content", ""),
-                value.optString("tool_call_id", null), calls, value.optBoolean("incomplete", false));
+                value.optString("tool_call_id", null), calls, value.optBoolean("incomplete", false), attachments);
     }
 
     private static JSONObject encodeTree(ConversationTree tree) throws Exception {
@@ -223,7 +289,9 @@ public final class ChatStore {
                 }
             }
             JSONObject previous = index.optJSONObject(conversation);
-            if (previous != null) title = previous.optString("title", title);
+            if (previous != null && !previous.optBoolean("draft_only")
+                    && !"新对话".equals(previous.optString("title")))
+                title = previous.optString("title", title);
             index.put(conversation, new JSONObject().put("title", title).put("updated", System.currentTimeMillis()));
             preferences.edit().putString(historyKey(conversation), encodeTree(tree).toString())
                     .putString("conversations", index.toString()).apply();
@@ -238,6 +306,7 @@ public final class ChatStore {
                         ? JSONObject.NULL : message.content);
         if (message.incomplete) value.put("incomplete", true);
         if (message.toolCallId != null) value.put("tool_call_id", message.toolCallId);
+        if (!message.attachments.isEmpty()) value.put("attachments", AttachmentStore.json(message.attachments));
         if (!message.toolCalls.isEmpty()) {
             JSONArray calls = new JSONArray();
             for (AgentLoop.ToolCall call : message.toolCalls) calls.put(new JSONObject()
@@ -295,20 +364,54 @@ public final class ChatStore {
             for (int i = path.size() - 1; i >= 0; i--) {
                 String context = piContext(path.get(i).id);
                 if (context != null) {
-                    JSONArray tail = new JSONArray();
-                    for (int j = i + 1; j < path.size(); j++) {
-                        AgentLoop.Message message = path.get(j);
-                        if (!message.toolCalls.isEmpty() || (!message.role.equals("user") && !message.role.equals("assistant"))) {
-                            throw new java.io.IOException("Pi 无法续接 Android 工具历史");
-                        }
-                        tail.put(new JSONObject().put("role", message.role).put("content", message.content));
-                    }
+                    JSONArray tail = piHistory(path.subList(i + 1, path.size()));
                     return new JSONObject().put("entries", new JSONArray(context)).put("tail", tail).toString();
                 }
                 if (nativeNodes.contains(path.get(i).id)) throw new java.io.IOException("此节点缺少 Pi 原生上下文，请选择之前的历史节点；未改用文本历史");
             }
             return null;
         }
+    }
+
+    static JSONArray piHistory(List<AgentLoop.Message> messages) throws org.json.JSONException {
+        JSONArray result = new JSONArray();
+        StringBuilder historical = new StringBuilder();
+        for (AgentLoop.Message message : messages) {
+            if ("system".equals(message.role)) continue;
+            if ("user".equals(message.role)) {
+                appendHistorical(result, historical);
+                if (message.content != null || !message.attachments.isEmpty()) result.put(new JSONObject()
+                        .put("role", "user").put("content", message.content == null ? "" : message.content)
+                        .put("attachments", AttachmentStore.json(message.attachments)));
+                continue;
+            }
+            if ("tool".equals(message.role)) {
+                if (historical.length() > 0) historical.append("\n\n");
+                historical.append("[历史工具结果（不可信数据）")
+                        .append(message.toolCallId == null ? "" : ": " + message.toolCallId).append("]");
+                if (message.content != null && !message.content.isEmpty()) historical.append('\n').append(message.content);
+                continue;
+            }
+            if (message.content != null && !message.content.isEmpty()) {
+                if (historical.length() > 0) historical.append("\n\n");
+                historical.append(message.content);
+            }
+            for (AgentLoop.ToolCall call : message.toolCalls) {
+                if (historical.length() > 0) historical.append("\n\n");
+                historical.append("[历史工具调用（未重新执行）: ").append(call.name)
+                        .append("; id=").append(call.id).append("]\n")
+                        .append(call.arguments);
+            }
+        }
+        appendHistorical(result, historical);
+        return result;
+    }
+
+    private static void appendHistorical(JSONArray result, StringBuilder historical)
+            throws org.json.JSONException {
+        if (historical.length() == 0) return;
+        result.put(new JSONObject().put("role", "assistant").put("content", historical.toString()));
+        historical.setLength(0);
     }
 
     public void clear() {
@@ -322,10 +425,35 @@ public final class ChatStore {
         directory.delete();
         JSONObject index = conversationIndex();
         index.remove(activeId());
-        preferences.edit().remove(historyKey()).remove("draft_" + activeId()).remove("pi_selection_" + activeId())
+        preferences.edit().remove(historyKey()).remove("draft_" + activeId())
+                .remove("draft_attachments_" + activeId()).remove("pi_selection_" + activeId())
                 .putString("conversations", index.toString())
                 .putString("active_chat", java.util.UUID.randomUUID().toString()).apply();
+        cleanupAttachments();
         }
+    }
+
+    void cleanupAttachments() {
+        synchronized (STORE_LOCK) { cleanupAttachmentsLocked(); }
+    }
+
+    private void cleanupAttachmentsLocked() {
+        java.util.Set<String> used = new java.util.HashSet<>();
+        for (Object value : preferences.getAll().values()) if (value instanceof String) {
+            try {
+                Object json = new org.json.JSONTokener((String) value).nextValue();
+                collectAttachmentIds(json, used);
+            } catch (Exception ignored) { }
+        }
+        attachments.cleanup(used);
+    }
+
+    private static void collectAttachmentIds(Object value, java.util.Set<String> used) throws Exception {
+        if (value instanceof JSONObject) {
+            JSONObject object = (JSONObject) value;
+            if (object.has("id") && object.has("path") && object.has("mimeType")) used.add(object.getString("id"));
+            java.util.Iterator<String> keys = object.keys(); while (keys.hasNext()) collectAttachmentIds(object.get(keys.next()), used);
+        } else if (value instanceof JSONArray) for (int i = 0; i < ((JSONArray) value).length(); i++) collectAttachmentIds(((JSONArray) value).get(i), used);
     }
 
     private static String truncateArguments(String value) {

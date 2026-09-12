@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { mkdtemp, mkdir, readFile, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, symlink, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -20,8 +20,10 @@ try {
   const config = { agentDir: join(home, "agent"), cwd: join(home, "workspace"), cacheDir: join(home, "cache"),
     settings: { defaultProvider: "local", defaultModel: "mock", defaultTools: [], compaction: { enabled: false } },
     models: { providers: { local: { baseUrl: `http://127.0.0.1:${server.address().port}/v1`, api: "openai-completions",
-      models: [{ id: "mock", name: "Mock", reasoning: true }] } } }, auth: { local: { type: "api_key", key: "mock-only" } } };
+      models: [{ id: "mock", name: "Mock", reasoning: true, input: ["text", "image"] }] } } }, auth: { local: { type: "api_key", key: "mock-only" } } };
   await mkdir(config.cwd, { recursive: true });
+  config.chatAttachmentRoot = join(home, "attachments");
+  await mkdir(config.chatAttachmentRoot, { recursive: true });
   const catalog = await sdkQuery({ type: "catalog", config });
   assert.equal(catalog.find((provider) => provider.id === "local").models[0].id, "mock");
   assert(catalog.find((provider) => provider.id === "local").models[0].thinkingLevels.includes("high"));
@@ -39,6 +41,39 @@ try {
     const previousLength = context?.length ?? 0;
     context = events.find((event) => event.type === "context").messages;
     assert.equal(context.length, previousLength + 2, "native history survives subsequent turns");
+  }
+  const imageId = "11111111-1111-1111-1111-111111111111", fileId = "22222222-2222-2222-2222-222222222222";
+  await writeFile(join(config.chatAttachmentRoot, imageId), Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64"));
+  await writeFile(join(config.chatAttachmentRoot, fileId), "attachment body");
+  const attached = await createSdkRuntime({ config, attachments: [
+    { id:imageId, path:join(config.chatAttachmentRoot,imageId), name:"photo.png", mimeType:"image/png", kind:"image" },
+    { id:fileId, path:join(config.chatAttachmentRoot,fileId), name:"notes.txt", mimeType:"text/plain", kind:"file" },
+  ] });
+  await attached.prompt("");
+  const attachedMessages = requests.at(-1).messages;
+  const attachedRequest = JSON.stringify(attachedMessages);
+  const userContent = attachedMessages.findLast(message => message.role === "user").content;
+  assert(userContent.some(part => part.type === "image_url") && userContent.some(part => part.type === "text" && part.text.includes(fileId)),
+    `images use SDK image input and files are exposed as validated readable paths: ${attachedRequest}`);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    await assert.rejects(createSdkRuntime({ config, attachments: [{ id:"bad", path:join(home,"outside"), mimeType:"text/plain", kind:"file" }] })
+      .then(runtime=>runtime.prompt("bad")), /路径无效/);
+    assert.equal((await readdir(config.cacheDir)).filter(name => name.startsWith("pi-request-")).length, 0,
+      "invalid attachment releases SDK request services");
+  }
+  const outside = join(home, "outside-file");
+  const linkedId = "33333333-3333-3333-3333-333333333333";
+  await writeFile(outside, "outside");
+  try {
+    await symlink(outside, join(config.chatAttachmentRoot, linkedId));
+    await assert.rejects(createSdkRuntime({ config, attachments: [
+      { id:linkedId, path:join(config.chatAttachmentRoot,linkedId), mimeType:"text/plain", kind:"file" },
+    ] }).then(runtime=>runtime.prompt("linked")), /路径无效/);
+    assert.equal((await readdir(config.cacheDir)).filter(name => name.startsWith("pi-request-")).length, 0,
+      "symlink rejection releases SDK request services");
+  } catch (error) {
+    if (error?.code !== "EPERM") throw error;
+    console.warn("SKIP: OS does not permit creating the attachment symlink fixture");
   }
   const { SessionManager } = await import("@earendil-works/pi-coding-agent");
   const saved = SessionManager.inMemory(config.cwd);

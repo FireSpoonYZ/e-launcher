@@ -1,9 +1,10 @@
 import { registerPlugin, type PluginListenerHandle } from '@capacitor/core';
 
 export type ToolCall = { id: string; name: string; arguments: string };
-export type Message = { id: string; role: 'system'|'user'|'assistant'|'tool'; content: string|null; toolCallId: string|null; toolCalls: ToolCall[]; incomplete: boolean };
+export type Attachment = { id: string; name: string; mimeType: string; kind: 'image'|'file'; size: number; path: string };
+export type Message = { id: string; role: 'system'|'user'|'assistant'|'tool'; content: string|null; toolCallId: string|null; toolCalls: ToolCall[]; attachments: Attachment[]; incomplete: boolean };
 export type ConversationNode = { id: string; parentId: string|null; message: Message };
-export type Conversation = { id: string; leaf: string|null; nodes: ConversationNode[]; draft: string; piSelection: Record<string, unknown> };
+export type Conversation = { id: string; leaf: string|null; nodes: ConversationNode[]; draft: string; draftAttachments: Attachment[]; piSelection: Record<string, unknown> };
 export type ConversationSummary = { id: string; title: string; updated: number };
 export type ChatSnapshot = { error?: string; status?: string; sequence: number; running: boolean; requestId: string|null; conversationId: string; conversation: Conversation };
 export type NativeEvent<T = Record<string, unknown>> = { sequence?: number; type: string; conversationId?: string; requestId?: string|null; nodeId?: string|null; payload?: T; [key: string]: unknown };
@@ -64,7 +65,7 @@ export interface SettingsPlugin {
   latestRelease(): Promise<{release: Record<string, unknown>|null}>;
 }
 
-export type DeviceState = { launchRoute: string; language: 'system'|'zh'|'en'; theme: 'system'|'light'|'dark'; background: 'circles'|'solid'|'image'; backgroundMask: number; backgroundPath?: string; piMode: boolean; homeRole: boolean; gestureStatus: string; canWriteSecureSettings: boolean; accessibilityConnected: boolean };
+export type DeviceState = { launchRoute: string; language: 'system'|'zh'|'en'; theme: 'system'|'light'|'dark'; background: 'circles'|'solid'|'image'; backgroundMask: number; backgroundPath?: string; homeRole: boolean; gestureStatus: string; canWriteSecureSettings: boolean; accessibilityConnected: boolean };
 export interface DevicePlugin {
   addListener(event: 'deviceEvent', listener: (state: DeviceState) => void): ListenerPromise;
   addListener(event: 'keyboardEvent', listener: (state: {visible:boolean}) => void): ListenerPromise;
@@ -73,12 +74,12 @@ export interface DevicePlugin {
   apps(): Promise<{apps: Array<{label: string; packageName: string; className: string; icon: string}>}>;
   launchApp(options: {packageName: string; className: string}): Promise<void>;
   voice(): Promise<{text: string}>;
+  chooseAttachment(options: {conversationId: string; kind: 'camera'|'image'|'file'}): Promise<{attachments: Attachment[]}>;
+  removeAttachment(options: {conversationId: string; attachmentId: string}): Promise<void>;
+  openAttachment(options: {attachmentId: string}): Promise<void>;
   chooseBackground(): Promise<void>;
   clearBackground(): Promise<void>;
   setAppearance(options: Partial<Pick<DeviceState, 'language'|'theme'|'background'|'backgroundMask'>>): Promise<DeviceState>;
-  setAgentMode(options: {pi: boolean}): Promise<void>;
-  legacyProvider(): Promise<Record<string,string>>;
-  setLegacyProvider(options: {baseUrl: string; model: string; apiKey?: string; reasoningEffort?: string; searchProvider?: string; searchBaseUrl?: string; pi?: boolean}): Promise<void>;
   openSystemSettings(options: {target: 'app'|'home'|'accessibility'|'settings'}): Promise<void>;
   repairPermissions(): Promise<void>;
   requestHome(): Promise<DeviceState|void>;

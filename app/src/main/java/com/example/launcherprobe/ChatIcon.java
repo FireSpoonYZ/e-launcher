@@ -54,6 +54,8 @@ final class ChatIcon extends Drawable {
                 canvas.drawCircle(12, 14, 1.5f, paint); break;
             case "search":
                 canvas.drawCircle(10, 10, 6, paint); line(canvas, 15, 15, 21, 21); break;
+            case "bubble":
+                canvas.drawRoundRect(3, 4, 21, 18, 6, 6, paint); path(canvas, 7, 18, 5, 22, 11, 18); break;
             case "compose":
                 path(canvas, 10, 4, 5, 4, 4, 5, 4, 19, 5, 20, 19, 20, 20, 19, 20, 12);
                 path(canvas, 10, 14, 11, 10, 19, 2, 22, 5, 14, 13, 10, 14); break;

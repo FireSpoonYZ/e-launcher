@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, writeFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, stat, writeFile, rm } from "node:fs/promises";
 import { join, resolve, relative, dirname } from "node:path";
 import {
   createAgentSessionServices, createAgentSessionFromServices, ModelRuntime, SettingsManager, SessionManager, DefaultPackageManager,
@@ -46,6 +46,44 @@ async function services(config, signal) {
   }
 }
 
+async function attachmentInput(attachments, config, model) {
+  if (!Array.isArray(attachments) || attachments.length === 0) return { images: [], files: [] };
+  const root = resolve(config.chatAttachmentRoot ?? "");
+  const canonicalRoot = await realpath(root);
+  const images = [], files = [];
+  for (const item of attachments) {
+    if (!item || typeof item.id !== "string" || typeof item.path !== "string" || typeof item.mimeType !== "string") throw new Error("附件信息无效");
+    const path = resolve(item.path);
+    if (dirname(path) !== root || path !== join(root, item.id)) throw new Error("附件路径无效");
+    const canonicalPath = await realpath(path);
+    if (dirname(canonicalPath) !== canonicalRoot) throw new Error("附件路径无效");
+    const info = await stat(canonicalPath);
+    if (!info.isFile() || info.size < 1 || info.size > 25 * 1024 * 1024) throw new Error("附件大小无效");
+    if (item.kind === "image") {
+      if (!item.mimeType.startsWith("image/")) throw new Error("图片类型无效");
+      if (!model.input?.includes("image")) throw new Error("当前模型不支持图片输入");
+      images.push({ type: "image", data: (await readFile(canonicalPath)).toString("base64"), mimeType: item.mimeType });
+    } else {
+      files.push({ name: String(item.name || "附件"), mimeType: item.mimeType, size: info.size, path: canonicalPath });
+    }
+  }
+  return { images, files };
+}
+
+async function historyWithAttachments(history, config, model) {
+  const converted = toAgentHistory(history ?? []);
+  for (let i = 0; i < converted.length; i++) if (history[i]?.role === "user" && history[i].attachments?.length) {
+    const input = await attachmentInput(history[i].attachments, config, model);
+    const text = input.files.length ? `${history[i].content}\n\n${fileNotice(input.files)}` : history[i].content;
+    converted[i].content = [{ type: "text", text }, ...input.images];
+  }
+  return converted;
+}
+
+function fileNotice(files) {
+  return `[用户附件已安全复制到应用私有工作区。请使用 read 工具实际读取，不要声称已读取而未读取。]\n${files.map(file => `- ${JSON.stringify(file.name)} (${file.mimeType}, ${file.size} bytes): ${file.path}`).join("\n")}`;
+}
+
 async function credentialChanges(s, config, emit) {
   const ids = new Set([...Object.keys(config.auth ?? {}), ...(await s.credentials.list()).map((item) => item.providerId)]);
   for (const providerId of ids) {
@@ -71,12 +109,12 @@ export async function createSdkRuntime(command, signal) {
     if (!["off", "minimal", "low", "medium", "high", "xhigh", "max"].includes(level)) throw new Error("不支持的思考强度");
     if (level !== "off" && !model.reasoning) throw new Error("当前模型未启用推理能力，请在模型配置中设置 reasoning");
     if (model.thinkingLevelMap?.[level] === null) throw new Error("当前模型不支持所选思考档位");
-    const history = command.sdkHistory ?? toAgentHistory(command.history ?? []);
+    const history = command.sdkHistory ?? await historyWithAttachments(command.history ?? [], config, model);
     if (!Array.isArray(history)) throw new Error("Pi 会话记录必须是数组");
     const nativeEntries = history[0]?.type === "session";
     const sessionManager = SessionManager.inMemory(s.cwd, undefined, nativeEntries ? history : undefined);
     if (!nativeEntries) for (const message of history) sessionManager.appendMessage(message);
-    for (const message of toAgentHistory(command.sdkHistoryTail ?? [])) sessionManager.appendMessage(message);
+    for (const message of await historyWithAttachments(command.sdkHistoryTail ?? [], config, model)) sessionManager.appendMessage(message);
     const result = await createAgentSessionFromServices({ services: s, model, thinkingLevel: level, sessionManager });
     session = result.session;
     if (session.thinkingLevel !== level) throw new Error(`模型实际支持的思考强度为 ${session.thinkingLevel}，请重新选择`);
@@ -107,13 +145,15 @@ export async function createSdkRuntime(command, signal) {
     return {
       subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
       abort() { return session.abort(); },
-      async prompt(text) {
+      async prompt(text, attachments = command.attachments) {
         const onAbort = () => { void session.abort(); };
         signal?.addEventListener("abort", onAbort, { once: true });
         let status;
         try {
+          const input = await attachmentInput(attachments, config, model);
+          const prompt = input.files.length ? `${text || ""}\n\n${fileNotice(input.files)}` : text || "请查看附件。";
           signal?.throwIfAborted();
-          await session.prompt(text);
+          await session.prompt(prompt, { images: input.images });
           const last = session.messages.findLast((message) => message.role === "assistant");
           if (last?.errorMessage) emit({ type: "error", message: last.errorMessage, aborted: last.stopReason === "aborted" });
           status = signal?.aborted || last?.stopReason === "aborted" ? "aborted"
