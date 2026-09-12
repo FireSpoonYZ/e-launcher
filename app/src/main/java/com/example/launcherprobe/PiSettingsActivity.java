@@ -761,7 +761,14 @@ public final class PiSettingsActivity extends Activity {
         JSONObject request = new JSONObject();
         try { request.put("refresh", refresh); } catch (Exception exception) { toast(exception.getMessage()); return; }
         runQuery("catalog", request, result -> {
-            JSONArray providers = (JSONArray) result;
+            JSONArray providers = new JSONArray();
+            JSONArray catalog = (JSONArray) result;
+            boolean pickModel = getIntent().getBooleanExtra("pickModel", false);
+            for (int i = 0; i < catalog.length(); i++) {
+                JSONObject provider = catalog.optJSONObject(i);
+                JSONObject auth = provider.optJSONObject("auth");
+                if (!pickModel || (auth != null && Boolean.TRUE.equals(auth.opt("configured")))) providers.put(provider);
+            }
             String[] labels = new String[providers.length()];
             for (int i = 0; i < labels.length; i++) {
                 JSONObject provider = providers.optJSONObject(i);

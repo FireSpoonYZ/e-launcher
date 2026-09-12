@@ -154,7 +154,7 @@ function ConversationDrawer({open, close, conversation, running, onChange}: {ope
 function ModelSheet({conversation, disabled, close, onChange}: {conversation: Conversation; disabled: boolean; close(): void; onChange(): Promise<void>}) {
   const t = useText(); const nav = useNavigate(); const action = useAction();
   const [providers, setProviders] = useState<CatalogProvider[]>([]); const [defaults, setDefaults] = useState<Record<string,unknown>>({}); const [search, setSearch] = useState('');
-  useEffect(() => { void action.run(async () => { setDefaults((await NativeSettings.settings({effective:true})).settings); setProviders(await query<CatalogProvider[]>('catalog')); }); }, []);
+  useEffect(() => { void action.run(async () => { setDefaults((await NativeSettings.settings({effective:true})).settings); setProviders((await query<CatalogProvider[]>('catalog')).filter(provider => provider.auth.configured === true)); }); }, []);
   const providerId = String(conversation.piSelection.provider || defaults.defaultProvider || '');
   const modelId = String(conversation.piSelection.model || defaults.defaultModel || '');
   const current = providers.find(p => p.id === providerId)?.models.find(m => m.id === modelId);
