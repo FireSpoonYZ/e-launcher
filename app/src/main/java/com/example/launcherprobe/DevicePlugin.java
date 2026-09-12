@@ -25,14 +25,37 @@ import java.util.concurrent.Executors;
 public final class DevicePlugin extends Plugin {
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private ShizukuRepair repair;
+    private android.view.ViewTreeObserver.OnGlobalLayoutListener keyboardListener;
+    private boolean keyboardVisible;
+
+    private boolean isKeyboardVisible() {
+        androidx.core.view.WindowInsetsCompat insets = androidx.core.view.ViewCompat.getRootWindowInsets(getBridge().getWebView());
+        return insets != null && insets.isVisible(androidx.core.view.WindowInsetsCompat.Type.ime());
+    }
+    @PluginMethod public void keyboardState(PluginCall call) {
+        getActivity().runOnUiThread(() -> call.resolve(object("visible", isKeyboardVisible())));
+    }
 
     @Override public void load() {
         repair = new ShizukuRepair(getContext(), () -> notifyListeners("deviceEvent", stateObject()));
         repair.register(); repair.resume();
+        getActivity().runOnUiThread(() -> {
+            keyboardListener = () -> {
+                boolean visible = isKeyboardVisible();
+                if (visible != keyboardVisible) {
+                    keyboardVisible = visible;
+                    notifyListeners("keyboardEvent", object("visible", visible));
+                }
+            };
+            getBridge().getWebView().getViewTreeObserver().addOnGlobalLayoutListener(keyboardListener);
+        });
     }
     @Override protected void handleOnResume() { if (repair != null) repair.resume(); notifyListeners("deviceEvent", stateObject()); }
     @Override protected void handleOnPause() { if (repair != null) repair.pause(); }
-    @Override protected void handleOnDestroy() { if (repair != null) repair.destroy(); worker.shutdownNow(); }
+    @Override protected void handleOnDestroy() {
+        if (keyboardListener != null) getBridge().getWebView().getViewTreeObserver().removeOnGlobalLayoutListener(keyboardListener);
+        if (repair != null) repair.destroy(); worker.shutdownNow();
+    }
 
     @PluginMethod public void state(PluginCall call) { call.resolve(stateObject()); }
     @PluginMethod public void apps(PluginCall call) {

@@ -67,6 +67,8 @@ export interface SettingsPlugin {
 export type DeviceState = { launchRoute: string; language: 'system'|'zh'|'en'; theme: 'system'|'light'|'dark'; background: 'circles'|'solid'|'image'; backgroundMask: number; backgroundPath?: string; piMode: boolean; homeRole: boolean; gestureStatus: string; canWriteSecureSettings: boolean; accessibilityConnected: boolean };
 export interface DevicePlugin {
   addListener(event: 'deviceEvent', listener: (state: DeviceState) => void): ListenerPromise;
+  addListener(event: 'keyboardEvent', listener: (state: {visible:boolean}) => void): ListenerPromise;
+  keyboardState(): Promise<{visible:boolean}>;
   state(): Promise<DeviceState>;
   apps(): Promise<{apps: Array<{label: string; packageName: string; className: string; icon: string}>}>;
   launchApp(options: {packageName: string; className: string}): Promise<void>;

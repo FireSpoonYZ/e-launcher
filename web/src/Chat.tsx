@@ -10,6 +10,8 @@ import { pairToolResults, toolCallKey } from './toolResults';
 import { ToolCallView } from './ToolCallView';
 import { ConfirmDialog, Dialog } from './components/ui/dialog';
 import { ThinkingControl } from './ThinkingControl';
+import { ComposerPopover } from './ComposerPopover';
+import { useKeyboardVisible } from './useKeyboardVisible';
 import { Empty, Environment, ErrorNotice, Header, Loading, SearchField, errorText, query, useAction, useText } from './ui';
 
 export interface CatalogProvider { id: string; name: string; authMethods: string[]; auth: Record<string, unknown>; models: {id: string; name: string; reasoning: boolean; thinkingLevels: string[]; api: string}[] }
@@ -89,6 +91,9 @@ const MessageView = memo(function MessageView({node, toolResults, pending}: {nod
 export function ChatPage() {
   const chat = useChat(); const action = useAction(); const t = useText(); const nav = useNavigate(); const {device} = useContext(Environment);
   const [params] = useSearchParams();
+  const keyboardVisible = useKeyboardVisible();
+  const [composerPanel, setComposerPanel] = useState<'tree'|'thinking'|null>(null);
+  useEffect(() => { if (!keyboardVisible) setComposerPanel(null); }, [keyboardVisible]);
   const [panel, setPanel] = useState<'conversations'|'models'|'apps'|null>(params.get('panel') === 'models' ? 'models' : null);
   const [draft, setDraft] = useState(''); const [following, setFollowing] = useState(true);
   const [defaults, setDefaults] = useState<Record<string,unknown>>({});
@@ -113,17 +118,32 @@ export function ChatPage() {
   const path = lineage(conversation); const paired = pairToolResults(path);
   const activeMessage = path.filter(node => node.message.role !== 'tool').at(-1);
   return <main className="chat-page"><header className="chat-header"><button className="icon-button" aria-label={t('会话列表','Conversations')} onClick={() => setPanel('conversations')}><Menu/></button><button className="model-title" onClick={() => device?.piMode ? setPanel('models') : nav('/settings/general')}><strong>{device?.piMode ? 'Pi' : 'Android Agent'}</strong><span>{String(selection.model || t('选择模型','Choose model'))}<ChevronDown/></span></button><button className="icon-button" aria-label={t('新会话','New conversation')} disabled={running || action.busy} onClick={() => action.run(async () => { await Chat.newConversation(); await chat.refresh(); })}><SquarePen/></button></header>
-    <section className="messages" ref={scroll} onScroll={e => { const el = e.currentTarget; setFollowing(el.scrollHeight - el.scrollTop - el.clientHeight < 90); }}>
+    <section className="messages" ref={scroll} onClick={e => {
+      if (keyboardVisible && !composerPanel && !(e.target as HTMLElement).closest('button,a,input,textarea,summary,pre')) {
+        textarea.current?.blur(); void Device.hideKeyboard();
+      }
+    }} onScroll={e => { const el = e.currentTarget; setFollowing(el.scrollHeight - el.scrollTop - el.clientHeight < 90); }}>
       {path.some(n => n.message.role !== 'system') ? path.filter(node => !paired.embeddedResultIds.has(node.id)).map(node => <MessageView node={node} toolResults={paired.byCall} pending={running && node.id === activeMessage?.id} key={node.id}/>) : <div className="chat-empty"><span className="empty-mark">Pi</span><h1>{t('今天想聊些什么？','What’s on your mind?')}</h1><p>{t('从一个问题开始。','Start with a question.')}</p></div>}
     </section>
     <footer className="composer-wrap">{!following && <button className="scroll-latest icon-button" aria-label={t('回到最新消息','Latest message')} onClick={() => setFollowing(true)}><ArrowDown/></button>}
       <ErrorNotice error={action.error || chat.error}/>{running && <div className="run-status" role="status"><span className="pulse-dot"/>{chat.status || t('正在回复…','Working…')}</div>}
-      <div className="composer"><textarea ref={textarea} value={draft} rows={1} placeholder={t('发消息…','Message…')} aria-label={t('消息','Message')} onChange={e => changeDraft(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && !e.nativeEvent.isComposing) { e.preventDefault(); void send(); } }}/><div className="composer-tools"><button className="icon-button" aria-label={t('选择应用','Choose app')} onClick={() => setPanel('apps')}><Plus/></button><button className="icon-button" aria-label={t('历史分支','History')} onClick={() => nav(`/history/${conversation.id}`)}><GitBranch/></button><span className="composer-spacer"/>{device?.piMode && <ThinkingControl conversation={conversation} level={String(selection.thinkingLevel || '')} disabled={running || action.busy} onChange={chat.refresh}/>}<button className="icon-button" aria-label={t('语音输入','Voice input')} onClick={() => action.run(async () => { await Chat.saveDraft({conversationId:conversation.id,text:draft}); const result = await Device.voice(); setDraft(result.text); })}><Mic/></button>{running ? <button className="send-button" aria-label={t('停止生成','Stop')} onClick={() => action.run(() => Chat.cancel())}><Square/></button> : <button className="send-button" aria-label={t('发送','Send')} disabled={!draft.trim() || action.busy} onClick={send}><ArrowUp/></button>}</div></div>
+      <div className="composer"><textarea ref={textarea} value={draft} rows={1} placeholder={t('发消息…','Message…')} aria-label={t('消息','Message')} onChange={e => changeDraft(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && !e.nativeEvent.isComposing) { e.preventDefault(); void send(); } }}/><div className="composer-tools"><button className="icon-button" aria-label={t('选择应用','Choose app')} onClick={() => setPanel('apps')}><Plus/></button>{keyboardVisible && <button className="icon-button" aria-label={t('历史分支','History')} aria-haspopup="dialog" aria-expanded={composerPanel === 'tree'} onPointerDown={e=>e.preventDefault()} onMouseDown={e=>e.preventDefault()} onClick={() => setComposerPanel('tree')}><GitBranch/></button>}<span className="composer-spacer"/>{keyboardVisible && device?.piMode && <ThinkingControl open={composerPanel === 'thinking'} onOpenChange={open=>setComposerPanel(open?'thinking':null)} conversation={conversation} level={String(selection.thinkingLevel || '')} disabled={running || action.busy} onChange={chat.refresh}/>}<button className="icon-button" aria-label={t('语音输入','Voice input')} onClick={() => action.run(async () => { await Chat.saveDraft({conversationId:conversation.id,text:draft}); const result = await Device.voice(); setDraft(result.text); })}><Mic/></button>{running ? <button className="send-button" aria-label={t('停止生成','Stop')} onClick={() => action.run(() => Chat.cancel())}><Square/></button> : <button className="send-button" aria-label={t('发送','Send')} disabled={!draft.trim() || action.busy} onClick={send}><ArrowUp/></button>}</div></div>
     </footer>
+    {composerPanel === 'tree' && keyboardVisible && <BranchPopover conversation={conversation} disabled={running} close={()=>setComposerPanel(null)} onChange={async next=>{setDraft(next.draft);await chat.refresh();setComposerPanel(null);}}/>}
     <ConversationDrawer open={panel === 'conversations'} close={() => setPanel(null)} conversation={conversation} running={running} onChange={changed}/>
     {panel === 'models' && <ModelSheet conversation={conversation} disabled={running} close={() => setPanel(null)} onChange={chat.refresh}/>}
     {panel === 'apps' && <AppPicker close={() => setPanel(null)}/>}
   </main>;
+}
+function BranchPopover({conversation, disabled, close, onChange}: {conversation:Conversation; disabled:boolean; close():void; onChange(next:Conversation):Promise<void>}) {
+  const t=useText(); const action=useAction(); const [preview,setPreview]=useState<ConversationNode>();
+  const path=new Set(lineage(conversation).map(n=>n.id));
+  const tree=(parent:string|null):React.ReactNode=><ul>{conversation.nodes.filter(n=>n.parentId===parent).map(node=><li key={node.id}><button className={`${path.has(node.id)?'on-path':''} ${preview?.id===node.id?'previewing':''}`} aria-pressed={preview?.id===node.id} onClick={()=>setPreview(node)}><span className="tree-dot"/><span>{(node.message.content || t('工具消息','Tool message')).slice(0,90)}</span></button>{tree(node.id)}</li>)}</ul>;
+  return <ComposerPopover title={t('历史分支','History')} close={close}>
+    <div className="branch-scroll"><div className="tree">{conversation.nodes.length ? tree(null) : <p className="secondary">{t('还没有对话记录','No conversation history yet')}</p>}</div>
+    {preview && <div className="branch-preview"><Markdown text={preview.message.content || ''}/><button className="button full" disabled={disabled || action.busy} onClick={()=>action.run(async()=>{const next=await Chat.selectNode({conversationId:conversation.id,nodeId:preview.id,edit:preview.message.role==='user'});await onChange(next);})}>{preview.message.role==='user'?t('编辑并续接','Edit and continue'):t('从这里继续','Continue from here')}</button></div>}</div>
+    <ErrorNotice error={action.error}/>
+  </ComposerPopover>;
 }
 function ConversationDrawer({open, close, conversation, running, onChange}: {open: boolean; close(): void; conversation: Conversation; running: boolean; onChange(): Promise<void>}) {
   const [items, setItems] = useState<ConversationSummary[]>([]); const [search, setSearch] = useState(''); const [remove, setRemove] = useState<ConversationSummary>();

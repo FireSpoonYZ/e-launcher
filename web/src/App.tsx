@@ -22,6 +22,7 @@ function Navigation() {
     };
     viewport?.addEventListener('resize', resized);
     const listener = CapacitorApp.addListener('backButton', () => {
+      if (!window.dispatchEvent(new Event('composer-back', {cancelable:true}))) return;
       if (keyboardVisible || performance.now() - keyboardClosedAt < 350) {
         if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
         void Device.hideKeyboard(); return;

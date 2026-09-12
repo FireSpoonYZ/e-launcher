@@ -1,7 +1,7 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Chat, NativeSettings, type Conversation } from './native';
 import { type CatalogProvider } from './Chat';
-import { Dialog } from './components/ui/dialog';
+import { ComposerPopover } from './ComposerPopover';
 import { ErrorNotice, Loading, errorText, query, useText } from './ui';
 
 const scale = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
@@ -13,16 +13,16 @@ function Gauge({level}: {level:string}) {
   const fraction = Math.max(0,scale.indexOf(level)) / (scale.length-1);
   return <svg className="reasoning-gauge" viewBox="0 0 32 32" fill="none" aria-hidden="true">
     <path className="gauge-track" d="M6.808 25.192 A13 13 0 1 1 25.192 25.192" pathLength="100"/>
-    <path className="gauge-fill" d="M6.808 25.192 A13 13 0 1 1 25.192 25.192" pathLength="100" strokeDasharray={`${fraction*100} 100`}/>
+    <path className="gauge-fill" visibility={fraction > 0 ? 'visible' : 'hidden'} d="M6.808 25.192 A13 13 0 1 1 25.192 25.192" pathLength="100" strokeDasharray={`${fraction*100} 100`}/>
     <g className="gauge-needle" style={{transform:`rotate(${135+fraction*270}deg)`}}><path d="M16 16H24"/></g>
     <circle cx="16" cy="16" r="2" className="gauge-pivot"/>
   </svg>;
 }
-export function ThinkingControl({conversation,level,disabled,onChange}: {conversation:Conversation;level:string;disabled:boolean;onChange():Promise<void>}) {
-  const t=useText();const [open,setOpen]=useState(false);
+export function ThinkingControl({conversation,level,disabled,onChange,open,onOpenChange}: {conversation:Conversation;level:string;disabled:boolean;onChange():Promise<void>;open:boolean;onOpenChange(open:boolean):void}) {
+  const t=useText();
   const label=names[level] ?? [level || '默认',level || 'Default'];
-  return <><button className="icon-button reasoning-button" aria-label={`${t('思考强度','Thinking level')}：${t(...label)}`} aria-haspopup="dialog" disabled={disabled} onClick={()=>setOpen(true)}><Gauge level={level}/></button>
-    {open&&<ThinkingSheet conversation={conversation} level={level} onChange={onChange} close={()=>setOpen(false)}/>}</>;
+  return <><button className="icon-button reasoning-button" aria-label={`${t('思考强度','Thinking level')}：${t(...label)}`} aria-haspopup="dialog" aria-expanded={open} disabled={disabled} onPointerDown={e=>e.preventDefault()} onMouseDown={e=>e.preventDefault()} onClick={()=>onOpenChange(true)}><Gauge level={level}/></button>
+    {open&&<ThinkingSheet conversation={conversation} level={level} onChange={onChange} close={()=>onOpenChange(false)}/>}</>;
 }
 function ThinkingSheet({conversation,level,onChange,close}: {conversation:Conversation;level:string;onChange():Promise<void>;close():void}) {
   const t=useText();const [levels,setLevels]=useState<string[]>([]);const [model,setModel]=useState<{provider:string;id:string}>();
@@ -50,18 +50,28 @@ function ThinkingSheet({conversation,level,onChange,close}: {conversation:Conver
     finally{setBusy(false);}
   };
   const index=levels.indexOf(selected);const position=Math.max(0,index);const label=names[selected] ?? [selected || '默认',selected || 'Default'];
-  return <Dialog open onOpenChange={v=>!v&&close()} title={t('思考强度','Thinking level')} sheet>
-    <div className="reasoning-picker">
+  const slider = useRef<HTMLDivElement>(null);
+  const pick = (x:number) => {
+    const rect = slider.current!.getBoundingClientRect();
+    const value = levels[Math.round(Math.max(0,Math.min(1,(x-rect.left)/rect.width))*(levels.length-1))];
+    setSelected(value); return value;
+  };
+  return <ComposerPopover compact close={close} title={t('思考强度','Thinking level')}>
+    <div className="reasoning-picker" aria-busy={busy}>
       {!model&&!error?<Loading/>:levels.length>1?<>
         <output className="reasoning-readout" aria-live="polite"><span>{t(...label)}</span>{t('推理强度',' reasoning')}</output>
-        <div className="reasoning-slider" style={{'--progress':`${position/(levels.length-1)*100}%`} as React.CSSProperties}>
-          <div className="reasoning-rail" aria-hidden="true"><div className="reasoning-fill"/><div className="reasoning-ticks">{levels.map(value=><i key={value}/>)}</div></div>
-          <input type="range" min="0" max={levels.length-1} step="1" value={position} disabled={busy} aria-label={t('思考强度','Thinking level')} aria-valuetext={index<0?t('使用模型默认值','Model default'):t(...label)} onChange={e=>setSelected(levels[Number(e.target.value)])} onPointerUp={e=>void commit(levels[Number(e.currentTarget.value)])} onKeyUp={e=>void commit(levels[Number(e.currentTarget.value)])} onBlur={()=>void commit(selected)}/>
+        <div className="reasoning-slider" role="slider" tabIndex={0} aria-label={t('思考强度','Thinking level')} aria-valuemin={0} aria-valuemax={levels.length-1} aria-valuenow={position} aria-valuetext={t(...label)} aria-disabled={busy}
+          onPointerDown={e=>{e.preventDefault(); if(!busy){e.currentTarget.setPointerCapture(e.pointerId);pick(e.clientX);}}}
+          onPointerMove={e=>{if(e.currentTarget.hasPointerCapture(e.pointerId))pick(e.clientX);}}
+          onPointerUp={e=>{if(e.currentTarget.hasPointerCapture(e.pointerId)){e.currentTarget.releasePointerCapture(e.pointerId);void commit(pick(e.clientX));}}}
+          onPointerCancel={()=>setSelected(level)}
+          onKeyDown={e=>{if(busy)return;const delta=['ArrowRight','ArrowUp'].includes(e.key)?1:['ArrowLeft','ArrowDown'].includes(e.key)?-1:0;if(delta || e.key==='Home' || e.key==='End'){e.preventDefault();const next=levels[e.key==='Home'?0:e.key==='End'?levels.length-1:Math.max(0,Math.min(levels.length-1,position+delta))];setSelected(next);void commit(next);}}}
+          style={{'--progress':`${position/(levels.length-1)*100}%`} as React.CSSProperties}>
+          <div ref={slider} className="reasoning-rail" aria-hidden="true"><div className="reasoning-fill"/><div className="reasoning-ticks">{levels.map(value=><i key={value}/>)}</div><div className="reasoning-thumb"/></div>
         </div>
         <div className="reasoning-labels" aria-hidden="true">{levels.map(value=><span key={value} className={value===selected?'active':''}>{names[value]?t(...names[value]):value}</span>)}</div>
-        <p className="reasoning-hint">{busy?t('正在保存…','Saving…'):index<0?t('拖动以选择强度，仅用于当前会话','Drag to choose a level for this conversation'):t('仅用于当前会话','Only for this conversation')}</p>
       </>:model&&<p className="secondary">{t('此模型不支持调整思考强度。','This model does not support adjustable thinking levels.')}</p>}
       <ErrorNotice error={error}/>
     </div>
-  </Dialog>;
+  </ComposerPopover>;
 }
