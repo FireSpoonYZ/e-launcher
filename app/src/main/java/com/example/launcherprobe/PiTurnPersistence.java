@@ -12,9 +12,9 @@ final class PiTurnPersistence {
     private final String conversation, userId, assistantId;
     private final List<AgentLoop.Message> path;
     private final StringBuilder delta = new StringBuilder();
-    private String completed;
     private JSONArray entries;
     private boolean ended, toolStarted;
+    private int assistantCount;
 
     PiTurnPersistence(ChatStore store, String conversation, String userId, String assistantId,
             List<AgentLoop.Message> path) {
@@ -24,10 +24,22 @@ final class PiTurnPersistence {
     }
 
     synchronized void savePreview(AgentLoop.Message message) {
-        if (ended || !assistantId.equals(message.id) || message.content == null || message.content.isEmpty()) return;
+        if (ended || message.content == null || message.content.isEmpty()) return;
+        savePreview(message.content);
+    }
+
+    synchronized AgentLoop.Message savePreview() {
+        if (ended || delta.length() == 0) return null;
+        return savePreview(delta.toString());
+    }
+
+    private AgentLoop.Message savePreview(String content) {
+        AgentLoop.Message message = new AgentLoop.Message(nextAssistantId(), "assistant", content, null,
+                Collections.emptyList(), true);
         List<AgentLoop.Message> preview = new ArrayList<>(path);
-        preview.add(new AgentLoop.Message(assistantId, "assistant", message.content, null, Collections.emptyList(), true));
+        preview.add(message);
         store.savePiPreview(conversation, userId, assistantId, preview);
+        return message;
     }
 
     synchronized void accept(JSONObject event) throws Exception {
@@ -35,17 +47,54 @@ final class PiTurnPersistence {
         switch (event.optString("type")) {
             case "text_delta": delta.append(event.optString("delta")); break;
             case "tool_start": toolStarted = true; break;
-            case "message": completed = event.getJSONObject("message").optString("content"); break;
+            case "message": append(event.getJSONObject("message")); break;
             case "context": entries = event.optJSONArray("entries"); break;
             case "end":
-                String text = completed == null || completed.isEmpty() ? delta.toString() : completed;
-                if (entries == null && toolStarted && text.isEmpty()) text = "Pi 工具已执行，但原生上下文未保存，请选择之前的历史节点。";
-                if (!text.isEmpty()) path.add(new AgentLoop.Message(assistantId, "assistant", text, null,
-                        Collections.emptyList(), !"completed".equals(event.optString("status"))));
-                store.savePiTurn(conversation, userId, assistantId, path, text.isEmpty() ? userId : assistantId, entries);
+                boolean incomplete = !"completed".equals(event.optString("status"));
+                if (delta.length() > 0) {
+                    path.add(new AgentLoop.Message(nextAssistantId(), "assistant", delta.toString(), null,
+                            Collections.emptyList(), incomplete));
+                    assistantCount++;
+                    delta.setLength(0);
+                } else if (incomplete && !path.isEmpty() && "assistant".equals(path.get(path.size() - 1).role)) {
+                    AgentLoop.Message last = path.remove(path.size() - 1);
+                    path.add(new AgentLoop.Message(last.id, last.role, last.content, last.toolCallId,
+                            last.toolCalls, true));
+                }
+                if (entries == null && toolStarted && path.get(path.size() - 1).id.equals(userId)) {
+                    path.add(new AgentLoop.Message(nextAssistantId(), "assistant",
+                            "Pi 工具已执行，但原生上下文未保存，请选择之前的历史节点。", null,
+                            Collections.emptyList(), true));
+                }
+                String contextNode = path.get(path.size() - 1).id;
+                store.savePiTurn(conversation, userId, assistantId, path, contextNode, entries);
                 ended = true;
                 break;
             default: break;
         }
+    }
+
+    private void append(JSONObject value) throws Exception {
+        String role = value.optString("role", "assistant");
+        String id;
+        if ("assistant".equals(role)) {
+            id = nextAssistantId();
+            assistantCount++;
+            delta.setLength(0);
+        } else if ("tool".equals(role)) {
+            id = assistantId + ":tool:" + value.getString("toolCallId");
+        } else {
+            throw new IllegalArgumentException("Pi 返回了未知消息角色");
+        }
+        boolean incomplete = "assistant".equals(role) && (!value.optString("errorMessage", "").isEmpty()
+                || "error".equals(value.optString("stopReason"))
+                || "aborted".equals(value.optString("stopReason"))
+                || "length".equals(value.optString("stopReason")));
+        path.add(NativeJson.piMessage(value, id, incomplete));
+        store.savePiPreview(conversation, userId, assistantId, new ArrayList<>(path));
+    }
+
+    private String nextAssistantId() {
+        return assistantCount == 0 ? assistantId : assistantId + ":assistant:" + assistantCount;
     }
 }

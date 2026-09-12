@@ -153,7 +153,6 @@ final class ChatCoordinator {
         work.add(user);
         piPersistence = new PiTurnPersistence(store, conversationId, user.id, piAssistantId, work);
         PiTurnPersistence persistence = piPersistence;
-        String assistantId = piAssistantId;
         emit("snapshot", user.id, new JSONObject());
         AgentLoop.CancelToken token = cancellation;
         String id = requestId;
@@ -165,7 +164,7 @@ final class ChatCoordinator {
                     piBridge = bridge;
                 }
                 bridge.prompt(id, config, text, sdkHistory, prior, event -> main.post(() -> {
-                    if (ownsRun(token)) onPiEvent(work, event, token, persistence, assistantId);
+                    if (ownsRun(token)) onPiEvent(event, token, persistence);
                 }));
             } catch (Throwable exception) {
                 try { persistence.accept(new JSONObject().put("type", "end").put("status", "error")); }
@@ -175,25 +174,31 @@ final class ChatCoordinator {
         });
     }
 
-    private void onPiEvent(List<AgentLoop.Message> work, JSONObject event, AgentLoop.CancelToken token, PiTurnPersistence persistence, String assistantId) {
+    void onPiEvent(JSONObject event, AgentLoop.CancelToken token, PiTurnPersistence persistence) {
         if (!ownsRun(token)) return;
+        String type = event.optString("type");
+        JSONObject message = event.optJSONObject("message");
+        if ("message".equals(type) && message != null && "assistant".equals(message.optString("role"))) {
+            main.removeCallbacksAndMessages(persistence);
+            synchronized (pendingDelta) { pendingDelta.setLength(0); }
+        }
         try { persistence.accept(event); }
         catch (Exception exception) { emit("error", null, json("message", "Pi 会话未保存：" + detail(exception))); }
-        String type = event.optString("type");
         if ("text_delta".equals(type)) {
             synchronized (pendingDelta) { pendingDelta.append(event.optString("delta")); }
-            flushPiDelta(work, false, token, persistence, assistantId);
-        } else if ("tool_start".equals(type)) emit("toolStart", null, event);
+            flushPiDelta(false, token, persistence);
+        } else if ("message".equals(type)) emit("snapshot", null, event);
+        else if ("tool_start".equals(type)) emit("toolStart", null, event);
         else if ("tool_end".equals(type)) emit("toolEnd", null, event);
         else if ("status".equals(type)) emit("runStatus", null, event);
         else if ("error".equals(type)) { lastError = event.optString("message"); emit("error", null, event); }
         else if ("end".equals(type)) {
-            flushPiDelta(work, true, token, persistence, assistantId);
+            flushPiDelta(true, token, persistence);
             finish(event.optString("status", "completed"), "");
         }
     }
 
-    private void flushPiDelta(List<AgentLoop.Message> work, boolean immediate, AgentLoop.CancelToken token, PiTurnPersistence persistence, String assistantId) {
+    private void flushPiDelta(boolean immediate, AgentLoop.CancelToken token, PiTurnPersistence persistence) {
         long delay = Math.max(0, 40 - (System.currentTimeMillis() - lastDeltaFlush));
         Runnable flush = () -> {
             if (!ownsRun(token)) return;
@@ -204,18 +209,8 @@ final class ChatCoordinator {
                 pendingDelta.setLength(0);
             }
             lastDeltaFlush = System.currentTimeMillis();
-            List<AgentLoop.Message> preview = new ArrayList<>(work);
-            String previous = "";
-            List<AgentLoop.Message> saved = store.load();
-            if (!saved.isEmpty()) {
-                AgentLoop.Message last = saved.get(saved.size() - 1);
-                if (assistantId.equals(last.id) && last.content != null) previous = last.content;
-            }
-            AgentLoop.Message assistant = new AgentLoop.Message(assistantId, "assistant", previous + delta,
-                    null, Collections.emptyList(), true);
-            preview.add(assistant);
-            persistence.savePreview(assistant);
-            emit("textDelta", assistantId, json("delta", delta));
+            AgentLoop.Message assistant = persistence.savePreview();
+            if (assistant != null) emit("textDelta", assistant.id, json("delta", delta));
         };
         if (immediate) { main.removeCallbacksAndMessages(persistence); flush.run(); }
         else main.postAtTime(flush, persistence, android.os.SystemClock.uptimeMillis() + delay);

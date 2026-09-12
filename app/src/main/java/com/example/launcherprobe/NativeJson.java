@@ -3,6 +3,8 @@ package com.example.launcherprobe;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 
@@ -25,6 +27,20 @@ final class NativeJson {
                 "content", message.content == null ? JSONObject.NULL : message.content,
                 "toolCallId", message.toolCallId == null ? JSONObject.NULL : message.toolCallId,
                 "toolCalls", calls, "incomplete", message.incomplete);
+    }
+
+    static AgentLoop.Message piMessage(JSONObject value, String id, boolean incomplete) throws Exception {
+        String role = value.optString("role", "assistant");
+        List<AgentLoop.ToolCall> calls = new ArrayList<>();
+        JSONArray storedCalls = value.optJSONArray("toolCalls");
+        if (storedCalls != null) for (int index = 0; index < storedCalls.length(); index++) {
+            JSONObject call = storedCalls.getJSONObject(index);
+            Object arguments = call.opt("arguments");
+            calls.add(new AgentLoop.ToolCall(call.getString("id"), call.getString("name"),
+                    arguments instanceof String ? (String) arguments : String.valueOf(arguments)));
+        }
+        return new AgentLoop.Message(id, role, value.isNull("content") ? null : value.optString("content", ""),
+                value.optString("toolCallId", null), calls.isEmpty() ? Collections.emptyList() : calls, incomplete);
     }
 
     static JSONArray conversations(List<ChatStore.Conversation> values) {

@@ -14,6 +14,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 
 @RunWith(RobolectricTestRunner.class)
 @Config(sdk = 34, manifest = Config.NONE, shadows = HostAtomicFile.class)
@@ -139,6 +140,115 @@ public class PiPersistenceTest {
         turn.accept(new JSONObject().put("type", "text_delta").put("delta", "partial"));
         turn.accept(new JSONObject().put("type", "end").put("status", "error"));
         assertThrows(java.io.IOException.class, () -> store.piResume(store.load()));
+    }
+
+    @Test public void coordinatorDropsThrottledDeltaAtCanonicalAssistantBoundary() throws Exception {
+        ChatCoordinator coordinator = ChatCoordinator.get(context);
+        ChatStore store = coordinator.store();
+        AgentLoop.Message user = new AgentLoop.Message("user", "cross round");
+        store.save(Collections.singletonList(user));
+        AgentLoop.CancelToken token = new AgentLoop.CancelToken();
+        PiTurnPersistence turn = new PiTurnPersistence(store, store.activeId(), user.id, "reply", store.load());
+        org.robolectric.util.ReflectionHelpers.setField(coordinator, "running", true);
+        org.robolectric.util.ReflectionHelpers.setField(coordinator, "cancellation", token);
+        org.robolectric.util.ReflectionHelpers.setField(coordinator, "conversationId", store.activeId());
+        org.robolectric.util.ReflectionHelpers.setField(coordinator, "requestId", "request");
+        org.robolectric.util.ReflectionHelpers.setField(coordinator, "piPersistence", turn);
+        org.robolectric.util.ReflectionHelpers.setField(coordinator, "lastDeltaFlush", System.currentTimeMillis());
+        StringBuilder pending = org.robolectric.util.ReflectionHelpers.getField(coordinator, "pendingDelta");
+        pending.setLength(0);
+        List<JSONObject> events = new ArrayList<>();
+        ChatCoordinator.Listener listener = (messages, event) -> events.add(event);
+        coordinator.addListener(listener);
+        try {
+            coordinator.onPiEvent(new JSONObject().put("type", "text_delta").put("delta", "checking"), token, turn);
+            coordinator.onPiEvent(message(new JSONObject().put("role", "assistant").put("content", "checking")
+                    .put("stopReason", "toolUse").put("toolCalls", new JSONArray()
+                            .put(call("probe", "read", "{}")))), token, turn);
+            coordinator.onPiEvent(message(new JSONObject().put("role", "tool").put("content", "result")
+                    .put("toolCallId", "probe")), token, turn);
+            coordinator.onPiEvent(new JSONObject().put("type", "text_delta").put("delta", "done"), token, turn);
+            org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idleFor(100, TimeUnit.MILLISECONDS);
+            List<JSONObject> deltas = events.stream().filter(event -> "textDelta".equals(event.optString("type")))
+                    .collect(java.util.stream.Collectors.toList());
+            assertEquals(1, deltas.size());
+            assertEquals("reply:assistant:1", deltas.get(0).getString("nodeId"));
+            assertEquals("done", deltas.get(0).getJSONObject("payload").getString("delta"));
+            coordinator.onPiEvent(message(new JSONObject().put("role", "assistant").put("content", "done")
+                    .put("stopReason", "stop").put("toolCalls", new JSONArray())), token, turn);
+            coordinator.onPiEvent(new JSONObject().put("type", "context").put("entries", entries()), token, turn);
+            coordinator.onPiEvent(new JSONObject().put("type", "end").put("status", "completed"), token, turn);
+        } finally {
+            coordinator.removeListener(listener);
+            org.robolectric.util.ReflectionHelpers.setField(coordinator, "running", false);
+            pending.setLength(0);
+        }
+    }
+
+    @Test public void retryKeepsFailedPartialAssistantIncomplete() throws Exception {
+        ChatStore store = new ChatStore(context);
+        AgentLoop.Message user = new AgentLoop.Message("user", "retry"); store.save(Collections.singletonList(user));
+        PiTurnPersistence turn = new PiTurnPersistence(store, store.activeId(), user.id, "reply", store.load());
+        turn.accept(new JSONObject().put("type", "text_delta").put("delta", "partial"));
+        turn.accept(message(new JSONObject().put("role", "assistant").put("content", "partial")
+                .put("stopReason", "error").put("errorMessage", "temporary failure")
+                .put("toolCalls", new JSONArray())));
+        turn.accept(new JSONObject().put("type", "text_delta").put("delta", "recovered"));
+        turn.accept(message(new JSONObject().put("role", "assistant").put("content", "recovered")
+                .put("stopReason", "stop").put("toolCalls", new JSONArray())));
+        turn.accept(new JSONObject().put("type", "context").put("entries", entries()));
+        turn.accept(new JSONObject().put("type", "end").put("status", "completed"));
+        List<AgentLoop.Message> restored = new ChatStore(context).load();
+        assertTrue(restored.get(1).incomplete);
+        assertEquals("partial", restored.get(1).content);
+        assertFalse(restored.get(2).incomplete);
+        assertEquals("recovered", restored.get(2).content);
+    }
+
+    @Test public void canonicalToolMessagesRemainOrderedAndAssociatedAfterReload() throws Exception {
+        ChatStore store = new ChatStore(context);
+        AgentLoop.Message user = new AgentLoop.Message("user", "use tools"); store.save(Collections.singletonList(user));
+        PiTurnPersistence turn = new PiTurnPersistence(store, store.activeId(), user.id, "reply", store.load());
+        turn.accept(new JSONObject().put("type", "text_delta").put("delta", "checking"));
+        AgentLoop.Message preview = turn.savePreview();
+        assertEquals("reply", preview.id);
+        assertTrue(store.load().get(1).incomplete);
+        turn.accept(message(new JSONObject().put("role", "assistant").put("content", "checking")
+                .put("toolCalls", new JSONArray()
+                        .put(call("first", "read", "{\"path\":\"a\"}"))
+                        .put(call("second", "grep", "{\"pattern\":\"b\"}")))));
+        turn.accept(message(new JSONObject().put("role", "tool").put("content", "first-result")
+                .put("toolCallId", "first")));
+        turn.accept(message(new JSONObject().put("role", "tool").put("content", "second-result")
+                .put("toolCallId", "second")));
+        turn.accept(new JSONObject().put("type", "text_delta").put("delta", "done"));
+        assertEquals("reply:assistant:1", turn.savePreview().id);
+        turn.accept(message(new JSONObject().put("role", "assistant").put("content", "done")
+                .put("toolCalls", new JSONArray())));
+        turn.accept(new JSONObject().put("type", "context").put("entries", entries()));
+        turn.accept(new JSONObject().put("type", "end").put("status", "completed"));
+
+        List<AgentLoop.Message> restored = new ChatStore(context).load();
+        assertEquals(Arrays.asList("user", "assistant", "tool", "tool", "assistant"),
+                restored.stream().map(value -> value.role).collect(java.util.stream.Collectors.toList()));
+        assertEquals(Arrays.asList("first", "second"), restored.get(1).toolCalls.stream()
+                .map(value -> value.id).collect(java.util.stream.Collectors.toList()));
+        assertEquals("first", restored.get(2).toolCallId);
+        assertEquals("first-result", restored.get(2).content);
+        assertEquals("second", restored.get(3).toolCallId);
+        assertEquals("second-result", restored.get(3).content);
+        assertEquals("reply:assistant:1", restored.get(4).id);
+        assertEquals(entries().toString(), store.piContext(restored.get(4).id));
+        JSONObject rendered = NativeJson.message(restored.get(1));
+        assertEquals("first", rendered.getJSONArray("toolCalls").getJSONObject(0).getString("id"));
+    }
+
+    private static JSONObject message(JSONObject value) throws Exception {
+        return new JSONObject().put("type", "message").put("message", value);
+    }
+
+    private static JSONObject call(String id, String name, String arguments) throws Exception {
+        return new JSONObject().put("id", id).put("name", name).put("arguments", arguments);
     }
 
     @Test public void lateCompletionDoesNotRecreateDeletedConversation() throws Exception {

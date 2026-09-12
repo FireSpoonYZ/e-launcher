@@ -34,6 +34,7 @@ try {
     await runtime.prompt("hello");
     assert.equal(requests.at(-1).reasoning_effort, level);
     assert.equal(events.find((event) => event.type === "message").message.content, "sdk-ok");
+    assert.equal(events.find((event) => event.type === "message").message.stopReason, "stop");
     assert.equal(events.at(-1).status, "completed");
     const previousLength = context?.length ?? 0;
     context = events.find((event) => event.type === "context").messages;

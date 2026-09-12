@@ -183,15 +183,21 @@ public final class ChatStore {
 
     void savePiPreview(String conversation, String userId, String assistantId, List<AgentLoop.Message> messages) {
         synchronized (STORE_LOCK) {
-            if (piPending(conversation, userId)) mergePiMessages(conversation, userId, assistantId, messages);
+            if (piPending(conversation, userId)) mergePiMessages(conversation, userId, messages);
         }
     }
 
-    private void mergePiMessages(String conversation, String userId, String assistantId, List<AgentLoop.Message> messages) {
+    private void mergePiMessages(String conversation, String userId, List<AgentLoop.Message> messages) {
         ConversationTree tree = tree(conversation);
         String leaf = tree.leaf();
+        boolean inTurn = false;
+        boolean turnSelected = java.util.Objects.equals(leaf, userId);
+        for (AgentLoop.Message message : messages) {
+            if (message.id.equals(userId)) inTurn = true;
+            if (inTurn && message.id.equals(leaf)) { turnSelected = true; break; }
+        }
         tree.merge(messages);
-        if (!java.util.Objects.equals(leaf, userId) && !java.util.Objects.equals(leaf, assistantId)) tree.select(leaf);
+        if (!turnSelected) tree.select(leaf);
         writeTree(conversation, tree);
     }
 
@@ -200,7 +206,7 @@ public final class ChatStore {
         synchronized (STORE_LOCK) {
             if (!piPending(conversation, userId)) return;
             if (entries != null) PiConfigStore.write(piContextFile(conversation, contextNode), entries.toString());
-            mergePiMessages(conversation, userId, assistantId, messages);
+            mergePiMessages(conversation, userId, messages);
             preferences.edit().remove("pi_pending_" + conversation + "_" + userId).apply();
         }
     }

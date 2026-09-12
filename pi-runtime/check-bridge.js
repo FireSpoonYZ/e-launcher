@@ -36,7 +36,10 @@ const api = http.createServer((req, res) => {
       held.add(res);
       res.on("close", () => held.delete(res));
     } else if (prompt === "tool") {
-      emit({ tool_calls: [{ index: 0, id: "probe-1", type: "function", function: { name: "probe", arguments: "{}" } }] }, "tool_calls");
+      emit({ tool_calls: [
+        { index: 0, id: "probe-1", type: "function", function: { name: "probe", arguments: "{}" } },
+        { index: 1, id: "probe-2", type: "function", function: { name: "probe", arguments: "{}" } },
+      ] }, "tool_calls");
       res.end("data: [DONE]\n\n");
     } else {
       emit({}, "stop");
@@ -141,7 +144,23 @@ try {
   send({ id: "sdk-tool", type: "prompt", sdk: true, prompt: "tool", config });
   assert.equal((await waitFor((event) => event.id === "sdk-tool" && event.type === "end")).status, "completed", JSON.stringify(events));
   assert.equal(requests.at(-1).reasoning_effort, "high");
-  assert(events.some((event) => event.id === "sdk-tool" && event.type === "tool_start" && event.name === "probe"));
+  const toolStarts = events.filter((event) => event.id === "sdk-tool" && event.type === "tool_start");
+  const toolEnds = events.filter((event) => event.id === "sdk-tool" && event.type === "tool_end");
+  assert.deepEqual(toolStarts.map((event) => ({ id: event.toolCallId, name: event.name, args: event.args })), [
+    { id: "probe-1", name: "probe", args: {} }, { id: "probe-2", name: "probe", args: {} },
+  ]);
+  assert.deepEqual(toolEnds.map((event) => event.toolCallId).sort(), ["probe-1", "probe-2"]);
+  assert(toolEnds.every((event) => event.result.content[0].text === "probe-ok"));
+  const canonical = events.filter((event) => event.id === "sdk-tool" && event.type === "message").map((event) => event.message);
+  assert.deepEqual(canonical.map((message) => message.role), ["assistant", "tool", "tool", "assistant"]);
+  assert.equal(canonical[0].stopReason, "toolUse");
+  assert.deepEqual(canonical[0].toolCalls, [
+    { id: "probe-1", name: "probe", arguments: "{}" },
+    { id: "probe-2", name: "probe", arguments: "{}" },
+  ]);
+  assert.deepEqual(canonical.slice(1, 3).map((message) => message.toolCallId), ["probe-1", "probe-2"]);
+  assert.equal(canonical[3].stopReason, "stop");
+  assert(canonical.slice(1, 3).every((message) => message.content === "probe-ok"));
   const sdkHistory = events.find((event) => event.id === "sdk-tool" && event.type === "context").entries;
   assert.equal(sdkHistory[0].type, "session");
   assert(sdkHistory.some((entry) => entry.message?.role === "toolResult"));

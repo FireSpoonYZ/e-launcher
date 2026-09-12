@@ -85,10 +85,21 @@ export async function createSdkRuntime(command, signal) {
     session.subscribe((event) => {
       if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
         emit({ type: "text_delta", delta: event.assistantMessageEvent.delta });
+      } else if (event.type === "message_end" && event.message.role === "assistant") {
+        emit({ type: "message", message: { role: "assistant", stopReason: event.message.stopReason,
+          errorMessage: event.message.errorMessage,
+          content: event.message.content.filter((part) => part.type === "text").map((part) => part.text).join(""),
+          toolCalls: event.message.content.filter((part) => part.type === "toolCall")
+            .map((part) => ({ id: part.id, name: part.name, arguments: JSON.stringify(part.arguments) })) } });
+      } else if (event.type === "message_end" && event.message.role === "toolResult") {
+        emit({ type: "message", message: { role: "tool",
+          content: event.message.content.filter((part) => part.type === "text").map((part) => part.text).join("\n"),
+          toolCallId: event.message.toolCallId } });
       } else if (event.type === "tool_execution_start") {
-        emit({ type: "tool_start", name: event.toolName });
+        emit({ type: "tool_start", toolCallId: event.toolCallId, name: event.toolName, args: event.args });
       } else if (event.type === "tool_execution_end") {
-        emit({ type: "tool_end", name: event.toolName, isError: event.isError });
+        emit({ type: "tool_end", toolCallId: event.toolCallId, name: event.toolName,
+          result: event.result, isError: event.isError });
       } else if (event.type === "auto_retry_start" || event.type === "auto_compaction_start") {
         emit({ type: "status", message: event.type === "auto_retry_start" ? "Pi 正在重试" : "Pi 正在压缩上下文" });
       }
@@ -104,8 +115,6 @@ export async function createSdkRuntime(command, signal) {
           signal?.throwIfAborted();
           await session.prompt(text);
           const last = session.messages.findLast((message) => message.role === "assistant");
-          const content = last?.content?.filter((part) => part.type === "text").map((part) => part.text).join("") ?? "";
-          if (last) emit({ type: "message", message: { role: "assistant", content } });
           if (last?.errorMessage) emit({ type: "error", message: last.errorMessage, aborted: last.stopReason === "aborted" });
           status = signal?.aborted || last?.stopReason === "aborted" ? "aborted"
             : last?.stopReason === "length" ? "truncated" : last?.errorMessage ? "error" : "completed";

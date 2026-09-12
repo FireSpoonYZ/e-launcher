@@ -92,10 +92,35 @@ small, .secondary { font-size: .85rem; color: var(--muted); }
 .markdown :not(pre) > code { background: var(--surface); padding: 2px 4px; border-radius: 4px; }
 .table-scroll, .katex-display { max-width: 100%; overflow-x: auto; }
 .markdown table { border-collapse: collapse; font-size: .9rem; }.markdown th,.markdown td { border: 1px solid var(--line); padding: 8px 12px; text-align: left; }
-.tool { margin-block: 20px; padding: 12px 14px; border-radius: 14px; background: var(--surface); }
-.tool summary { min-height: 28px; display: flex; align-items: center; gap: 10px; cursor: pointer; font-size: .92rem; list-style: none; }
-.tool summary > svg:first-child { color: var(--accent); }.tool summary > svg:last-child { margin-left: auto; width: 18px; }
-.tool[open] summary > svg:last-child { transform: rotate(180deg); }.tool pre { margin-bottom: 0; padding-inline: 0; }
+.tool { margin-block: 12px; border: 1px solid var(--line); border-radius: 12px; background: color-mix(in srgb, var(--surface) 24%, var(--bg)); overflow: hidden; }
+.tool summary { display: block; padding: 6px 14px 0; cursor: pointer; list-style: none; touch-action: manipulation; }
+.tool summary::-webkit-details-marker { display: none; }
+.tool summary:focus-visible { outline-offset: -3px; border-radius: 12px; }
+.tool-heading { display: flex; align-items: center; gap: 9px; min-height: 44px; }
+.tool-heading > svg { width: 19px; height: 19px; color: var(--muted); }
+.tool-name { min-width: 0; overflow-wrap: anywhere; font-size: .9rem; font-weight: 600; line-height: 1.4; }
+.tool-status { margin-left: auto; flex-shrink: 0; display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: .75rem; white-space: nowrap; }
+.tool-status-dot { width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+.tool-returned .tool-status { color: var(--accent); }
+.tool-waiting .tool-status-dot { animation: tool-pulse 1.6s ease-in-out infinite; }
+.tool-argument { display: block; margin: 0 0 10px; font: .875rem/1.6 ui-monospace, Consolas, monospace; white-space: nowrap; text-overflow: ellipsis; overflow: hidden; }
+.tool-preview { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; max-height: 5.8em; overflow: hidden; padding-top: 10px; border-top: 1px solid var(--line); font: .875rem/1.6 ui-monospace, Consolas, monospace; color: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere; }
+.tool-preview-empty { font-family: inherit; font-size: .8rem; }
+.tool-disclosure { display: flex; align-items: center; justify-content: flex-end; gap: 5px; min-height: 44px; color: var(--accent); font-size: .75rem; }
+.tool-disclosure svg { width: 15px; height: 15px; transition: transform 160ms ease; }
+.tool-collapse, .tool[open] .tool-expand, .tool[open] .tool-preview { display: none; }
+.tool[open] .tool-collapse { display: inline; }
+.tool[open] .tool-disclosure svg { transform: rotate(180deg); }
+.tool[open] .tool-argument { margin-bottom: 0; }
+.tool-details { border-top: 1px solid var(--line); padding: 12px 14px 14px; }
+.tool-details section + section { margin-top: 16px; }
+.tool-details small { font-size: .75rem; }
+.tool pre { margin: 6px 0 0; max-height: 280px; padding: 0; border-radius: 0; background: transparent; font-size: .875rem; }
+.tool pre:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.tool-empty { color: var(--muted); font-size: .8rem; margin: 6px 0 0; }
+@media (hover: hover) { .tool summary:hover { background: color-mix(in srgb, var(--surface) 45%, transparent); } }
+@keyframes tool-pulse { 50% { opacity: .3; } }
+@media (prefers-reduced-motion: reduce) { .tool-waiting .tool-status-dot { animation: none; }.tool-disclosure svg { transition: none; } }
 .chat-empty { display: flex; flex-direction: column; min-height: 85%; align-items: center; justify-content: center; text-align: center; }
 .empty-mark { font-weight: 500; font-size: 2.5rem; letter-spacing: -.08em; line-height: 1; display: inline-block; color: var(--accent); margin-bottom: 24px; }
 .chat-empty h1 { font-size: 1.5rem; font-weight: 600; letter-spacing: -.025em; margin-bottom: 8px; }.chat-empty p { color: var(--muted); font-size: .9rem; }

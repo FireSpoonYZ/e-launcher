@@ -4,8 +4,10 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
-import { ArrowDown, ArrowUp, Check, ChevronDown, Copy, GitBranch, Menu, Mic, Plus, Search, Settings, Share2, SlidersHorizontal, Square, SquarePen, Trash2 } from 'lucide-react';
+import { ArrowDown, ArrowUp, Check, ChevronDown, Copy, GitBranch, Menu, Mic, Plus, Search, Settings, Share2, Square, SquarePen, Trash2 } from 'lucide-react';
 import { Chat, Device, NativeSettings, type ChatSnapshot, type Conversation, type ConversationNode, type ConversationSummary, type NativeEvent } from './native';
+import { pairToolResults, toolCallKey } from './toolResults';
+import { ToolCallView } from './ToolCallView';
 import { ConfirmDialog, Dialog } from './components/ui/dialog';
 import { ThinkingControl } from './ThinkingControl';
 import { Empty, Environment, ErrorNotice, Header, Loading, SearchField, errorText, query, useAction, useText } from './ui';
@@ -72,13 +74,13 @@ export const Markdown = memo(function Markdown({text}: {text: string}) {
     table: ({children}) => <div className="table-scroll"><table>{children}</table></div>,
   }}>{text}</ReactMarkdown><ErrorNotice error={action.error}/></div>;
 });
-const MessageView = memo(function MessageView({node}: {node: ConversationNode}) {
+const MessageView = memo(function MessageView({node, toolResults, pending}: {node: ConversationNode; toolResults: Map<string, ConversationNode[]>; pending: boolean}) {
   const t = useText(); const action = useAction(); const [copied, setCopied] = useState(false); const message = node.message;
   if (message.role === 'system') return null;
-  if (message.role === 'tool') return <details className="tool"><summary><Check/>{t('工具结果','Tool result')}<ChevronDown/></summary><pre>{message.content}</pre></details>;
+  if (message.role === 'tool') return <ToolCallView results={[node]}/>;
   return <article className={`message ${message.role}`}>
     {message.content && <Markdown text={message.content}/>}
-    {message.toolCalls.map(tool => <details className="tool" key={tool.id}><summary><SlidersHorizontal/><span>{tool.name}</span><ChevronDown/></summary><pre>{tool.arguments}</pre></details>)}
+    {message.toolCalls.map((tool, index) => <ToolCallView key={toolCallKey(node.id, index)} tool={tool} results={toolResults.get(toolCallKey(node.id, index)) ?? []} pending={pending}/>)}
     {message.incomplete && <small className="secondary">{t('尚未完成','Not completed')}</small>}
     {message.content && message.role === 'assistant' && <div className="message-actions"><button className="icon-button" aria-label={t('复制','Copy')} onClick={() => action.run(async () => { await navigator.clipboard.writeText(message.content!); setCopied(true); })}>{copied ? <Check/> : <Copy/>}</button><button className="icon-button" aria-label={t('分享','Share')} onClick={() => action.run(() => Device.share({text:message.content!,title:'Pi'}))}><Share2/></button></div>}
     <ErrorNotice error={action.error}/>
@@ -108,9 +110,11 @@ export function ChatPage() {
   });
   const changed = async () => { setPanel(null); await chat.refresh(); };
   const selection = {model: defaults.defaultModel, thinkingLevel: defaults.defaultThinkingLevel, ...conversation.piSelection};
+  const path = lineage(conversation); const paired = pairToolResults(path);
+  const activeMessage = path.filter(node => node.message.role !== 'tool').at(-1);
   return <main className="chat-page"><header className="chat-header"><button className="icon-button" aria-label={t('会话列表','Conversations')} onClick={() => setPanel('conversations')}><Menu/></button><button className="model-title" onClick={() => device?.piMode ? setPanel('models') : nav('/settings/general')}><strong>{device?.piMode ? 'Pi' : 'Android Agent'}</strong><span>{String(selection.model || t('选择模型','Choose model'))}<ChevronDown/></span></button><button className="icon-button" aria-label={t('新会话','New conversation')} disabled={running || action.busy} onClick={() => action.run(async () => { await Chat.newConversation(); await chat.refresh(); })}><SquarePen/></button></header>
     <section className="messages" ref={scroll} onScroll={e => { const el = e.currentTarget; setFollowing(el.scrollHeight - el.scrollTop - el.clientHeight < 90); }}>
-      {lineage(conversation).filter(n => n.message.role !== 'system').length ? lineage(conversation).map(node => <MessageView node={node} key={node.id}/>) : <div className="chat-empty"><span className="empty-mark">Pi</span><h1>{t('今天想聊些什么？','What’s on your mind?')}</h1><p>{t('从一个问题开始。','Start with a question.')}</p></div>}
+      {path.some(n => n.message.role !== 'system') ? path.filter(node => !paired.embeddedResultIds.has(node.id)).map(node => <MessageView node={node} toolResults={paired.byCall} pending={running && node.id === activeMessage?.id} key={node.id}/>) : <div className="chat-empty"><span className="empty-mark">Pi</span><h1>{t('今天想聊些什么？','What’s on your mind?')}</h1><p>{t('从一个问题开始。','Start with a question.')}</p></div>}
     </section>
     <footer className="composer-wrap">{!following && <button className="scroll-latest icon-button" aria-label={t('回到最新消息','Latest message')} onClick={() => setFollowing(true)}><ArrowDown/></button>}
       <ErrorNotice error={action.error || chat.error}/>{running && <div className="run-status" role="status"><span className="pulse-dot"/>{chat.status || t('正在回复…','Working…')}</div>}
