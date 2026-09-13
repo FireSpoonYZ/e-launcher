@@ -6,15 +6,33 @@ import { join } from "node:path";
 
 const home = await mkdtemp(join(tmpdir(), "launcher-sdk-check-"));
 process.env.PI_CODING_AGENT_DIR = join(home, "agent");
-const requests = [];
+const requests = [], fetchProbes = [];
 const server = createServer(async (request, response) => {
   let body = "";
   for await (const chunk of request) body += chunk;
-  requests.push(JSON.parse(body));
+  if (request.url.startsWith("/fetch-probe/")) {
+    fetchProbes.push(request.url);
+    response.writeHead(200, { "Content-Type": "text/plain" });
+    response.end("fetch-ok");
+    return;
+  }
+  const payload = JSON.parse(body);
+  requests.push(payload);
+  const last = payload.messages.at(-1), lastContent = JSON.stringify(last?.content);
+  const toolName = last?.role === "user" && [
+    ["pure tool image", "image_only"], ["mixed tool image", "image_mixed"],
+    ["five mib tool image", "image_5m"], ["max tool image", "image_25m"],
+    ["oversize tool image", "image_oversize"], ["invalid base64 tool image", "image_invalid"],
+  ].find(([prompt]) => lastContent.includes(prompt))?.[1];
+  const delta = toolName
+    ? { role: "assistant", tool_calls: [{ index: 0, id: `${toolName}-call`, type: "function",
+      function: { name: toolName, arguments: "{}" } }] }
+    : { role: "assistant", content: "sdk-ok" };
   response.writeHead(200, { "Content-Type": "text/event-stream" });
-  response.end('data: {"id":"mock","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"sdk-ok"},"finish_reason":null}]}\n\ndata: {"id":"mock","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n');
+  response.end(`data: ${JSON.stringify({ id:"mock", object:"chat.completion.chunk", choices:[{ index:0, delta, finish_reason:null }] })}\n\ndata: ${JSON.stringify({ id:"mock", object:"chat.completion.chunk", choices:[{ index:0, delta:{}, finish_reason:toolName ? "tool_calls" : "stop" }] })}\n\ndata: [DONE]\n\n`);
 });
 await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+let explicitAgent;
 try {
   const { createSdkRuntime, sdkQuery } = await import("./sdk.js");
   const config = { agentDir: join(home, "agent"), cwd: join(home, "workspace"), cacheDir: join(home, "cache"),
@@ -42,8 +60,9 @@ try {
     context = events.find((event) => event.type === "context").messages;
     assert.equal(context.length, previousLength + 2, "native history survives subsequent turns");
   }
+  const imageData = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
   const imageId = "11111111-1111-1111-1111-111111111111", fileId = "22222222-2222-2222-2222-222222222222";
-  await writeFile(join(config.chatAttachmentRoot, imageId), Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64"));
+  await writeFile(join(config.chatAttachmentRoot, imageId), Buffer.from(imageData, "base64"));
   await writeFile(join(config.chatAttachmentRoot, fileId), "attachment body");
   const attached = await createSdkRuntime({ config, attachments: [
     { id:imageId, path:join(config.chatAttachmentRoot,imageId), name:"photo.png", mimeType:"image/png", kind:"image" },
@@ -75,6 +94,124 @@ try {
     if (error?.code !== "EPERM") throw error;
     console.warn("SKIP: OS does not permit creating the attachment symlink fixture");
   }
+
+  const lifecycleFile = join(home, "lifecycle.txt"), extensionFile = join(home, "lifecycle-extension.js");
+  const probeUrl = `http://127.0.0.1:${server.address().port}/fetch-probe`;
+  await writeFile(extensionFile, `
+import { appendFileSync } from "node:fs";
+const image = ${JSON.stringify({ type:"image", mimeType:"image/png", data:imageData })};
+const sizedImage = (size) => ({ type:"image", mimeType:"image/png", data:Buffer.alloc(size, 0x5a).toString("base64") });
+export default function(pi) {
+  pi.on("session_start", async () => {
+    appendFileSync(${JSON.stringify(lifecycleFile)}, "session_start\\n");
+    if (await (await fetch(${JSON.stringify(`${probeUrl}/explicit`)}, { dispatcher: globalThis.__launcherSdkCheckDispatcher })).text() !== "fetch-ok") throw new Error("explicit fetch failed");
+    if (await (await fetch(${JSON.stringify(`${probeUrl}/default`)})).text() !== "fetch-ok") throw new Error("default fetch failed");
+  });
+  pi.on("session_shutdown", () => appendFileSync(${JSON.stringify(lifecycleFile)}, "session_shutdown\\n"));
+  pi.registerTool({ name:"image_only", label:"Image only", description:"Return a synthetic image", parameters:{ type:"object", properties:{}, additionalProperties:false },
+    execute:async () => ({ content:[image] }) });
+  pi.registerTool({ name:"image_mixed", label:"Mixed image", description:"Return text and a synthetic image", parameters:{ type:"object", properties:{}, additionalProperties:false },
+    execute:async () => ({ content:[{ type:"text", text:"tool caption" }, image] }) });
+  for (const [name, size] of [["image_5m", 5 * 1024 * 1024], ["image_25m", 25 * 1024 * 1024], ["image_oversize", 25 * 1024 * 1024 + 1]])
+    pi.registerTool({ name, label:name, description:"Return a sized synthetic image", parameters:{ type:"object", properties:{}, additionalProperties:false },
+      execute:async () => ({ content:[sizedImage(size)] }) });
+  pi.registerTool({ name:"image_invalid", label:"Invalid image", description:"Return invalid base64", parameters:{ type:"object", properties:{}, additionalProperties:false },
+    execute:async () => ({ content:[{ type:"image", mimeType:"image/png", data:"AAAA!" }] }) });
+}
+`);
+  const undici = await import("./node_modules/@earendil-works/pi-coding-agent/node_modules/undici/index.js");
+  explicitAgent = new undici.Agent();
+  let explicitDispatches = 0;
+  globalThis.__launcherSdkCheckDispatcher = { dispatch(options, handler) {
+    explicitDispatches++;
+    return explicitAgent.dispatch(options, handler);
+  } };
+  config.settings.extensions = [extensionFile];
+  const lifecycleCounts = async () => {
+    let lines = [];
+    try { lines = (await readFile(lifecycleFile, "utf8")).trim().split("\n"); }
+    catch (error) { if (error?.code !== "ENOENT") throw error; }
+    return { starts:lines.filter(line => line === "session_start").length,
+      shutdowns:lines.filter(line => line === "session_shutdown").length };
+  };
+  for (const [prompt, expectedText] of [["pure tool image", ""], ["mixed tool image", "tool caption"]]) {
+    const before = await lifecycleCounts();
+    const runtime = await createSdkRuntime({ config });
+    const started = await lifecycleCounts();
+    assert.deepEqual(started, { starts:before.starts + 1, shutdowns:before.shutdowns },
+      "bindExtensions sends session_start once before prompting");
+    const events = [];
+    runtime.subscribe((event) => events.push(event));
+    await runtime.prompt(prompt);
+    const ended = await lifecycleCounts();
+    assert.deepEqual(ended, { starts:before.starts + 1, shutdowns:before.shutdowns + 1 },
+      "native runtime disposal sends session_shutdown once");
+    const toolMessage = events.find((event) => event.type === "message" && event.message.role === "tool").message;
+    assert.equal(toolMessage.content, expectedText);
+    assert.equal(toolMessage.attachments.length, 1, "tool images are projected as one chat attachment");
+    assert.equal(toolMessage.attachments[0].mimeType, "image/png");
+    assert.equal(toolMessage.attachments[0].path, join(config.chatAttachmentRoot, toolMessage.attachments[0].id));
+    assert.deepEqual(await readFile(toolMessage.attachments[0].path), Buffer.from(imageData, "base64"));
+    assert(!JSON.stringify(toolMessage).includes(imageData), "chat projection never exposes base64 as text or metadata");
+    assert(events.find((event) => event.type === "tool_end").result.content.some((part) => part.type === "image"));
+    const snapshot = events.find((event) => event.type === "context");
+    assert(snapshot.entries.some((entry) => entry.message?.role === "toolResult"
+      && entry.message.content.some((part) => part.type === "image")), "native model history retains tool images");
+    assert(JSON.stringify(requests.at(-1).messages).includes("data:image/png;base64,"),
+      "tool images remain in the model's follow-up request");
+  }
+  for (const [prompt, bytes] of [["five mib tool image", 5 * 1024 * 1024], ["max tool image", 25 * 1024 * 1024]]) {
+    const before = await lifecycleCounts();
+    const runtime = await createSdkRuntime({ config });
+    const events = [];
+    runtime.subscribe((event) => events.push(event));
+    await runtime.prompt(prompt);
+    assert.equal(events.at(-1).status, "completed", `${bytes} byte tool image completes its turn`);
+    const toolMessage = events.find((event) => event.type === "message" && event.message.role === "tool").message;
+    assert.equal(toolMessage.attachments[0].size, bytes);
+    assert((await readFile(toolMessage.attachments[0].path)).equals(Buffer.alloc(bytes, 0x5a)),
+      `${bytes} byte tool image is written without corruption`);
+    const ended = await lifecycleCounts();
+    assert.deepEqual(ended, { starts:before.starts + 1, shutdowns:before.shutdowns + 1 },
+      `${bytes} byte successful turn closes the extension session exactly once`);
+    assert.equal((await readdir(config.cacheDir)).filter(name => name.startsWith("pi-request-")).length, 0);
+    requests.length = 0;
+  }
+  for (const [prompt, expectedError] of [["oversize tool image", /工具图片大小无效/], ["invalid base64 tool image", /工具图片数据无效/]]) {
+    const before = await lifecycleCounts();
+    const runtime = await createSdkRuntime({ config });
+    const events = [];
+    runtime.subscribe((event) => events.push(event));
+    await assert.rejects(runtime.prompt(prompt), expectedError);
+    assert(!events.some((event) => event.type === "message" && event.message.role === "tool"),
+      `${prompt} does not publish an invalid attachment`);
+    assert(events.some((event) => event.type === "context"), `${prompt} still publishes native context on failure`);
+    const ended = await lifecycleCounts();
+    assert.deepEqual(ended, { starts:before.starts + 1, shutdowns:before.shutdowns + 1 },
+      `${prompt} failure closes the extension session exactly once`);
+    assert.equal((await readdir(config.cacheDir)).filter(name => name.startsWith("pi-request-")).length, 0);
+    requests.length = 0;
+  }
+  console.log("PASS: 5 MiB and 25 MiB tool images persisted; oversize and invalid base64 rejected with lifecycle cleanup");
+  for (const failure of ["attachment", "abort"]) {
+    const before = await lifecycleCounts();
+    const controller = new AbortController();
+    const runtime = await createSdkRuntime({ config, attachments: failure === "attachment"
+      ? [{ id:"bad", path:join(home, "outside"), mimeType:"text/plain", kind:"file" }] : undefined }, controller.signal);
+    if (failure === "abort") controller.abort();
+    await assert.rejects(runtime.prompt("fail before send"), failure === "attachment" ? /路径无效/ : { name:"AbortError" });
+    const ended = await lifecycleCounts();
+    assert.deepEqual(ended, { starts:before.starts + 1, shutdowns:before.shutdowns + 1 },
+      `${failure} cleanup closes the started extension session exactly once`);
+    assert.equal((await readdir(config.cacheDir)).filter(name => name.startsWith("pi-request-")).length, 0);
+  }
+  assert.equal(explicitDispatches, 8, "an explicit caller dispatcher receives each extension request");
+  assert.equal(fetchProbes.filter((path) => path === "/fetch-probe/explicit").length, 8);
+  assert.equal(fetchProbes.filter((path) => path === "/fetch-probe/default").length, 8,
+    "requests without an explicit dispatcher still use the session transport");
+  delete config.settings.extensions;
+  delete globalThis.__launcherSdkCheckDispatcher;
+
   const { SessionManager } = await import("@earendil-works/pi-coding-agent");
   const saved = SessionManager.inMemory(config.cwd);
   saved.appendMessage({ role: "user", content: "discard-old", timestamp: 1 });
@@ -143,6 +280,8 @@ try {
   assert((await readFile(skillFile, "utf8")).includes("Fixture."), "removing a local package preserves its source files");
   console.log("Full SDK: registry, scoped resources/toggles, package lifecycle, thinking, session selection and native compaction restoration passed");
 } finally {
+  delete globalThis.__launcherSdkCheckDispatcher;
+  await explicitAgent?.close();
   await new Promise((resolve) => server.close(resolve));
   await rm(home, { recursive: true, force: true });
 }

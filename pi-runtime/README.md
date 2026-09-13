@@ -2,6 +2,8 @@
 
 Android Pi mode uses the full `@earendil-works/pi-coding-agent` SDK, pinned to **0.85.1**, with matching Pi core/AI packages. `sdk.js` owns session creation, native model/resource loading, tools, thinking levels, compaction, retries, credentials and package operations. The smaller `createPiRuntime` adapter in `index.js` remains for compatibility and regression checks.
 
+The built-in `shower` tool is a direct native bridge to the app's Operit Shower controller, not MCP or loopback HTTP. Node sends request-ID/call-ID tagged operations over the existing same-UID/same-PID local socket; Java validates and serializes them onto the single virtual display. Responses carry real errors, and cancellation or the 20-second timeout sends a native cancel without replay. Screenshots return PNG image content plus both virtual-display and scaled-image dimensions. An explicit `release` owns cleanup across Pi turns.
+
 ## Configuration and sessions
 
 The Java host supplies app-private global/workspace settings, models, credentials, system prompts and resource paths. The runtime does not load the user's desktop Pi directory. Forms and file editing share those files; the next request reads a fresh snapshot. Current-chat model/thinking selection is separate from startup defaults. CLI/TUI-only settings do not control Android rendering or permissions.
@@ -12,7 +14,7 @@ Models, resource diagnostics, OAuth prompts, credential updates, package operati
 
 ## Bridge and packaging
 
-The app starts Node once with private `HOME`/`TMPDIR` and exchanges request-ID-tagged newline JSON over a randomized abstract Unix socket. The connecting peer must match the app process UID and PID. Only one operation is admitted at a time; the protocol includes busy rejection, cancellation, errors and OAuth replies. Startup failure is sticky until process restart.
+The app starts Node once with private `HOME`/`TMPDIR` and exchanges request-ID-tagged newline JSON over a randomized abstract Unix socket. The connecting peer must match the app process UID and PID. One operation per conversation is admitted at a time; independent conversations may run concurrently. The protocol includes busy rejection, cancellation, errors, OAuth replies and call-ID-tagged Shower requests. Startup failure is sticky until process restart.
 
 `scripts/prepare-pi-runtime.ps1` prepares Node Mobile 24.18.0-0, arm64 libraries/headers and npm dependencies. `npm run build:android` bundles `android.js` into `app/src/main/assets/pi-runtime.cjs` and copies the pinned SDK metadata, documentation, themes and export resources into `app/src/main/assets/pi-sdk/`. The build also copies the complete pinned npm distribution to `assets/npm/11.6.2/`. These outputs are generated and ignored by Git. Gradle packages the Node executable as `libnode_launcher.so`, with native-library extraction enabled so Android can execute it from `nativeLibraryDir`. The app prepares npm in a versioned private directory and repairs its `node` symlink after APK replacement. The bundle maps `import.meta.url`, sets `PI_PACKAGE_DIR`, and uses the pinned SDK's internal HTTP dispatcher bootstrap.
 
@@ -23,7 +25,7 @@ npm --prefix pi-runtime ci
 npm --prefix pi-runtime test
 ```
 
-The suite checks all 65 documented settings keys, wire-level thinking values, scoped resources, local package lifecycle, native history/compaction, session-only selection, cancellation and context publication after a throwing prompt. It also builds and executes the shipped CJS bridge with local mock SSE, TypeScript extensions/tools/providers, simulated OAuth and busy/abort/recovery checks. Mock credentials and replies are not real provider validation.
+The suite checks all 65 documented settings keys, wire-level thinking values, scoped resources, local package lifecycle, native history/compaction, session-only selection, cancellation and context publication after a throwing prompt. It also checks the Shower tool schema boundary, native dispatch, screenshot image projection, errors and cancellation, then builds and executes the shipped CJS bridge with a simulated Java Shower response plus local mock SSE, TypeScript extensions/tools/providers, simulated OAuth and busy/abort/recovery checks. Mock native/provider replies are not device or provider validation.
 
 The npm integration check uses a loopback npm registry and mock model to exercise the shipped bundle: scoped/versioned package installation, dependencies and `postinstall`, `node` and `process.execPath`, persisted settings, fresh TypeScript extension loading, same-chat next-turn tool execution, filtering, workspace precedence, ordinary npm packages, load errors, repeated installation and removal. It makes no real model requests.
 

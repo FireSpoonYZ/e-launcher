@@ -1,12 +1,12 @@
 import { memo, useEffect, useRef, useState } from 'react';
-import { Capacitor } from '@capacitor/core';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
-import { ArrowDown, ArrowUp, Camera, Check, ChevronDown, Copy, File, GitBranch, Image, Menu, Mic, Paperclip, Plus, RotateCcw, Search, Settings, Share2, Square, SquarePen, Trash2, X } from 'lucide-react';
-import { Chat, Device, NativeSettings, type Attachment, type ChatSnapshot, type Conversation, type ConversationNode, type ConversationSummary, type NativeEvent } from './native';
+import { ArrowDown, ArrowUp, Camera, Check, ChevronDown, Copy, GitBranch, Image, Menu, Mic, Paperclip, Plus, RotateCcw, Search, Settings, Share2, Square, SquarePen, Trash2 } from 'lucide-react';
+import { Chat, Device, NativeSettings, type ChatSnapshot, type Conversation, type ConversationNode, type ConversationSummary, type NativeEvent } from './native';
+import { AttachmentList } from './AttachmentList';
 import { LatestRequest } from './latestRequest';
 import { pairToolResults, toolCallKey } from './toolResults';
 import { ToolCallView } from './ToolCallView';
@@ -78,17 +78,6 @@ export const Markdown = memo(function Markdown({text}: {text: string}) {
     table: ({children}) => <div className="table-scroll"><table>{children}</table></div>,
   }}>{text}</ReactMarkdown><ErrorNotice error={action.error}/></div>;
 });
-function formatBytes(size: number) {
-  if (size < 1024) return `${size} B`; if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
-  return `${(size / 1024 / 1024).toFixed(1)} MB`;
-}
-function AttachmentList({attachments, sent=false, remove}: {attachments:Attachment[]; sent?:boolean; remove?:(id:string)=>void}) {
-  const t=useText(); const action=useAction();
-  return <><div className={`attachments ${sent?'sent':''}`}>{attachments.map(item => item.kind === 'image'
-    ? <div className="image-attachment" key={item.id}><button aria-label={t('查看图片','View image')} onClick={()=>action.run(()=>Device.openAttachment({attachmentId:item.id}))}><img src={Capacitor.convertFileSrc(item.path)} alt={item.name}/></button>{remove&&<button className="remove-attachment" aria-label={t('移除附件','Remove attachment')} onClick={()=>remove(item.id)}><X/></button>}</div>
-    : <div className="file-attachment" key={item.id}><button className="file-open" disabled={!sent} onClick={()=>sent&&action.run(()=>Device.openAttachment({attachmentId:item.id}))}><File/><span><strong>{item.name}</strong><small>{item.mimeType} · {formatBytes(item.size)}</small></span></button>{remove&&<button className="remove-file" aria-label={t('移除附件','Remove attachment')} onClick={()=>remove(item.id)}><X/></button>}</div>)}</div><ErrorNotice error={action.error}/></>;
-}
-
 const MessageView = memo(function MessageView({node, toolResults, pending}: {node: ConversationNode; toolResults: Map<string, ConversationNode[]>; pending: boolean}) {
   const t = useText(); const action = useAction(); const [copied, setCopied] = useState(false); const message = node.message;
   if (message.role === 'system') return null;

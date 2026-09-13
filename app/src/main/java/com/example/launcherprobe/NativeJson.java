@@ -43,8 +43,13 @@ final class NativeJson {
             calls.add(new AgentLoop.ToolCall(call.getString("id"), call.getString("name"),
                     arguments instanceof String ? (String) arguments : String.valueOf(arguments)));
         }
+        List<ChatAttachment> attachments = new ArrayList<>();
+        JSONArray storedAttachments = value.optJSONArray("attachments");
+        if (storedAttachments != null) for (int index = 0; index < storedAttachments.length(); index++)
+            attachments.add(ChatAttachment.fromJson(storedAttachments.getJSONObject(index)));
         return new AgentLoop.Message(id, role, value.isNull("content") ? null : value.optString("content", ""),
-                value.optString("toolCallId", null), calls.isEmpty() ? Collections.emptyList() : calls, incomplete);
+                value.optString("toolCallId", null), calls.isEmpty() ? Collections.emptyList() : calls, incomplete,
+                attachments);
     }
 
     static JSONArray conversations(List<ChatStore.Conversation> values) {

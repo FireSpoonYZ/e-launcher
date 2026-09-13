@@ -1,4 +1,4 @@
-import type { ConversationNode } from './native';
+import type { Attachment, ConversationNode } from './native';
 
 export type ToolResultPairs = {
   byCall: Map<string, ConversationNode[]>;
@@ -25,6 +25,10 @@ export function summarizeToolArgs(source: string): string {
 
 export function toolOutputPreview(output: string): string {
   return output.trim().slice(0, 600).split(/\r?\n/, 3).join('\n');
+}
+
+export function toolResultAttachments(results: ConversationNode[]): Attachment[] {
+  return results.flatMap(result => result.message.attachments);
 }
 
 /** Pair only within one assistant/tool-message run so reused call IDs cannot cross turn boundaries. */

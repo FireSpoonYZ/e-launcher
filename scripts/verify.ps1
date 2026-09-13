@@ -53,17 +53,42 @@ if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 & "$env:JAVA_HOME\bin\java.exe" -ea -cp $classes com.example.launcherprobe.ConversationTreeChecks
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-& $gradle --no-daemon :app:testDebugUnitTest :app:assembleDebug :app:lintDebug
+& $gradle --no-daemon :app:testDebugUnitTest :app:assembleDebug :app:lintDebug :shower-server:lintDebug
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+$showerAsset = 'app\build\generated\showerAssets\shower-server.jar'
+if (-not (Test-Path $showerAsset)) { throw "Missing generated Operit Shower server asset: $showerAsset" }
+$showerEntries = & "$env:JAVA_HOME\bin\jar.exe" tf $showerAsset
+if ($LASTEXITCODE -ne 0 -or $showerEntries -notcontains 'classes.dex' -or $showerEntries -contains 'classes2.dex') {
+    throw 'Generated Operit Shower server asset must contain exactly one dex payload'
+}
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+$zip = [IO.Compression.ZipFile]::OpenRead((Resolve-Path $showerAsset))
+try {
+    $dexStream = $zip.GetEntry('classes.dex').Open()
+    $memory = [IO.MemoryStream]::new()
+    try { $dexStream.CopyTo($memory); $dexText = [Text.Encoding]::ASCII.GetString($memory.ToArray()) }
+    finally { $dexStream.Dispose(); $memory.Dispose() }
+} finally { $zip.Dispose() }
+foreach ($className in 'Main', 'IShowerService', 'IShowerClient', 'ShowerBinderContainer') {
+    if (-not $dexText.Contains("Lcom/ai/assistance/shower/$className;")) {
+        throw "Generated Operit Shower server asset is missing $className"
+    }
+}
+$legacyFiles = @(Get-ChildItem app/src/main/java, app/src/main/aidl, pi-runtime, scripts -Recurse -File |
+    Where-Object { $_.FullName -notmatch '[\\/]node_modules[\\/]' -and $_.FullName -ne $PSCommandPath })
+$legacyFiles += Get-Item app/build.gradle, pi-runtime/package.json
+$legacyReferences = @($legacyFiles |
+    Select-String -Pattern 'Lamda|lamda|bundledAndroidMcp|android-mcp|127[.]0[.]0[.]1:65000')
+if ($legacyReferences.Count -ne 0) { throw "Legacy Lamda integration references remain: $legacyReferences" }
 
 # Existing style: spaces (not tabs), no trailing whitespace, final newline.
-$files = @(Get-ChildItem app/src, tests, scripts -Recurse -File |
-    Where-Object { $_.Extension -in '.java', '.xml', '.ps1' })
-$files += Get-Item app/build.gradle, build.gradle, settings.gradle, README.md, THIRD_PARTY_NOTICES.md
+$files = @(Get-ChildItem app/src, shower-server/src, tests, scripts -Recurse -File |
+    Where-Object { $_.Extension -in '.java', '.aidl', '.xml', '.ps1' })
+$files += Get-Item app/build.gradle, shower-server/build.gradle, build.gradle, settings.gradle, README.md, THIRD_PARTY_NOTICES.md
 foreach ($file in $files) {
     $text = [IO.File]::ReadAllText($file.FullName, [Text.Encoding]::UTF8)
     if ($text -match "`t|(?m)[ ]+`r?$" -or -not $text.EndsWith("`n")) {
         throw "Style check failed: $($file.FullName)"
     }
 }
-Write-Output "PASS: style check ($($files.Count) files); Java checks, assembleDebug and lintDebug"
+Write-Output "PASS: style/legacy checks ($($files.Count) files); Java checks, Shower asset, assembleDebug and lintDebug"

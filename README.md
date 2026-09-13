@@ -18,9 +18,9 @@ Pi 模式接入固定版本 **0.85.1** 的完整 coding-agent SDK，提供模型
 
 ## Android 平台能力
 
-Pi Agent 是聊天的唯一执行路径。应用继续保留启动应用、系统导航、屏幕读取与无障碍动作等 Android 平台能力，以及相应的权限、安全边界和回归检查。历史会话中的旧工具调用与结果保留用于显示；继续对话时会作为不重新执行的历史上下文交给 Pi。
+Pi Agent 是聊天的唯一执行路径。内置 `shower` 工具使用 Operit Shower：按需通过现有 Shizuku 授权启动应用自有的 Binder-only 服务，只创建一个虚拟屏，并在该屏启动 App、截图、点击、滑动、输入虚拟键盘可生成的文字、发送受限按键和释放屏幕。工具动作只接受当前非零虚拟 display ID，服务端同时校验调用 UID；不会退回或转发到手机主屏。历史会话中的旧工具调用与结果保留用于显示；继续对话时会作为不重新执行的历史上下文交给 Pi。
 
-网页、屏幕和工具输出均是不可信数据。屏幕读取最多返回 200 个节点、深度 12，使用单次观察 ID；界面事件或任一动作会使 ID 失效。密码文字会隐藏且拒绝向密码节点自动输入，动作被系统接受后仍须再次读取验证。
+`shower` 必须先 `create`，默认虚拟尺寸为 720×1280；坐标始终是 create 返回的虚拟屏坐标。截图通过 Binder 文件描述符传输，避免大 PNG 进入 Binder 事务，并可按 `maxWidth` / `maxHeight` 等比缩小；工具结果同时返回虚拟屏与图片尺寸，PNG 作为 image content 保存到聊天附件。输入字符若不能由 Android 虚拟键盘生成会真实报错，不会静默成功。网页、虚拟屏和工具输出均是不可信数据，动作被系统接受后仍须再次截图验证。
 
 原生首页提供本地时间日期、应用图标网格和输入栏；首页输入栏与 React 聊天输入栏目前是独立实现。点击首页输入栏会聚焦并唤起键盘，非空草稿在点击发送后打开聊天页并提交。
 
@@ -48,7 +48,7 @@ Pi Agent 是聊天的唯一执行路径。应用继续保留启动应用、系�
 
 ## 构建与检查（Windows PowerShell）
 
-JDK 21、Gradle 8.14.3（仓库内 `gradlew`）、SDK Platform 36、AGP 8.13.0，minSdk29、targetSdk36。运行时网络使用 OkHttp 3.14.9。首次构建需下载 Gradle 发行包与构建依赖并接受 SDK 许可。先运行 `scripts/prepare-pi-runtime.ps1` 准备 Node Mobile、SDK 资源和锁定完整性的官方 npm 11.6.2 payload；JavaScript 改动后运行 `npm --prefix pi-runtime test` 重建并测试 bundle。构建会把真实 arm64 Node executable 以 `libnode_launcher.so` 打入 APK 的 native library 目录；npm 的完整目录保存在版本化 asset 中并仅在版本首次使用时原子展开。
+JDK 21、Gradle 8.14.3（仓库内 `gradlew`）、SDK Platform 36、AGP 8.13.0，minSdk29、targetSdk36。运行时网络使用 OkHttp 3.14.9。首次构建需下载 Gradle 发行包与构建依赖并接受 SDK 许可。先运行 `scripts/prepare-pi-runtime.ps1` 准备 Node Mobile、SDK 资源和锁定完整性的官方 npm 11.6.2 payload；JavaScript 改动后运行 `npm --prefix pi-runtime test` 重建并测试 bundle。Gradle 从 `shower-server/` 的固定来源构建精简 Binder-only APK，并以 `shower-server.jar` 生成到 App assets；不需要 Python、Lamda payload 或外部部署脚本。构建还会把真实 arm64 Node executable 以 `libnode_launcher.so` 打入 APK 的 native library 目录；npm 的完整目录保存在版本化 asset 中并仅在版本首次使用时原子展开。
 
 首次构建或修改前端后，先安装依赖、构建并同步 Web 资源：
 
@@ -72,7 +72,7 @@ $env:JAVA_HOME = "$env:ProgramFiles\Microsoft\jdk-21.0.9.10-hotspot"
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/verify.ps1
 ```
 
-脚本要求 `JAVA_HOME` 指向 JDK 21，`ANDROID_HOME` 未设置时使用 `$env:LOCALAPPDATA\Android\Sdk`，并通过仓库内 `gradlew.bat` 运行纯 Java 断言检查、Gradle `:app:testDebugUnitTest :app:assembleDebug :app:lintDebug` 以及空白/行尾风格检查。逻辑检查在 `tests/com/example/launcherprobe/GestureChecks.java` 和 `AgentChecks.java`，不使用 Android stub 或第三方测试框架；Gradle unit-test 任务运行 `app/src/test` 下的 Robolectric 回归，覆盖凭据、请求持久化、设置重建和公开元数据边界；Windows 测试仅适配 AtomicFile 的底层替换操作，不替换业务逻辑。纯 Java 检查覆盖反馈进度/阈值与各类清理状态，但不能证明 WindowManager、MotionEvent 或 ROM 转场行为。成功构建的调试 APK 位于 `app/build/outputs/apk/debug/app-debug.apk`。
+脚本要求 `JAVA_HOME` 指向 JDK 21，`ANDROID_HOME` 未设置时使用 `$env:LOCALAPPDATA\Android\Sdk`，并通过仓库内 `gradlew.bat` 运行纯 Java 断言检查、Gradle `:app:testDebugUnitTest :app:assembleDebug :app:lintDebug :shower-server:lintDebug`、Shower 单 dex/必需类与旧 Lamda 引用检查，以及空白/行尾风格检查。逻辑检查在 `tests/com/example/launcherprobe/GestureChecks.java` 和 `AgentChecks.java`，不使用 Android stub 或第三方测试框架；Gradle unit-test 任务运行 `app/src/test` 下的 Robolectric 回归，覆盖凭据、请求持久化、设置重建和公开元数据边界；Windows 测试仅适配 AtomicFile 的底层替换操作，不替换业务逻辑。纯 Java 检查覆盖反馈进度/阈值与各类清理状态，但不能证明 WindowManager、MotionEvent 或 ROM 转场行为。成功构建的调试 APK 位于 `app/build/outputs/apk/debug/app-debug.apk`。
 
 纯 Java 检查的编译产物位于 `build/test-classes/`。思考强度浮窗的真机触摸回归脚本为 `scripts/check-thinking-slider.mjs`，设备连接和运行方式见文件开头的说明。
 
@@ -101,7 +101,7 @@ $serial = '<已授权设备序列号>'
 
 手机可能要求额外允许 USB 安装/调试安全设置；授权是否被 ROM 接受必须看实际结果。`WRITE_SECURE_SETTINGS` **不是普通运行时权限弹窗可以授予的权限**。也可安装并启动官方 Shizuku：App 首次检测到 Shizuku 后会请求本 App 的 Shizuku 授权；授权后通过受限 UserService 为本包执行固定的 `WRITE_SECURE_SETTINGS` 授权；设置默认桌面则仅在点击对应按钮后执行本包的 `cmd role add-role-holder` 命令。自动修复会检查权限，并保留其他无障碍服务来修复 **Launcher Probe 手势**。设置页“使用 Shizuku 修复授权与无障碍”可重试；状态以权限读回、系统启用列表及服务真实连接为准。Shizuku 未运行、拒绝或 ROM 阻止命令时会显示失败，不持续后台轮询。
 
-自动修复不会启用固定导航手势。确认状态为“已连接”和写设置授权后，仍须由用户点击“启用固定导航手势”；也可点击“打开无障碍授权设置”手动处理。服务使用 `TYPE_ACCESSIBILITY_OVERLAY`，不需要普通悬浮窗权限或独立前台服务；授权说明会明确窗口结构与节点动作能力，`canPerformGestures` 仅用于回放被边缘区域截获但未识别为导航的单指触摸。取消/多指触摸不回放。
+自动修复不会启用固定导航手势。确认状态为“已连接”和写设置授权后，仍须由用户点击“启用固定导航手势”；也可点击“打开无障碍授权设置”手动处理。服务使用 `TYPE_ACCESSIBILITY_OVERLAY`，不需要普通悬浮窗权限或独立前台服务；授权说明会明确窗口结构与节点动作能力，`canPerformGestures` 仅用于回放被边缘区域截获但未识别为导航的单指触摸。取消/多指触摸不回放。Operit Shower 复用同一份用户明确授予的 Shizuku 权限，但仅在 Pi 调用 `shower create` 时启动；`release` 会销毁虚拟屏并停止本应用拥有的 Shower PID，不使用端口服务、共享下载目录或宽泛 `pkill`。
 
 ## 启停、安全恢复和已知边界
 
@@ -110,6 +110,7 @@ $serial = '<已授权设备序列号>'
 - 服务断开/销毁会尽力恢复；**强行停止、系统杀进程、崩溃、断电、撤权、卸载不保证调用清理回调**。无后台轮询看门狗、开机广播或永不被杀承诺。进程中断后下次打开 Activity 或服务重连先尝试恢复三键，成功后保持停用，须再次手动启用。
 - 系统主动解除绑定时，即使恢复失败也无法强留服务；待恢复标记会保留。这不同于 App 内主动停用的“先恢复再移除”。
 - 未识别的边缘点击/长按/拖动通过无障碍重新注入，会有延迟，不能等同于原生透传。回放期间窗口透明且不接收新触摸；手势取消/旋转/停用会取消尚未发出的回放和停留任务。已经交给系统的注入不能通过本地 Handler 撤回，最多持续3秒；失败会提示。原上游的路径回放也不保留每段采样的精确速度，且只缓存最多400个点。
+- Shower 依赖 Android 的隐藏 display/input API、硬件 H.264 encoder 和 ROM 对虚拟屏启动 Activity 的支持。工具超时或 Binder 断开后不会自动重放动作；重新 `create` / `screenshot` 检查。桌面构建与模拟桥接测试不等于真机虚拟屏验证。
 - 无障碍悬浮窗属于平台 trusted window，但不保证所有设置/安全页面、锁屏、键盘、横屏都可操作。任何隐藏三键后没有可用导航的界面都是本轮验收阻断项。
 
 ADB 救援（保持电脑授权和连接；若设备不接受命令，从通知栏进入系统导航设置）：
@@ -153,6 +154,6 @@ ADB 救援（保持电脑授权和连接；若设备不接受命令，从通知�
 
 ## 源码与许可证
 
-本项目包含 Ogesture 的 AGPLv3 派生源码。完整许可证见 [LICENSE](LICENSE)，固定上游版本、真实移植文件和修改见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。分发 APK 时须遵守对应源码与构建材料提供义务，仅给未修改上游链接不足以满足本修改版的义务。
+本项目包含 Ogesture 的 AGPLv3 派生源码，以及 Operit Shower 的 LGPL-3.0 派生源码。主项目完整许可证见 [LICENSE](LICENSE)，Operit 许可证副本见 [licenses/Operit-LGPL-3.0.txt](licenses/Operit-LGPL-3.0.txt)；固定上游版本、真实移植文件和修改见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。分发 APK 时须遵守对应源码与构建材料提供义务，仅给未修改上游链接不足以满足本修改版的义务。
 
 HOME 身份本身不授予跨应用自动化权限。本 App 不验证 LLM、通知读取、后台启动 Activity 或应用商店分发政策。应用列表在 Activity 创建时读取；工作资料、多用户、快捷方式、小组件仍不在范围。

@@ -248,7 +248,7 @@ public final class PiSettingsActivity extends Activity {
                 link(t("系统提示词"), "SYSTEM.md", () -> { project = false; openFile("SYSTEM.md"); });
                 link(t("追加系统提示词"), "APPEND_SYSTEM.md", () -> { project = false; openFile("APPEND_SYSTEM.md"); });
             } else if (page.equals("技能") || page.equals("扩展") || page.equals("MCP")) {
-                note(page.equals("MCP") ? t("Pi 核心不内置 MCP，通过扩展接入。") : t("Pi SDK 按全局与工作区资源配置加载。"));
+                note(page.equals("MCP") ? t("通用 MCP 通过扩展接入；Operit Shower 是内置虚拟屏工具，不使用 MCP。") : t("Pi SDK 按全局与工作区资源配置加载。"));
                 scope();
                 if (page.equals("扩展")) npmInstaller();
                 action(t("启用或停用资源"), this::resourceControls);

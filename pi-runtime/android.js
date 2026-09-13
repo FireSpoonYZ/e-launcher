@@ -54,7 +54,44 @@ async function requestAuth(prompt, operation) {
   }
 }
 
+function requestShower(operation, arguments_, signal) {
+  const combined = signal ? AbortSignal.any([signal, operation.controller.signal])
+    : operation.controller.signal;
+  combined.throwIfAborted();
+  const callId = randomUUID();
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (error, result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      combined.removeEventListener("abort", onAbort);
+      operation.nativeCalls.delete(callId);
+      if (error) reject(error);
+      else resolve(result);
+    };
+    const onAbort = () => {
+      send({ type: "shower_cancel", id: operation.id, callId });
+      finish(combined.reason instanceof Error ? combined.reason : new Error("Shower 工具已取消"));
+    };
+    const timeout = setTimeout(() => {
+      send({ type: "shower_cancel", id: operation.id, callId });
+      finish(new Error("Shower 原生操作 20 秒内未完成；先重新 create/screenshot 确认状态"));
+    }, 20_000);
+    operation.nativeCalls.set(callId, { finish });
+    combined.addEventListener("abort", onAbort, { once: true });
+    send({ type: "shower_request", id: operation.id, conversationId: operation.conversationId,
+      callId, arguments: arguments_ });
+  });
+}
+
 async function handle(command) {
+  if (command.type === "shower_response") {
+    const operation = operations.get(command.id);
+    const pending = operation?.nativeCalls.get(command.callId);
+    if (pending) pending.finish(command.error ? new Error(command.error) : undefined, command.result);
+    return;
+  }
   if (command.type === "abort") {
     const operation = operations.get(command.id);
     if (operation) { operation.controller.abort(); operation.runtime?.abort(); }
@@ -81,7 +118,7 @@ async function handle(command) {
   }
   let ended = false;
   const controller = new AbortController();
-  const operation = { id, conversationId, controller, prompts: new Map() };
+  const operation = { id, conversationId, controller, prompts: new Map(), nativeCalls: new Map() };
   const sendEvent = (event) => send({ ...event, id, conversationId });
   operations.set(id, operation);
   if (conversationId) sessions.set(conversationId, operation);
@@ -94,7 +131,8 @@ async function handle(command) {
       ended = true;
       return;
     }
-    const runtime = command.sdk ? await createSdkRuntime(command, controller.signal) : createPiRuntime(command);
+    const runtime = command.sdk ? await createSdkRuntime(command, controller.signal,
+      (arguments_, signal) => requestShower(operation, arguments_, signal)) : createPiRuntime(command);
     operation.runtime = runtime;
     runtime.subscribe((event) => {
       if (ended) return;

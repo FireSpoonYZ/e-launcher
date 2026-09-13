@@ -18,6 +18,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
 
 /** One-process Node/pi agent, with a randomized abstract socket and same-process peer check. */
@@ -28,6 +31,9 @@ final class PiAgentBridge {
     private final LocalSocket socket;
     private final OutputStreamWriter writer;
     private final Map<String, Request> requests = new HashMap<>();
+    private final Map<String, ShowerCall> showerCalls = new HashMap<>();
+    private final ExecutorService showerWorker = Executors.newSingleThreadExecutor();
+    private final ShowerToolBridge showerTools;
     private boolean closed;
 
     static synchronized PiAgentBridge get(Context context) throws Exception {
@@ -40,6 +46,7 @@ final class PiAgentBridge {
     }
 
     private PiAgentBridge(Context context) throws Exception {
+        showerTools = new ShowerToolBridge(context);
         System.loadLibrary("node");
         System.loadLibrary("launcher_node");
         File home = new File(context.getFilesDir(), "node");
@@ -168,7 +175,8 @@ final class PiAgentBridge {
         JSONArray converted = ChatStore.piHistory(history);
         JSONObject command = new JSONObject().put("type", "prompt").put("id", id)
                 .put("conversationId", conversationId).put("sdk", true)
-                .put("config", new JSONObject(config)).put("history", converted).put("prompt", text)
+                .put("config", new JSONObject(config).put("bundledShower", true))
+                .put("history", converted).put("prompt", text)
                 .put("attachments", AttachmentStore.json(attachments));
         if (sdkHistory != null) {
             JSONObject resume = new JSONObject(sdkHistory);
@@ -206,6 +214,7 @@ final class PiAgentBridge {
 
     synchronized void abort(String id) {
         if (closed || id == null || !requests.containsKey(id)) return;
+        cancelShowerCalls(id);
         try { write(new JSONObject().put("type", "abort").put("id", id)); }
         catch (Exception exception) { fail("pi 取消请求发送失败"); }
     }
@@ -219,6 +228,15 @@ final class PiAgentBridge {
                 socket.getInputStream(), StandardCharsets.UTF_8))) {
             for (String line; (line = input.readLine()) != null;) {
                 JSONObject event = new JSONObject(line);
+                String type = event.optString("type");
+                if ("shower_request".equals(type)) {
+                    handleShowerRequest(event);
+                    continue;
+                }
+                if ("shower_cancel".equals(type)) {
+                    cancelShowerCall(event.optString("callId"));
+                    continue;
+                }
                 synchronized (this) {
                     if (closed) continue;
                     String id = event.optString("id");
@@ -246,7 +264,10 @@ final class PiAgentBridge {
                         }
                         continue;
                     }
-                    if ("end".equals(event.optString("type"))) requests.remove(id);
+                    if ("end".equals(type)) {
+                        requests.remove(id);
+                        cancelShowerCalls(id);
+                    }
                     current.event(event);
                 }
             }
@@ -255,9 +276,61 @@ final class PiAgentBridge {
         } finally { fail("pi Node 连接已结束，请重新启动应用进程"); }
     }
 
+    private void handleShowerRequest(JSONObject event) {
+        String requestId = event.optString("id");
+        String callId = event.optString("callId");
+        JSONObject arguments = event.optJSONObject("arguments");
+        if (requestId.isEmpty() || callId.isEmpty()) return;
+        ShowerCall call = new ShowerCall(requestId);
+        FutureTask<Void> task = new FutureTask<>(() -> {
+            JSONObject response = new JSONObject().put("type", "shower_response")
+                    .put("id", requestId).put("callId", callId);
+            try {
+                response.put("result", showerTools.execute(arguments));
+            } catch (Exception exception) {
+                response.put("error", exception.getMessage() == null
+                        ? exception.getClass().getSimpleName() : exception.getMessage());
+            }
+            synchronized (PiAgentBridge.this) {
+                ShowerCall current = showerCalls.get(callId);
+                if (current != call || closed || !requests.containsKey(requestId)) return null;
+                showerCalls.remove(callId);
+                try { write(response); }
+                catch (Exception exception) { fail("Shower 工具结果发送失败"); }
+            }
+            return null;
+        });
+        call.task = task;
+        synchronized (this) {
+            if (closed || !requests.containsKey(requestId) || showerCalls.containsKey(callId)) return;
+            showerCalls.put(callId, call);
+            showerWorker.execute(task);
+        }
+    }
+
+    private synchronized void cancelShowerCall(String callId) {
+        ShowerCall call = showerCalls.remove(callId);
+        if (call != null) call.task.cancel(true);
+    }
+
+    private synchronized void cancelShowerCalls(String requestId) {
+        java.util.Iterator<Map.Entry<String, ShowerCall>> iterator = showerCalls.entrySet().iterator();
+        while (iterator.hasNext()) {
+            ShowerCall call = iterator.next().getValue();
+            if (requestId.equals(call.requestId)) {
+                iterator.remove();
+                call.task.cancel(true);
+            }
+        }
+    }
+
     private synchronized void fail(String message) {
         if (closed) return;
         closed = true;
+        for (ShowerCall call : showerCalls.values()) call.task.cancel(true);
+        showerCalls.clear();
+        showerTools.shutdown();
+        showerWorker.shutdownNow();
         try { socket.close(); } catch (Exception ignored) { }
         Map<String, Request> failed = new HashMap<>(requests);
         requests.clear();
@@ -267,6 +340,12 @@ final class PiAgentBridge {
             item.getValue().listener.event(new JSONObject().put("id", item.getKey()).put("type", "end")
                     .put("status", "error"));
         } catch (Exception ignored) { }
+    }
+
+    private static final class ShowerCall {
+        final String requestId;
+        FutureTask<Void> task;
+        ShowerCall(String requestId) { this.requestId = requestId; }
     }
 
     private static final class Request {

@@ -66,6 +66,7 @@ android {
         ignoreAssetsPattern = '!.git:!.svn:!.DS_Store:!*~'
     }
 
+    sourceSets.main.assets.srcDir "$buildDir/generated/showerAssets"
     sourceSets.debug.jniLibs.srcDir "$buildDir/generated/jniLibs/nodeLauncher/debug"
     sourceSets.release.jniLibs.srcDir "$buildDir/generated/jniLibs/nodeLauncher/release"
 }
@@ -90,6 +91,16 @@ android {
     tasks.matching { it.name == "merge${buildType}NativeLibs" || it.name == "merge${buildType}JniLibFolders" }
             .configureEach { dependsOn syncTask }
 }
+
+def syncShowerServer = tasks.register('syncShowerServer', Copy) {
+    dependsOn ':shower-server:assembleRelease'
+    from rootProject.file('shower-server/build/outputs/apk/release/shower-server-release-unsigned.apk')
+    into "$buildDir/generated/showerAssets"
+    rename { 'shower-server.jar' }
+}
+tasks.matching { it.name in ['mergeDebugAssets', 'mergeReleaseAssets']
+        || it.name.toLowerCase().contains('lint') }
+        .configureEach { dependsOn syncShowerServer }
 
 dependencies {
     implementation project(':capacitor-android')

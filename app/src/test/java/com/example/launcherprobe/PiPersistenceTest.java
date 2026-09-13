@@ -273,6 +273,26 @@ public class PiPersistenceTest {
         assertEquals("first", rendered.getJSONArray("toolCalls").getJSONObject(0).getString("id"));
     }
 
+    @Test public void toolImageAttachmentSurvivesTurnPersistenceAndNativeProjection() throws Exception {
+        ChatStore store = new ChatStore(context);
+        AgentLoop.Message user = new AgentLoop.Message("user", "capture");
+        store.save(Collections.singletonList(user));
+        PiTurnPersistence turn = new PiTurnPersistence(store, store.activeId(), user.id, "reply", store.load());
+        ChatAttachment image = new ChatAttachment("tool-image", "工具图片", "image/png", "image", 68,
+                new java.io.File(context.getFilesDir(), "chat-attachments/tool-image").getAbsolutePath());
+        turn.accept(message(new JSONObject().put("role", "assistant").put("content", "")
+                .put("toolCalls", new JSONArray().put(call("capture", "screenshot", "{}")))));
+        turn.accept(message(new JSONObject().put("role", "tool").put("content", "")
+                .put("toolCallId", "capture").put("attachments", new JSONArray().put(image.toJson()))));
+        turn.accept(new JSONObject().put("type", "context").put("entries", entries()));
+        turn.accept(new JSONObject().put("type", "end").put("status", "completed"));
+
+        AgentLoop.Message restored = new ChatStore(context).load().get(2);
+        assertEquals("tool-image", restored.attachments.get(0).id);
+        assertEquals("image/png", NativeJson.message(restored).getJSONArray("attachments")
+                .getJSONObject(0).getString("mimeType"));
+    }
+
     private static JSONObject message(JSONObject value) throws Exception {
         return new JSONObject().put("type", "message").put("message", value);
     }

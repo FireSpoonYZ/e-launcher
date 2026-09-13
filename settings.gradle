@@ -15,5 +15,5 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = 'LauncherProbe'
-include ':app'
+include ':app', ':shower-server'
 apply from: 'capacitor.settings.gradle'

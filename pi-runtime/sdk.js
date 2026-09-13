@@ -1,12 +1,15 @@
 import { mkdir, mkdtemp, readFile, realpath, stat, writeFile, rm } from "node:fs/promises";
 import { AsyncLocalStorage } from "node:async_hooks";
+import { randomUUID } from "node:crypto";
 import { join, resolve, relative, dirname } from "node:path";
 import {
-  createAgentSessionServices, createAgentSessionFromServices, ModelRuntime, SettingsManager, SessionManager, DefaultPackageManager,
+  AgentSessionRuntime, createAgentSessionServices, createAgentSessionFromServices, ModelRuntime, SettingsManager, SessionManager,
+  DefaultPackageManager,
 } from "@earendil-works/pi-coding-agent";
 import { InMemoryCredentialStore, getSupportedThinkingLevels } from "@earendil-works/pi-ai";
 import undici from "./node_modules/@earendil-works/pi-coding-agent/node_modules/undici/index.js";
 import { toAgentHistory } from "./index.js";
+import { createShowerTool } from "./shower.js";
 
 // Some upstream adapters reject a custom fetch unless it is globalThis.fetch. Keep that identity
 // stable while AsyncLocalStorage routes every provider, OAuth and extension fetch to its runtime.
@@ -68,7 +71,7 @@ async function services(config, signal) {
       }, handler),
       close: () => agent.close(),
     };
-    const fetch = (input, init) => undici.fetch(input, { ...init, dispatcher });
+    const fetch = (input, init) => undici.fetch(input, { ...init, dispatcher: init?.dispatcher ?? dispatcher });
     const native = await sessionHttp.run(fetch, async () => {
       const modelRuntime = await ModelRuntime.create({ credentials, modelsPath,
         modelsStorePath: join(agentDir, "models-store.json"), allowModelNetwork: false, signal });
@@ -126,6 +129,43 @@ function fileNotice(files) {
   return `[用户附件已安全复制到应用私有工作区。请使用 read 工具实际读取，不要声称已读取而未读取。]\n${files.map(file => `- ${JSON.stringify(file.name)} (${file.mimeType}, ${file.size} bytes): ${file.path}`).join("\n")}`;
 }
 
+const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
+
+async function toolResultAttachments(content, config) {
+  const images = content.filter((part) => part.type === "image");
+  if (images.length === 0) return [];
+  if (typeof config.chatAttachmentRoot !== "string" || !config.chatAttachmentRoot) throw new Error("缺少聊天附件目录");
+  const root = resolve(config.chatAttachmentRoot);
+  await mkdir(root, { recursive: true });
+  const paths = [];
+  try {
+    const attachments = [];
+    for (const image of images) {
+      if (typeof image.mimeType !== "string" || !/^image\/[a-z0-9][a-z0-9.+-]*$/i.test(image.mimeType)) {
+        throw new Error("工具图片类型无效");
+      }
+      if (typeof image.data !== "string" || image.data.length === 0
+          || image.data.length > Math.ceil(MAX_ATTACHMENT_BYTES / 3) * 4) throw new Error("工具图片数据无效");
+      const data = Buffer.from(image.data, "base64");
+      if (data.length < 1) throw new Error("工具图片数据无效");
+      if (data.length > MAX_ATTACHMENT_BYTES) throw new Error("工具图片大小无效");
+      if (data.toString("base64") !== image.data) throw new Error("工具图片数据无效");
+      const id = randomUUID(), path = join(root, id);
+      try { await writeFile(path, data, { flag: "wx", mode: 0o600 }); }
+      catch (error) {
+        if (error?.code !== "EEXIST") await rm(path, { force: true });
+        throw error;
+      }
+      paths.push(path);
+      attachments.push({ id, name: "工具图片", mimeType: image.mimeType, kind: "image", size: data.length, path });
+    }
+    return attachments;
+  } catch (error) {
+    await Promise.all(paths.map((path) => rm(path, { force: true })));
+    throw error;
+  }
+}
+
 async function credentialChanges(s, config, emit) {
   const ids = new Set([...Object.keys(config.auth ?? {}), ...(await s.credentials.list()).map((item) => item.providerId)]);
   for (const providerId of ids) {
@@ -137,10 +177,20 @@ async function credentialChanges(s, config, emit) {
   }
 }
 
-export async function createSdkRuntime(command, signal) {
+export async function createSdkRuntime(command, signal, nativeShowerRequest) {
   const config = command.config;
   const s = await services(config, signal);
-  let session;
+  let session, lifecycle, disposed = false;
+  const dispose = async () => {
+    if (disposed) return;
+    disposed = true;
+    try {
+      if (lifecycle) await s.withHttp(() => lifecycle.dispose());
+      else session?.dispose();
+    } finally {
+      await s.dispose();
+    }
+  };
   try {
     const provider = config.selection?.provider ?? s.settingsManager.getDefaultProvider();
     const modelId = config.selection?.model ?? s.settingsManager.getDefaultModel();
@@ -157,37 +207,46 @@ export async function createSdkRuntime(command, signal) {
     const sessionManager = SessionManager.inMemory(s.cwd, undefined, nativeEntries ? history : undefined);
     if (!nativeEntries) for (const message of history) sessionManager.appendMessage(message);
     for (const message of await historyWithAttachments(command.sdkHistoryTail ?? [], config, model)) sessionManager.appendMessage(message);
+    const showerTool = config.bundledShower
+      ? createShowerTool({ request: nativeShowerRequest }) : undefined;
     const result = await s.withHttp(() => createAgentSessionFromServices({
       services: s, model, thinkingLevel: level, sessionManager,
+      customTools: showerTool ? [showerTool] : [],
     }));
     session = result.session;
     const stream = session.agent.streamFunction;
     session.agent.streamFunction = (requestModel, context, options) =>
       stream(requestModel, context, { ...options, fetch: globalThis.fetch });
     if (session.thinkingLevel !== level) throw new Error(`模型实际支持的思考强度为 ${session.thinkingLevel}，请重新选择`);
+    lifecycle = new AgentSessionRuntime(session, s, async () => { throw new Error("不支持在单轮中替换会话"); }, s.diagnostics);
+    await s.withHttp(() => session.bindExtensions({ mode: "print" }));
     const listeners = new Set();
     const emit = (event) => { for (const listener of listeners) listener(event); };
+    let eventQueue = Promise.resolve(), eventError;
     session.subscribe((event) => {
-      if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
-        emit({ type: "text_delta", delta: event.assistantMessageEvent.delta });
-      } else if (event.type === "message_end" && event.message.role === "assistant") {
-        emit({ type: "message", message: { role: "assistant", stopReason: event.message.stopReason,
-          errorMessage: event.message.errorMessage,
-          content: event.message.content.filter((part) => part.type === "text").map((part) => part.text).join(""),
-          toolCalls: event.message.content.filter((part) => part.type === "toolCall")
-            .map((part) => ({ id: part.id, name: part.name, arguments: JSON.stringify(part.arguments) })) } });
-      } else if (event.type === "message_end" && event.message.role === "toolResult") {
-        emit({ type: "message", message: { role: "tool",
-          content: event.message.content.filter((part) => part.type === "text").map((part) => part.text).join("\n"),
-          toolCallId: event.message.toolCallId } });
-      } else if (event.type === "tool_execution_start") {
-        emit({ type: "tool_start", toolCallId: event.toolCallId, name: event.toolName, args: event.args });
-      } else if (event.type === "tool_execution_end") {
-        emit({ type: "tool_end", toolCallId: event.toolCallId, name: event.toolName,
-          result: event.result, isError: event.isError });
-      } else if (event.type === "auto_retry_start" || event.type === "auto_compaction_start") {
-        emit({ type: "status", message: event.type === "auto_retry_start" ? "Pi 正在重试" : "Pi 正在压缩上下文" });
-      }
+      eventQueue = eventQueue.then(async () => {
+        if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
+          emit({ type: "text_delta", delta: event.assistantMessageEvent.delta });
+        } else if (event.type === "message_end" && event.message.role === "assistant") {
+          emit({ type: "message", message: { role: "assistant", stopReason: event.message.stopReason,
+            errorMessage: event.message.errorMessage,
+            content: event.message.content.filter((part) => part.type === "text").map((part) => part.text).join(""),
+            toolCalls: event.message.content.filter((part) => part.type === "toolCall")
+              .map((part) => ({ id: part.id, name: part.name, arguments: JSON.stringify(part.arguments) })) } });
+        } else if (event.type === "message_end" && event.message.role === "toolResult") {
+          emit({ type: "message", message: { role: "tool",
+            content: event.message.content.filter((part) => part.type === "text").map((part) => part.text).join("\n"),
+            toolCallId: event.message.toolCallId,
+            attachments: await toolResultAttachments(event.message.content, config) } });
+        } else if (event.type === "tool_execution_start") {
+          emit({ type: "tool_start", toolCallId: event.toolCallId, name: event.toolName, args: event.args });
+        } else if (event.type === "tool_execution_end") {
+          emit({ type: "tool_end", toolCallId: event.toolCallId, name: event.toolName,
+            result: event.result, isError: event.isError });
+        } else if (event.type === "auto_retry_start" || event.type === "auto_compaction_start") {
+          emit({ type: "status", message: event.type === "auto_retry_start" ? "Pi 正在重试" : "Pi 正在压缩上下文" });
+        }
+      }).catch((error) => { eventError ??= error; });
     });
     return {
       subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
@@ -201,27 +260,28 @@ export async function createSdkRuntime(command, signal) {
           const prompt = input.files.length ? `${text || ""}\n\n${fileNotice(input.files)}` : text || "请查看附件。";
           signal?.throwIfAborted();
           await s.withHttp(() => session.prompt(prompt, { images: input.images }));
+          await eventQueue;
+          if (eventError) throw eventError;
           const last = session.messages.findLast((message) => message.role === "assistant");
           if (last?.errorMessage) emit({ type: "error", message: last.errorMessage, aborted: last.stopReason === "aborted" });
           status = signal?.aborted || last?.stopReason === "aborted" ? "aborted"
             : last?.stopReason === "length" ? "truncated" : last?.errorMessage ? "error" : "completed";
         } finally {
           signal?.removeEventListener("abort", onAbort);
+          await eventQueue;
           try {
             emit({ type: "context", messages: session.messages,
               entries: [session.sessionManager.getHeader(), ...session.sessionManager.getEntries()] });
             await credentialChanges(s, config, emit);
           } finally {
-            try { session.dispose(); }
-            finally { await s.dispose(); }
+            await dispose();
           }
         }
         emit({ type: "end", status });
       },
     };
   } catch (error) {
-    try { session?.dispose(); }
-    finally { await s.dispose(); }
+    await dispose();
     throw error;
   }
 }

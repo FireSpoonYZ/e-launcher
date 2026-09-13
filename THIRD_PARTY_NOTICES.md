@@ -17,6 +17,27 @@ Launcher Probe incorporates modified source from **Ogesture**, by the Ogesture c
 
 `NavigationSession.java` and the HyperOS `force_fsg_nav_bar` write/readback, recovery marker, App controls, host checks and verification script are additions for this project, not features supplied by upstream Ogesture. The accessibility XML uses the corresponding platform capabilities; no upstream UI/resources or Kotlin build stack were copied.
 
+## Operit Shower
+
+The application incorporates and modifies **Operit Shower**, by the Operit contributors:
+
+- Repository: https://github.com/AAswordman/Operit
+- Exact revision: `b2c76100e5960a82ec154b62f201d89db099fadc`
+- Upstream paths: `showerclient/` and `tools/shower/app/src/main/`
+- License: GNU Lesser General Public License version 3; a verbatim copy is retained at [`licenses/Operit-LGPL-3.0.txt`](licenses/Operit-LGPL-3.0.txt).
+
+The required corresponding source is kept in this repository rather than represented only by a prebuilt upstream artifact:
+
+| Upstream source | Local source | Changes |
+| --- | --- | --- |
+| `showerclient/.../ShowerController.kt`, `ShowerBinderRegistry.kt` | `app/src/main/java/com/example/launcherprobe/ShowerController.java`, `ShowerManager.java` | Java host integration using the existing Shizuku permission channel and one controller-owned virtual display. Adds authenticated Binder handoff, strict coordinates, real error propagation and explicit release. |
+| `showerclient/.../ShowerServerManager.kt` | `OwnPermissionService.java`, `ShowerManager.java` | Replaces `/sdcard/Download/Operit`, broad `pkill`, Kotlin coroutines and a separate permission framework. The existing UID-checked UserService copies the generated asset directly to an app-owned `/data/local/tmp/e-launcher-shower-<uid>` directory, tracks and stops only its validated PID, and waits asynchronously for Binder handoff. |
+| `showerclient/.../IShowerService.java`, `ShowerBinderContainer.java` | `app/src/main/aidl/com/ai/assistance/shower/IShowerService.aidl`, `app/src/main/java/com/ai/assistance/shower/ShowerBinderContainer.java` | Equivalent Binder contract converted to AIDL and narrowed to used functions. Screenshots use `ParcelFileDescriptor` instead of Binder byte arrays. The parcelable container and broadcast action/key stay protocol-compatible. |
+| `tools/shower/app/src/main/java/com/ai/assistance/shower/` | `shower-server/src/main/` | Binder-only server with no Compose/video UI dependencies. Keeps Operit's virtual-display, capture, hidden-API workaround and display-scoped input implementation; enforces the host UID, forbids display 0, owns only one display, scales captures before PNG encoding, returns screenshot pipes, reports launch/input failures, sends swipe events at their actual timestamps, checks per-call Binder cancellation between gesture events, and exits only when no display is active. |
+| `showerclient/src/main/assets/shower-server.jar` | `shower-server/build.gradle`, `app/build.gradle` | The 1.08 MiB upstream prebuilt artifact is not copied. Gradle reproducibly builds the modified, source-present server APK and packages it under the expected `shower-server.jar` asset name. |
+
+`pi-runtime/shower.js` and the call-ID transport in `pi-runtime/android.js` are original host adapter code. Upstream's video renderer/surface UI, WebSocket/Python tools, Compose dependencies and coroutine client are not included because the App only needs tool-driven screenshots and input.
+
 Network requests use [OkHttp 3.14.9](https://github.com/square/okhttp/tree/parent-3.14.9), Copyright 2019 Square, Inc., under the [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0).
 
 The selected upstream source files contain no individual copyright headers. Their attribution is retained here and at the heads of the derived Java files; the Free Software Foundation copyright in the license text refers to that document, not authorship of Ogesture's code. No upstream license notice has been removed.

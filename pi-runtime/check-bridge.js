@@ -56,6 +56,8 @@ const api = http.createServer((req, res) => {
       emit({ role: "assistant", content: "bridge ok" });
       held.add(res);
       res.on("close", () => held.delete(res));
+    } else if (prompt === "shower") {
+      tool("shower", { action:"screenshot", maxWidth:360, maxHeight:640 });
     } else if (prompt === "tool") {
       emit({ role: "assistant", content: "bridge ok" });
       emit({ tool_calls: [
@@ -121,6 +123,12 @@ try {
     for (let end; (end = input.indexOf("\n")) >= 0;) {
       const event = JSON.parse(input.slice(0, end)); input = input.slice(end + 1);
       events.push(event); for (const check of waiters) check(event);
+      if (event.type === "shower_request") socket.write(`${JSON.stringify({
+        type:"shower_response", id:event.id, callId:event.callId,
+        result:{ok:true,action:"screenshot",displayId:7,width:720,height:1280,dpi:320,
+          imageWidth:360,imageHeight:640,mimeType:"image/png",
+          data:"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aXioAAAAASUVORK5CYII="},
+      })}\n`);
     }
   });
   await waitFor((event) => event.type === "ready");
@@ -150,9 +158,11 @@ try {
     .every((event) => typeof event.conversationId === "string"));
   console.log("PASS: shipped CJS bridge request/session routing, cross-session concurrency, same-session exclusion and abort");
   const config = { agentDir: path.join(home, "agent"), cwd: path.join(home, "workspace"), cacheDir: path.join(home, "cache"),
+    chatAttachmentRoot: path.join(home, "attachments"),
     settings: { defaultProvider: "local", defaultModel: "sdk-mock", defaultThinkingLevel: "high", defaultTools: ["probe"], compaction: { enabled: false } },
     models: { providers: { local: { baseUrl: `http://127.0.0.1:${api.address().port}/v1`, api: "openai-completions",
-      models: [{ id: "sdk-mock", reasoning: true }] } } }, auth: { local: { type: "api_key", key: "synthetic" } } };
+      models: [{ id: "sdk-mock", reasoning: true, input: ["text", "image"] }] } } },
+    auth: { local: { type: "api_key", key: "synthetic" } } };
   await mkdir(path.join(config.agentDir, "extensions"), { recursive: true });
   await writeFile(path.join(config.agentDir, "extensions", "probe.ts"), `
     import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -215,6 +225,21 @@ try {
   assert.deepEqual(canonical.slice(1, 3).map((message) => message.toolCallId), ["probe-1", "probe-2"]);
   assert.equal(canonical[3].stopReason, "stop");
   assert(canonical.slice(1, 3).every((message) => message.content === "probe-ok"));
+  config.bundledShower = true;
+  config.selection = { provider:"local", model:"sdk-mock", thinkingLevel:"off" };
+  send({ id:"sdk-shower", conversationId:"sdk-shower", type:"prompt", sdk:true,
+    prompt:"shower", config });
+  assert.equal((await waitFor((event) => event.id === "sdk-shower" && event.type === "end")).status,
+    "completed", JSON.stringify(events));
+  const showerRequest = events.find((event) => event.id === "sdk-shower" && event.type === "shower_request");
+  assert.deepEqual(showerRequest.arguments, { action:"screenshot", maxWidth:360, maxHeight:640 });
+  const showerMessage = events.find((event) => event.id === "sdk-shower" && event.type === "message"
+    && event.message.role === "tool").message;
+  assert.match(showerMessage.content, /虚拟屏 720×1280/);
+  assert.equal(showerMessage.attachments.length, 1);
+  assert.equal((await readFile(showerMessage.attachments[0].path)).subarray(1, 4).toString(), "PNG");
+  delete config.bundledShower;
+  delete config.selection;
   const sdkHistory = events.find((event) => event.id === "sdk-tool" && event.type === "context").entries;
   assert.equal(sdkHistory[0].type, "session");
   assert(sdkHistory.some((entry) => entry.message?.role === "toolResult"));

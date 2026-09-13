@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import {pairToolResults, toolCallKey, summarizeToolArgs, toolOutputPreview} from '../src/toolResults.ts';
+import {pairToolResults, toolCallKey, summarizeToolArgs, toolOutputPreview, toolResultAttachments} from '../src/toolResults.ts';
 
-const node = (id, role, {toolCalls = [], toolCallId = null, content = id} = {}) => ({
+const node = (id, role, {toolCalls = [], toolCallId = null, content = id, attachments = []} = {}) => ({
   id,
   parentId: null,
-  message: {id, role, content, toolCallId, toolCalls, incomplete: false},
+  message: {id, role, content, toolCallId, toolCalls, attachments, incomplete: false},
 });
 const call = id => ({id, name: id, arguments: '{}'});
 
@@ -45,6 +45,14 @@ test('summarizes actual arguments and bounds result previews without changing th
   assert.ok(output.endsWith('fourth'));
   assert.equal(toolOutputPreview('  \n'), '');
   assert.equal(toolOutputPreview('x'.repeat(1000)).length, 600);
+});
+
+test('returns persisted tool result attachments for the production tool view', () => {
+  const image = {id:'image', name:'tool image', mimeType:'image/png', kind:'image', size:68, path:'/private/image'};
+  assert.deepEqual(toolResultAttachments([
+    node('image-result', 'tool', {content:'', attachments:[image]}),
+    node('text-result', 'tool', {content:'caption'}),
+  ]), [image]);
 });
 
 test('leaves ambiguous duplicate IDs in one assistant message visible', () => {
