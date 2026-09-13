@@ -11,14 +11,17 @@ import java.util.Map;
 final class NativeJson {
     private NativeJson() { }
 
-    static JSONObject conversation(ChatStore store) {
-        ConversationTree tree = store.tree();
+    static JSONObject conversation(ChatStore store) { return conversation(store, store.activeId()); }
+
+    static JSONObject conversation(ChatStore store, String conversationId) {
+        ConversationTree tree = store.tree(conversationId);
         JSONArray nodes = new JSONArray();
         for (ConversationTree.Node node : tree.nodes()) nodes.put(object("id", node.id,
                 "parentId", node.parentId == null ? JSONObject.NULL : node.parentId, "message", message(node.message)));
-        return object("id", store.activeId(), "leaf", tree.leaf() == null ? JSONObject.NULL : tree.leaf(),
-                "nodes", nodes, "draft", store.draft(), "draftAttachments", AttachmentStore.json(store.draftAttachments()),
-                "piSelection", object(store.piSelection()));
+        return object("id", conversationId, "leaf", tree.leaf() == null ? JSONObject.NULL : tree.leaf(),
+                "nodes", nodes, "draft", store.draft(conversationId),
+                "draftAttachments", AttachmentStore.json(store.draftAttachments(conversationId)),
+                "piSelection", object(store.piSelection(conversationId)));
     }
 
     static JSONObject message(AgentLoop.Message message) {

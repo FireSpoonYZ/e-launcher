@@ -6,7 +6,8 @@ export type Message = { id: string; role: 'system'|'user'|'assistant'|'tool'; co
 export type ConversationNode = { id: string; parentId: string|null; message: Message };
 export type Conversation = { id: string; leaf: string|null; nodes: ConversationNode[]; draft: string; draftAttachments: Attachment[]; piSelection: Record<string, unknown> };
 export type ConversationSummary = { id: string; title: string; updated: number };
-export type ChatSnapshot = { error?: string; status?: string; sequence: number; running: boolean; requestId: string|null; conversationId: string; conversation: Conversation };
+export type ActiveRun = { conversationId: string; requestId: string; status: string; message: string };
+export type ChatSnapshot = { error?: string; status?: string; sequence: number; running: boolean; requestId: string|null; conversationId: string; conversation: Conversation; activeRuns: ActiveRun[] };
 export type NativeEvent<T = Record<string, unknown>> = { sequence?: number; type: string; conversationId?: string; requestId?: string|null; nodeId?: string|null; payload?: T; [key: string]: unknown };
 export type Listener = (event: NativeEvent) => void;
 
@@ -25,7 +26,7 @@ export interface ChatPlugin {
   /** UI node taps only preview locally. Call this only for explicit continue/edit. User edit selects its parent and copies text to draft. */
   selectNode(options: {conversationId: string; nodeId: string; edit?: boolean}): Promise<Conversation>;
   send(options: {conversationId: string; text: string; submissionId?: string}): Promise<{accepted: boolean; requestId: string|null}>;
-  cancel(): Promise<void>;
+  cancel(options: {conversationId: string}): Promise<void>;
   catalog(options?: {refresh?: boolean}): Promise<{requestId: string}>;
   selectModel(options: {conversationId: string; providerId: string; modelId: string; thinkingLevel?: string; expectedSelection?: string}): Promise<Conversation>;
   selectThinkingLevel(options: {conversationId: string; providerId: string; modelId: string; thinkingLevel?: string; expectedSelection?: string}): Promise<Conversation>;
@@ -49,7 +50,7 @@ export interface SettingsPlugin {
   clearDraft(options: ConfigScope & {name: string}): Promise<void>;
   importFile(): Promise<{source: string}>;
   exportFile(options: {name: string; source: string; json?: boolean}): Promise<void>;
-  settings(options?: ConfigScope & {effective?: boolean}): Promise<{settings: Record<string, unknown>; sources?: Record<string,string>; revision?: string}>;
+  settings(options?: ConfigScope & {effective?: boolean; conversationId?: string}): Promise<{settings: Record<string, unknown>; sources?: Record<string,string>; revision?: string}>;
   /** value/previous are JSON value source strings, preserving native ConfigJson/CAS behavior. */
   updateSetting(options: ConfigScope & {key: string; value: string; previous: string; field?: Record<string, unknown>}): Promise<void>;
   resetSetting(options: ConfigScope & {key: string; revision: string}): Promise<void>;

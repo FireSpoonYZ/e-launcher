@@ -1,12 +1,32 @@
 import { mkdir, mkdtemp, readFile, realpath, stat, writeFile, rm } from "node:fs/promises";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { join, resolve, relative, dirname } from "node:path";
 import {
   createAgentSessionServices, createAgentSessionFromServices, ModelRuntime, SettingsManager, SessionManager, DefaultPackageManager,
 } from "@earendil-works/pi-coding-agent";
 import { InMemoryCredentialStore, getSupportedThinkingLevels } from "@earendil-works/pi-ai";
+import undici from "./node_modules/@earendil-works/pi-coding-agent/node_modules/undici/index.js";
 import { toAgentHistory } from "./index.js";
-// The pinned SDK exposes its CLI HTTP bootstrap internally, but not from its public index.
-import { applyHttpProxySettings, configureHttpDispatcher } from "./node_modules/@earendil-works/pi-coding-agent/dist/core/http-dispatcher.js";
+
+// Some upstream adapters reject a custom fetch unless it is globalThis.fetch. Keep that identity
+// stable while AsyncLocalStorage routes every provider, OAuth and extension fetch to its runtime.
+const sessionHttp = new AsyncLocalStorage();
+const processFetch = globalThis.fetch.bind(globalThis);
+globalThis.fetch = (input, init) => (sessionHttp.getStore() ?? processFetch)(input, init);
+
+function quietDispatcher(dispatcher) {
+  dispatcher.on("error", () => {});
+  return dispatcher;
+}
+
+function createOriginClient(origin, options) {
+  return quietDispatcher(new undici.Client(origin, options));
+}
+
+function createOriginDispatcher(origin, options) {
+  if (options.connections === 1) return createOriginClient(origin, options);
+  return quietDispatcher(new undici.Pool(origin, { ...options, factory: createOriginClient }));
+}
 
 async function services(config, signal) {
   if (!config?.agentDir || !config?.cwd || !config?.cacheDir) throw new Error("缺少应用私有运行目录");
@@ -19,6 +39,7 @@ async function services(config, signal) {
   await mkdir(cwd, { recursive: true });
   await mkdir(cacheDir, { recursive: true });
   const temporary = await mkdtemp(join(cacheDir, "pi-request-"));
+  let dispatcher;
   try {
     // Native models.json parsing/composition, with the immutable send-time snapshot.
     const modelsPath = join(temporary, "models.json");
@@ -33,14 +54,35 @@ async function services(config, signal) {
       const next = update(scoped[scope]);
       if (next !== undefined) scoped[scope] = next;
     } }, { projectTrusted: true });
-    applyHttpProxySettings(settingsManager.getGlobalSettings().httpProxy);
-    configureHttpDispatcher(settingsManager.getHttpIdleTimeoutMs());
-    const modelRuntime = await ModelRuntime.create({ credentials, modelsPath,
-      modelsStorePath: join(agentDir, "models-store.json"), allowModelNetwork: false, signal });
-    if (modelRuntime.getError()) throw new Error(modelRuntime.getError());
-    const native = await createAgentSessionServices({ cwd, agentDir, settingsManager, modelRuntime, modelRuntimeSignal: signal });
-    return { ...native, credentials, dispose: () => rm(temporary, { recursive: true, force: true }) };
+    const timeout = settingsManager.getHttpIdleTimeoutMs();
+    const proxy = settingsManager.getGlobalSettings().httpProxy?.trim();
+    const agent = quietDispatcher(new undici.EnvHttpProxyAgent({
+      ...(proxy ? { httpProxy: proxy, httpsProxy: proxy } : {}),
+      allowH2: false, proxyTunnel: true, bodyTimeout: timeout, headersTimeout: timeout,
+      connect: { autoSelectFamilyAttemptTimeout: 2_000 },
+      clientFactory: createOriginClient, factory: createOriginDispatcher,
+    }));
+    dispatcher = {
+      dispatch: (options, handler) => agent.dispatch({
+        ...options, bodyTimeout: timeout, headersTimeout: timeout,
+      }, handler),
+      close: () => agent.close(),
+    };
+    const fetch = (input, init) => undici.fetch(input, { ...init, dispatcher });
+    const native = await sessionHttp.run(fetch, async () => {
+      const modelRuntime = await ModelRuntime.create({ credentials, modelsPath,
+        modelsStorePath: join(agentDir, "models-store.json"), allowModelNetwork: false, signal });
+      if (modelRuntime.getError()) throw new Error(modelRuntime.getError());
+      return createAgentSessionServices({ cwd, agentDir, settingsManager, modelRuntime,
+        modelRuntimeSignal: signal });
+    });
+    return { ...native, credentials, fetch, withHttp: (task) => sessionHttp.run(fetch, task), dispose: async () => {
+      try { await dispatcher.close(); }
+      finally { await rm(temporary, { recursive: true, force: true }); }
+    } };
   } catch (error) {
+    try { await dispatcher?.close(); }
+    catch { /* Preserve the initialization error. */ }
     await rm(temporary, { recursive: true, force: true });
     throw error;
   }
@@ -115,8 +157,13 @@ export async function createSdkRuntime(command, signal) {
     const sessionManager = SessionManager.inMemory(s.cwd, undefined, nativeEntries ? history : undefined);
     if (!nativeEntries) for (const message of history) sessionManager.appendMessage(message);
     for (const message of await historyWithAttachments(command.sdkHistoryTail ?? [], config, model)) sessionManager.appendMessage(message);
-    const result = await createAgentSessionFromServices({ services: s, model, thinkingLevel: level, sessionManager });
+    const result = await s.withHttp(() => createAgentSessionFromServices({
+      services: s, model, thinkingLevel: level, sessionManager,
+    }));
     session = result.session;
+    const stream = session.agent.streamFunction;
+    session.agent.streamFunction = (requestModel, context, options) =>
+      stream(requestModel, context, { ...options, fetch: globalThis.fetch });
     if (session.thinkingLevel !== level) throw new Error(`模型实际支持的思考强度为 ${session.thinkingLevel}，请重新选择`);
     const listeners = new Set();
     const emit = (event) => { for (const listener of listeners) listener(event); };
@@ -153,25 +200,28 @@ export async function createSdkRuntime(command, signal) {
           const input = await attachmentInput(attachments, config, model);
           const prompt = input.files.length ? `${text || ""}\n\n${fileNotice(input.files)}` : text || "请查看附件。";
           signal?.throwIfAborted();
-          await session.prompt(prompt, { images: input.images });
+          await s.withHttp(() => session.prompt(prompt, { images: input.images }));
           const last = session.messages.findLast((message) => message.role === "assistant");
           if (last?.errorMessage) emit({ type: "error", message: last.errorMessage, aborted: last.stopReason === "aborted" });
           status = signal?.aborted || last?.stopReason === "aborted" ? "aborted"
             : last?.stopReason === "length" ? "truncated" : last?.errorMessage ? "error" : "completed";
         } finally {
           signal?.removeEventListener("abort", onAbort);
-          emit({ type: "context", messages: session.messages,
-            entries: [session.sessionManager.getHeader(), ...session.sessionManager.getEntries()] });
-          await credentialChanges(s, config, emit);
-          session.dispose();
-          await s.dispose();
+          try {
+            emit({ type: "context", messages: session.messages,
+              entries: [session.sessionManager.getHeader(), ...session.sessionManager.getEntries()] });
+            await credentialChanges(s, config, emit);
+          } finally {
+            try { session.dispose(); }
+            finally { await s.dispose(); }
+          }
         }
         emit({ type: "end", status });
       },
     };
   } catch (error) {
-    session?.dispose();
-    await s.dispose();
+    try { session?.dispose(); }
+    finally { await s.dispose(); }
     throw error;
   }
 }
@@ -180,6 +230,7 @@ export async function createSdkRuntime(command, signal) {
 export async function sdkQuery(command, signal, emit = () => {}, interact = async () => { throw new Error("登录需要用户输入"); }) {
   const s = await services(command.config, signal);
   try {
+    return await s.withHttp(async () => {
     if (["packages", "install", "remove", "update", "resource_paths", "resource_toggle"].includes(command.type)) {
       const manager = new DefaultPackageManager(s);
       manager.setProgressCallback((event) => emit({ type: "status", message: event.message ?? `${event.action}: ${event.source}` }));
@@ -282,13 +333,14 @@ export async function sdkQuery(command, signal, emit = () => {}, interact = asyn
       if (!model) throw new Error("该服务商没有模型");
       const message = await s.modelRuntime.completeSimple(model, {
         messages: [{ role: "user", content: "ping", timestamp: Date.now() }],
-      }, { signal });
+      }, { signal, fetch: globalThis.fetch });
       if (message.errorMessage) throw new Error(message.errorMessage);
       return { model: model.id };
     }
     throw new Error("未知的 Pi 配置操作");
+    });
   } finally {
-    await credentialChanges(s, command.config, emit);
-    await s.dispose();
+    try { await credentialChanges(s, command.config, emit); }
+    finally { await s.dispose(); }
   }
 }

@@ -179,27 +179,25 @@ public class PiPersistenceTest {
         ChatStore store = coordinator.store();
         AgentLoop.Message user = new AgentLoop.Message("user", "cross round");
         store.save(Collections.singletonList(user));
-        AgentLoop.CancelToken token = new AgentLoop.CancelToken();
         PiTurnPersistence turn = new PiTurnPersistence(store, store.activeId(), user.id, "reply", store.load());
-        org.robolectric.util.ReflectionHelpers.setField(coordinator, "running", true);
-        org.robolectric.util.ReflectionHelpers.setField(coordinator, "cancellation", token);
-        org.robolectric.util.ReflectionHelpers.setField(coordinator, "conversationId", store.activeId());
-        org.robolectric.util.ReflectionHelpers.setField(coordinator, "requestId", "request");
-        org.robolectric.util.ReflectionHelpers.setField(coordinator, "piPersistence", turn);
-        org.robolectric.util.ReflectionHelpers.setField(coordinator, "lastDeltaFlush", System.currentTimeMillis());
-        StringBuilder pending = org.robolectric.util.ReflectionHelpers.getField(coordinator, "pendingDelta");
-        pending.setLength(0);
+        ChatCoordinator.SessionRun run = new ChatCoordinator.SessionRun(store.activeId(), "request");
+        run.persistence = turn;
+        run.lastDeltaFlush = System.currentTimeMillis();
+        @SuppressWarnings("unchecked")
+        java.util.Map<String, ChatCoordinator.SessionRun> activeRuns =
+                org.robolectric.util.ReflectionHelpers.getField(coordinator, "activeRuns");
+        activeRuns.put(store.activeId(), run);
         List<JSONObject> events = new ArrayList<>();
         ChatCoordinator.Listener listener = (messages, event) -> events.add(event);
         coordinator.addListener(listener);
         try {
-            coordinator.onPiEvent(new JSONObject().put("type", "text_delta").put("delta", "checking"), token, turn);
+            coordinator.onPiEvent(new JSONObject().put("type", "text_delta").put("delta", "checking"), run);
             coordinator.onPiEvent(message(new JSONObject().put("role", "assistant").put("content", "checking")
                     .put("stopReason", "toolUse").put("toolCalls", new JSONArray()
-                            .put(call("probe", "read", "{}")))), token, turn);
+                            .put(call("probe", "read", "{}")))), run);
             coordinator.onPiEvent(message(new JSONObject().put("role", "tool").put("content", "result")
-                    .put("toolCallId", "probe")), token, turn);
-            coordinator.onPiEvent(new JSONObject().put("type", "text_delta").put("delta", "done"), token, turn);
+                    .put("toolCallId", "probe")), run);
+            coordinator.onPiEvent(new JSONObject().put("type", "text_delta").put("delta", "done"), run);
             org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idleFor(100, TimeUnit.MILLISECONDS);
             List<JSONObject> deltas = events.stream().filter(event -> "textDelta".equals(event.optString("type")))
                     .collect(java.util.stream.Collectors.toList());
@@ -207,13 +205,13 @@ public class PiPersistenceTest {
             assertEquals("reply:assistant:1", deltas.get(0).getString("nodeId"));
             assertEquals("done", deltas.get(0).getJSONObject("payload").getString("delta"));
             coordinator.onPiEvent(message(new JSONObject().put("role", "assistant").put("content", "done")
-                    .put("stopReason", "stop").put("toolCalls", new JSONArray())), token, turn);
-            coordinator.onPiEvent(new JSONObject().put("type", "context").put("entries", entries()), token, turn);
-            coordinator.onPiEvent(new JSONObject().put("type", "end").put("status", "completed"), token, turn);
+                    .put("stopReason", "stop").put("toolCalls", new JSONArray())), run);
+            coordinator.onPiEvent(new JSONObject().put("type", "context").put("entries", entries()), run);
+            coordinator.onPiEvent(new JSONObject().put("type", "end").put("status", "completed"), run);
         } finally {
             coordinator.removeListener(listener);
-            org.robolectric.util.ReflectionHelpers.setField(coordinator, "running", false);
-            pending.setLength(0);
+            activeRuns.remove(store.activeId(), run);
+            run.pendingDelta.setLength(0);
         }
     }
 
@@ -404,5 +402,86 @@ public class PiPersistenceTest {
         turn.accept(new JSONObject().put("type", "context").put("entries", entries()));
         turn.accept(new JSONObject().put("type", "end").put("status", "completed"));
         assertFalse(new JSONObject(context.getSharedPreferences("chat", Context.MODE_PRIVATE).getString("conversations", "{}")).has(old));
+    }
+
+    @Test public void interleavedTurnsPersistOnlyToTheirOwningSessions() throws Exception {
+        ChatStore store = new ChatStore(context);
+        AgentLoop.Message firstUser = new AgentLoop.Message("first-user", "user", "first", null,
+                Collections.emptyList(), false);
+        store.save(Collections.singletonList(firstUser));
+        String first = store.activeId();
+        PiTurnPersistence firstTurn = new PiTurnPersistence(store, first, firstUser.id, "first-reply",
+                store.load(first));
+        store.newConversation();
+        String second = store.activeId();
+        AgentLoop.Message secondUser = new AgentLoop.Message("second-user", "user", "second", null,
+                Collections.emptyList(), false);
+        store.save(second, Collections.singletonList(secondUser));
+        PiTurnPersistence secondTurn = new PiTurnPersistence(store, second, secondUser.id, "second-reply",
+                store.load(second));
+
+        firstTurn.accept(new JSONObject().put("type", "text_delta").put("delta", "first-answer"));
+        secondTurn.accept(new JSONObject().put("type", "text_delta").put("delta", "second-answer"));
+        secondTurn.accept(new JSONObject().put("type", "context").put("entries", entries()));
+        firstTurn.accept(new JSONObject().put("type", "context").put("entries", entries()));
+        secondTurn.accept(new JSONObject().put("type", "end").put("status", "completed"));
+        firstTurn.accept(new JSONObject().put("type", "end").put("status", "aborted"));
+
+        assertEquals("first-answer", store.load(first).get(1).content);
+        assertTrue(store.load(first).get(1).incomplete);
+        assertEquals("second-answer", store.load(second).get(1).content);
+        assertFalse(store.load(second).get(1).incomplete);
+        assertEquals(entries().toString(), new JSONObject(store.piResume(first, store.load(first)))
+                .getJSONArray("entries").toString());
+        assertEquals(entries().toString(), new JSONObject(store.piResume(second, store.load(second)))
+                .getJSONArray("entries").toString());
+    }
+
+    @Test public void workspacesAreStableIsolatedLazyAndDeletedWithTheirSession() throws Exception {
+        java.io.File legacyRoot = new java.io.File(context.getFilesDir(), "pi-workspace");
+        assertTrue(legacyRoot.mkdirs() || legacyRoot.isDirectory());
+        java.io.File legacyFile = new java.io.File(legacyRoot, "legacy-fixture.txt");
+        java.nio.file.Files.write(legacyFile.toPath(), "legacy".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        ChatStore store = new ChatStore(context);
+        store.save(Collections.singletonList(new AgentLoop.Message("user", "old session")));
+        String old = store.activeId();
+        PiConfigStore oldConfig = new PiConfigStore(context, old);
+        oldConfig.save(true, "settings.json",
+                "{\"defaultModel\":\"model-a\",\"defaultThinkingLevel\":\"low\"}",
+                oldConfig.read(true, "settings.json"));
+        String oldCwd = new JSONObject(oldConfig.snapshot()).getString("cwd");
+        assertTrue(new java.io.File(oldCwd, "legacy-fixture.txt").isFile());
+        assertEquals(oldCwd, new JSONObject(new PiConfigStore(context, old).snapshot()).getString("cwd"));
+
+        store.newConversation();
+        String fresh = store.activeId();
+        store.save(Collections.singletonList(new AgentLoop.Message("user", "new session")));
+        PiConfigStore freshConfig = new PiConfigStore(context, fresh);
+        freshConfig.save(true, "settings.json",
+                "{\"defaultModel\":\"model-b\",\"defaultThinkingLevel\":\"high\"}",
+                freshConfig.read(true, "settings.json"));
+        String freshCwd = new JSONObject(freshConfig.snapshot()).getString("cwd");
+        assertEquals("model-a", new PiConfigStore(context, old).effectiveSettings().get("defaultModel"));
+        assertEquals("model-b", freshConfig.effectiveSettings().get("defaultModel"));
+        assertEquals("low", new PiConfigStore(context, old).effectiveSettings().get("defaultThinkingLevel"));
+        assertNotEquals(oldCwd, freshCwd);
+        assertFalse(new java.io.File(freshCwd, "legacy-fixture.txt").exists());
+        java.nio.file.Files.write(new java.io.File(oldCwd, "owned.txt").toPath(),
+                "old".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        assertFalse(new java.io.File(freshCwd, "owned.txt").exists());
+        context.getSharedPreferences("settings_editor_drafts", Context.MODE_PRIVATE).edit()
+                .putString("project/" + old + "/settings.json", "draft").commit();
+        context.getSharedPreferences("chat_submissions", Context.MODE_PRIVATE).edit()
+                .putString("session_" + old, "submission").commit();
+
+        store.clear(old);
+        assertFalse(new java.io.File(oldCwd).exists());
+        assertTrue(new java.io.File(freshCwd).isDirectory());
+        assertFalse(context.getSharedPreferences("settings_editor_drafts", Context.MODE_PRIVATE)
+                .contains("project/" + old + "/settings.json"));
+        assertFalse(context.getSharedPreferences("chat_submissions", Context.MODE_PRIVATE)
+                .contains("session_" + old));
+        legacyFile.delete();
+        legacyRoot.delete();
     }
 }

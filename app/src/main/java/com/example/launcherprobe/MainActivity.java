@@ -160,14 +160,19 @@ public class MainActivity extends BridgeActivity {
         shizukuRepair.register();
         chatCoordinator = ChatCoordinator.get(this);
         chatStore = chatCoordinator.store();
-        agentRunning = chatCoordinator.running();
+        agentRunning = chatCoordinator.running(chatStore.activeId());
         coordinatorListener = (messages, event) -> {
-            agentRunning = chatCoordinator.running();
+            String activeConversation = chatStore.activeId();
+            agentRunning = chatCoordinator.running(activeConversation);
             activePiRequestId = chatCoordinator.requestId();
-            if ("textDelta".equals(event.optString("type"))) activePiMessageId = event.optString("nodeId", activePiMessageId);
-            showSnapshot(immutable(messages));
-            if (state != null) state.setText(event.optJSONObject("payload") == null ? ""
-                    : event.optJSONObject("payload").optString("message"));
+            if (activeConversation.equals(event.optString("conversationId"))) {
+                if ("textDelta".equals(event.optString("type"))) {
+                    activePiMessageId = event.optString("nodeId", activePiMessageId);
+                }
+                showSnapshot(immutable(messages));
+                if (state != null) state.setText(event.optJSONObject("payload") == null ? ""
+                        : event.optJSONObject("payload").optString("message"));
+            }
             updateAgentControls();
         };
         chatCoordinator.addListener(coordinatorListener);
@@ -232,6 +237,8 @@ public class MainActivity extends BridgeActivity {
     @Override
     public void onResume() {
         super.onResume();
+        agentRunning = chatCoordinator.running(chatStore.activeId());
+        activePiRequestId = chatCoordinator.requestId();
         if (!agentRunning && !appearanceRevision.equals(AppAppearance.revision(this))) { recreate(); return; }
         GestureService.statusListener = refreshGestures;
         GestureService.recover(this);
@@ -768,16 +775,16 @@ public class MainActivity extends BridgeActivity {
         final String model;
         final String selectionSource = chatStore.piSelection();
         final String snapshot;
+        final PiConfigStore queryStore = new PiConfigStore(this, conversationId);
         try {
-            PiConfigStore store = new PiConfigStore(this);
-            store.initialize(getSharedPreferences("chat", MODE_PRIVATE));
+            queryStore.initialize(getSharedPreferences("chat", MODE_PRIVATE));
             JSONObject selection = new JSONObject(selectionSource);
-            java.util.Map<String, Object> settings = store.effectiveSettings();
+            java.util.Map<String, Object> settings = queryStore.effectiveSettings();
             provider = selection.optString("provider",
                     String.valueOf(settings.getOrDefault("defaultProvider", "")));
             model = selection.optString("model",
                     String.valueOf(settings.getOrDefault("defaultModel", "")));
-            snapshot = store.snapshot();
+            snapshot = queryStore.snapshot();
         } catch (Exception exception) {
             failure(t("无法读取 Pi 配置：") + exception.getMessage());
             return;
@@ -795,7 +802,7 @@ public class MainActivity extends BridgeActivity {
                 synchronized (thinkingLevelQueryLock) {
                     if (!ACTIVITY_EPOCH.owns(owner)) return;
                     thinkingLevelBridge = bridge;
-                    thinkingLevelRequestId = bridge.query("catalog", snapshot, arguments, event -> {
+                    thinkingLevelRequestId = bridge.query("catalog", snapshot, arguments, queryStore, event -> {
                         String type = event.optString("type");
                         if ("result".equals(type)) result[0] = event.opt("result");
                         else if ("error".equals(type)) error[0] = event.optString("message");
@@ -944,12 +951,11 @@ public class MainActivity extends BridgeActivity {
 
     private boolean canChangeConversation() {
         if (!agentRunning) return true;
-        Toast.makeText(this, t("请先停止当前生成，再切换会话"), Toast.LENGTH_SHORT).show();
+        Toast.makeText(this, t("请先停止此会话的当前生成"), Toast.LENGTH_SHORT).show();
         return false;
     }
 
     private void newConversation() {
-        if (!canChangeConversation()) return;
         if (!chatStore.tree().nodes().isEmpty()) chatStore.newConversation();
         chatStore.saveDraft("");
         changeConversation();
@@ -957,6 +963,8 @@ public class MainActivity extends BridgeActivity {
 
     private void changeConversation() {
         closeChatDrawer(false);
+        agentRunning = chatCoordinator.running(chatStore.activeId());
+        activePiRequestId = chatCoordinator.requestId();
         history = immutable(chatStore.load());
         expandedTools.clear();
         savedDraft = chatStore.draft();
@@ -1115,15 +1123,16 @@ public class MainActivity extends BridgeActivity {
             LinearLayout item = row();
             boolean selected = conversation.id.equals(chatStore.activeId());
             if (selected) item.setBackground(shape(appearance.panel, 14, 0, 0));
-            TextView title = label(conversation.title, 15, CHARCOAL);
+            boolean running = chatCoordinator.running(conversation.id);
+            TextView title = label(conversation.title + (running ? t(" · 正在运行") : ""), 15, CHARCOAL);
             title.setSingleLine(true);
             title.setEllipsize(android.text.TextUtils.TruncateAt.END);
             title.setPadding(dp(12), 0, dp(8), 0);
             title.setGravity(Gravity.CENTER_VERTICAL);
-            title.setContentDescription(conversation.title + (selected ? t("，当前对话") : ""));
+            title.setContentDescription(conversation.title + (selected ? t("，当前对话") : "")
+                    + (running ? t("，正在运行") : ""));
             title.setFocusable(true);
             title.setOnClickListener(view -> {
-                if (!canChangeConversation()) return;
                 if (selected) { closeChatDrawer(); return; }
                 chatStore.selectConversation(conversation.id);
                 changeConversation();
@@ -1140,12 +1149,14 @@ public class MainActivity extends BridgeActivity {
     }
 
     private void confirmDeleteConversation() {
-        if (!canChangeConversation()) return;
+        if (chatCoordinator.running(chatStore.activeId())) {
+            Toast.makeText(this, t("此会话正在运行，请先停止后再删除"), Toast.LENGTH_SHORT).show();
+            return;
+        }
         new android.app.AlertDialog.Builder(this).setTitle(t("删除当前对话？"))
                 .setMessage(t("删除后无法恢复。其他对话不会受影响。"))
                 .setNegativeButton(t("取消"), null).setPositiveButton(t("删除"), (dialog, which) -> {
-                    clearHistory();
-                    changeConversation();
+                    if (clearHistory()) changeConversation();
                 }).show();
     }
 
@@ -1183,7 +1194,7 @@ public class MainActivity extends BridgeActivity {
 
     private void sendMessage() {
         String text = composerInput == null ? "" : composerInput.getText().toString().trim();
-        if (text.isEmpty() || chatCoordinator.running() || thinkingLevelQueryToken != null) return;
+        if (text.isEmpty() || chatCoordinator.running(chatStore.activeId()) || thinkingLevelQueryToken != null) return;
         if ("home".equals(page)) {
             if (!chatStore.tree().nodes().isEmpty()) chatStore.newConversation();
             chatStore.saveDraft(text);
@@ -1194,7 +1205,7 @@ public class MainActivity extends BridgeActivity {
         catch (Exception exception) { failure(exception.getMessage()); }
     }
 
-    private void cancelAgent() { chatCoordinator.cancel(); }
+    private void cancelAgent() { chatCoordinator.cancel(chatStore.activeId()); }
 
     private void savePiPreview() { }
 
@@ -1516,14 +1527,15 @@ public class MainActivity extends BridgeActivity {
         }
     }
 
-    private void clearHistory() {
-        if (agentRunning) return;
-        chatStore.clear();
+    private boolean clearHistory() {
+        try { chatCoordinator.deleteConversation(chatStore.activeId()); }
+        catch (Exception exception) { failure(exception.getMessage()); return false; }
         history = Collections.emptyList();
         expandedTools.clear();
         forceScrollToBottom = true;
         renderMessages();
         if (state != null) state.setText(t("记录已清空"));
+        return true;
     }
 
     private String currentModelLabel() {

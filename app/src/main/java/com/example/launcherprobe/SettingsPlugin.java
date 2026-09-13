@@ -109,6 +109,7 @@ public final class SettingsPlugin extends Plugin {
 
     @PluginMethod public void previous(PluginCall call) {
         try {
+            initialize();
             boolean project = call.getBoolean("project", false);
             String name = required(call, "name");
             if (secretFile(project, name) && !(call.getBoolean("allowSecrets", false) && call.getBoolean("warningAccepted", false)))
@@ -120,6 +121,7 @@ public final class SettingsPlugin extends Plugin {
 
     @PluginMethod public void saveDraft(PluginCall call) {
         try {
+            initialize();
             String key = draftKey(call.getBoolean("project", false), required(call, "name"));
             drafts().edit().putString(key, string(call, "source")).putString(key + "/base", string(call, "base")).apply();
             call.resolve();
@@ -127,7 +129,7 @@ public final class SettingsPlugin extends Plugin {
     }
 
     @PluginMethod public void clearDraft(PluginCall call) {
-        try { clearDraft(call.getBoolean("project", false), required(call, "name")); call.resolve(); }
+        try { initialize(); clearDraft(call.getBoolean("project", false), required(call, "name")); call.resolve(); }
         catch (Exception exception) { reject(call, exception); }
     }
 
@@ -170,7 +172,7 @@ public final class SettingsPlugin extends Plugin {
 
     @PluginMethod public void settings(PluginCall call) {
         try {
-            initialize();
+            initialize(call.getString("conversationId"));
             boolean effective = call.getBoolean("effective", false), project = call.getBoolean("project", false);
             Map<String, Object> value = effective ? store.effectiveSettings() : store.settings(project);
             JSONObject result = new JSONObject().put("settings", NativeJson.jsonValue(value));
@@ -322,8 +324,9 @@ public final class SettingsPlugin extends Plugin {
             JSONObject arguments = call.getObject("arguments", new JSObject());
             validateQuery(operation, arguments);
             PiAgentBridge bridge = PiAgentBridge.get(getContext());
+            PiConfigStore queryStore = store;
             synchronized (bridge) {
-                String id = bridge.query(operation, store.snapshot(), arguments, event -> {
+                String id = bridge.query(operation, queryStore.snapshot(), arguments, queryStore, event -> {
                     notifyListeners("settingsEvent", js(event), true);
                     if ("end".equals(event.optString("type")) && event.optString("id").equals(queryRequestId)) {
                         queryRequestId = null; queryBridge = null;
@@ -376,15 +379,39 @@ public final class SettingsPlugin extends Plugin {
         });
     }
 
-    private void initialize() throws Exception { store.initialize(getContext().getSharedPreferences("chat", Context.MODE_PRIVATE)); }
+    private void initialize() throws Exception { initialize(null); }
+    private void initialize(String requestedConversationId) throws Exception {
+        SharedPreferences chat = getContext().getSharedPreferences("chat", Context.MODE_PRIVATE);
+        String conversationId = requestedConversationId == null || requestedConversationId.isEmpty()
+                ? chat.getString("active_chat", "legacy") : requestedConversationId;
+        if (store == null || !conversationId.equals(store.conversationId())) {
+            store = new PiConfigStore(getContext(), conversationId);
+        }
+        store.initialize(chat);
+    }
     private void cancelNativeQuery() { PiAgentBridge bridge = queryBridge; if (bridge != null && queryCancellable) bridge.abort(queryRequestId); }
     private SharedPreferences drafts() { return getContext().getSharedPreferences("settings_editor_drafts", Context.MODE_PRIVATE); }
-    private String draftKey(boolean project, String name) { return (project ? "project/" : "global/") + name; }
-    private EditorDraft draft(boolean project, String name) {
-        String key = draftKey(project, name); SharedPreferences values = drafts();
-        return values.contains(key) ? new EditorDraft(values.getString(key, ""), values.getString(key + "/base", "")) : null;
+    private String draftKey(boolean project, String name) {
+        return (project ? "project/" + store.conversationId() + "/" : "global/") + name;
     }
-    private void clearDraft(boolean project, String name) { String key = draftKey(project, name); drafts().edit().remove(key).remove(key + "/base").apply(); }
+    private EditorDraft draft(boolean project, String name) {
+        String key = draftKey(project, name);
+        SharedPreferences values = drafts();
+        String legacy = "project/" + name;
+        if (project && !values.contains(key) && values.contains(legacy)) {
+            values.edit().putString(key, values.getString(legacy, ""))
+                    .putString(key + "/base", values.getString(legacy + "/base", ""))
+                    .remove(legacy).remove(legacy + "/base").apply();
+        }
+        return values.contains(key) ? new EditorDraft(values.getString(key, ""),
+                values.getString(key + "/base", "")) : null;
+    }
+    private void clearDraft(boolean project, String name) {
+        String key = draftKey(project, name);
+        SharedPreferences.Editor edit = drafts().edit().remove(key).remove(key + "/base");
+        if (project) edit.remove("project/" + name).remove("project/" + name + "/base");
+        edit.apply();
+    }
     private void migrateDrafts() {
         SharedPreferences target = drafts(); if (target.getBoolean("migrated", false)) return;
         SharedPreferences.Editor edit = target.edit();

@@ -653,7 +653,7 @@ public final class PiSettingsActivity extends Activity {
                 PiAgentBridge bridge = PiAgentBridge.get(this);
                 queryBridge = bridge;
                 Object[] result = {null}; String[] error = {""};
-                queryRequestId = bridge.query(operation, snapshot, arguments, event -> runOnUiThread(() -> {
+                queryRequestId = bridge.query(operation, snapshot, arguments, store, event -> runOnUiThread(() -> {
                     String type = event.optString("type");
                     if (type.equals("auth") && !isDestroyed()) showAuthNotice(event.optJSONObject("event"));
                     else if (type.equals("auth_prompt") && !isDestroyed()) showAuthPrompt(event);

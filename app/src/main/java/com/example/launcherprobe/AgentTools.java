@@ -30,6 +30,7 @@ import okhttp3.ResponseBody;
 /** Native launcher/navigation and bounded public-web tools. */
 public final class AgentTools {
     private static final int MAX_WEB_BYTES = 128 * 1024;
+    private static final Object DEVICE_TOOL_LOCK = new Object();
     private final Context context;
     private final PackageManager packages;
     private final OkHttpClient webClient = new OkHttpClient.Builder()
@@ -67,7 +68,9 @@ public final class AgentTools {
         });
         tools.put("read_screen", arguments -> {
             noArguments(arguments);
-            return GestureService.readScreenForAgent(cancellation);
+            synchronized (DEVICE_TOOL_LOCK) {
+                return GestureService.readScreenForAgent(cancellation);
+            }
         });
         tools.put("click", arguments -> click(arguments, cancellation));
         tools.put("input_text", arguments -> inputText(arguments, cancellation));
@@ -111,52 +114,62 @@ public final class AgentTools {
 
     private String listApps(String arguments) throws Exception {
         noArguments(arguments);
-        JSONArray values = new JSONArray();
-        for (ResolveInfo app : launcherApps()) {
-            values.put(new JSONObject().put("label", app.loadLabel(packages).toString())
-                    .put("package", app.activityInfo.packageName));
-            if (values.length() == 200) break;
+        synchronized (DEVICE_TOOL_LOCK) {
+            JSONArray values = new JSONArray();
+            for (ResolveInfo app : launcherApps()) {
+                values.put(new JSONObject().put("label", app.loadLabel(packages).toString())
+                        .put("package", app.activityInfo.packageName));
+                if (values.length() == 200) break;
+            }
+            return ok().put("apps", values).toString();
         }
-        return ok().put("apps", values).toString();
     }
 
     private String launchApp(String arguments) throws Exception {
         String requested = required(object(arguments, "package"), "package", 200);
-        ResolveInfo match = null;
-        for (ResolveInfo app : launcherApps()) {
-            if (app.activityInfo.packageName.equals(requested)) {
-                match = app;
-                break;
+        synchronized (DEVICE_TOOL_LOCK) {
+            ResolveInfo match = null;
+            for (ResolveInfo app : launcherApps()) {
+                if (app.activityInfo.packageName.equals(requested)) {
+                    match = app;
+                    break;
+                }
             }
+            if (match == null) throw new IllegalArgumentException("没有可启动的匹配包名");
+            ComponentName component = new ComponentName(match.activityInfo.packageName, match.activityInfo.name);
+            context.startActivity(new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+                    .setComponent(component).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
+                            | Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED));
+            return ok().put("accepted", true).put("package", requested)
+                    .put("note", "Android accepted the launch request; target UI was not inspected.").toString();
         }
-        if (match == null) throw new IllegalArgumentException("没有可启动的匹配包名");
-        ComponentName component = new ComponentName(match.activityInfo.packageName, match.activityInfo.name);
-        context.startActivity(new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
-                .setComponent(component).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
-                        | Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED));
-        return ok().put("accepted", true).put("package", requested)
-                .put("note", "Android accepted the launch request; target UI was not inspected.").toString();
     }
 
     private String navigation(String action, AgentLoop.Cancellation cancellation) throws Exception {
-        if (!GestureService.performAgentAction(action, cancellation)) {
-            throw new IllegalStateException("无障碍服务未连接或系统拒绝动作；请在桌面设置中授权");
+        synchronized (DEVICE_TOOL_LOCK) {
+            if (!GestureService.performAgentAction(action, cancellation)) {
+                throw new IllegalStateException("无障碍服务未连接或系统拒绝动作；请在桌面设置中授权");
+            }
+            return ok().put("accepted", true).put("action", action)
+                    .put("note", "Android accepted the action; target UI was not inspected.").toString();
         }
-        return ok().put("accepted", true).put("action", action)
-                .put("note", "Android accepted the action; target UI was not inspected.").toString();
     }
 
     private String click(String arguments, AgentLoop.Cancellation cancellation) throws Exception {
         JSONObject value = object(arguments, "observation_id", "node_id");
-        return GestureService.performNodeAction(required(value, "observation_id", 100),
-                required(value, "node_id", 100), "click", null, cancellation);
+        synchronized (DEVICE_TOOL_LOCK) {
+            return GestureService.performNodeAction(required(value, "observation_id", 100),
+                    required(value, "node_id", 100), "click", null, cancellation);
+        }
     }
 
     private String inputText(String arguments, AgentLoop.Cancellation cancellation) throws Exception {
         JSONObject value = object(arguments, "observation_id", "node_id", "text");
-        return GestureService.performNodeAction(required(value, "observation_id", 100),
-                required(value, "node_id", 100), "input_text", text(value, "text", 1000),
-                cancellation);
+        synchronized (DEVICE_TOOL_LOCK) {
+            return GestureService.performNodeAction(required(value, "observation_id", 100),
+                    required(value, "node_id", 100), "input_text", text(value, "text", 1000),
+                    cancellation);
+        }
     }
 
     private String scroll(String arguments, AgentLoop.Cancellation cancellation) throws Exception {
@@ -165,8 +178,10 @@ public final class AgentTools {
         if (!("forward".equals(direction) || "backward".equals(direction))) {
             throw new IllegalArgumentException("direction 必须是 forward 或 backward");
         }
-        return GestureService.performNodeAction(required(value, "observation_id", 100),
-                required(value, "node_id", 100), "scroll_" + direction, null, cancellation);
+        synchronized (DEVICE_TOOL_LOCK) {
+            return GestureService.performNodeAction(required(value, "observation_id", 100),
+                    required(value, "node_id", 100), "scroll_" + direction, null, cancellation);
+        }
     }
 
     private String webSearch(String arguments, String provider, String configuredBase)

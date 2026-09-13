@@ -13,11 +13,13 @@ import java.util.List;
 public final class ChatStore {
     private static final int MAX_TOOL_ARGUMENTS = 50_000;
     private static final Object STORE_LOCK = new Object();
+    private final Context context;
     private final SharedPreferences preferences;
     private final java.io.File piContexts;
     private final AttachmentStore attachments;
 
     public ChatStore(Context context) {
+        this.context = context.getApplicationContext();
         preferences = context.getSharedPreferences("chat", Context.MODE_PRIVATE);
         piContexts = new java.io.File(context.getFilesDir(), "pi-contexts");
         attachments = new AttachmentStore(context);
@@ -25,11 +27,15 @@ public final class ChatStore {
             List<AgentLoop.Message> legacy = load();
             if (!legacy.isEmpty()) save(legacy);
         }
+        PiConfigStore.registerExistingSessions(this.context);
     }
 
     public String activeId() { return preferences.getString("active_chat", "legacy"); }
 
-    String piSelection() { return preferences.getString("pi_selection_" + activeId(), "{}"); }
+    String piSelection() { return piSelection(activeId()); }
+    String piSelection(String conversationId) {
+        return preferences.getString("pi_selection_" + conversationId, "{}");
+    }
 
     void setPiSelection(String provider, String model, String thinkingLevel) throws org.json.JSONException {
         setPiSelection(activeId(), provider, model, thinkingLevel);
@@ -42,10 +48,19 @@ public final class ChatStore {
         preferences.edit().putString("pi_selection_" + conversationId, selection.toString()).apply();
     }
 
-    public String draft() { return preferences.getString("draft_" + activeId(), ""); }
+    public String draft() { return draft(activeId()); }
+    String draft(String conversationId) { return preferences.getString("draft_" + conversationId, ""); }
 
-    public void saveDraft(String text) {
-        preferences.edit().putString("draft_" + activeId(), text).apply();
+    public void saveDraft(String text) { saveDraft(activeId(), text); }
+
+    void saveDraft(String conversationId, String text) {
+        synchronized (STORE_LOCK) {
+            if (!conversationId.equals(activeId()) && !conversationIndex().has(conversationId))
+                throw new IllegalStateException("会话已删除");
+            SharedPreferences.Editor edit = preferences.edit().putString("draft_" + conversationId, text);
+            if (text != null && !text.isEmpty()) registerConversation(edit, conversationId);
+            edit.apply();
+        }
     }
 
     public List<ChatAttachment> draftAttachments() { return draftAttachments(activeId()); }
@@ -101,7 +116,8 @@ public final class ChatStore {
 
     void removeDraftAttachment(String conversationId, String attachmentId) {
         synchronized (STORE_LOCK) {
-            if (!conversationId.equals(activeId())) throw new IllegalStateException("会话已切换");
+            if (!conversationId.equals(activeId()) && !conversationIndex().has(conversationId))
+                throw new IllegalStateException("会话已删除");
             List<ChatAttachment> next = new ArrayList<>();
             for (ChatAttachment item : draftAttachments(conversationId))
                 if (!attachmentId.equals(item.id)) next.add(item);
@@ -175,11 +191,12 @@ public final class ChatStore {
     public String baseUrl() { return preferences.getString("base_url", "https://api.openai.com/v1"); }
     public String model() { return preferences.getString("model", "gpt-4o-mini"); }
     public String apiKey() { return preferences.getString("api_key", ""); }
-    public List<AgentLoop.Message> load() { return tree().path(); }
+    public List<AgentLoop.Message> load() { return load(activeId()); }
+    List<AgentLoop.Message> load(String conversationId) { return tree(conversationId).path(); }
 
     public ConversationTree tree() { return tree(activeId()); }
 
-    private ConversationTree tree(String conversation) {
+    ConversationTree tree(String conversation) {
         try {
             Object stored = new org.json.JSONTokener(preferences.getString(historyKey(conversation), "[]")).nextValue();
             boolean legacy = stored instanceof JSONArray;
@@ -229,18 +246,20 @@ public final class ChatStore {
         return new JSONObject().put("version", 1).put("nodes", values).put("leaf", tree.leaf());
     }
 
-    public void selectNode(String id) {
+    public void selectNode(String id) { selectNode(activeId(), id); }
+
+    void selectNode(String conversation, String id) {
         synchronized (STORE_LOCK) {
-            String conversation = activeId();
             ConversationTree tree = tree(conversation);
             tree.select(id);
             writeTree(conversation, tree);
         }
     }
 
-    public void save(List<AgentLoop.Message> messages) {
+    public void save(List<AgentLoop.Message> messages) { save(activeId(), messages); }
+
+    void save(String conversation, List<AgentLoop.Message> messages) {
         synchronized (STORE_LOCK) {
-            String conversation = activeId();
             ConversationTree tree = tree(conversation);
             tree.merge(messages);
             writeTree(conversation, tree);
@@ -329,9 +348,11 @@ public final class ChatStore {
                 nodeId.getBytes(java.nio.charset.StandardCharsets.UTF_8)).toString() + ".json");
     }
 
-    String piContext(String nodeId) throws java.io.IOException {
+    String piContext(String nodeId) throws java.io.IOException { return piContext(activeId(), nodeId); }
+
+    private String piContext(String conversation, String nodeId) throws java.io.IOException {
         if (nodeId == null) return null;
-        java.io.File file = piContextFile(nodeId);
+        java.io.File file = piContextFile(conversation, nodeId);
         if (!file.exists() && !new java.io.File(file.getPath() + ".bak").exists()) return null;
         return new String(new android.util.AtomicFile(file).readFully(), java.nio.charset.StandardCharsets.UTF_8);
     }
@@ -354,15 +375,16 @@ public final class ChatStore {
         return preferences.getBoolean("pi_pending_" + conversation + "_" + userId, false);
     }
 
-    String piResume(List<AgentLoop.Message> path) throws Exception {
+    String piResume(List<AgentLoop.Message> path) throws Exception { return piResume(activeId(), path); }
+
+    String piResume(String conversation, List<AgentLoop.Message> path) throws Exception {
         synchronized (STORE_LOCK) {
-            String conversation = activeId();
             for (AgentLoop.Message message : path) if (piPending(conversation, message.id)) {
                 throw new java.io.IOException("上一轮 Pi 请求尚未保存完成；请稍后重试，或选择之前的历史节点");
             }
             java.util.Set<String> nativeNodes = preferences.getStringSet("pi_nodes_" + conversation, java.util.Collections.emptySet());
             for (int i = path.size() - 1; i >= 0; i--) {
-                String context = piContext(path.get(i).id);
+                String context = piContext(conversation, path.get(i).id);
                 if (context != null) {
                     JSONArray tail = piHistory(path.subList(i + 1, path.size()));
                     return new JSONObject().put("entries", new JSONArray(context)).put("tail", tail).toString();
@@ -414,22 +436,39 @@ public final class ChatStore {
         historical.setLength(0);
     }
 
-    public void clear() {
+    public void clear() { clear(activeId()); }
+
+    void clear(String conversationId) {
         synchronized (STORE_LOCK) {
-        SharedPreferences.Editor cleanup = preferences.edit().remove("pi_nodes_" + activeId());
-        for (String key : preferences.getAll().keySet()) if (key.startsWith("pi_pending_" + activeId() + "_")) cleanup.remove(key);
-        cleanup.apply();
-        java.io.File directory = piContextDirectory();
-        java.io.File[] contexts = directory.listFiles();
-        if (contexts != null) for (java.io.File file : contexts) file.delete();
-        directory.delete();
-        JSONObject index = conversationIndex();
-        index.remove(activeId());
-        preferences.edit().remove(historyKey()).remove("draft_" + activeId())
-                .remove("draft_attachments_" + activeId()).remove("pi_selection_" + activeId())
-                .putString("conversations", index.toString())
-                .putString("active_chat", java.util.UUID.randomUUID().toString()).apply();
-        cleanupAttachments();
+            if (!conversationId.equals(activeId()) && !conversationIndex().has(conversationId))
+                throw new IllegalArgumentException("会话不存在");
+            try { PiConfigStore.deleteWorkspace(context, conversationId); }
+            catch (java.io.IOException exception) { throw new IllegalStateException("无法清理会话工作区", exception); }
+            SharedPreferences.Editor cleanup = preferences.edit().remove("pi_nodes_" + conversationId);
+            for (String key : preferences.getAll().keySet())
+                if (key.startsWith("pi_pending_" + conversationId + "_")) cleanup.remove(key);
+            cleanup.apply();
+            context.getSharedPreferences("chat_submissions", Context.MODE_PRIVATE).edit()
+                    .remove("session_" + conversationId).apply();
+            SharedPreferences editorDrafts = context.getSharedPreferences(
+                    "settings_editor_drafts", Context.MODE_PRIVATE);
+            SharedPreferences.Editor draftCleanup = editorDrafts.edit();
+            String draftPrefix = "project/" + conversationId + "/";
+            for (String key : editorDrafts.getAll().keySet())
+                if (key.startsWith(draftPrefix)) draftCleanup.remove(key);
+            draftCleanup.apply();
+            java.io.File directory = piContextDirectory(conversationId);
+            java.io.File[] contexts = directory.listFiles();
+            if (contexts != null) for (java.io.File file : contexts) file.delete();
+            directory.delete();
+            JSONObject index = conversationIndex();
+            index.remove(conversationId);
+            SharedPreferences.Editor edit = preferences.edit().remove(historyKey(conversationId))
+                    .remove("draft_" + conversationId).remove("draft_attachments_" + conversationId)
+                    .remove("pi_selection_" + conversationId).putString("conversations", index.toString());
+            if (conversationId.equals(activeId())) edit.putString("active_chat", java.util.UUID.randomUUID().toString());
+            edit.apply();
+            cleanupAttachmentsLocked();
         }
     }
 

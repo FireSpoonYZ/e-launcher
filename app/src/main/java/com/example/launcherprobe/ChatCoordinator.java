@@ -9,9 +9,12 @@ import org.json.JSONObject;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArraySet;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -29,22 +32,14 @@ final class ChatCoordinator {
 
     private final Context context;
     private final ChatStore store;
-    private final ExecutorService executor = Executors.newSingleThreadExecutor();
+    private final ExecutorService executor = Executors.newCachedThreadPool();
     private final Handler main = new Handler(Looper.getMainLooper());
     private final Set<Listener> listeners = new CopyOnWriteArraySet<>();
     private final AtomicLong sequence = new AtomicLong();
     private final Object runLock = new Object();
-    private volatile boolean running;
-    private volatile String requestId;
-    private volatile String conversationId;
-    private AgentLoop.CancelToken cancellation;
-    private PiAgentBridge piBridge;
-    private PiTurnPersistence piPersistence;
-    private String piAssistantId;
-    private String lastError = "";
-    private String lastStatus = "";
-    private long lastDeltaFlush;
-    private final StringBuilder pendingDelta = new StringBuilder();
+    private final Map<String, SessionRun> activeRuns = new ConcurrentHashMap<>();
+    private final Map<String, SessionRun> terminatingRuns = new ConcurrentHashMap<>();
+    private final Map<String, RunResult> recentResults = new ConcurrentHashMap<>();
 
     private ChatCoordinator(Context context) {
         this.context = context;
@@ -52,173 +47,338 @@ final class ChatCoordinator {
     }
 
     ChatStore store() { return store; }
-    boolean running() { return running; }
-    String requestId() { return requestId; }
-    String conversationId() { return conversationId; }
+    boolean running() { return !activeRuns.isEmpty(); }
+    boolean running(String conversationId) { return activeRuns.containsKey(conversationId); }
+    String requestId() {
+        SessionRun run = activeRuns.get(store.activeId());
+        return run == null ? null : run.requestId;
+    }
+    String conversationId() { return store.activeId(); }
     long sequence() { return sequence.get(); }
     void addListener(Listener listener) { listeners.add(listener); }
     void removeListener(Listener listener) { listeners.remove(listener); }
 
     String send(String text, String submissionId) throws Exception {
-        return send(text, store.draftAttachments(), submissionId);
+        String conversationId = store.activeId();
+        return send(conversationId, text, store.draftAttachments(conversationId), submissionId);
     }
 
-    String send(String text, List<ChatAttachment> attachments, String submissionId) throws Exception {
+    String send(String conversationId, String text, String submissionId) throws Exception {
+        return send(conversationId, text, store.draftAttachments(conversationId), submissionId);
+    }
+
+    private String send(String conversationId, String text, List<ChatAttachment> attachments,
+            String submissionId) throws Exception {
         String prompt = text == null ? "" : text.trim();
         if (prompt.isEmpty() && attachments.isEmpty()) throw new IllegalArgumentException("消息不能为空");
         AttachmentStore attachmentStore = new AttachmentStore(context);
         for (ChatAttachment attachment : attachments) attachmentStore.requireFile(attachment);
-        synchronized (runLock) {
-            if (running) throw new IllegalStateException("请先停止当前生成");
-            if (submissionId != null && !submissionId.isEmpty()
-                    && context.getSharedPreferences("chat_submissions", Context.MODE_PRIVATE).getBoolean(submissionId, false)) return null;
-            running = true;
-            requestId = UUID.randomUUID().toString();
-            conversationId = store.activeId();
-            cancellation = new AgentLoop.CancelToken();
-            lastError = "";
-            lastStatus = "running";
-        }
+        SessionRun run = registerRun(conversationId, submissionId);
+        if (run == null) return null;
         try {
-            emit("runStatus", null, json("status", "running", "message", "正在启动…"));
-            startPi(prompt, attachments);
-            if (submissionId != null && !submissionId.isEmpty()) context.getSharedPreferences("chat_submissions", Context.MODE_PRIVATE)
-                    .edit().clear().putBoolean(submissionId, true).apply();
-            return requestId;
+            emit(run, "runStatus", null, json("status", "running", "message", run.message));
+            startPi(run, prompt, new ArrayList<>(attachments));
+            if (submissionId != null && !submissionId.isEmpty()) {
+                context.getSharedPreferences("chat_submissions", Context.MODE_PRIVATE)
+                        .edit().putString("session_" + conversationId, submissionId).apply();
+            }
+            return run.requestId;
         } catch (Exception exception) {
-            finish("error", exception.getMessage());
+            endPersistence(run, "error", exception);
+            finish(run, "error", detail(exception));
             throw exception;
         }
     }
 
-    void cancel() {
+    SessionRun registerRun(String conversationId, String submissionId) {
+        SessionRun run = new SessionRun(conversationId, UUID.randomUUID().toString());
         synchronized (runLock) {
-            if (!running) return;
-            cancellation.cancel();
-            if (piBridge != null) piBridge.abort(requestId);
+            if (!conversationId.equals(store.activeId())) throw new IllegalStateException("会话已切换");
+            if (activeRuns.containsKey(conversationId)) throw new IllegalStateException("此会话已有一轮正在运行，请先停止");
+            if (terminatingRuns.containsKey(conversationId)) throw new IllegalStateException("此会话的后台任务正在结束，请稍后重试");
+            if (submissionId != null && !submissionId.isEmpty()) {
+                android.content.SharedPreferences submissions = context.getSharedPreferences(
+                        "chat_submissions", Context.MODE_PRIVATE);
+                if (submissions.getBoolean(submissionId, false)
+                        || submissionId.equals(submissions.getString("session_" + conversationId, null))) return null;
+            }
+            activeRuns.put(conversationId, run);
+            try {
+                ChatExecutionService.setActiveCount(context, activeRuns.size());
+            } catch (RuntimeException failure) {
+                activeRuns.remove(conversationId, run);
+                try { ChatExecutionService.setActiveCount(context, activeRuns.size()); }
+                catch (RuntimeException rollbackFailure) { failure.addSuppressed(rollbackFailure); }
+                throw failure;
+            }
+            recentResults.remove(conversationId);
+            return run;
         }
-        emit("runStatus", null, json("status", "stopping", "message", "正在停止…"));
     }
 
-    private void startPi(String text, List<ChatAttachment> attachments) throws Exception {
-        PiConfigStore configStore = new PiConfigStore(context);
+    void deleteConversation(String conversationId) {
+        synchronized (runLock) {
+            if (activeRuns.containsKey(conversationId) || terminatingRuns.containsKey(conversationId)) {
+                throw new IllegalStateException("此会话正在运行或结束中，请稍后再删除");
+            }
+            store.clear(conversationId);
+            recentResults.remove(conversationId);
+        }
+    }
+
+    void cancel(String conversationId) {
+        SessionRun run;
+        synchronized (runLock) {
+            run = activeRuns.get(conversationId);
+            if (run == null) return;
+            run.cancellation.cancel();
+            if (run.bridge != null) run.bridge.abort(run.requestId);
+            run.status = "stopping";
+            run.message = "正在停止…";
+        }
+        emit(run, "runStatus", null, json("status", run.status, "message", run.message));
+    }
+
+    private void startPi(SessionRun run, String text, List<ChatAttachment> attachments) throws Exception {
+        PiConfigStore configStore = new PiConfigStore(context, run.conversationId);
         configStore.initialize(context.getSharedPreferences("chat", Context.MODE_PRIVATE));
-        String config = new JSONObject(configStore.snapshot()).put("selection", new JSONObject(store.piSelection()))
-                .put("chatAttachmentRoot", new java.io.File(context.getFilesDir(), "chat-attachments").getAbsolutePath()).toString();
-        List<AgentLoop.Message> full = new ArrayList<>(store.load());
-        String sdkHistory = store.piResume(full);
-        int start = Math.max(0, full.size() - 49);
-        while (start > 0 && !"user".equals(full.get(start).role)) start--;
-        List<AgentLoop.Message> prior = new ArrayList<>(full.subList(start, full.size()));
+        String config = new JSONObject(configStore.snapshot())
+                .put("selection", new JSONObject(store.piSelection(run.conversationId)))
+                .put("chatAttachmentRoot", new java.io.File(context.getFilesDir(), "chat-attachments").getAbsolutePath())
+                .toString();
+        List<AgentLoop.Message> full = new ArrayList<>(store.load(run.conversationId));
+        String sdkHistory = store.piResume(run.conversationId, full);
+        List<AgentLoop.Message> prior = new ArrayList<>(full);
         AgentLoop.Message user = new AgentLoop.Message(UUID.randomUUID().toString(), "user", text, null,
                 Collections.emptyList(), false, attachments);
         full.add(user);
-        store.save(full);
-        store.saveDraft("");
-        store.saveDraftAttachments(Collections.emptyList());
-        piAssistantId = UUID.randomUUID().toString();
+        store.save(run.conversationId, full);
+        store.saveDraft(run.conversationId, "");
+        store.saveDraftAttachments(run.conversationId, Collections.emptyList());
+        run.assistantId = UUID.randomUUID().toString();
         List<AgentLoop.Message> work = new ArrayList<>(prior);
         work.add(user);
-        piPersistence = new PiTurnPersistence(store, conversationId, user.id, piAssistantId, work);
-        PiTurnPersistence persistence = piPersistence;
-        emit("snapshot", user.id, new JSONObject());
-        AgentLoop.CancelToken token = cancellation;
-        String id = requestId;
+        run.persistence = new PiTurnPersistence(store, run.conversationId, user.id, run.assistantId, work);
+        emit(run, "snapshot", user.id, new JSONObject());
         executor.execute(() -> {
             try {
                 PiAgentBridge bridge = PiAgentBridge.get(context);
                 synchronized (runLock) {
-                    if (!ownsRun(token) || token.cancelled()) throw new InterruptedException("pi 启动已取消");
-                    piBridge = bridge;
+                    if (!ownsRun(run) || run.cancellation.cancelled()) throw new InterruptedException("pi 启动已取消");
+                    run.bridge = bridge;
+                    bridge.prompt(run.requestId, run.conversationId, config, text, attachments, sdkHistory,
+                            prior, configStore, event -> main.post(() -> {
+                                if (ownsRun(run)) onPiEvent(event, run);
+                                else if (terminatingRuns.get(run.conversationId) == run) {
+                                    onTerminatingPiEvent(event, run);
+                                }
+                            }));
+                    run.nodeRegistered = true;
                 }
-                bridge.prompt(id, config, text, attachments, sdkHistory, prior, event -> main.post(() -> {
-                    if (ownsRun(token)) onPiEvent(event, token, persistence);
-                }));
             } catch (Throwable exception) {
-                try { persistence.accept(new JSONObject().put("type", "end").put("status", "error")); }
-                catch (Exception saving) { exception.addSuppressed(saving); }
-                if (ownsRun(token)) finish(token.cancelled() ? "aborted" : "error", detail(exception));
+                endPersistence(run, run.cancellation.cancelled() ? "aborted" : "error", exception);
+                if (ownsRun(run)) finish(run, run.cancellation.cancelled() ? "aborted" : "error",
+                        detail(exception));
+                else acknowledgeTermination(run);
             }
         });
     }
 
-    void onPiEvent(JSONObject event, AgentLoop.CancelToken token, PiTurnPersistence persistence) {
-        if (!ownsRun(token)) return;
+    void foregroundServiceTimedOut() {
+        final String message = "Android 已停止超时的后台任务；返回应用后可重新发送";
+        List<SessionRun> interrupted;
+        synchronized (runLock) {
+            interrupted = new ArrayList<>(activeRuns.values());
+            for (SessionRun run : interrupted) {
+                run.cancellation.cancel();
+                if (run.nodeRegistered) {
+                    if (run.persistence != null) run.persistence.savePreview();
+                    terminatingRuns.put(run.conversationId, run);
+                } else {
+                    endPersistence(run, "aborted", new InterruptedException(message));
+                }
+                if (run.persistence != null) main.removeCallbacksAndMessages(run.persistence);
+                synchronized (run.pendingDelta) { run.pendingDelta.setLength(0); }
+                activeRuns.remove(run.conversationId, run);
+                run.status = "aborted";
+                run.message = "";
+                run.error = message;
+                recentResults.put(run.conversationId, new RunResult(run.status, run.error));
+            }
+            ChatExecutionService.setActiveCount(context, 0);
+        }
+        for (SessionRun run : interrupted) {
+            emit(run, "error", null, json("message", message));
+            emit(run, "end", null, json("status", "aborted", "finishedRequestId", run.requestId));
+            synchronized (runLock) {
+                run.timeoutFinalized = true;
+                if (run.terminationAcknowledged) terminatingRuns.remove(run.conversationId, run);
+            }
+            if (run.nodeRegistered && run.bridge != null) run.bridge.abort(run.requestId);
+        }
+    }
+
+    void onTerminatingPiEvent(JSONObject event, SessionRun run) {
+        if (terminatingRuns.get(run.conversationId) != run) return;
+        Exception persistenceFailure = null;
+        try { run.persistence.accept(event); }
+        catch (Exception exception) {
+            persistenceFailure = exception;
+            run.error = "Pi 会话未保存：" + detail(exception);
+            recentResults.put(run.conversationId, new RunResult("error", run.error));
+        }
+        if (persistenceFailure != null) emit(run, "error", null, json("message", run.error));
+        if ("end".equals(event.optString("type"))) acknowledgeTermination(run);
+    }
+
+    private void acknowledgeTermination(SessionRun run) {
+        synchronized (runLock) {
+            run.terminationAcknowledged = true;
+            if (run.timeoutFinalized) terminatingRuns.remove(run.conversationId, run);
+        }
+    }
+
+    void onPiEvent(JSONObject event, SessionRun run) {
+        if (!ownsRun(run)) return;
         String type = event.optString("type");
         JSONObject message = event.optJSONObject("message");
         if ("message".equals(type) && message != null && "assistant".equals(message.optString("role"))) {
-            main.removeCallbacksAndMessages(persistence);
-            synchronized (pendingDelta) { pendingDelta.setLength(0); }
+            main.removeCallbacksAndMessages(run.persistence);
+            synchronized (run.pendingDelta) { run.pendingDelta.setLength(0); }
         }
-        try { persistence.accept(event); }
-        catch (Exception exception) { emit("error", null, json("message", "Pi 会话未保存：" + detail(exception))); }
+        Exception persistenceFailure = null;
+        try { run.persistence.accept(event); }
+        catch (Exception exception) {
+            persistenceFailure = exception;
+            run.error = "Pi 会话未保存：" + detail(exception);
+            emit(run, "error", null, json("message", run.error));
+        }
         if ("text_delta".equals(type)) {
-            synchronized (pendingDelta) { pendingDelta.append(event.optString("delta")); }
-            flushPiDelta(false, token, persistence);
-        } else if ("message".equals(type)) emit("snapshot", null, event);
-        else if ("tool_start".equals(type)) emit("toolStart", null, event);
-        else if ("tool_end".equals(type)) emit("toolEnd", null, event);
-        else if ("status".equals(type)) emit("runStatus", null, event);
-        else if ("error".equals(type)) { lastError = event.optString("message"); emit("error", null, event); }
-        else if ("end".equals(type)) {
-            flushPiDelta(true, token, persistence);
-            finish(event.optString("status", "completed"), "");
+            synchronized (run.pendingDelta) { run.pendingDelta.append(event.optString("delta")); }
+            flushPiDelta(false, run);
+        } else if ("message".equals(type)) emit(run, "snapshot", null, event);
+        else if ("tool_start".equals(type)) emit(run, "toolStart", null, event);
+        else if ("tool_end".equals(type)) emit(run, "toolEnd", null, event);
+        else if ("status".equals(type)) {
+            run.status = "running";
+            run.message = event.optString("message", "正在回复…");
+            emit(run, "runStatus", null, event);
+        } else if ("error".equals(type)) {
+            run.error = event.optString("message");
+            emit(run, "error", null, event);
+        } else if ("end".equals(type)) {
+            flushPiDelta(true, run);
+            String status = persistenceFailure == null ? event.optString("status", "completed") : "error";
+            finish(run, status, persistenceFailure == null ? "" : run.error);
         }
     }
 
-    private void flushPiDelta(boolean immediate, AgentLoop.CancelToken token, PiTurnPersistence persistence) {
-        long delay = Math.max(0, 40 - (System.currentTimeMillis() - lastDeltaFlush));
+    private void flushPiDelta(boolean immediate, SessionRun run) {
+        long delay = Math.max(0, 40 - (System.currentTimeMillis() - run.lastDeltaFlush));
         Runnable flush = () -> {
-            if (!ownsRun(token)) return;
+            if (!ownsRun(run)) return;
             final String delta;
-            synchronized (pendingDelta) {
-                if (pendingDelta.length() == 0) return;
-                delta = pendingDelta.toString();
-                pendingDelta.setLength(0);
+            synchronized (run.pendingDelta) {
+                if (run.pendingDelta.length() == 0) return;
+                delta = run.pendingDelta.toString();
+                run.pendingDelta.setLength(0);
             }
-            lastDeltaFlush = System.currentTimeMillis();
-            AgentLoop.Message assistant = persistence.savePreview();
-            if (assistant != null) emit("textDelta", assistant.id, json("delta", delta));
+            run.lastDeltaFlush = System.currentTimeMillis();
+            AgentLoop.Message assistant = run.persistence.savePreview();
+            if (assistant != null) emit(run, "textDelta", assistant.id, json("delta", delta));
         };
-        if (immediate) { main.removeCallbacksAndMessages(persistence); flush.run(); }
-        else main.postAtTime(flush, persistence, android.os.SystemClock.uptimeMillis() + delay);
+        if (immediate) {
+            main.removeCallbacksAndMessages(run.persistence);
+            flush.run();
+        } else {
+            main.postAtTime(flush, run.persistence, android.os.SystemClock.uptimeMillis() + delay);
+        }
     }
 
-    private boolean ownsRun(AgentLoop.CancelToken token) { return running && cancellation == token; }
+    private void endPersistence(SessionRun run, String status, Throwable original) {
+        PiTurnPersistence persistence = run.persistence;
+        if (persistence == null) return;
+        try { persistence.accept(new JSONObject().put("type", "end").put("status", status)); }
+        catch (Exception saving) { original.addSuppressed(saving); }
+    }
 
-    private void finish(String status, String error) {
-        final String finishedId;
+    private boolean ownsRun(SessionRun run) {
+        return activeRuns.get(run.conversationId) == run;
+    }
+
+    void finish(SessionRun run, String status, String error) {
         synchronized (runLock) {
-            if (!running) return;
-            finishedId = requestId;
-            if (error != null && !error.isEmpty()) lastError = error;
-            lastStatus = status;
-            if (piPersistence != null) main.removeCallbacksAndMessages(piPersistence);
-            synchronized (pendingDelta) { pendingDelta.setLength(0); }
-            running = false;
-            cancellation = null;
-            piBridge = null;
-            piPersistence = null;
-            piAssistantId = null;
-            if (error != null && !error.isEmpty()) emit("error", null, json("message", error));
-            emit("end", null, json("status", status, "finishedRequestId", finishedId));
+            if (!ownsRun(run)) return;
+            if (error != null && !error.isEmpty()) run.error = error;
+            run.status = status;
+            run.message = "";
+            if (run.persistence != null) main.removeCallbacksAndMessages(run.persistence);
+            synchronized (run.pendingDelta) { run.pendingDelta.setLength(0); }
+            activeRuns.remove(run.conversationId, run);
+            recentResults.put(run.conversationId, new RunResult(status, run.error));
+            ChatExecutionService.setActiveCount(context, activeRuns.size());
         }
+        if (error != null && !error.isEmpty()) emit(run, "error", null, json("message", error));
+        emit(run, "end", null, json("status", status, "finishedRequestId", run.requestId));
     }
 
     JSONObject snapshot() {
-        return json("sequence", sequence.get(), "running", running,
-                "requestId", requestId == null ? JSONObject.NULL : requestId,
-                "conversationId", store.activeId(), "conversation", NativeJson.conversation(store),
-                "error", lastError, "status", lastStatus);
+        String activeId = store.activeId();
+        SessionRun current;
+        RunResult recent;
+        List<SessionRun> runs;
+        synchronized (runLock) {
+            current = activeRuns.get(activeId);
+            recent = recentResults.get(activeId);
+            runs = new ArrayList<>(activeRuns.values());
+        }
+        runs.sort(Comparator.comparing(value -> value.conversationId));
+        JSONArray active = new JSONArray();
+        for (SessionRun run : runs) active.put(json("conversationId", run.conversationId,
+                "requestId", run.requestId, "status", run.status, "message", run.message));
+        return json("sequence", sequence.get(), "running", current != null,
+                "requestId", current == null ? JSONObject.NULL : current.requestId,
+                "conversationId", activeId, "conversation", NativeJson.conversation(store, activeId),
+                "activeRuns", active,
+                "error", current != null ? current.error : recent == null ? "" : recent.error,
+                "status", current != null ? current.message : recent == null ? "" : recent.status);
     }
 
-    private void emit(String type, String nodeId, JSONObject payload) {
+    private void emit(SessionRun run, String type, String nodeId, JSONObject payload) {
         JSONObject event = json("sequence", sequence.incrementAndGet(), "type", type,
-                "conversationId", conversationId == null ? store.activeId() : conversationId,
-                "requestId", requestId == null ? JSONObject.NULL : requestId,
+                "conversationId", run.conversationId, "requestId", run.requestId,
                 "nodeId", nodeId == null ? JSONObject.NULL : nodeId, "payload", payload);
-        List<AgentLoop.Message> messages = Collections.unmodifiableList(new ArrayList<>(store.load()));
+        List<AgentLoop.Message> messages = Collections.unmodifiableList(
+                new ArrayList<>(store.load(run.conversationId)));
         main.post(() -> { for (Listener listener : listeners) listener.changed(messages, event); });
+    }
+
+    static final class SessionRun {
+        final String conversationId;
+        final String requestId;
+        final AgentLoop.CancelToken cancellation = new AgentLoop.CancelToken();
+        final StringBuilder pendingDelta = new StringBuilder();
+        volatile PiAgentBridge bridge;
+        volatile PiTurnPersistence persistence;
+        volatile String assistantId;
+        volatile String error = "";
+        volatile String status = "running";
+        volatile String message = "正在启动…";
+        volatile long lastDeltaFlush;
+        boolean nodeRegistered;
+        boolean terminationAcknowledged;
+        boolean timeoutFinalized;
+
+        SessionRun(String conversationId, String requestId) {
+            this.conversationId = conversationId;
+            this.requestId = requestId;
+        }
+    }
+
+    private static final class RunResult {
+        final String status;
+        final String error;
+        RunResult(String status, String error) { this.status = status; this.error = error; }
     }
 
     private static JSONObject json(Object... values) {

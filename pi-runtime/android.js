@@ -3,10 +3,15 @@ import { randomUUID } from "node:crypto";
 import { createPiRuntime } from "./index.js";
 import { createSdkRuntime, sdkQuery } from "./sdk.js";
 
+// cross-spawn otherwise changes the process cwd temporarily while resolving cwd-bound commands.
+// That is unsafe when independent session runtimes execute concurrently in this process.
+if (typeof process.chdir === "function") process.chdir.disabled = true;
+
 const endpoint = process.argv[2];
 const socket = net.createConnection({ path: endpoint.startsWith("@") ? `\0${endpoint.slice(1)}` : endpoint });
 let input = "";
-let active;
+const operations = new Map();
+const sessions = new Map();
 const send = (value) => { if (!socket.destroyed) socket.write(`${JSON.stringify(value)}\n`); };
 socket.setEncoding("utf8");
 socket.on("data", (chunk) => {
@@ -22,7 +27,12 @@ socket.on("data", (chunk) => {
 });
 socket.on("connect", () => send({ type: "ready", node: process.version }));
 socket.on("error", (error) => console.error(`pi bridge socket: ${error.message}`));
-socket.on("close", () => { active?.controller.abort(); active?.runtime?.abort(); });
+socket.on("close", () => {
+  for (const operation of operations.values()) {
+    operation.controller.abort();
+    operation.runtime?.abort();
+  }
+});
 
 async function requestAuth(prompt, operation) {
   const signal = prompt.signal ? AbortSignal.any([prompt.signal, operation.controller.signal]) : operation.controller.signal;
@@ -34,64 +44,71 @@ async function requestAuth(prompt, operation) {
       aborted = () => reject(signal.reason);
       signal.addEventListener("abort", aborted, { once: true });
       operation.prompts.set(promptId, resolve);
-      send({ id: operation.id, type: "auth_prompt", promptId, prompt: { ...prompt, signal: undefined } });
+      send({ id: operation.id, conversationId: operation.conversationId,
+        type: "auth_prompt", promptId, prompt: { ...prompt, signal: undefined } });
     });
   } finally {
     signal.removeEventListener("abort", aborted);
     operation.prompts.delete(promptId);
-    send({ id: operation.id, type: "auth_prompt_end", promptId });
+    send({ id: operation.id, conversationId: operation.conversationId, type: "auth_prompt_end", promptId });
   }
 }
 
 async function handle(command) {
   if (command.type === "abort") {
-    if (active?.id === command.id) { active.controller.abort(); active.runtime?.abort(); }
+    const operation = operations.get(command.id);
+    if (operation) { operation.controller.abort(); operation.runtime?.abort(); }
     return;
   }
   if (command.type === "auth_reply") {
-    if (active?.id !== command.id) return;
-    const pending = active.prompts.get(command.promptId);
+    const operation = operations.get(command.id);
+    if (!operation) return;
+    const pending = operation.prompts.get(command.promptId);
     if (pending) {
-      if (command.cancelled) active.controller.abort();
+      if (command.cancelled) operation.controller.abort();
       else if (typeof command.value === "string") pending(command.value);
     }
     return;
   }
   if (typeof command.id !== "string") return;
   const id = command.id;
-  if (active) {
-    send({ id, type: "error", message: "pi 正在结束上一轮请求，请稍后重试", aborted: false });
-    send({ id, type: "end", status: "error" });
+  const conversationId = command.type === "prompt" && typeof command.conversationId === "string"
+    ? command.conversationId : undefined;
+  if (operations.has(id) || (conversationId && sessions.has(conversationId))) {
+    send({ id, conversationId, type: "error", message: "此会话已有一轮正在运行", aborted: false });
+    send({ id, conversationId, type: "end", status: "error" });
     return;
   }
   let ended = false;
   const controller = new AbortController();
-  const operation = { id, controller, prompts: new Map() };
-  active = operation;
+  const operation = { id, conversationId, controller, prompts: new Map() };
+  const sendEvent = (event) => send({ ...event, id, conversationId });
+  operations.set(id, operation);
+  if (conversationId) sessions.set(conversationId, operation);
   try {
     if (command.type !== "prompt") {
-      const result = await sdkQuery(command, controller.signal, (event) => send({ ...event, id }), (prompt) => requestAuth(prompt, operation));
-      send({ id, type: "result", result });
-      send({ id, type: "end", status: "completed" });
+      const result = await sdkQuery(command, controller.signal, sendEvent,
+        (prompt) => requestAuth(prompt, operation));
+      sendEvent({ type: "result", result });
+      sendEvent({ type: "end", status: "completed" });
+      ended = true;
       return;
     }
     const runtime = command.sdk ? await createSdkRuntime(command, controller.signal) : createPiRuntime(command);
-    active.runtime = runtime;
+    operation.runtime = runtime;
     runtime.subscribe((event) => {
       if (ended) return;
-      if (event.type === "end") {
-        ended = true;
-        if (active?.id === id) active = undefined;
-      }
-      send({ ...event, id });
+      if (event.type === "end") ended = true;
+      sendEvent(event);
     });
     await runtime.prompt(command.prompt);
   } catch (error) {
     if (!ended) {
-      send({ id, type: "error", message: error?.message || String(error), aborted: controller.signal.aborted });
-      send({ id, type: "end", status: controller.signal.aborted ? "aborted" : "error" });
+      sendEvent({ type: "error", message: error?.message || String(error), aborted: controller.signal.aborted });
+      sendEvent({ type: "end", status: controller.signal.aborted ? "aborted" : "error" });
     }
   } finally {
-    if (active?.id === id) active = undefined;
+    if (operations.get(id) === operation) operations.delete(id);
+    if (conversationId && sessions.get(conversationId) === operation) sessions.delete(conversationId);
   }
 }

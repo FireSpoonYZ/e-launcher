@@ -9,12 +9,18 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.StandardCopyOption;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Set;
 
 /** App-private Pi files; editor and form writes share validation and conflict checks. */
 final class PiConfigStore {
     private static final Object LOCK = new Object();
+    private static final String LEGACY_SESSIONS = "pi_legacy_workspace_sessions";
+    private static final String LEGACY_SESSIONS_CAPTURED = "pi_legacy_workspace_sessions_captured";
+    private final Context context;
+    private final String conversationId;
     private final File global;
     private final File workspace;
     private final File cache;
@@ -22,17 +28,28 @@ final class PiConfigStore {
     private final File nativeLibraryDir;
 
     PiConfigStore(Context context) {
+        this(context, context.getSharedPreferences("chat", Context.MODE_PRIVATE)
+                .getString("active_chat", "legacy"));
+    }
+
+    PiConfigStore(Context context, String conversationId) {
+        this.context = context.getApplicationContext();
+        this.conversationId = conversationId;
+        registerExistingSessions(this.context);
         home = new File(context.getFilesDir(), "node");
         global = new File(home, ".pi/agent");
-        workspace = new File(context.getFilesDir(), "pi-workspace/.pi");
+        workspace = new File(new File(context.getFilesDir(), "pi-workspaces"), workspaceName(conversationId) + "/.pi");
         cache = new File(context.getCacheDir(), "pi-runtime");
         String nativePath = context.getApplicationInfo().nativeLibraryDir;
         nativeLibraryDir = nativePath == null ? new File(context.getFilesDir(), "native") : new File(nativePath);
     }
 
+    String conversationId() { return conversationId; }
     File directory(boolean project) { return project ? workspace : global; }
+    File workspaceRoot() { return workspace.getParentFile(); }
 
     private File file(boolean project, String name) throws IOException {
+        if (project) ensureWorkspace();
         File root = directory(project).getCanonicalFile();
         File target = new File(root, name).getCanonicalFile();
         if (name.isEmpty() || !target.getPath().startsWith(root.getPath() + File.separator)) {
@@ -105,6 +122,92 @@ final class PiConfigStore {
             if (output != null) atomic.failWrite(output);
             throw exception;
         }
+    }
+
+    static void registerExistingSessions(Context context) {
+        synchronized (LOCK) {
+            SharedPreferences preferences = context.getSharedPreferences("chat", Context.MODE_PRIVATE);
+            if (preferences.getBoolean(LEGACY_SESSIONS_CAPTURED, false)) return;
+            Set<String> sessions = new java.util.HashSet<>();
+            sessions.add(preferences.getString("active_chat", "legacy"));
+            try {
+                org.json.JSONObject index = new org.json.JSONObject(preferences.getString("conversations", "{}"));
+                java.util.Iterator<String> ids = index.keys();
+                while (ids.hasNext()) sessions.add(ids.next());
+            } catch (Exception exception) {
+                throw new IllegalStateException("无法登记旧会话工作区", exception);
+            }
+            preferences.edit().putStringSet(LEGACY_SESSIONS, sessions)
+                    .putBoolean(LEGACY_SESSIONS_CAPTURED, true).apply();
+        }
+    }
+
+    static void deleteWorkspace(Context context, String conversationId) throws IOException {
+        synchronized (LOCK) {
+            File root = new File(new File(context.getFilesDir(), "pi-workspaces"), workspaceName(conversationId));
+            deleteTree(root);
+            SharedPreferences preferences = context.getSharedPreferences("chat", Context.MODE_PRIVATE);
+            Set<String> legacy = new java.util.HashSet<>(preferences.getStringSet(LEGACY_SESSIONS,
+                    java.util.Collections.emptySet()));
+            if (legacy.remove(conversationId)) preferences.edit().putStringSet(LEGACY_SESSIONS, legacy).apply();
+        }
+    }
+
+    private void ensureWorkspace() throws IOException {
+        synchronized (LOCK) {
+            File root = workspaceRoot();
+            if (root.isDirectory()) return;
+            File parent = root.getParentFile();
+            if (parent == null || (!parent.isDirectory() && !parent.mkdirs())) throw new IOException("无法创建会话工作区目录");
+            File temporary = new File(parent, "." + root.getName() + "-creating");
+            deleteTree(temporary);
+            try {
+                File legacy = new File(context.getFilesDir(), "pi-workspace");
+                Set<String> sessions = context.getSharedPreferences("chat", Context.MODE_PRIVATE)
+                        .getStringSet(LEGACY_SESSIONS, java.util.Collections.emptySet());
+                if (sessions.contains(conversationId) && legacy.isDirectory()) copyTree(legacy, temporary);
+                else if (!temporary.mkdirs()) throw new IOException("无法创建会话工作区");
+                File project = new File(temporary, ".pi");
+                if (!project.isDirectory() && !project.mkdirs()) throw new IOException("无法创建会话配置目录");
+                if (!temporary.renameTo(root)) throw new IOException("无法启用会话工作区");
+            } catch (IOException exception) {
+                deleteTree(temporary);
+                throw exception;
+            }
+        }
+    }
+
+    private static String workspaceName(String conversationId) {
+        if (conversationId == null || !conversationId.matches("[A-Za-z0-9_-]{1,100}")) {
+            if (conversationId == null) throw new IllegalArgumentException("conversationId is required");
+            return java.util.UUID.nameUUIDFromBytes(conversationId.getBytes(StandardCharsets.UTF_8)).toString();
+        }
+        return conversationId;
+    }
+
+    private static void copyTree(File source, File target) throws IOException {
+        if (Files.isSymbolicLink(source.toPath())) {
+            Files.copy(source.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING,
+                    java.nio.file.LinkOption.NOFOLLOW_LINKS);
+        } else if (source.isDirectory()) {
+            if (!target.isDirectory() && !target.mkdirs()) throw new IOException("无法复制旧工作区");
+            File[] children = source.listFiles();
+            if (children == null) throw new IOException("无法读取旧工作区");
+            for (File child : children) copyTree(child, new File(target, child.getName()));
+        } else {
+            Files.copy(source.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING,
+                    StandardCopyOption.COPY_ATTRIBUTES);
+        }
+    }
+
+    private static void deleteTree(File file) throws IOException {
+        if (!Files.exists(file.toPath(), java.nio.file.LinkOption.NOFOLLOW_LINKS)) return;
+        if (!Files.isSymbolicLink(file.toPath()) && file.isDirectory()) {
+            File[] children = file.listFiles();
+            if (children == null) throw new IOException("无法读取待清理工作区");
+            for (File child : children) deleteTree(child);
+        }
+        if (!file.delete()) throw new IOException("无法清理会话工作区");
     }
 
     String previous(boolean project, String name) throws IOException {

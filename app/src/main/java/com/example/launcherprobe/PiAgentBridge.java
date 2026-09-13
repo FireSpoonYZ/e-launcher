@@ -13,7 +13,9 @@ import java.io.FileOutputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStreamWriter;
 import java.nio.charset.StandardCharsets;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -25,9 +27,7 @@ final class PiAgentBridge {
     private static boolean attempted;
     private final LocalSocket socket;
     private final OutputStreamWriter writer;
-    private final PiConfigStore configStore;
-    private Listener listener;
-    private String requestId;
+    private final Map<String, Request> requests = new HashMap<>();
     private boolean closed;
 
     static synchronized PiAgentBridge get(Context context) throws Exception {
@@ -40,7 +40,6 @@ final class PiAgentBridge {
     }
 
     private PiAgentBridge(Context context) throws Exception {
-        configStore = new PiConfigStore(context);
         System.loadLibrary("node");
         System.loadLibrary("launcher_node");
         File home = new File(context.getFilesDir(), "node");
@@ -163,32 +162,34 @@ final class PiAgentBridge {
         if (!file.delete()) throw new IllegalStateException("无法清理未完成的 npm 资源");
     }
 
-    synchronized void prompt(String id, String config, String text, List<ChatAttachment> attachments,
-            String sdkHistory, List<AgentLoop.Message> history, Listener nextListener) throws Exception {
-        if (closed) throw new IllegalStateException("pi 连接已关闭，请重新启动应用进程");
-        if (listener != null) throw new IllegalStateException("pi 正在结束上一轮请求，请稍后重试");
+    synchronized void prompt(String id, String conversationId, String config, String text,
+            List<ChatAttachment> attachments, String sdkHistory, List<AgentLoop.Message> history,
+            PiConfigStore configStore, Listener nextListener) throws Exception {
         JSONArray converted = ChatStore.piHistory(history);
-        JSONObject command = new JSONObject().put("type", "prompt").put("id", id).put("sdk", true)
+        JSONObject command = new JSONObject().put("type", "prompt").put("id", id)
+                .put("conversationId", conversationId).put("sdk", true)
                 .put("config", new JSONObject(config)).put("history", converted).put("prompt", text)
                 .put("attachments", AttachmentStore.json(attachments));
         if (sdkHistory != null) {
             JSONObject resume = new JSONObject(sdkHistory);
             command.put("sdkHistory", resume.getJSONArray("entries")).put("sdkHistoryTail", resume.getJSONArray("tail"));
         }
-        sendRequest(command, nextListener);
+        sendRequest(command, configStore, nextListener);
     }
 
-    synchronized String query(String type, String config, JSONObject arguments, Listener nextListener) throws Exception {
+    synchronized String query(String type, String config, JSONObject arguments, PiConfigStore configStore,
+            Listener nextListener) throws Exception {
         arguments.put("id", UUID.randomUUID().toString()).put("type", type).put("config", new JSONObject(config));
-        sendRequest(arguments, nextListener);
+        sendRequest(arguments, configStore, nextListener);
         return arguments.getString("id");
     }
 
-    private synchronized void sendRequest(JSONObject command, Listener nextListener) throws Exception {
+    private synchronized void sendRequest(JSONObject command, PiConfigStore configStore,
+            Listener nextListener) throws Exception {
         if (closed) throw new IllegalStateException("Pi 连接已关闭，请重新启动应用进程");
-        if (listener != null) throw new IllegalStateException("Pi 正在处理请求，请稍后重试");
-        listener = nextListener;
-        requestId = command.getString("id");
+        String id = command.getString("id");
+        if (requests.containsKey(id)) throw new IllegalStateException("Pi 请求 ID 重复");
+        requests.put(id, new Request(configStore, nextListener));
         try {
             write(command);
         } catch (Exception exception) {
@@ -198,13 +199,13 @@ final class PiAgentBridge {
     }
 
     synchronized void replyAuth(String id, String promptId, String value, boolean cancelled) throws Exception {
-        if (closed || !id.equals(requestId)) throw new IllegalStateException("登录请求已结束");
+        if (closed || id == null || !requests.containsKey(id)) throw new IllegalStateException("登录请求已结束");
         write(new JSONObject().put("type", "auth_reply").put("id", id).put("promptId", promptId)
                 .put("value", value).put("cancelled", cancelled));
     }
 
     synchronized void abort(String id) {
-        if (closed || id == null || !id.equals(requestId)) return;
+        if (closed || id == null || !requests.containsKey(id)) return;
         try { write(new JSONObject().put("type", "abort").put("id", id)); }
         catch (Exception exception) { fail("pi 取消请求发送失败"); }
     }
@@ -219,30 +220,34 @@ final class PiAgentBridge {
             for (String line; (line = input.readLine()) != null;) {
                 JSONObject event = new JSONObject(line);
                 synchronized (this) {
-                    if (closed || requestId == null || !requestId.equals(event.optString("id"))) continue;
-                    Listener current = listener;
+                    if (closed) continue;
+                    String id = event.optString("id");
+                    Request request = requests.get(id);
+                    if (request == null) continue;
+                    Listener current = request.listener;
                     if ("credential".equals(event.optString("type"))) {
                         try {
-                            configStore.updateCredential(event.getString("providerId"), event.isNull("value") ? null : event.getJSONObject("value").toString(),
+                            request.configStore.updateCredential(event.getString("providerId"),
+                                    event.isNull("value") ? null : event.getJSONObject("value").toString(),
                                     event.isNull("previous") ? null : event.getJSONObject("previous").toString());
                         } catch (Exception exception) {
-                            if (current != null) current.event(new JSONObject().put("id", requestId).put("type", "error")
+                            current.event(new JSONObject().put("id", id).put("type", "error")
                                     .put("message", "凭据刷新未保存：" + exception.getMessage()));
                         }
                         continue;
                     }
                     if ("setting".equals(event.optString("type"))) {
                         try {
-                            configStore.updateSetting(event.optBoolean("project"), event.getString("key"),
+                            request.configStore.updateSetting(event.optBoolean("project"), event.getString("key"),
                                     event.get("value").toString(), event.get("previous").toString());
                         } catch (Exception exception) {
-                            if (current != null) current.event(new JSONObject().put("id", requestId).put("type", "error")
+                            current.event(new JSONObject().put("id", id).put("type", "error")
                                     .put("message", "配置未保存：" + exception.getMessage()));
                         }
                         continue;
                     }
-                    if ("end".equals(event.optString("type"))) { listener = null; requestId = null; }
-                    if (current != null) current.event(event);
+                    if ("end".equals(event.optString("type"))) requests.remove(id);
+                    current.event(event);
                 }
             }
         } catch (Exception ignored) {
@@ -254,13 +259,23 @@ final class PiAgentBridge {
         if (closed) return;
         closed = true;
         try { socket.close(); } catch (Exception ignored) { }
-        Listener current = listener;
-        String id = requestId;
-        listener = null; requestId = null;
-        if (current != null) try {
-            current.event(new JSONObject().put("id", id).put("type", "error").put("message", message));
-            current.event(new JSONObject().put("id", id).put("type", "end").put("status", "error"));
+        Map<String, Request> failed = new HashMap<>(requests);
+        requests.clear();
+        for (Map.Entry<String, Request> item : failed.entrySet()) try {
+            item.getValue().listener.event(new JSONObject().put("id", item.getKey()).put("type", "error")
+                    .put("message", message));
+            item.getValue().listener.event(new JSONObject().put("id", item.getKey()).put("type", "end")
+                    .put("status", "error"));
         } catch (Exception ignored) { }
+    }
+
+    private static final class Request {
+        final PiConfigStore configStore;
+        final Listener listener;
+        Request(PiConfigStore configStore, Listener listener) {
+            this.configStore = configStore;
+            this.listener = listener;
+        }
     }
 
     private static native void startNode(String script, String socket, String home);
