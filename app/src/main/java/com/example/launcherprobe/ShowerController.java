@@ -1,6 +1,9 @@
 package com.example.launcherprobe;
 
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.graphics.BitmapFactory;
+import android.view.KeyEvent;
 import android.os.IBinder;
 import android.os.ParcelFileDescriptor;
 import android.util.Base64;
@@ -14,10 +17,11 @@ import org.json.JSONObject;
 import java.io.ByteArrayOutputStream;
 import java.io.FileInputStream;
 
-/** Owns the app's single Operit Shower virtual display. */
+/** Owns one conversation's Operit Shower display; the manager/service is shared across chats. */
 final class ShowerController {
     private static final int MAX_SCREENSHOT_BYTES = 12 * 1024 * 1024;
     private final ShowerManager manager;
+    private final ClipboardManager clipboard;
     private Integer displayId;
     private int width;
     private int height;
@@ -25,18 +29,30 @@ final class ShowerController {
     private IBinder displayService;
     private IShowerClient clientToken;
 
-    ShowerController(android.content.Context context) {
-        manager = new ShowerManager(context);
+    ShowerController(android.content.Context context, ShowerManager manager) {
+        this.manager = manager;
+        clipboard = context.getApplicationContext().getSystemService(ClipboardManager.class);
     }
 
     synchronized JSONObject create(int requestedWidth, int requestedHeight, int requestedDpi,
+            int bitrateKbps) throws Exception {
+        try {
+            return createDisplay(requestedWidth, requestedHeight, requestedDpi, bitrateKbps);
+        } catch (android.os.DeadObjectException exception) {
+            // The server may reach its idle deadline between the alive check and the Binder call.
+            clearDisplay();
+            return createDisplay(requestedWidth, requestedHeight, requestedDpi, bitrateKbps);
+        }
+    }
+
+    private JSONObject createDisplay(int requestedWidth, int requestedHeight, int requestedDpi,
             int bitrateKbps) throws Exception {
         int alignedWidth = align(requestedWidth);
         int alignedHeight = align(requestedHeight);
         validateDisplay(alignedWidth, alignedHeight, requestedDpi, bitrateKbps);
         IShowerService service = manager.ensureService();
         if (displayId != null && service.asBinder() == displayService && width == alignedWidth
-                && height == alignedHeight && dpi == requestedDpi) {
+                && height == alignedHeight && dpi == requestedDpi && service.touchDisplay(displayId)) {
             return state("create").put("reused", true);
         }
         if (displayId != null && service.asBinder() == displayService) {
@@ -147,20 +163,47 @@ final class ShowerController {
     }
 
     synchronized JSONObject key(int keyCode, int metaState, String keyName) throws Exception {
-        if (!activeService().injectKeyWithMeta(displayId, keyCode, metaState)) {
-            throw new IllegalStateException("虚拟屏按键注入失败");
+        synchronized (clipboard) {
+            if (Thread.currentThread().isInterrupted()) throw new InterruptedException("虚拟屏操作已取消");
+            if (!activeService().injectKeyWithMeta(displayId, keyCode, metaState)) {
+                throw new IllegalStateException("虚拟屏按键注入失败");
+            }
+            return state("key").put("key", keyName).put("metaState", metaState);
         }
-        return state("key").put("key", keyName).put("metaState", metaState);
     }
 
     synchronized JSONObject text(String text) throws Exception {
+        if (text == null || text.length() > 1000) {
+            throw new IllegalArgumentException("text 长度范围为 0..1000");
+        }
+        // The system clipboard is shared: don't let another chat overwrite it between write and paste.
+        synchronized (clipboard) {
+            activeService();
+            if (!text.isEmpty()) copy(text);
+            // Select-all replaces the entire field; empty text preserves the clipboard.
+            key(KeyEvent.KEYCODE_A, KeyEvent.META_CTRL_ON, "A");
+            key(text.isEmpty() ? KeyEvent.KEYCODE_DEL : KeyEvent.KEYCODE_PASTE, 0,
+                    text.isEmpty() ? "DEL" : "PASTE");
+        }
+        return state("text").put("characters", text.length());
+    }
+
+    synchronized JSONObject copy(String text) throws Exception {
         if (text == null || text.isEmpty() || text.length() > 1000) {
             throw new IllegalArgumentException("text 长度范围为 1..1000");
         }
-        if (!activeService().inputText(displayId, text)) {
-            throw new IllegalArgumentException("当前 Android 虚拟键盘无法生成这些字符；请使用 key 或目标应用输入法");
+        synchronized (clipboard) {
+            activeService();
+            if (Thread.currentThread().isInterrupted()) throw new InterruptedException("复制已取消");
+            clipboard.setPrimaryClip(ClipData.newPlainText("e-launcher", text));
         }
-        return state("text").put("characters", text.length());
+        return state("copy").put("characters", text.length());
+    }
+
+    synchronized JSONObject paste() throws Exception {
+        // The focused target can paste even when Android denies this host clipboard read access.
+        key(KeyEvent.KEYCODE_PASTE, 0, "PASTE");
+        return state("paste");
     }
 
     synchronized JSONObject release() throws Exception {
@@ -178,19 +221,18 @@ final class ShowerController {
                 clearDisplay();
             }
         }
-        String stopError = hadDisplay ? manager.stopServer() : "";
-        JSONObject result = new JSONObject().put("ok", destroyError.isEmpty() && stopError.isEmpty())
+        JSONObject result = new JSONObject().put("ok", destroyError.isEmpty())
                 .put("action", "release").put("released", released);
         if (!destroyError.isEmpty()) result.put("destroyWarning", destroyError);
-        if (!stopError.isEmpty()) result.put("serverStopWarning", stopError);
         return result;
     }
 
-    private IShowerService activeService() {
+    private IShowerService activeService() throws android.os.RemoteException {
         IShowerService service = manager.aliveService();
-        if (displayId == null || service == null || service.asBinder() != displayService) {
+        if (displayId == null || service == null || service.asBinder() != displayService
+                || !service.touchDisplay(displayId)) {
             clearDisplay();
-            throw new IllegalStateException("虚拟屏尚未创建或 Shower 服务已断开；先调用 create");
+            throw new IllegalStateException("本聊天的虚拟屏尚未创建、已空闲超时回收或 Shower 已断开；调用 create 重新创建");
         }
         return service;
     }
@@ -204,7 +246,8 @@ final class ShowerController {
 
     private JSONObject state(String action) throws Exception {
         return new JSONObject().put("ok", true).put("action", action).put("displayId", displayId)
-                .put("width", width).put("height", height).put("dpi", dpi);
+                .put("width", width).put("height", height).put("dpi", dpi)
+                .put("idleTimeoutMs", 300_000);
     }
 
     private void clearDisplay() {

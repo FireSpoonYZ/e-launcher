@@ -15,6 +15,7 @@ import android.os.Build;
 import android.os.IBinder;
 import android.os.Looper;
 import android.os.ParcelFileDescriptor;
+import android.os.SystemClock;
 import android.view.Surface;
 
 import com.ai.assistance.shower.shell.FakeContext;
@@ -36,12 +37,17 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.Date;
 import java.util.Locale;
+import java.util.Map;
+import java.util.HashSet;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Function;
 import java.util.regex.Pattern;
 
 /**
  * Binder-only virtual-display server adapted from Operit Shower.
  *
- * The host UID is the only accepted Binder caller, and this build owns one virtual display.
+ * The host UID is the only accepted Binder caller; each conversation owns a separate display.
  */
 public final class Main {
     private static final String ACTION_BINDER_READY =
@@ -51,6 +57,7 @@ public final class Main {
     private static final int CODEC_SIZE_ALIGNMENT = 16;
     private static final int DEFAULT_BIT_RATE = 500_000;
     private static final long IDLE_TIMEOUT_MS = 15_000;
+    private static final long DISPLAY_IDLE_TIMEOUT_MS = 300_000;
     private static final Pattern PACKAGE_NAME = Pattern.compile(
             "[A-Za-z][A-Za-z0-9_]*(?:\\.[A-Za-z][A-Za-z0-9_]*)+");
     private static final Pattern TOKEN = Pattern.compile("[a-f0-9-]{36}");
@@ -74,8 +81,8 @@ public final class Main {
 
     private final Context context;
     private final int allowedUid;
-    private volatile DisplaySession display;
-    private volatile long lastClientActive = System.currentTimeMillis();
+    private final Map<Integer, DisplaySession> displays = new ConcurrentHashMap<>();
+    private volatile long lastClientActive = SystemClock.elapsedRealtime();
 
     public static void main(String... args) {
         if (args == null || args.length != 4 || !PACKAGE_NAME.matcher(args[0]).matches()
@@ -117,11 +124,23 @@ public final class Main {
 
             @Override public boolean attachClient(int displayId, IShowerClient client) {
                 enforceCaller();
-                markClientActive();
                 if (client == null) throw new IllegalArgumentException("Client token is required");
-                DisplaySession current = requireDisplay(displayId);
-                current.attachClient(client.asBinder(), () -> releaseDisplay(displayId));
-                return true;
+                return withDisplay(displayId, current -> {
+                    current.attachClient(client.asBinder(), () -> releaseDisplay(displayId));
+                    return true;
+                });
+            }
+
+            @Override public boolean touchDisplay(int displayId) {
+                enforceCaller();
+                DisplaySession current = displays.get(displayId);
+                if (displayId <= 0 || current == null) return false;
+                synchronized (current) {
+                    if (displays.get(displayId) != current) return false;
+                    current.lastActive = SystemClock.elapsedRealtime();
+                    markClientActive();
+                    return true;
+                }
             }
 
             @Override public boolean destroyDisplay(int displayId) {
@@ -132,60 +151,48 @@ public final class Main {
 
             @Override public boolean launchApp(String packageName, int displayId) {
                 enforceCaller();
-                markClientActive();
-                return launchPackage(packageName, requireDisplay(displayId));
+                return withDisplay(displayId, current -> launchPackage(packageName, current));
             }
 
             @Override public boolean tap(int displayId, float x, float y) {
                 enforceCaller();
-                markClientActive();
-                DisplaySession current = requireDisplay(displayId);
-                requireCoordinate(current, x, y);
-                return current.input.tap(x, y);
+                return withDisplay(displayId, current -> {
+                    requireCoordinate(current, x, y);
+                    return current.input.tap(x, y);
+                });
             }
 
             @Override public boolean swipe(int displayId, float x1, float y1, float x2, float y2,
                     long durationMs, IShowerGesture gesture) {
                 enforceCaller();
-                markClientActive();
-                DisplaySession current = requireDisplay(displayId);
-                requireCoordinate(current, x1, y1);
-                requireCoordinate(current, x2, y2);
                 if (durationMs < 1 || durationMs > 10_000) {
                     throw new IllegalArgumentException("Swipe duration is out of range");
                 }
                 if (gesture == null) throw new IllegalArgumentException("Gesture cancellation token is required");
-                return current.input.swipe(x1, y1, x2, y2, durationMs, () -> {
-                    try { return gesture.isCancelled(); }
-                    catch (android.os.RemoteException exception) { return true; }
+                return withDisplay(displayId, current -> {
+                    requireCoordinate(current, x1, y1);
+                    requireCoordinate(current, x2, y2);
+                    return current.input.swipe(x1, y1, x2, y2, durationMs, () -> {
+                        try { return gesture.isCancelled(); }
+                        catch (android.os.RemoteException exception) { return true; }
+                    });
                 });
             }
 
             @Override public boolean injectKeyWithMeta(int displayId, int keyCode, int metaState) {
                 enforceCaller();
-                markClientActive();
                 if (keyCode < 0 || keyCode > 288) throw new IllegalArgumentException("Invalid key code");
-                return requireDisplay(displayId).input.injectKeyWithMeta(keyCode, metaState);
-            }
-
-            @Override public boolean inputText(int displayId, String text) {
-                enforceCaller();
-                markClientActive();
-                if (text == null || text.isEmpty() || text.length() > 1000) {
-                    throw new IllegalArgumentException("Text length is out of range");
-                }
-                return requireDisplay(displayId).input.inputText(text);
+                return withDisplay(displayId, current -> current.input.injectKeyWithMeta(keyCode, metaState));
             }
 
             @Override public ParcelFileDescriptor requestScreenshot(int displayId, int maxWidth,
                     int maxHeight) {
                 enforceCaller();
-                markClientActive();
-                requireDisplay(displayId);
                 if (maxWidth < 160 || maxWidth > 1440 || maxHeight < 160 || maxHeight > 3200) {
                     throw new IllegalArgumentException("Screenshot bounds are out of range");
                 }
-                return screenshotPipe(DisplayCapture.captureDisplay(displayId, maxWidth, maxHeight));
+                return withDisplay(displayId, current ->
+                        screenshotPipe(DisplayCapture.captureDisplay(displayId, maxWidth, maxHeight)));
             }
         };
         sendBinderToApp(service);
@@ -206,13 +213,7 @@ public final class Main {
                 || dpi < 120 || dpi > 640 || bitRate < 128_000 || bitRate > 12_000_000) {
             throw new IllegalArgumentException("Virtual display configuration is out of range");
         }
-        if (display != null && display.width == alignedWidth && display.height == alignedHeight
-                && display.dpi == dpi) return display.id;
-        if (display != null) {
-            display.release();
-            display = null;
-        }
-
+        markClientActive();
         MediaCodec encoder = null;
         Surface surface = null;
         VirtualDisplay virtualDisplay = null;
@@ -255,8 +256,8 @@ public final class Main {
             } catch (RuntimeException exception) {
                 logToFile("Unable to set local IME policy: " + exception, exception);
             }
-            display = new DisplaySession(id, alignedWidth, alignedHeight, dpi, virtualDisplay,
-                    encoder, surface, new InputController(id));
+            displays.put(id, new DisplaySession(id, alignedWidth, alignedHeight, dpi, virtualDisplay,
+                    encoder, surface, new InputController(id)));
             logToFile("Created virtual display " + id + " " + alignedWidth + "x" + alignedHeight,
                     null);
             return id;
@@ -271,20 +272,42 @@ public final class Main {
         }
     }
 
-    private synchronized boolean releaseDisplay(int displayId) {
-        if (display == null || display.id != displayId) return false;
-        DisplaySession released = display;
-        display = null;
-        released.release();
-        return true;
+    private boolean releaseDisplay(int displayId) {
+        DisplaySession current = displays.get(displayId);
+        if (current == null) return false;
+        synchronized (current) {
+            synchronized (this) {
+                if (!displays.remove(displayId, current)) return false;
+                markClientActive();
+            }
+            try {
+                current.release();
+            } finally {
+                // Start the server's 15-second idle period after the last display is released.
+                markClientActive();
+            }
+            return true;
+        }
     }
 
-    private DisplaySession requireDisplay(int displayId) {
-        DisplaySession current = display;
-        if (displayId <= 0 || current == null || current.id != displayId) {
-            throw new IllegalStateException("Virtual display is not active");
+    private <T> T withDisplay(int displayId, Function<DisplaySession, T> action) {
+        DisplaySession current = displays.get(displayId);
+        if (displayId <= 0 || current == null) {
+            throw new IllegalStateException("Virtual display expired or is not active; call create");
         }
-        return current;
+        synchronized (current) {
+            if (displays.get(displayId) != current) {
+                throw new IllegalStateException("Virtual display expired or is not active; call create");
+            }
+            current.lastActive = SystemClock.elapsedRealtime();
+            markClientActive();
+            try {
+                return action.apply(current);
+            } finally {
+                current.lastActive = SystemClock.elapsedRealtime();
+                markClientActive();
+            }
+        }
     }
 
     private static void requireCoordinate(DisplaySession display, float x, float y) {
@@ -294,9 +317,14 @@ public final class Main {
         }
     }
 
-    private boolean launchPackage(String packageName, DisplaySession display) {
+    private synchronized boolean launchPackage(String packageName, DisplaySession display) {
         if (packageName == null || !PACKAGE_NAME.matcher(packageName).matches()) {
             throw new IllegalArgumentException("Invalid package name");
+        }
+        for (DisplaySession other : displays.values()) {
+            if (other != display && other.packages.contains(packageName)) {
+                throw new IllegalStateException("应用已被其他聊天的虚拟屏占用；请先释放那块屏幕，再启动此应用");
+            }
         }
         PackageManager packages = context.getPackageManager();
         Intent intent = packages.getLaunchIntentForPackage(packageName);
@@ -306,6 +334,7 @@ public final class Main {
         launchOptions.setLaunchDisplayId(display.id);
         int result = ServiceManager.getActivityManager().startActivity(intent,
                 launchOptions.toBundle());
+        if (result >= 0) display.packages.add(packageName);
         return result >= 0;
     }
 
@@ -335,9 +364,21 @@ public final class Main {
                 } catch (InterruptedException exception) {
                     return;
                 }
-                if (display == null && System.currentTimeMillis() - lastClientActive > IDLE_TIMEOUT_MS) {
-                    logToFile("No virtual display is active; exiting", null);
-                    System.exit(0);
+                for (DisplaySession current : displays.values()) {
+                    // The same lock covers input/capture, so an in-flight operation cannot expire.
+                    synchronized (current) {
+                        if (SystemClock.elapsedRealtime() - current.lastActive >= DISPLAY_IDLE_TIMEOUT_MS) {
+                            logToFile("Virtual display " + current.id + " idle for 300000ms; releasing", null);
+                            try { releaseDisplay(current.id); }
+                            catch (Exception exception) { logToFile("Idle display release failed", exception); }
+                        }
+                    }
+                }
+                synchronized (Main.this) {
+                    if (displays.isEmpty() && SystemClock.elapsedRealtime() - lastClientActive >= IDLE_TIMEOUT_MS) {
+                        logToFile("No virtual display is active; exiting", null);
+                        System.exit(0);
+                    }
                 }
             }
         }, "ShowerIdleWatcher");
@@ -346,7 +387,7 @@ public final class Main {
     }
 
     private void markClientActive() {
-        lastClientActive = System.currentTimeMillis();
+        lastClientActive = SystemClock.elapsedRealtime();
     }
 
     private void sendBinderToApp(IShowerService service) {
@@ -480,9 +521,11 @@ public final class Main {
         final Surface surface;
         final InputController input;
         final Thread drain;
+        final Set<String> packages = new HashSet<>(); // Guarded by Main's monitor, including launch conflict checks.
         IBinder clientBinder;
         IBinder.DeathRecipient clientDeath;
         volatile boolean running = true;
+        long lastActive = SystemClock.elapsedRealtime();
 
         DisplaySession(int id, int width, int height, int dpi, VirtualDisplay virtualDisplay,
                 MediaCodec encoder, Surface surface, InputController input) {

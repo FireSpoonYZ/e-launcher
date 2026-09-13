@@ -6,8 +6,9 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
-/** Validates native Shower tool calls before dispatching them to the single display controller. */
+/** Routes each native tool call to the display owned by its host-authenticated conversation. */
 final class ShowerToolBridge {
     private static final Map<String, Integer> KEYS = Map.ofEntries(
             Map.entry("BACK", KeyEvent.KEYCODE_BACK),
@@ -17,6 +18,10 @@ final class ShowerToolBridge {
             Map.entry("ESCAPE", KeyEvent.KEYCODE_ESCAPE),
             Map.entry("SPACE", KeyEvent.KEYCODE_SPACE),
             Map.entry("DEL", KeyEvent.KEYCODE_DEL),
+            Map.entry("A", KeyEvent.KEYCODE_A),
+            Map.entry("COPY", KeyEvent.KEYCODE_COPY),
+            Map.entry("CUT", KeyEvent.KEYCODE_CUT),
+            Map.entry("PASTE", KeyEvent.KEYCODE_PASTE),
             Map.entry("FORWARD_DEL", KeyEvent.KEYCODE_FORWARD_DEL),
             Map.entry("DPAD_UP", KeyEvent.KEYCODE_DPAD_UP),
             Map.entry("DPAD_DOWN", KeyEvent.KEYCODE_DPAD_DOWN),
@@ -28,14 +33,22 @@ final class ShowerToolBridge {
             Map.entry("MOVE_HOME", KeyEvent.KEYCODE_MOVE_HOME),
             Map.entry("MOVE_END", KeyEvent.KEYCODE_MOVE_END)
     );
-    private final ShowerController controller;
+    private final android.content.Context context;
+    private final ShowerManager manager;
+    private final Map<String, ShowerController> controllers = new ConcurrentHashMap<>();
 
     ShowerToolBridge(android.content.Context context) {
-        controller = new ShowerController(context);
+        this.context = context.getApplicationContext();
+        manager = new ShowerManager(this.context);
     }
 
-    JSONObject execute(JSONObject arguments) throws Exception {
+    JSONObject execute(String conversationId, JSONObject arguments) throws Exception {
+        if (conversationId == null || conversationId.isBlank()) {
+            throw new IllegalArgumentException("Shower 操作必须属于一个聊天");
+        }
         if (arguments == null) throw new IllegalArgumentException("缺少 Shower 工具参数");
+        ShowerController controller = controllers.computeIfAbsent(conversationId,
+                ignored -> new ShowerController(context, manager));
         String action = arguments.optString("action", "");
         return switch (action) {
             case "create" -> controller.create(integer(arguments, "width", 720),
@@ -48,19 +61,34 @@ final class ShowerToolBridge {
             case "swipe" -> controller.swipe(integer(arguments, "x1"), integer(arguments, "y1"),
                     integer(arguments, "x2"), integer(arguments, "y2"),
                     integer(arguments, "durationMs", 300));
-            case "key" -> key(arguments);
-            case "text" -> controller.text(requiredString(arguments, "text", 1000));
+            case "key" -> key(controller, arguments);
+            case "text" -> controller.text(requiredString(arguments, "text", 1000, true));
+            case "copy" -> controller.copy(requiredString(arguments, "text", 1000));
+            case "paste" -> controller.paste();
+            case "clear" -> controller.text("").put("action", "clear");
             case "release" -> controller.release();
             default -> throw new IllegalArgumentException("未知 Shower action：" + action);
         };
     }
 
-    void shutdown() {
-        try { controller.release(); }
-        catch (Exception ignored) { }
+    void forgetConversation(String conversationId) {
+        ShowerController controller = controllers.remove(conversationId);
+        if (controller != null) {
+            try { controller.release(); }
+            catch (Exception ignored) { } // The server also reclaims idle displays or dead client tokens.
+        }
     }
 
-    private JSONObject key(JSONObject arguments) throws Exception {
+    void shutdown() {
+        for (ShowerController controller : controllers.values()) {
+            try { controller.release(); }
+            catch (Exception ignored) { }
+        }
+        controllers.clear();
+        manager.stopServer();
+    }
+
+    private JSONObject key(ShowerController controller, JSONObject arguments) throws Exception {
         String name = requiredString(arguments, "key", 32);
         Integer keyCode = KEYS.get(name);
         if (keyCode == null) throw new IllegalArgumentException("不支持的虚拟屏按键：" + name);
@@ -95,9 +123,14 @@ final class ShowerToolBridge {
     }
 
     private static String requiredString(JSONObject arguments, String name, int maxLength) {
+        return requiredString(arguments, name, maxLength, false);
+    }
+
+    private static String requiredString(JSONObject arguments, String name, int maxLength, boolean allowEmpty) {
         Object value = arguments.opt(name);
-        if (!(value instanceof String text) || text.isEmpty() || text.length() > maxLength) {
-            throw new IllegalArgumentException(name + " 必须是 1.." + maxLength + " 字符的文本");
+        if (!(value instanceof String text) || !allowEmpty && text.isEmpty() || text.length() > maxLength) {
+            throw new IllegalArgumentException(name + " 必须是 " + (allowEmpty ? "0" : "1")
+                    + ".." + maxLength + " 字符的文本");
         }
         return text;
     }

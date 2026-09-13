@@ -32,7 +32,7 @@ final class PiAgentBridge {
     private final OutputStreamWriter writer;
     private final Map<String, Request> requests = new HashMap<>();
     private final Map<String, ShowerCall> showerCalls = new HashMap<>();
-    private final ExecutorService showerWorker = Executors.newSingleThreadExecutor();
+    private final ExecutorService showerWorker = Executors.newFixedThreadPool(4);
     private final ShowerToolBridge showerTools;
     private boolean closed;
 
@@ -43,6 +43,16 @@ final class PiAgentBridge {
         attempted = true;
         instance = new PiAgentBridge(context.getApplicationContext());
         return instance;
+    }
+
+    static synchronized void forgetConversation(String conversationId) {
+        PiAgentBridge bridge = instance;
+        if (bridge == null) return;
+        synchronized (bridge) {
+            if (!bridge.closed) {
+                bridge.showerWorker.execute(() -> bridge.showerTools.forgetConversation(conversationId));
+            }
+        }
     }
 
     private PiAgentBridge(Context context) throws Exception {
@@ -197,7 +207,7 @@ final class PiAgentBridge {
         if (closed) throw new IllegalStateException("Pi 连接已关闭，请重新启动应用进程");
         String id = command.getString("id");
         if (requests.containsKey(id)) throw new IllegalStateException("Pi 请求 ID 重复");
-        requests.put(id, new Request(configStore, nextListener));
+        requests.put(id, new Request(configStore, nextListener, command.optString("conversationId", null)));
         try {
             write(command);
         } catch (Exception exception) {
@@ -276,17 +286,21 @@ final class PiAgentBridge {
         } finally { fail("pi Node 连接已结束，请重新启动应用进程"); }
     }
 
-    private void handleShowerRequest(JSONObject event) {
+    private synchronized void handleShowerRequest(JSONObject event) {
         String requestId = event.optString("id");
         String callId = event.optString("callId");
         JSONObject arguments = event.optJSONObject("arguments");
         if (requestId.isEmpty() || callId.isEmpty()) return;
+        Request request = requests.get(requestId);
+        if (closed || request == null || showerCalls.containsKey(callId)) return;
+        // Never accept a conversation/display owner from model-supplied tool arguments.
+        String conversationId = request.conversationId;
         ShowerCall call = new ShowerCall(requestId);
         FutureTask<Void> task = new FutureTask<>(() -> {
             JSONObject response = new JSONObject().put("type", "shower_response")
                     .put("id", requestId).put("callId", callId);
             try {
-                response.put("result", showerTools.execute(arguments));
+                response.put("result", showerTools.execute(conversationId, arguments));
             } catch (Exception exception) {
                 response.put("error", exception.getMessage() == null
                         ? exception.getClass().getSimpleName() : exception.getMessage());
@@ -301,11 +315,8 @@ final class PiAgentBridge {
             return null;
         });
         call.task = task;
-        synchronized (this) {
-            if (closed || !requests.containsKey(requestId) || showerCalls.containsKey(callId)) return;
-            showerCalls.put(callId, call);
-            showerWorker.execute(task);
-        }
+        showerCalls.put(callId, call);
+        showerWorker.execute(task);
     }
 
     private synchronized void cancelShowerCall(String callId) {
@@ -351,9 +362,11 @@ final class PiAgentBridge {
     private static final class Request {
         final PiConfigStore configStore;
         final Listener listener;
-        Request(PiConfigStore configStore, Listener listener) {
+        final String conversationId;
+        Request(PiConfigStore configStore, Listener listener, String conversationId) {
             this.configStore = configStore;
             this.listener = listener;
+            this.conversationId = conversationId;
         }
     }
 

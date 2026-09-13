@@ -98,7 +98,7 @@ final class ShowerManager {
                 ContextCompat.RECEIVER_EXPORTED);
     }
 
-    IShowerService ensureService() throws Exception {
+    synchronized IShowerService ensureService() throws Exception {
         IShowerService alive = aliveService();
         if (alive != null) return alive;
         IOwnPermissionService remote = ensureShellService();

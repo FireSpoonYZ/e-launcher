@@ -8,7 +8,7 @@ const tool = createShowerTool({ request: async (arguments_, signal) => {
   signal?.throwIfAborted();
   if (arguments_.action === "screenshot") return { ok:true, action:"screenshot", displayId:7,
     width:720, height:1280, dpi:320, imageWidth:360, imageHeight:640, mimeType:"image/png", data:png };
-  if (arguments_.action === "text") throw new Error("当前 Android 虚拟键盘无法生成这些字符");
+  if (arguments_.action === "paste") throw new Error("虚拟屏按键注入失败");
   return { ok:true, ...arguments_, displayId:7, width:720, height:1280, dpi:320 };
 } });
 
@@ -20,9 +20,16 @@ assert.deepEqual(screenshot.content, [
   { type:"image", data:png, mimeType:"image/png" },
 ]);
 assert(!JSON.stringify(screenshot.details).includes(png), "base64 stays in image content only");
-await assert.rejects(tool.execute("text", { action:"text", text:"unsupported" }), /虚拟键盘/);
+await tool.execute("text", { action:"text", text:"不要做挑战" });
+await tool.execute("clear-text", { action:"text", text:"" });
+await tool.execute("copy", { action:"copy", text:"复制测试" });
+await tool.execute("clear", { action:"clear" });
+await assert.rejects(tool.execute("paste", { action:"paste" }), /按键注入失败/);
 const aborted = new AbortController();
 aborted.abort(new Error("cancelled before native dispatch"));
 await assert.rejects(tool.execute("abort", { action:"release" }, aborted.signal), /cancelled before native dispatch/);
-assert.deepEqual(calls.map((call) => call.action), ["create", "screenshot", "text"]);
+assert.deepEqual(calls.slice(2), [
+  { action:"text", text:"不要做挑战" }, { action:"text", text:"" },
+  { action:"copy", text:"复制测试" }, { action:"clear" }, { action:"paste" },
+]);
 console.log("Operit Shower tool: native dispatch, virtual/image dimensions, image content, errors and cancellation passed");

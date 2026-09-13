@@ -122,6 +122,7 @@ final class ChatCoordinator {
                 throw new IllegalStateException("此会话正在运行或结束中，请稍后再删除");
             }
             store.clear(conversationId);
+            PiAgentBridge.forgetConversation(conversationId);
             recentResults.remove(conversationId);
         }
     }

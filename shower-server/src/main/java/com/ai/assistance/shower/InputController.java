@@ -42,15 +42,8 @@ final class InputController {
         KeyEvent down = new KeyEvent(now, now, KeyEvent.ACTION_DOWN, keyCode, 0, metaState,
                 KeyCharacterMap.VIRTUAL_KEYBOARD, 0, 0, InputDevice.SOURCE_KEYBOARD);
         KeyEvent up = KeyEvent.changeAction(down, KeyEvent.ACTION_UP);
-        return inject(down) && inject(up);
-    }
-
-    boolean inputText(String text) {
-        KeyEvent[] events = KeyCharacterMap.load(KeyCharacterMap.VIRTUAL_KEYBOARD)
-                .getEvents(text.toCharArray());
-        if (events == null || events.length == 0) return false;
-        for (KeyEvent event : events) if (!inject(event)) return false;
-        return true;
+        // Wait for dispatch so select-all has taken effect before the subsequent paste/delete.
+        return inject(down, 2) && inject(up, 2);
     }
 
     boolean tap(float x, float y) {
@@ -138,9 +131,13 @@ final class InputController {
     }
 
     private boolean inject(InputEvent event) {
+        return inject(event, 0);
+    }
+
+    private boolean inject(InputEvent event, int mode) {
         try {
             setDisplayIdMethod.invoke(event, displayId);
-            return Boolean.TRUE.equals(injectInputEventMethod.invoke(inputManager, event, 0));
+            return Boolean.TRUE.equals(injectInputEventMethod.invoke(inputManager, event, mode));
         } catch (InvocationTargetException exception) {
             Throwable cause = exception.getCause() == null ? exception : exception.getCause();
             Main.logToFile("Input injection failed on display " + displayId + ": " + cause, cause);
