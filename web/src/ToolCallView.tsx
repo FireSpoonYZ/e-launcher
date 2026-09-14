@@ -19,7 +19,7 @@ export function ToolCallView({tool, results, pending = false}: {tool?: ToolCall;
   const attachmentSummary = t(`${attachments.length} 个附件`, `${attachments.length} attachment${attachments.length === 1 ? '' : 's'}`);
   const empty = returned ? attachments.length ? attachmentSummary : t('工具未返回文本内容', 'No text in the result') : waiting ? t('结果返回后会显示在这里', 'The result will appear here') : t('本次调用没有结果记录', 'No result was recorded for this call');
 
-  return <><details className={`tool tool-${state}`}>
+  return <details className={`tool tool-${state}`}>
     <summary>
       <span className="tool-heading"><Icon aria-hidden="true"/><span className="tool-name">{name}</span><span className="tool-status"><span className="tool-status-dot" aria-hidden="true"/>{status}</span></span>
       {args && <code className="tool-argument" title={args}>{args}</code>}
@@ -28,7 +28,7 @@ export function ToolCallView({tool, results, pending = false}: {tool?: ToolCall;
     </summary>
     <div className="tool-details">
       {tool && <section aria-label={t('参数', 'Arguments')}><small>{t('参数', 'Arguments')}</small><pre tabIndex={0}>{tool.arguments || '{}'}</pre></section>}
-      <section aria-label={t('结果', 'Result')}><small>{t('结果', 'Result')}</small>{returned ? results.map(result => result.message.content && <pre key={result.id} tabIndex={0}>{result.message.content}</pre>) : <p className="tool-empty">{empty}</p>}{returned && !attachments.length && !results.some(result => result.message.content) && <p className="tool-empty">{empty}</p>}</section>
+      <section aria-label={t('结果', 'Result')}><small>{t('结果', 'Result')}</small>{returned ? results.map(result => result.message.content && <pre key={result.id} tabIndex={0}>{result.message.content}</pre>) : <p className="tool-empty">{empty}</p>}{returned && !attachments.length && !results.some(result => result.message.content) && <p className="tool-empty">{empty}</p>}{!!attachments.length && <AttachmentList attachments={attachments} sent/>}</section>
     </div>
-  </details>{!!attachments.length && <AttachmentList attachments={attachments} sent/>}</>;
+  </details>;
 }
