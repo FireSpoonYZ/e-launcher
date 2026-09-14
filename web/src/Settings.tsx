@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { Capacitor } from '@capacitor/core';
 import { App as CapacitorApp } from '@capacitor/app';
 import * as Switch from '@radix-ui/react-switch';
-import { Database, ExternalLink, Grid2X2, Hand, Info, Palette, Puzzle, RefreshCw, Settings, Share2, Shield, SlidersHorizontal } from 'lucide-react';
+import { Database, ExternalLink, FileText, Grid2X2, Hand, Info, Palette, Puzzle, RefreshCw, Settings, Share2, Shield, SlidersHorizontal } from 'lucide-react';
 import { Device, NativeSettings, type DeviceState } from './native';
 import { Environment, ErrorNotice, Header, Row, Section, useAction, useText } from './ui';
 
@@ -14,6 +14,7 @@ export function SettingsHome() {
     <Row icon={<Palette/>} title={t('外观','Appearance')} detail={t('主题与背景','Theme & background')} onClick={() => nav('/settings/appearance')}/>
     <Row icon={<Hand/>} title={t('桌面与手势','Home & gestures')} detail={t('默认桌面与系统权限','Default home & permissions')} onClick={() => nav('/settings/device')}/>
   </Section><Section title={t('AI 与工具','AI & tools')}>
+    <Row icon={<FileText/>} title={t('全局 AGENTS.md','Global AGENTS.md')} detail={t('编辑与保存全局 Agent 指令','Edit and save global agent instructions')} onClick={() => nav('/settings/editor?project=false&file=AGENTS.md')}/>
     <Row icon={<Database/>} title={t('服务商与模型','Providers & models')} onClick={() => nav('/settings/providers')}/>
     <Row icon={<Puzzle/>} title={t('技能','Skills')} onClick={() => nav('/settings/resources/skills')}/>
     <Row icon={<Share2/>} title="MCP" onClick={() => nav('/settings/resources/mcp')}/>
