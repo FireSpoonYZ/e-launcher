@@ -4,6 +4,18 @@ plugins {
 
 apply from: 'capacitor.build.gradle'
 
+def npmCommand = System.getProperty('os.name').toLowerCase().contains('windows') ? ['cmd', '/c', 'npm'] : ['npm']
+def buildWeb = tasks.register('buildWeb', Exec) {
+    workingDir rootProject.projectDir
+    commandLine npmCommand + ['run', 'build']
+}
+def copyWebAssets = tasks.register('copyWebAssets', Exec) {
+    dependsOn buildWeb
+    workingDir rootProject.projectDir
+    commandLine npmCommand + ['exec', '--', 'cap', 'copy', 'android']
+}
+tasks.named('preBuild') { dependsOn copyWebAssets }
+
 android {
     namespace 'com.example.launcherprobe'
     compileSdk 36
