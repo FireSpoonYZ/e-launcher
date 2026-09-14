@@ -7,7 +7,27 @@ export type ConversationNode = { id: string; parentId: string|null; message: Mes
 export type Conversation = { id: string; leaf: string|null; nodes: ConversationNode[]; draft: string; draftAttachments: Attachment[]; piSelection: Record<string, unknown> };
 export type ConversationSummary = { id: string; title: string; updated: number };
 export type ActiveRun = { conversationId: string; requestId: string; status: string; message: string };
-export type ChatSnapshot = { error?: string; status?: string; sequence: number; running: boolean; requestId: string|null; conversationId: string; conversation: Conversation; activeRuns: ActiveRun[] };
+export type ExtensionWidget = { key: string; placement: 'aboveEditor'|'belowEditor'; lines: string[] };
+export type ExtensionStatus = { key: string; text: string };
+export type ExtensionNotification = { id: number; type: string; message: string };
+export type TodoTask = { id: number; subject: string; status: 'pending'|'in_progress'|'completed'|'deleted' };
+export type AskUserOption = { label: string; description: string; preview?: string };
+export type AskUserQuestion = { questionIndex: number; question: string; header: string; multiSelect: boolean; options: AskUserOption[] };
+export type AskUserQuestionnaire = { id: string; questions: AskUserQuestion[] };
+export type AskUserAnswer =
+  | { questionIndex: number; kind: 'option'; answer: string; notes?: string }
+  | { questionIndex: number; kind: 'custom'; answer: string|null; notes?: string }
+  | { questionIndex: number; kind: 'multi'; selected: string[]; notes?: string };
+export type AskUserQuestionnaireResult = { answers: AskUserAnswer[]; globalNote?: string };
+export type ExtensionUiState = {
+  widgets?: ExtensionWidget[];
+  statuses?: ExtensionStatus[];
+  notifications?: ExtensionNotification[];
+  todo?: {tasks: TodoTask[]; nextId: number}|null;
+  askUser?: AskUserQuestionnaire|null;
+};
+export type ChatSnapshot = { error?: string; status?: string; sequence: number; running: boolean; requestId: string|null; conversationId: string; conversation: Conversation; activeRuns: ActiveRun[]; extensionUi: ExtensionUiState };
+export type QuestionnaireReply = { questionnaireId: string; accepted: boolean; message?: string };
 export type NativeEvent<T = Record<string, unknown>> = { sequence?: number; type: string; conversationId?: string; requestId?: string|null; nodeId?: string|null; payload?: T; [key: string]: unknown };
 export type Listener = (event: NativeEvent) => void;
 
@@ -27,6 +47,10 @@ export interface ChatPlugin {
   selectNode(options: {conversationId: string; nodeId: string; edit?: boolean}): Promise<Conversation>;
   send(options: {conversationId: string; text: string; submissionId?: string}): Promise<{accepted: boolean; requestId: string|null}>;
   cancel(options: {conversationId: string}): Promise<void>;
+  /** Rejects immediately when the conversation, run, questionnaire, answer kind, or selected option is stale/invalid. */
+  submitQuestionnaire(options: {conversationId: string; requestId: string; questionnaireId: string} & AskUserQuestionnaireResult): Promise<void>;
+  /** Rejects immediately when the conversation, run, or questionnaire no longer matches the active request. */
+  cancelQuestionnaire(options: {conversationId: string; requestId: string; questionnaireId: string}): Promise<void>;
   catalog(options?: {refresh?: boolean}): Promise<{requestId: string}>;
   selectModel(options: {conversationId: string; providerId: string; modelId: string; thinkingLevel?: string; expectedSelection?: string}): Promise<Conversation>;
   selectThinkingLevel(options: {conversationId: string; providerId: string; modelId: string; thinkingLevel?: string; expectedSelection?: string}): Promise<Conversation>;

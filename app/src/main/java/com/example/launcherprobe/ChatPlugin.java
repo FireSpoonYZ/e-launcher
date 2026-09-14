@@ -1,5 +1,6 @@
 package com.example.launcherprobe;
 
+import com.getcapacitor.JSArray;
 import com.getcapacitor.JSObject;
 import com.getcapacitor.Plugin;
 import com.getcapacitor.PluginCall;
@@ -98,6 +99,24 @@ public final class ChatPlugin extends Plugin {
     @PluginMethod public void cancel(PluginCall call) {
         try { coordinator.cancel(required(call, "conversationId")); call.resolve(); }
         catch (Exception exception) { reject(call, exception); }
+    }
+
+    @PluginMethod public void submitQuestionnaire(PluginCall call) {
+        try {
+            JSArray answers = call.getArray("answers");
+            if (answers == null) throw new IllegalArgumentException("answers is required");
+            coordinator.submitQuestionnaire(required(call, "conversationId"), required(call, "requestId"),
+                    required(call, "questionnaireId"), answers, call.getData().opt("globalNote"));
+            call.resolve();
+        } catch (Exception exception) { reject(call, exception); }
+    }
+
+    @PluginMethod public void cancelQuestionnaire(PluginCall call) {
+        try {
+            coordinator.cancelQuestionnaire(required(call, "conversationId"), required(call, "requestId"),
+                    required(call, "questionnaireId"));
+            call.resolve();
+        } catch (Exception exception) { reject(call, exception); }
     }
 
     @PluginMethod public void catalog(PluginCall call) {
