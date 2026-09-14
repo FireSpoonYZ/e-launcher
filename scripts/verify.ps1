@@ -53,7 +53,7 @@ if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 & "$env:JAVA_HOME\bin\java.exe" -ea -cp $classes com.example.launcherprobe.ConversationTreeChecks
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-& $gradle --no-daemon :app:testDebugUnitTest :app:assembleDebug :app:lintDebug :shower-server:lintDebug
+& $gradle --no-daemon --console=plain :app:testDebugUnitTest :app:assembleDebug :app:lintDebug :shower-server:lintDebug
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 $showerAsset = 'app\build\generated\showerAssets\shower-server.jar'
 if (-not (Test-Path $showerAsset)) { throw "Missing generated Operit Shower server asset: $showerAsset" }
@@ -82,8 +82,12 @@ $legacyReferences = @($legacyFiles |
 if ($legacyReferences.Count -ne 0) { throw "Legacy Lamda integration references remain: $legacyReferences" }
 
 # Existing style: spaces (not tabs), no trailing whitespace, final newline.
+$generatedXml = @(
+    (Join-Path (Get-Location) 'app/src/main/res/xml/config.xml'),
+    (Join-Path (Get-Location) 'capacitor-cordova-android-plugins/src/main/AndroidManifest.xml')
+)
 $files = @(Get-ChildItem app/src, shower-server/src, tests, scripts -Recurse -File |
-    Where-Object { $_.Extension -in '.java', '.aidl', '.xml', '.ps1' })
+    Where-Object { ($_.Extension -in '.java', '.aidl', '.xml', '.ps1') -and ($_.FullName -notin $generatedXml) })
 $files += Get-Item app/build.gradle, shower-server/build.gradle, build.gradle, settings.gradle, README.md, THIRD_PARTY_NOTICES.md
 foreach ($file in $files) {
     $text = [IO.File]::ReadAllText($file.FullName, [Text.Encoding]::UTF8)

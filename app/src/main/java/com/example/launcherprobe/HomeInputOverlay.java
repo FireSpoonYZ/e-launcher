@@ -31,6 +31,7 @@ import java.util.function.Consumer;
 /** Native search/composition above HOME. Only an explicit send or history click opens chat. */
 final class HomeInputOverlay extends LinearLayout {
     private final ChatStore store;
+    private final android.content.SharedPreferences preferences;
     private final PagerRoot pager;
     private final EditText input;
     private final View plus, voice, send;
@@ -60,7 +61,10 @@ final class HomeInputOverlay extends LinearLayout {
         this.input = input; this.plus = plus; this.voice = voice; this.send = send;
         this.openConversation = openConversation;
         colors = AppAppearance.read(context);
+        preferences = context.getSharedPreferences("home_input", Context.MODE_PRIVATE);
         draftId = store.prepareHomeDraft();
+        values[0] = preferences.getString("apps_query", "");
+        values[1] = preferences.getString("history_query", "");
         values[2] = store.draft(draftId);
         setOrientation(VERTICAL);
         setBackgroundColor(colors.background);
@@ -132,7 +136,11 @@ final class HomeInputOverlay extends LinearLayout {
                 if (binding || closed) return;
                 values[tab] = value.toString();
                 if (tab == 2) store.saveDraft(draftId, values[2]);
-                else searchResults();
+                else {
+                    preferences.edit().putString(tab == 0 ? "apps_query" : "history_query",
+                            values[tab]).apply();
+                    searchResults();
+                }
                 updateControls();
             }
         };
@@ -241,6 +249,7 @@ final class HomeInputOverlay extends LinearLayout {
 
     void clearInput() {
         values[0] = values[1] = values[2] = "";
+        preferences.edit().remove("apps_query").remove("history_query").apply();
         store.saveDraft(draftId, "");
         binding = true;
         input.setText("");

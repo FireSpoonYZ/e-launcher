@@ -4,8 +4,12 @@ import android.app.Activity;
 import android.app.Dialog;
 import android.app.role.RoleManager;
 import android.content.ActivityNotFoundException;
-import android.content.ComponentName;
+import android.content.BroadcastReceiver;
+import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
+import android.content.pm.ApplicationInfo;
+import android.content.pm.LauncherApps;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
 import android.graphics.Color;
@@ -26,8 +30,6 @@ import android.view.WindowManager;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.FrameLayout;
-import android.widget.GridLayout;
-import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
@@ -36,7 +38,6 @@ import android.widget.Toast;
 import org.json.JSONObject;
 import org.json.JSONArray;
 
-import java.text.Collator;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -78,6 +79,11 @@ public class MainActivity extends BridgeActivity {
 
     private RoleManager roles;
     private ShizukuRepair shizukuRepair;
+    private LauncherShortcuts launcherShortcuts;
+    private HomeLayout homeLayout;
+    private HomeDesktop homeDesktop;
+    private boolean shortcutListenerRegistered;
+    private boolean packageReceiverRegistered;
     private final List<ResolveInfo> apps = new ArrayList<>();
     private FrameLayout root;
     private PagerRoot pager;
@@ -141,6 +147,18 @@ public class MainActivity extends BridgeActivity {
     private String page = "home";
     private String savedQuery = "";
     private String savedDraft = "";
+    private final BroadcastReceiver packageChanges = new BroadcastReceiver() {
+        @Override public void onReceive(Context context, Intent intent) {
+            String packageName = intent.getData() == null ? null
+                    : intent.getData().getSchemeSpecificPart();
+            if (packageName == null) return;
+            boolean removed = Intent.ACTION_PACKAGE_REMOVED.equals(intent.getAction())
+                    && !intent.getBooleanExtra(Intent.EXTRA_REPLACING, false);
+            if (removed && homeDesktop != null) homeDesktop.packageRemoved(packageName);
+            loadApps();
+            if (homeDesktop != null) homeDesktop.appsChanged(apps);
+        }
+    };
 
     @Override protected void attachBaseContext(android.content.Context base) { super.attachBaseContext(UiText.wrap(base)); }
     private String t(String literal) { return UiText.get(this, literal); }
@@ -189,6 +207,10 @@ public class MainActivity extends BridgeActivity {
         history = immutable(chatStore.load());
         savedDraft = chatStore.draft();
         loadApps();
+        launcherShortcuts = new LauncherShortcuts(this);
+        homeLayout = HomeLayout.load(this, apps);
+        removeActuallyUninstalledApps();
+        registerPackageChanges();
         getWindow().setStatusBarColor(IVORY);
         getWindow().setNavigationBarColor(IVORY);
         getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
@@ -206,6 +228,7 @@ public class MainActivity extends BridgeActivity {
         installPager();
         getOnBackPressedDispatcher().addCallback(this, new androidx.activity.OnBackPressedCallback(true) {
             @Override public void handleOnBackPressed() {
+                if (homeDesktop != null && homeDesktop.dismissMenu()) return;
                 if (pager.page() == PagerState.Page.HOME) {
                     if (homeInputOverlay != null) {
                         androidx.core.view.WindowInsetsCompat insets = androidx.core.view.ViewCompat.getRootWindowInsets(root);
@@ -221,7 +244,9 @@ public class MainActivity extends BridgeActivity {
             }
         });
         showHome(false);
-        if (restoreWebPage) pager.show(PagerState.Page.CHAT, false);
+        boolean pinIntent = isPinIntent(getIntent());
+        handlePinIntent(getIntent());
+        if (restoreWebPage && !pinIntent) pager.show(PagerState.Page.CHAT, false);
         if (savedInstanceState != null) {
             nativePickerKind = savedInstanceState.getString("native_picker_kind");
             nativePickerConversation = savedInstanceState.getString("native_picker_conversation");
@@ -240,10 +265,11 @@ public class MainActivity extends BridgeActivity {
         super.onNewIntent(intent);
         setIntent(intent);
         // BridgeActivity.load delivers the initial intent before installPager().
-        if (pager != null && isHomeIntent(intent)) {
+        if (pager != null && (isHomeIntent(intent) || isPinIntent(intent))) {
             suppressHomeEnterTransition(intent);
             if (controls != null && controls.isShowing()) controls.dismiss();
             showHome(false);
+            handlePinIntent(intent);
         }
     }
 
@@ -269,6 +295,19 @@ public class MainActivity extends BridgeActivity {
     }
 
     @Override
+    public void onStart() {
+        super.onStart();
+        if (!shortcutListenerRegistered && launcherShortcuts.hasAccess()) try {
+            launcherShortcuts.register(() -> runOnUiThread(() -> {
+                if (homeDesktop != null) homeDesktop.shortcutsChanged();
+            }));
+            shortcutListenerRegistered = true;
+        } catch (RuntimeException failure) {
+            failure(t("无法监听快捷功能变化：") + failure.getMessage());
+        }
+    }
+
+    @Override
     public void onResume() {
         super.onResume();
         agentRunning = chatCoordinator.running(chatStore.activeId());
@@ -282,6 +321,10 @@ public class MainActivity extends BridgeActivity {
         clockTick.run();
         refreshTaskCards();
         refreshHomeComposer();
+        if (homeDesktop != null) {
+            homeDesktop.shortcutsChanged();
+            homeDesktop.syncPins();
+        }
     }
 
     @Override
@@ -294,6 +337,14 @@ public class MainActivity extends BridgeActivity {
         super.onPause();
     }
 
+    @Override
+    public void onStop() {
+        if (shortcutListenerRegistered) {
+            launcherShortcuts.unregister();
+            shortcutListenerRegistered = false;
+        }
+        super.onStop();
+    }
 
     @Override
     public void onDestroy() {
@@ -305,6 +356,11 @@ public class MainActivity extends BridgeActivity {
             if (queryBridge != null) queryBridge.abort(thinkingLevelRequestId);
         }
         if (homeInputOverlay != null) homeInputOverlay.dispose();
+        if (homeDesktop != null) homeDesktop.dispose();
+        if (packageReceiverRegistered) {
+            unregisterReceiver(packageChanges);
+            packageReceiverRegistered = false;
+        }
         queryExecutor.shutdownNow();
         chatCoordinator.removeListener(coordinatorListener);
         shizukuRepair.destroy();
@@ -388,7 +444,71 @@ public class MainActivity extends BridgeActivity {
     }
 
     private void loadApps() {
+        apps.clear();
         apps.addAll(DeviceActions.apps(this));
+    }
+
+    @SuppressWarnings("deprecation")
+    private void registerPackageChanges() {
+        IntentFilter filter = new IntentFilter();
+        filter.addAction(Intent.ACTION_PACKAGE_ADDED);
+        filter.addAction(Intent.ACTION_PACKAGE_CHANGED);
+        filter.addAction(Intent.ACTION_PACKAGE_REMOVED);
+        filter.addDataScheme("package");
+        if (Build.VERSION.SDK_INT >= 33) {
+            registerReceiver(packageChanges, filter, Context.RECEIVER_NOT_EXPORTED);
+        } else {
+            registerReceiver(packageChanges, filter);
+        }
+        packageReceiverRegistered = true;
+    }
+
+    private void removeActuallyUninstalledApps() {
+        boolean changed = false;
+        for (String packageName : homeLayout.packageNames()) {
+            try {
+                ApplicationInfo app = Build.VERSION.SDK_INT >= 33
+                        ? getPackageManager().getApplicationInfo(packageName,
+                                PackageManager.ApplicationInfoFlags.of(
+                                        PackageManager.MATCH_UNINSTALLED_PACKAGES))
+                        : installedApplicationLegacy(packageName);
+                if ((app.flags & ApplicationInfo.FLAG_INSTALLED) == 0) {
+                    changed |= homeLayout.removePackage(packageName);
+                }
+            } catch (PackageManager.NameNotFoundException missing) {
+                changed |= homeLayout.removePackage(packageName);
+            }
+        }
+        if (changed) homeLayout.save();
+    }
+
+    @SuppressWarnings("deprecation")
+    private ApplicationInfo installedApplicationLegacy(String packageName)
+            throws PackageManager.NameNotFoundException {
+        return getPackageManager().getApplicationInfo(
+                packageName, PackageManager.MATCH_UNINSTALLED_PACKAGES);
+    }
+
+    private static boolean isPinIntent(Intent intent) {
+        return intent != null && LauncherApps.ACTION_CONFIRM_PIN_SHORTCUT.equals(intent.getAction());
+    }
+
+    private void handlePinIntent(Intent intent) {
+        if (!isPinIntent(intent) || homeDesktop == null) return;
+        LauncherApps launcherApps = getSystemService(LauncherApps.class);
+        LauncherApps.PinItemRequest request;
+        try {
+            request = launcherApps == null ? null : launcherApps.getPinItemRequest(intent);
+        } catch (RuntimeException failure) {
+            request = null;
+        }
+        // A PinItemRequest can be accepted only once. Consuming the action prevents recreation from reopening it.
+        intent.setAction(null);
+        if (request == null) {
+            failure(t("固定请求已失效。"));
+            return;
+        }
+        homeDesktop.confirmPin(request);
     }
 
     private void setPage(View content) {
@@ -534,19 +654,19 @@ public class MainActivity extends BridgeActivity {
         capability.setPadding(0, dp(6), 0, dp(30));
         column.addView(capability);
 
+        LinearLayout desktopHeading = row();
         TextView title = label(t("应用"), 25, CHARCOAL);
         title.setTypeface(null, android.graphics.Typeface.BOLD);
-        column.addView(title);
+        desktopHeading.addView(title, new LinearLayout.LayoutParams(0, -2, 1));
+        TextView allApps = pill(t("全部应用  ›"), view -> homeDesktop.showAllApps());
+        allApps.setContentDescription(t("查看并搜索全部应用"));
+        desktopHeading.addView(allApps);
+        column.addView(desktopHeading);
 
-        GridLayout grid = appGrid(apps.subList(0, Math.min(8, apps.size())));
-        LinearLayout.LayoutParams gridParams = new LinearLayout.LayoutParams(-1, -2);
-        gridParams.topMargin = dp(12);
-        column.addView(grid, gridParams);
-        if (apps.isEmpty()) {
-            TextView empty = label(t("没有找到可启动的应用。"), 17, MUTED);
-            empty.setPadding(0, dp(24), 0, dp(24));
-            column.addView(empty);
-        }
+        homeDesktop = new HomeDesktop(this, pager, homeLayout, apps, launcherShortcuts, homeContent);
+        LinearLayout.LayoutParams desktopParams = new LinearLayout.LayoutParams(-1, dp(232));
+        desktopParams.topMargin = dp(12);
+        column.addView(homeDesktop, desktopParams);
 
         setPage(homeContent);
         pager.show(PagerState.Page.HOME, animated);
@@ -1314,38 +1434,6 @@ public class MainActivity extends BridgeActivity {
                 }).show();
     }
 
-    private void showAppPicker() {
-        final Dialog dialog = new Dialog(this);
-        LinearLayout column = column();
-        column.setPadding(dp(18), dp(18), dp(18), dp(18));
-        EditText query = new EditText(this);
-        query.setHint(t("搜索应用"));
-        column.addView(query);
-        TextView countView = label(t("全部应用 · ") + apps.size(), 18, CHARCOAL);
-        column.addView(countView);
-        GridLayout results = appGrid(apps);
-        column.addView(results);
-        query.addTextChangedListener(new TextWatcher() {
-            public void beforeTextChanged(CharSequence s, int start, int count, int after) { }
-            public void onTextChanged(CharSequence s, int start, int before, int count) {
-                filterGrid(results, countView, s.toString());
-            }
-            public void afterTextChanged(Editable value) { }
-        });
-        ScrollView scroll = new ScrollView(this);
-        scroll.addView(column);
-        dialog.setContentView(scroll);
-        dialogMotion(dialog, false);
-        dialog.show();
-        Window window = dialog.getWindow();
-        if (window != null) {
-            WindowManager.LayoutParams params = window.getAttributes();
-            params.width = WindowManager.LayoutParams.MATCH_PARENT;
-            params.height = WindowManager.LayoutParams.MATCH_PARENT;
-            window.setAttributes(params);
-        }
-    }
-
     private void sendMessage() {
         String text = composerInput == null ? "" : composerInput.getText().toString();
         String draftId = "home".equals(page) ? chatStore.homeDraftId() : chatStore.activeId();
@@ -1718,58 +1806,6 @@ public class MainActivity extends BridgeActivity {
         launchWeb("/settings", null, null);
     }
 
-    private GridLayout appGrid(List<ResolveInfo> entries) {
-        GridLayout grid = new GridLayout(this);
-        grid.setColumnCount(4);
-        PackageManager pm = getPackageManager();
-        for (ResolveInfo app : entries) {
-            String appLabel = app.loadLabel(pm).toString();
-            ComponentName component = new ComponentName(app.activityInfo.packageName, app.activityInfo.name);
-            LinearLayout item = column();
-            item.setGravity(Gravity.TOP | Gravity.CENTER_HORIZONTAL);
-            item.setTag(new String[]{appLabel, component.getPackageName()});
-            item.setClickable(true);
-            item.setFocusable(true);
-            item.setContentDescription(t("打开 ") + appLabel);
-            item.setOnClickListener(view -> launchApp(component));
-            pressFeedback(item);
-            android.util.TypedValue selectable = new android.util.TypedValue();
-            getTheme().resolveAttribute(android.R.attr.selectableItemBackground, selectable, true);
-            item.setForeground(getDrawable(selectable.resourceId));
-            item.setPadding(dp(3), dp(12), dp(3), dp(8));
-            item.setMinimumHeight(dp(108));
-            ImageView icon = new ImageView(this);
-            icon.setImageDrawable(app.loadIcon(pm));
-            icon.setContentDescription(null);
-            item.addView(icon, new LinearLayout.LayoutParams(dp(52), dp(52)));
-            TextView name = label(appLabel, 13, CHARCOAL);
-            name.setGravity(Gravity.CENTER);
-            name.setMaxLines(2);
-            LinearLayout.LayoutParams nameParams = new LinearLayout.LayoutParams(-1, -2);
-            nameParams.topMargin = dp(7);
-            item.addView(name, nameParams);
-            GridLayout.LayoutParams cell = new GridLayout.LayoutParams();
-            cell.width = 0;
-            cell.height = -2;
-            cell.columnSpec = GridLayout.spec(GridLayout.UNDEFINED, 1f);
-            grid.addView(item, cell);
-        }
-        return grid;
-    }
-
-    private void filterGrid(GridLayout grid, TextView label, String query) {
-        int visible = 0;
-        for (int index = 0; index < grid.getChildCount(); index++) {
-            View child = grid.getChildAt(index);
-            String[] metadata = (String[]) child.getTag();
-            boolean matches = AppSearch.matches(metadata[0], metadata[1], query);
-            child.setVisibility(matches ? View.VISIBLE : View.GONE);
-            if (matches) visible++;
-        }
-        label.setText(query.trim().isEmpty() ? t("全部应用 · ") + visible : t("搜索结果 · ") + visible);
-        label.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
-    }
-
     private void showControls() {
         controls = new Dialog(this);
         LinearLayout sheet = column();
@@ -1861,13 +1897,6 @@ public class MainActivity extends BridgeActivity {
             return;
         }
         shizukuRepair.requestHomeFromButton();
-    }
-
-    private void launchApp(ComponentName component) {
-        launch(new Intent(Intent.ACTION_MAIN)
-                .addCategory(Intent.CATEGORY_LAUNCHER)
-                .setComponent(component)
-                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED));
     }
 
     private void launch(Intent intent) {
