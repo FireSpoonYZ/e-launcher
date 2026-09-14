@@ -31,6 +31,7 @@ import java.util.function.Consumer;
 /** Native search/composition above HOME. Only an explicit send or history click opens chat. */
 final class HomeInputOverlay extends LinearLayout {
     private final ChatStore store;
+    private final android.content.SharedPreferences queries;
     private final PagerRoot pager;
     private final EditText input;
     private final View plus, voice, send;
@@ -61,6 +62,9 @@ final class HomeInputOverlay extends LinearLayout {
         this.openConversation = openConversation;
         colors = AppAppearance.read(context);
         draftId = store.prepareHomeDraft();
+        queries = context.getSharedPreferences("home_input", Context.MODE_PRIVATE);
+        values[0] = queries.getString("apps", "");
+        values[1] = queries.getString("history", "");
         values[2] = store.draft(draftId);
         setOrientation(VERTICAL);
         setBackgroundColor(colors.background);
@@ -132,7 +136,10 @@ final class HomeInputOverlay extends LinearLayout {
                 if (binding || closed) return;
                 values[tab] = value.toString();
                 if (tab == 2) store.saveDraft(draftId, values[2]);
-                else searchResults();
+                else {
+                    queries.edit().putString(tab == 0 ? "apps" : "history", values[tab]).apply();
+                    searchResults();
+                }
                 updateControls();
             }
         };
@@ -160,9 +167,12 @@ final class HomeInputOverlay extends LinearLayout {
     void setPreparing(boolean value) { preparing = value; updateControls(); }
 
     void select(int value) {
-        tab = value;
         binding = true;
+        android.view.inputmethod.InputMethodManager keyboard = getContext().getSystemService(android.view.inputmethod.InputMethodManager.class);
+        input.clearFocus();
+        tab = value;
         input.setInputType(InputType.TYPE_CLASS_TEXT | (tab == 2 ? InputType.TYPE_TEXT_FLAG_MULTI_LINE | InputType.TYPE_TEXT_FLAG_CAP_SENTENCES : 0));
+        input.setFocusableInTouchMode(true);
         input.setSingleLine(tab != 2); input.setMaxLines(tab == 2 ? 4 : 1);
         input.setImeOptions(tab == 2 ? EditorInfo.IME_ACTION_SEND : EditorInfo.IME_ACTION_SEARCH);
         input.setText(values[tab]); input.setSelection(input.length());
@@ -186,6 +196,7 @@ final class HomeInputOverlay extends LinearLayout {
         }
         refreshAttachments(); searchResults(); updateControls();
         input.requestFocus();
+        keyboard.restartInput(input);
     }
 
     void refreshAttachments() {

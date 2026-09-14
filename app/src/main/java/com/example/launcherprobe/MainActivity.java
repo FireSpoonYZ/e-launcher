@@ -691,6 +691,7 @@ public class MainActivity extends BridgeActivity {
             homeInputOverlay = null; closingHomeInput = false;
             composerClose.setVisibility(View.GONE);
             composerInput.setKeyListener(null); composerInput.setCursorVisible(false);
+            composerInput.setFocusable(false);
             composerInput.setShowSoftInputOnFocus(false); composerInput.setMaxLines(2);
             composerInput.setContentDescription(t("打开新建对话输入"));
             attachmentButton.setVisibility(View.VISIBLE); attachmentButton.setEnabled(true);
@@ -771,6 +772,7 @@ public class MainActivity extends BridgeActivity {
         composerInput.setText(savedDraft);
         composerInput.setCursorVisible(false);
         composerInput.setKeyListener(null);
+        composerInput.setFocusable(false);
         composerInput.setShowSoftInputOnFocus(false);
         composerInput.setOnClickListener(view -> { if (homeInputOverlay == null) openHomeInput(true); });
         LinearLayout inputRow = row();

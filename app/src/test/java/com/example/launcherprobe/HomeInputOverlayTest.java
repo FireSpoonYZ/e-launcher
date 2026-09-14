@@ -22,6 +22,7 @@ public class HomeInputOverlayTest {
         try (var controller = Robolectric.buildActivity(Activity.class).setup()) {
             Activity activity = controller.get();
             activity.getSharedPreferences("chat", Context.MODE_PRIVATE).edit().clear().commit();
+            activity.getSharedPreferences("home_input", Context.MODE_PRIVATE).edit().clear().commit();
             ChatStore store = new ChatStore(activity);
             store.save(Collections.singletonList(new AgentLoop.Message("user", "Existing chat")));
             String original = store.activeId();
@@ -29,13 +30,16 @@ public class HomeInputOverlayTest {
             View web = new View(activity);
             PagerRoot pager = new PagerRoot(activity, web, PagerState.Page.HOME, page -> {});
             LinearLayout dock = new LinearLayout(activity);
-            EditText input = new EditText(activity); dock.addView(input);
+            EditText input = new EditText(activity);
+            input.setKeyListener(null); input.setFocusable(false);
+            dock.addView(input);
             View plus = new TextView(activity), voice = new TextView(activity), send = new TextView(activity);
             int[] submitted = {0};
             HomeInputOverlay overlay = new HomeInputOverlay(activity, pager, store, Collections.emptyList(),
                     dock, input, plus, voice, send, id -> fail("Search must not open chat automatically"), () -> submitted[0]++);
             pager.setHome(overlay); activity.setContentView(pager);
             assertEquals(original, store.activeId());
+            assertTrue(input.isFocusableInTouchMode());
             assertEquals(1, store.conversations().size());
             input.setText("New native draft");
             assertEquals("New native draft", store.draft(overlay.draftId()));
@@ -59,6 +63,9 @@ public class HomeInputOverlayTest {
             HomeInputOverlay reopened = new HomeInputOverlay(activity, pager, store, Collections.emptyList(),
                     dock, input, plus, voice, send, id -> {}, () -> {});
             assertEquals("New native draft", input.getText().toString());
+            reopened.select(0); assertEquals("camera", input.getText().toString());
+            reopened.select(1); assertEquals("history query", input.getText().toString());
+            reopened.select(2); assertEquals("New native draft", input.getText().toString());
             assertEquals(original, store.activeId());
             reopened.dispose();
         }
