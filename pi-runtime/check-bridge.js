@@ -58,6 +58,10 @@ const api = http.createServer((req, res) => {
       res.on("close", () => held.delete(res));
     } else if (prompt === "shower") {
       tool("shower", { action:"screenshot", maxWidth:360, maxHeight:640 });
+    } else if (prompt === "search-apps" && !called.includes("search_apps")) {
+      tool("search_apps", { query:"SETTINGS" });
+    } else if (prompt === "list-apps" && !called.includes("list_apps")) {
+      tool("list_apps", {});
     } else if (prompt === "tool") {
       emit({ role: "assistant", content: "bridge ok" });
       emit({ tool_calls: [
@@ -128,6 +132,12 @@ try {
         result:{ok:true,action:"screenshot",displayId:7,width:720,height:1280,dpi:320,
           imageWidth:360,imageHeight:640,mimeType:"image/png",
           data:"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aXioAAAAASUVORK5CYII="},
+      })}\n`);
+      if (event.type === "apps_request") socket.write(`${JSON.stringify({
+        type:"apps_response", id:event.id, callId:event.callId,
+        result:event.arguments.action === "search"
+          ? [{label:"Settings",packageName:"com.android.settings"}]
+          : [{label:"Settings",packageName:"com.android.settings"},{label:"System UI",packageName:"com.android.systemui"}],
       })}\n`);
     }
   });
@@ -238,6 +248,23 @@ try {
   assert.match(showerMessage.content, /虚拟屏 720×1280/);
   assert.equal(showerMessage.attachments.length, 1);
   assert.equal((await readFile(showerMessage.attachments[0].path)).subarray(1, 4).toString(), "PNG");
+  for (const [id, prompt, expectedArguments, expectedCount] of [
+    ["sdk-search-apps", "search-apps", {action:"search",query:"SETTINGS"}, 1],
+    ["sdk-list-apps", "list-apps", {action:"list"}, 2],
+  ]) {
+    send({ id, conversationId:id, type:"prompt", sdk:true, prompt, config });
+    assert.equal((await waitFor((event) => event.id === id && event.type === "end")).status,
+      "completed", JSON.stringify(events));
+    const appRequest = events.find((event) => event.id === id && event.type === "apps_request");
+    assert.deepEqual(appRequest.arguments, expectedArguments);
+    const appMessage = events.find((event) => event.id === id && event.type === "message"
+      && event.message.role === "tool").message;
+    assert.equal(JSON.parse(appMessage.content).length, expectedCount);
+    const registered = requests.at(-1).tools.map((tool) => tool.function.name);
+    assert(registered.includes("list_apps") && registered.includes("search_apps"),
+      "both app tools are registered in actual SDK provider requests");
+  }
+  console.log("PASS: shipped CJS registers and bridges list_apps/search_apps independently");
   delete config.bundledShower;
   delete config.selection;
   const sdkHistory = events.find((event) => event.id === "sdk-tool" && event.type === "context").entries;

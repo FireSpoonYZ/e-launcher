@@ -102,12 +102,26 @@ import { appendFileSync } from "node:fs";
 const image = ${JSON.stringify({ type:"image", mimeType:"image/png", data:imageData })};
 const sizedImage = (size) => ({ type:"image", mimeType:"image/png", data:Buffer.alloc(size, 0x5a).toString("base64") });
 export default function(pi) {
-  pi.on("session_start", async () => {
+  let widgetText = "before", widgetTui;
+  pi.on("session_start", async (_event, ctx) => {
     appendFileSync(${JSON.stringify(lifecycleFile)}, "session_start\\n");
+    if (!ctx.hasUI || ctx.mode !== "print") throw new Error("thin UI binding must expose hasUI without claiming TUI mode");
+    ctx.ui.setStatus("probe", "ready");
+    ctx.ui.notify("extension ready", "info");
+    ctx.ui.setWidget("probe", (tui) => {
+      widgetTui = tui;
+      globalThis.__launcherSdkCheckRender = () => widgetTui.requestRender(true);
+      return {
+        render:(width) => { appendFileSync(${JSON.stringify(lifecycleFile)}, "widget_render\\n"); return [widgetText + ":" + width]; },
+        invalidate:() => {},
+        dispose:() => appendFileSync(${JSON.stringify(lifecycleFile)}, "widget_dispose\\n"),
+      };
+    });
     if (await (await fetch(${JSON.stringify(`${probeUrl}/explicit`)}, { dispatcher: globalThis.__launcherSdkCheckDispatcher })).text() !== "fetch-ok") throw new Error("explicit fetch failed");
     if (await (await fetch(${JSON.stringify(`${probeUrl}/default`)})).text() !== "fetch-ok") throw new Error("default fetch failed");
   });
   pi.on("session_shutdown", () => appendFileSync(${JSON.stringify(lifecycleFile)}, "session_shutdown\\n"));
+  pi.on("tool_execution_end", () => { widgetText = "after"; widgetTui?.requestRender(true); });
   pi.registerTool({ name:"image_only", label:"Image only", description:"Return a synthetic image", parameters:{ type:"object", properties:{}, additionalProperties:false },
     execute:async () => ({ content:[image] }) });
   pi.registerTool({ name:"image_mixed", label:"Mixed image", description:"Return text and a synthetic image", parameters:{ type:"object", properties:{}, additionalProperties:false },
@@ -127,10 +141,12 @@ export default function(pi) {
     return explicitAgent.dispatch(options, handler);
   } };
   config.settings.extensions = [extensionFile];
+  const lifecycleLines = async () => {
+    try { return (await readFile(lifecycleFile, "utf8")).trim().split("\n"); }
+    catch (error) { if (error?.code === "ENOENT") return []; throw error; }
+  };
   const lifecycleCounts = async () => {
-    let lines = [];
-    try { lines = (await readFile(lifecycleFile, "utf8")).trim().split("\n"); }
-    catch (error) { if (error?.code !== "ENOENT") throw error; }
+    const lines = await lifecycleLines();
     return { starts:lines.filter(line => line === "session_start").length,
       shutdowns:lines.filter(line => line === "session_shutdown").length };
   };
@@ -142,10 +158,19 @@ export default function(pi) {
       "bindExtensions sends session_start once before prompting");
     const events = [];
     runtime.subscribe((event) => events.push(event));
+    assert.deepEqual(events[0].state.widgets[0].lines, ["before:80"], "UI created before subscribe is replayed");
+    assert.deepEqual(events[0].state.statuses, [{ key:"probe", text:"ready" }]);
+    assert.equal(events[0].state.notifications[0].message, "extension ready");
     await runtime.prompt(prompt);
+    assert(events.some((event) => event.type === "extension_ui" && event.state.widgets[0]?.lines[0] === "after:80"),
+      "factory requestRender publishes a fresh snapshot");
     const ended = await lifecycleCounts();
     assert.deepEqual(ended, { starts:before.starts + 1, shutdowns:before.shutdowns + 1 },
       "native runtime disposal sends session_shutdown once");
+    const rendersAfterDispose = (await lifecycleLines()).filter(line => line === "widget_render").length;
+    globalThis.__launcherSdkCheckRender();
+    assert.equal((await lifecycleLines()).filter(line => line === "widget_render").length, rendersAfterDispose,
+      "requestRender cannot call a factory after runtime disposal");
     const toolMessage = events.find((event) => event.type === "message" && event.message.role === "tool").message;
     assert.equal(toolMessage.content, expectedText);
     assert.equal(toolMessage.attachments.length, 1, "tool images are projected as one chat attachment");
@@ -209,8 +234,13 @@ export default function(pi) {
   assert.equal(fetchProbes.filter((path) => path === "/fetch-probe/explicit").length, 8);
   assert.equal(fetchProbes.filter((path) => path === "/fetch-probe/default").length, 8,
     "requests without an explicit dispatcher still use the session transport");
+  const lifecycleTotals = await lifecycleLines();
+  assert.equal(lifecycleTotals.filter(line => line === "widget_dispose").length,
+    lifecycleTotals.filter(line => line === "session_start").length,
+    "every factory is disposed once across successful, rejected, and aborted turns");
   delete config.settings.extensions;
   delete globalThis.__launcherSdkCheckDispatcher;
+  delete globalThis.__launcherSdkCheckRender;
 
   const { SessionManager } = await import("@earendil-works/pi-coding-agent");
   const saved = SessionManager.inMemory(config.cwd);

@@ -95,6 +95,76 @@ public class PiPersistenceTest {
         assertEquals("follow-up", resume.getJSONArray("tail").getJSONObject(0).getString("content"));
     }
 
+    @Test public void extensionUiSnapshotsFollowTheSelectedBranchAndConversation() throws Exception {
+        ChatStore store = new ChatStore(context);
+        AgentLoop.Message firstUser = new AgentLoop.Message("user", "first");
+        store.save(Collections.singletonList(firstUser));
+        String firstConversation = store.activeId();
+        JSONObject pending = extensionUiState(new JSONArray()
+                .put(new JSONObject().put("id", 1).put("subject", "first task").put("status", "in_progress")), 2);
+        PiTurnPersistence firstTurn = new PiTurnPersistence(store, firstConversation, firstUser.id, "first-reply", store.load());
+        firstTurn.accept(new JSONObject().put("type", "extension_ui").put("state", pending));
+        firstTurn.accept(new JSONObject().put("type", "message").put("message",
+                new JSONObject().put("role", "assistant").put("content", "first done")));
+        firstTurn.accept(new JSONObject().put("type", "context").put("entries", entries()));
+        firstTurn.accept(new JSONObject().put("type", "end").put("status", "completed"));
+        assertEquals(pending.toString(), new JSONObject(store.extensionUi(store.load())).toString());
+
+        AgentLoop.Message secondUser = new AgentLoop.Message("user", "second");
+        List<AgentLoop.Message> secondPath = new ArrayList<>(store.load());
+        secondPath.add(secondUser);
+        store.save(secondPath);
+        JSONObject cleared = extensionUiState(new JSONArray(), 1);
+        PiTurnPersistence secondTurn = new PiTurnPersistence(store, firstConversation, secondUser.id, "second-reply", store.load());
+        secondTurn.accept(new JSONObject().put("type", "extension_ui").put("state", cleared));
+        secondTurn.accept(new JSONObject().put("type", "message").put("message",
+                new JSONObject().put("role", "assistant").put("content", "cleared")));
+        secondTurn.accept(new JSONObject().put("type", "context").put("entries", entries()));
+        secondTurn.accept(new JSONObject().put("type", "end").put("status", "completed"));
+        assertEquals("a structured empty snapshot is a durable user clear", cleared.toString(),
+                new JSONObject(store.extensionUi(store.load())).toString());
+
+        store.selectNode("first-reply");
+        assertEquals("selecting the earlier branch restores its own snapshot", pending.toString(),
+                new JSONObject(store.extensionUi(store.load())).toString());
+        store.newConversation();
+        assertEquals("a new conversation cannot inherit another chat's UI", "{}", store.extensionUi(store.load()));
+        store.selectConversation(firstConversation);
+        ChatStore reloaded = new ChatStore(context);
+        assertEquals("process-style store reload and conversation switching retain branch isolation", pending.toString(),
+                new JSONObject(reloaded.extensionUi(reloaded.load())).toString());
+    }
+
+    @Test public void coordinatorPublishesExtensionUiAndIncludesItInSnapshots() throws Exception {
+        ChatCoordinator coordinator = ChatCoordinator.get(context);
+        ChatStore store = coordinator.store();
+        AgentLoop.Message user = new AgentLoop.Message("user", "show tasks");
+        store.save(Collections.singletonList(user));
+        ChatCoordinator.SessionRun run = new ChatCoordinator.SessionRun(store.activeId(), "request-ui");
+        run.persistence = new PiTurnPersistence(store, store.activeId(), user.id, "ui-reply", store.load());
+        @SuppressWarnings("unchecked")
+        java.util.Map<String, ChatCoordinator.SessionRun> activeRuns =
+                org.robolectric.util.ReflectionHelpers.getField(coordinator, "activeRuns");
+        activeRuns.put(store.activeId(), run);
+        List<JSONObject> events = new ArrayList<>();
+        ChatCoordinator.Listener listener = (messages, event) -> events.add(event);
+        coordinator.addListener(listener);
+        try {
+            JSONObject state = extensionUiState(new JSONArray()
+                    .put(new JSONObject().put("id", 7).put("subject", "live task").put("status", "pending")), 8);
+            coordinator.onPiEvent(new JSONObject().put("type", "extension_ui").put("state", state), run);
+            org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle();
+            assertEquals(state.toString(), run.extensionUi.toString());
+            JSONObject emitted = events.stream().filter(event -> "extensionUi".equals(event.optString("type")))
+                    .findFirst().orElseThrow();
+            assertEquals(state.toString(), emitted.getJSONObject("payload").toString());
+            assertEquals(state.toString(), coordinator.snapshot().getJSONObject("extensionUi").toString());
+        } finally {
+            coordinator.removeListener(listener);
+            activeRuns.remove(store.activeId(), run);
+        }
+    }
+
     @Test public void latePreviewCannotOverwriteCompletedTextOrContext() throws Exception {
         ChatStore store = new ChatStore(context);
         AgentLoop.Message user = new AgentLoop.Message("user", "question"); store.save(Collections.singletonList(user));
@@ -503,5 +573,16 @@ public class PiPersistenceTest {
                 .contains("session_" + old));
         legacyFile.delete();
         legacyRoot.delete();
+    }
+
+    private static JSONObject extensionUiState(JSONArray tasks, int nextId) throws Exception {
+        return new JSONObject()
+                .put("widgets", new JSONArray())
+                .put("statuses", new JSONArray())
+                .put("notifications", new JSONArray())
+                .put("todo", new JSONObject()
+                        .put("package", "@juicesharp/rpiv-todo")
+                        .put("tasks", tasks)
+                        .put("nextId", nextId));
     }
 }

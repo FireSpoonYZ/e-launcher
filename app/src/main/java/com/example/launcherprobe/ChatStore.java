@@ -287,10 +287,11 @@ public final class ChatStore {
     }
 
     void savePiTurn(String conversation, String userId, String assistantId, List<AgentLoop.Message> messages,
-            String contextNode, JSONArray entries) throws java.io.IOException {
+            String contextNode, JSONArray entries, JSONObject extensionUi) throws java.io.IOException {
         synchronized (STORE_LOCK) {
             if (!piPending(conversation, userId)) return;
             if (entries != null) PiConfigStore.write(piContextFile(conversation, contextNode), entries.toString());
+            if (extensionUi != null) PiConfigStore.write(piUiFile(conversation, contextNode), extensionUi.toString());
             mergePiMessages(conversation, userId, messages);
             preferences.edit().remove("pi_pending_" + conversation + "_" + userId).apply();
         }
@@ -346,6 +347,28 @@ public final class ChatStore {
     private java.io.File piContextFile(String conversation, String nodeId) {
         return new java.io.File(piContextDirectory(conversation), java.util.UUID.nameUUIDFromBytes(
                 nodeId.getBytes(java.nio.charset.StandardCharsets.UTF_8)).toString() + ".json");
+    }
+
+    private java.io.File piUiFile(String conversation, String nodeId) {
+        return new java.io.File(piContextDirectory(conversation), java.util.UUID.nameUUIDFromBytes(
+                nodeId.getBytes(java.nio.charset.StandardCharsets.UTF_8)).toString() + ".ui.json");
+    }
+
+    String extensionUi(List<AgentLoop.Message> path) { return extensionUi(activeId(), path); }
+
+    String extensionUi(String conversation, List<AgentLoop.Message> path) {
+        synchronized (STORE_LOCK) {
+            for (int i = path.size() - 1; i >= 0; i--) {
+                java.io.File file = piUiFile(conversation, path.get(i).id);
+                if (!file.exists() && !new java.io.File(file.getPath() + ".bak").exists()) continue;
+                try {
+                    String value = new String(new android.util.AtomicFile(file).readFully(),
+                            java.nio.charset.StandardCharsets.UTF_8);
+                    return new JSONObject(value).toString();
+                } catch (Exception ignored) { }
+            }
+            return "{}";
+        }
     }
 
     String piContext(String nodeId) throws java.io.IOException { return piContext(activeId(), nodeId); }

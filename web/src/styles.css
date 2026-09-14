@@ -66,7 +66,7 @@ small, .secondary { font-size: .85rem; color: var(--muted); }
 
 /* Open reading surface; only user turns and the composer have a container. */
 .chat-page { display: flex; flex-direction: column; position: relative; }
-.chat-header, .messages, .composer-wrap { touch-action: pan-y; }
+.chat-header, .messages { touch-action: pan-y; }
 .chat-header { display: flex; align-items: center; justify-content: space-between; padding: 10px 16px; min-height: 74px; flex: none; }
 .chat-header > .icon-button:first-child svg { width: 25px; height: 25px; }
 .model-title { min-width: 0; max-width: 70%; text-align: center; line-height: 1.3; }
@@ -126,6 +126,25 @@ small, .secondary { font-size: .85rem; color: var(--muted); }
 .empty-mark { font-weight: 500; font-size: 2.5rem; letter-spacing: -.08em; line-height: 1; display: inline-block; color: var(--accent); margin-bottom: 24px; }
 .chat-empty h1 { font-size: 1.5rem; font-weight: 600; letter-spacing: -.025em; margin-bottom: 8px; }.chat-empty p { color: var(--muted); font-size: .9rem; }
 .composer-wrap { position: relative; flex: none; padding: 6px 20px 8px; background: var(--bg); }
+.extension-dock:empty { display: none; }
+.extension-widget { max-height: 7em; overflow: auto; margin: 0 0 8px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); color: var(--text); font: .78rem/1.45 ui-monospace, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+.extension-status, .extension-notification { margin: 0 2px 7px; color: var(--muted); font-size: .78rem; overflow-wrap: anywhere; }
+.extension-notification { color: var(--accent); }
+.todo-progress { margin: 0 0 9px; padding: 9px 0 4px; border-block: 1px solid var(--line); }
+.todo-scroll { max-width: 100%; overflow-x: auto; overscroll-behavior-x: contain; touch-action: pan-x; scrollbar-width: none; cursor: grab; }
+.todo-scroll::-webkit-scrollbar { display: none; }
+.todo-scroll:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 8px; }
+.todo-scroll.dragging { cursor: grabbing; user-select: none; }
+.todo-track { display: flex; width: 100%; padding: 0; margin: 0; list-style: none; }
+.todo-node { position: relative; flex: 0 0 calc(100% / var(--todo-visible-count)); min-width: 0; display: flex; flex-direction: column; align-items: center; gap: 6px; padding-inline: 7px; text-align: center; color: var(--muted); }
+.todo-node:not(:last-child)::after { content: ''; position: absolute; z-index: 0; top: 11px; left: calc(50% + 10px); width: calc(100% - 20px); border-top: 1px solid var(--line); }
+.todo-marker { position: relative; z-index: 1; width: 22px; height: 22px; display: grid; place-items: center; border: 2px solid currentColor; border-radius: 50%; background: var(--bg); }
+.todo-marker svg { width: 14px; height: 14px; stroke-width: 2.6; }
+.todo-node.in_progress { color: var(--accent); }
+.todo-node.in_progress .todo-marker { border-width: 3px; box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent); }
+.todo-node.completed .todo-marker { border-color: var(--accent); background: var(--accent); color: var(--bg); }
+.todo-subject { width: 100%; color: var(--text); font-size: .78rem; line-height: 1.35; white-space: normal; overflow-wrap: anywhere; }
+.todo-node.completed .todo-subject { color: var(--muted); }
 .composer { position: relative; background: var(--surface); border-radius: 20px; padding: 8px 10px; }
 .composer:has(.attachment-popover) > textarea, .composer:has(.attachment-popover) > .attachments, .composer:has(.attachment-popover) > .composer-tools { position: relative; z-index: 26; }
 .composer textarea { display: block; width: 100%; min-height: 42px; max-height: 160px; padding: 8px 8px 2px; background: transparent; border: 0; border-radius: 0; outline: none; resize: none; }

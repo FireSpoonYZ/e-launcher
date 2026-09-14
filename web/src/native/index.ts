@@ -7,7 +7,15 @@ export type ConversationNode = { id: string; parentId: string|null; message: Mes
 export type Conversation = { id: string; leaf: string|null; nodes: ConversationNode[]; draft: string; draftAttachments: Attachment[]; piSelection: Record<string, unknown> };
 export type ConversationSummary = { id: string; title: string; updated: number };
 export type ActiveRun = { conversationId: string; requestId: string; status: string; message: string };
-export type ChatSnapshot = { error?: string; status?: string; sequence: number; running: boolean; requestId: string|null; conversationId: string; conversation: Conversation; activeRuns: ActiveRun[] };
+export type TodoTask = { id: number; subject: string; status: 'pending'|'in_progress'|'completed'|'deleted' };
+export type TodoSnapshot = { package: '@juicesharp/rpiv-todo'; tasks: TodoTask[]; nextId: number };
+export type ExtensionUiState = {
+  widgets?: Array<{key: string; placement: 'aboveEditor'|'belowEditor'; lines: string[]}>;
+  statuses?: Array<{key: string; text: string}>;
+  notifications?: Array<{id: number; type: string; message: string}>;
+  todo?: TodoSnapshot|null;
+};
+export type ChatSnapshot = { error?: string; status?: string; sequence: number; running: boolean; requestId: string|null; conversationId: string; conversation: Conversation; activeRuns: ActiveRun[]; extensionUi: ExtensionUiState };
 export type NativeEvent<T = Record<string, unknown>> = { sequence?: number; type: string; conversationId?: string; requestId?: string|null; nodeId?: string|null; payload?: T; [key: string]: unknown };
 export type Listener = (event: NativeEvent) => void;
 

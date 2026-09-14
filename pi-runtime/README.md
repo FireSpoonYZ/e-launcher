@@ -12,6 +12,8 @@ Requests use the SDK model's supported thinking levels. Session snapshots includ
 
 Models, resource diagnostics, OAuth prompts, credential updates, package operations and resource toggles use the SDK. Provider credentials are updated through the host's conflict-checked file store. The APK includes official npm **11.6.2** and an executable launcher linked to the existing Node Mobile library. npm sources use this bundled command by default; a custom `npmCommand` takes precedence. Git sources still require Git; local packages use app-accessible paths. Configured package paths are not proof that an extension loaded successfully.
 
+Android supplies a thin, non-TUI extension UI context. The first version displays text/factory widgets, status and notifications; dialogs return cancellation and terminal/custom-editor APIs remain unavailable. A normally installed, unmodified `@juicesharp/rpiv-todo` package is recognized from its loaded package metadata and shown as a native web progress strip. Todo recovery reads only structured tool-result snapshots, never rendered ANSI text.
+
 ## Bridge and packaging
 
 The app starts Node once with private `HOME`/`TMPDIR` and exchanges request-ID-tagged newline JSON over a randomized abstract Unix socket. The connecting peer must match the app process UID and PID. One operation per conversation is admitted at a time; independent conversations may run concurrently. The protocol includes busy rejection, cancellation, errors, OAuth replies and call-ID-tagged Shower requests. Startup failure is sticky until process restart.

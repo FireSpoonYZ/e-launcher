@@ -21,7 +21,7 @@ function Navigation() {
       const bridge = window.PagerGesture;
       if (!bridge) return;
       const target = event.target instanceof Element ? event.target : null;
-      const horizontal = target?.closest('pre,.table-scroll,.katex-display,.attachments');
+      const horizontal = target?.closest('pre,.table-scroll,.katex-display,.attachments,.todo-scroll');
       const scrollsHorizontally = !!horizontal && horizontal.scrollWidth > horizontal.clientWidth;
       bridge.setBlocked(bridge.gestureId(), event.touches.length !== 1
         || !!target?.closest(gestureTarget) || scrollsHorizontally || !!window.getSelection()?.toString()

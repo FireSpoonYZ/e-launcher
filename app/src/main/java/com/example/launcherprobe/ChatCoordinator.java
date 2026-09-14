@@ -92,6 +92,7 @@ final class ChatCoordinator {
 
     SessionRun registerRun(String conversationId, String submissionId) {
         SessionRun run = new SessionRun(conversationId, UUID.randomUUID().toString());
+        run.extensionUi = parseObject(store.extensionUi(conversationId, store.load(conversationId)));
         synchronized (runLock) {
             if (!conversationId.equals(store.activeId())) throw new IllegalStateException("会话已切换");
             if (activeRuns.containsKey(conversationId)) throw new IllegalStateException("此会话已有一轮正在运行，请先停止");
@@ -258,7 +259,10 @@ final class ChatCoordinator {
             synchronized (run.pendingDelta) { run.pendingDelta.append(event.optString("delta")); }
             flushPiDelta(false, run);
         } else if ("message".equals(type)) emit(run, "snapshot", null, event);
-        else if ("tool_start".equals(type)) emit(run, "toolStart", null, event);
+        else if ("extension_ui".equals(type) && persistenceFailure == null) {
+            run.extensionUi = parseObject(event.optJSONObject("state").toString());
+            emit(run, "extensionUi", null, run.extensionUi);
+        } else if ("tool_start".equals(type)) emit(run, "toolStart", null, event);
         else if ("tool_end".equals(type)) emit(run, "toolEnd", null, event);
         else if ("status".equals(type)) {
             run.status = "running";
@@ -337,10 +341,12 @@ final class ChatCoordinator {
         JSONArray active = new JSONArray();
         for (SessionRun run : runs) active.put(json("conversationId", run.conversationId,
                 "requestId", run.requestId, "status", run.status, "message", run.message));
+        JSONObject extensionUi = current == null
+                ? parseObject(store.extensionUi(activeId, store.load(activeId))) : current.extensionUi;
         return json("sequence", sequence.get(), "running", current != null,
                 "requestId", current == null ? JSONObject.NULL : current.requestId,
                 "conversationId", activeId, "conversation", NativeJson.conversation(store, activeId),
-                "activeRuns", active,
+                "activeRuns", active, "extensionUi", extensionUi,
                 "error", current != null ? current.error : recent == null ? "" : recent.error,
                 "status", current != null ? current.message : recent == null ? "" : recent.status);
     }
@@ -364,6 +370,7 @@ final class ChatCoordinator {
         volatile String assistantId;
         volatile String error = "";
         volatile String status = "running";
+        volatile JSONObject extensionUi = new JSONObject();
         volatile String message = "正在启动…";
         volatile long lastDeltaFlush;
         boolean nodeRegistered;
@@ -380,6 +387,11 @@ final class ChatCoordinator {
         final String status;
         final String error;
         RunResult(String status, String error) { this.status = status; this.error = error; }
+    }
+
+    private static JSONObject parseObject(String value) {
+        try { return new JSONObject(value); }
+        catch (org.json.JSONException exception) { return new JSONObject(); }
     }
 
     private static JSONObject json(Object... values) {

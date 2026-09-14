@@ -85,8 +85,30 @@ function requestShower(operation, arguments_, signal) {
   });
 }
 
+function requestApps(operation, arguments_, signal) {
+  const combined = signal ? AbortSignal.any([signal, operation.controller.signal])
+    : operation.controller.signal;
+  combined.throwIfAborted();
+  const callId = randomUUID();
+  return new Promise((resolve, reject) => {
+    const finish = (error, result) => {
+      clearTimeout(timeout);
+      combined.removeEventListener("abort", onAbort);
+      operation.nativeCalls.delete(callId);
+      if (error) reject(error);
+      else resolve(result);
+    };
+    const onAbort = () => finish(combined.reason instanceof Error
+      ? combined.reason : new Error("应用查询已取消"));
+    const timeout = setTimeout(() => finish(new Error("Android 应用查询 20 秒内未完成")), 20_000);
+    operation.nativeCalls.set(callId, { finish });
+    combined.addEventListener("abort", onAbort, { once:true });
+    send({ type:"apps_request", id:operation.id, callId, arguments:arguments_ });
+  });
+}
+
 async function handle(command) {
-  if (command.type === "shower_response") {
+  if (command.type === "shower_response" || command.type === "apps_response") {
     const operation = operations.get(command.id);
     const pending = operation?.nativeCalls.get(command.callId);
     if (pending) pending.finish(command.error ? new Error(command.error) : undefined, command.result);
@@ -132,7 +154,8 @@ async function handle(command) {
       return;
     }
     const runtime = command.sdk ? await createSdkRuntime(command, controller.signal,
-      (arguments_, signal) => requestShower(operation, arguments_, signal)) : createPiRuntime(command);
+      (arguments_, signal) => requestShower(operation, arguments_, signal),
+      (arguments_, signal) => requestApps(operation, arguments_, signal)) : createPiRuntime(command);
     operation.runtime = runtime;
     runtime.subscribe((event) => {
       if (ended) return;

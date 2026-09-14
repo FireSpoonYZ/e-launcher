@@ -13,6 +13,7 @@ final class PiTurnPersistence {
     private final List<AgentLoop.Message> path;
     private final StringBuilder delta = new StringBuilder();
     private JSONArray entries;
+    private JSONObject extensionUi;
     private boolean ended, toolStarted;
     private int assistantCount;
 
@@ -49,6 +50,10 @@ final class PiTurnPersistence {
             case "tool_start": toolStarted = true; break;
             case "message": append(event.getJSONObject("message")); break;
             case "context": entries = event.optJSONArray("entries"); break;
+            case "extension_ui":
+                extensionUi = new JSONObject(event.getJSONObject("state").toString())
+                        .put("notifications", new JSONArray());
+                break;
             case "end":
                 boolean incomplete = !"completed".equals(event.optString("status"));
                 if (delta.length() > 0) {
@@ -67,7 +72,7 @@ final class PiTurnPersistence {
                             Collections.emptyList(), true));
                 }
                 String contextNode = path.get(path.size() - 1).id;
-                store.savePiTurn(conversation, userId, assistantId, path, contextNode, entries);
+                store.savePiTurn(conversation, userId, assistantId, path, contextNode, entries, extensionUi);
                 ended = true;
                 break;
             default: break;

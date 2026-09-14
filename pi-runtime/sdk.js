@@ -10,6 +10,7 @@ import { InMemoryCredentialStore, getSupportedThinkingLevels } from "@earendil-w
 import undici from "./node_modules/@earendil-works/pi-coding-agent/node_modules/undici/index.js";
 import { toAgentHistory } from "./index.js";
 import { createShowerTool } from "./shower.js";
+import { createAppTools } from "./apps.js";
 
 // Some upstream adapters reject a custom fetch unless it is globalThis.fetch. Keep that identity
 // stable while AsyncLocalStorage routes every provider, OAuth and extension fetch to its runtime.
@@ -177,7 +178,7 @@ async function credentialChanges(s, config, emit) {
   }
 }
 
-export async function createSdkRuntime(command, signal, nativeShowerRequest) {
+export async function createSdkRuntime(command, signal, nativeShowerRequest, nativeAppRequest) {
   const config = command.config;
   const s = await services(config, signal);
   let session, lifecycle, disposed = false;
@@ -209,9 +210,10 @@ export async function createSdkRuntime(command, signal, nativeShowerRequest) {
     for (const message of await historyWithAttachments(command.sdkHistoryTail ?? [], config, model)) sessionManager.appendMessage(message);
     const showerTool = config.bundledShower
       ? createShowerTool({ request: nativeShowerRequest }) : undefined;
+    const appTools = nativeAppRequest ? createAppTools({ request:nativeAppRequest }) : [];
     const result = await s.withHttp(() => createAgentSessionFromServices({
       services: s, model, thinkingLevel: level, sessionManager,
-      customTools: showerTool ? [showerTool] : [],
+      customTools: [...appTools, ...(showerTool ? [showerTool] : [])],
     }));
     session = result.session;
     const stream = session.agent.streamFunction;

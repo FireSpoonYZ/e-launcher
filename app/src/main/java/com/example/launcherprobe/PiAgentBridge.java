@@ -32,8 +32,9 @@ final class PiAgentBridge {
     private final OutputStreamWriter writer;
     private final Map<String, Request> requests = new HashMap<>();
     private final Map<String, ShowerCall> showerCalls = new HashMap<>();
-    private final ExecutorService showerWorker = Executors.newFixedThreadPool(4);
+    private final ExecutorService nativeWorker = Executors.newFixedThreadPool(4);
     private final ShowerToolBridge showerTools;
+    private final AppCatalog appCatalog;
     private boolean closed;
 
     static synchronized PiAgentBridge get(Context context) throws Exception {
@@ -50,13 +51,14 @@ final class PiAgentBridge {
         if (bridge == null) return;
         synchronized (bridge) {
             if (!bridge.closed) {
-                bridge.showerWorker.execute(() -> bridge.showerTools.forgetConversation(conversationId));
+                bridge.nativeWorker.execute(() -> bridge.showerTools.forgetConversation(conversationId));
             }
         }
     }
 
     private PiAgentBridge(Context context) throws Exception {
         showerTools = new ShowerToolBridge(context);
+        appCatalog = new AppCatalog(context);
         System.loadLibrary("node");
         System.loadLibrary("launcher_node");
         File home = new File(context.getFilesDir(), "node");
@@ -247,6 +249,10 @@ final class PiAgentBridge {
                     cancelShowerCall(event.optString("callId"));
                     continue;
                 }
+                if ("apps_request".equals(type)) {
+                    handleAppsRequest(event);
+                    continue;
+                }
                 synchronized (this) {
                     if (closed) continue;
                     String id = event.optString("id");
@@ -316,7 +322,30 @@ final class PiAgentBridge {
         });
         call.task = task;
         showerCalls.put(callId, call);
-        showerWorker.execute(task);
+        nativeWorker.execute(task);
+    }
+
+    private synchronized void handleAppsRequest(JSONObject event) {
+        String requestId = event.optString("id");
+        String callId = event.optString("callId");
+        JSONObject arguments = event.optJSONObject("arguments");
+        if (closed || requestId.isEmpty() || callId.isEmpty() || !requests.containsKey(requestId)) return;
+        nativeWorker.execute(new FutureTask<Void>(() -> {
+            JSONObject response = new JSONObject().put("type", "apps_response")
+                    .put("id", requestId).put("callId", callId);
+            try {
+                response.put("result", appCatalog.execute(arguments));
+            } catch (Exception exception) {
+                response.put("error", exception.getMessage() == null
+                        ? exception.getClass().getSimpleName() : exception.getMessage());
+            }
+            synchronized (PiAgentBridge.this) {
+                if (closed || !requests.containsKey(requestId)) return null;
+                try { write(response); }
+                catch (Exception exception) { fail("应用查询结果发送失败"); }
+            }
+            return null;
+        }));
     }
 
     private synchronized void cancelShowerCall(String callId) {
@@ -341,7 +370,7 @@ final class PiAgentBridge {
         for (ShowerCall call : showerCalls.values()) call.task.cancel(true);
         showerCalls.clear();
         showerTools.shutdown();
-        showerWorker.shutdownNow();
+        nativeWorker.shutdownNow();
         try { socket.close(); } catch (Exception ignored) { }
         Map<String, Request> failed = new HashMap<>(requests);
         requests.clear();

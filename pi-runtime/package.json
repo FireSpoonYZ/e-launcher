@@ -6,7 +6,7 @@
   "scripts": {
     "build:android": "node build.js",
     "check": "node check.js",
-    "test": "node settings-check.js && node check.js && node sdk-check.js && node shower-check.js && node build.js && node check-bridge.js && node ../app/src/androidTest/assets/npm-check.cjs node_modules/npm/bin/npm-cli.js ../app/src/main/assets/pi-runtime.cjs"
+    "test": "node settings-check.js && node check.js && node sdk-check.js && node apps-check.js && node shower-check.js && node build.js && node check-bridge.js && node ../app/src/androidTest/assets/npm-check.cjs node_modules/npm/bin/npm-cli.js ../app/src/main/assets/pi-runtime.cjs"
   },
   "engines": {
     "node": ">=22.19.0"
