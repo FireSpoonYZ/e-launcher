@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Chat, NativeSettings, type Conversation } from './native';
 import { type CatalogProvider } from './Chat';
 import { ComposerPopover } from './ComposerPopover';
-import { ErrorNotice, Loading, errorText, query, useText } from './ui';
+import { ErrorNotice, errorText, query, useText } from './ui';
 
 const scale = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
 const names: Record<string, [string,string]> = {
@@ -18,13 +18,13 @@ function Gauge({level}: {level:string}) {
     <circle cx="16" cy="16" r="2" className="gauge-pivot"/>
   </svg>;
 }
-export function ThinkingControl({conversation,level,disabled,onChange,open,onOpenChange}: {conversation:Conversation;level:string;disabled:boolean;onChange():Promise<void>;open:boolean;onOpenChange(open:boolean):void}) {
+export function ThinkingControl({conversation,level,disabled,onChange,open,onOpenChange,visible}: {conversation:Conversation;level:string;disabled:boolean;onChange():Promise<void>;open:boolean;onOpenChange(open:boolean):void;visible:boolean}) {
   const t=useText();
   const label=names[level] ?? [level || '默认',level || 'Default'];
-  return <><button className="icon-button reasoning-button" aria-label={`${t('思考强度','Thinking level')}：${t(...label)}`} aria-haspopup="dialog" aria-expanded={open} disabled={disabled} onPointerDown={e=>e.preventDefault()} onMouseDown={e=>e.preventDefault()} onClick={()=>onOpenChange(true)}><Gauge level={level}/></button>
-    {open&&<ThinkingSheet conversation={conversation} level={level} onChange={onChange} close={()=>onOpenChange(false)}/>}</>;
+  return <><button style={visible ? undefined : {display:'none'}} className="icon-button reasoning-button" aria-label={`${t('思考强度','Thinking level')}：${t(...label)}`} aria-haspopup="dialog" aria-expanded={open} disabled={disabled} onPointerDown={e=>e.preventDefault()} onMouseDown={e=>e.preventDefault()} onClick={()=>onOpenChange(true)}><Gauge level={level}/></button>
+    <ThinkingSheet key={JSON.stringify([conversation.id,conversation.piSelection.provider,conversation.piSelection.model])} open={open && visible} conversation={conversation} level={level} onChange={onChange} close={()=>onOpenChange(false)}/></>;
 }
-function ThinkingSheet({conversation,level,onChange,close}: {conversation:Conversation;level:string;onChange():Promise<void>;close():void}) {
+function ThinkingSheet({conversation,level,onChange,close,open}: {conversation:Conversation;level:string;onChange():Promise<void>;close():void;open:boolean}) {
   const t=useText();const [levels,setLevels]=useState<string[]>([]);const [model,setModel]=useState<{provider:string;id:string}>();
   const [selected,setSelected]=useState(level);const [error,setError]=useState('');const [busy,setBusy]=useState(false);
   useEffect(()=>{
@@ -40,6 +40,7 @@ function ThinkingSheet({conversation,level,onChange,close}: {conversation:Conver
     })().catch(e=>{if(live)setError(errorText(e));});
     return()=>{live=false;};
   },[]);
+  useEffect(()=>{setSelected(level);},[level,open]);
   const commit=async(value:string)=>{
     if(!model || busy || value===level || !levels.includes(value))return;
     setBusy(true);setError('');
@@ -56,9 +57,9 @@ function ThinkingSheet({conversation,level,onChange,close}: {conversation:Conver
     const value = levels[Math.round(Math.max(0,Math.min(1,(x-rect.left)/rect.width))*(levels.length-1))];
     setSelected(value); return value;
   };
-  return <ComposerPopover compact close={close} title={t('思考强度','Thinking level')}>
+  return <ComposerPopover compact open={open && (!!model || !!error)} close={close} title={t('思考强度','Thinking level')}>
     <div className="reasoning-picker" aria-busy={busy}>
-      {!model&&!error?<Loading/>:levels.length>1?<>
+      {levels.length>1?<>
         <output className="reasoning-readout" aria-live="polite"><span>{t(...label)}</span>{t('推理强度',' reasoning')}</output>
         <div className="reasoning-slider" role="slider" tabIndex={0} aria-label={t('思考强度','Thinking level')} aria-valuemin={0} aria-valuemax={levels.length-1} aria-valuenow={position} aria-valuetext={t(...label)} aria-disabled={busy}
           onPointerDown={e=>{e.preventDefault(); if(!busy){e.currentTarget.setPointerCapture(e.pointerId);pick(e.clientX);}}}

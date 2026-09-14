@@ -7,8 +7,10 @@ Windows 上使用仓库根目录的 Gradle Wrapper。常规编译：
 ```powershell
 $env:ANDROID_HOME = "$env:LOCALAPPDATA\Android\Sdk"
 $env:JAVA_HOME = "$env:ProgramFiles\Microsoft\jdk-21.0.9.10-hotspot"
-.\gradlew.bat build
+.\gradlew.bat build --no-daemon --console=plain
 ```
+
+后台构建统一加上 `--no-daemon --console=plain`，避免长期驻留的 Gradle Daemon 影响后台工具结束判定，并使用普通文本日志。通过 PowerShell 包装构建命令时，末尾加上 `exit $LASTEXITCODE`，将 Gradle 退出码传给后台工具。
 
 完整检查用 `scripts/verify.ps1`，该脚本要求 `JAVA_HOME` 指向 JDK 21，未设置 `ANDROID_HOME` 时使用 `%LOCALAPPDATA%\Android\Sdk`，并通过 `gradlew.bat` 执行 assemble、lint 和单元测试。
 

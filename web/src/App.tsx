@@ -25,7 +25,7 @@ function Navigation() {
       const scrollsHorizontally = !!horizontal && horizontal.scrollWidth > horizontal.clientWidth;
       bridge.setBlocked(bridge.gestureId(), event.touches.length !== 1
         || !!target?.closest(gestureTarget) || scrollsHorizontally || !!window.getSelection()?.toString()
-        || !!document.querySelector('[role="dialog"],.composer-popover,.attachment-popover')
+        || !!document.querySelector('[role="dialog"],.attachment-popover')
         || !window.location.hash.startsWith('#/chat'));
     };
     const selectionChanged = () => {
