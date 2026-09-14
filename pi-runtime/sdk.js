@@ -10,8 +10,6 @@ import { InMemoryCredentialStore, getSupportedThinkingLevels } from "@earendil-w
 import undici from "./node_modules/@earendil-works/pi-coding-agent/node_modules/undici/index.js";
 import { getThemeByName } from "./node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/theme.js";
 import { toAgentHistory } from "./index.js";
-import { createShowerTool } from "./shower.js";
-import { createAppTools } from "./apps.js";
 import {
   ExtensionUiBridge,
   findRpivAskUserQuestionTool,
@@ -40,7 +38,7 @@ function createOriginDispatcher(origin, options) {
   return quietDispatcher(new undici.Pool(origin, { ...options, factory: createOriginClient }));
 }
 
-async function services(config, signal) {
+async function services(config, signal, resourceLoaderOptions) {
   if (!config?.agentDir || !config?.cwd || !config?.cacheDir) throw new Error("缺少应用私有运行目录");
   for (const [key, value] of Object.entries(config.runtimeEnvironment ?? {})) {
     if (typeof value !== "string") throw new Error("运行环境配置无效");
@@ -86,7 +84,7 @@ async function services(config, signal) {
         modelsStorePath: join(agentDir, "models-store.json"), allowModelNetwork: false, signal });
       if (modelRuntime.getError()) throw new Error(modelRuntime.getError());
       return createAgentSessionServices({ cwd, agentDir, settingsManager, modelRuntime,
-        modelRuntimeSignal: signal });
+        modelRuntimeSignal: signal, resourceLoaderOptions });
     });
     return { ...native, credentials, fetch, withHttp: (task) => sessionHttp.run(fetch, task), dispose: async () => {
       try { await dispatcher.close(); }
@@ -186,9 +184,9 @@ async function credentialChanges(s, config, emit) {
   }
 }
 
-export async function createSdkRuntime(command, signal, nativeShowerRequest, nativeAppRequest) {
+export async function createSdkRuntime(command, signal, resourceLoaderOptions) {
   const config = command.config;
-  const s = await services(config, signal);
+  const s = await services(config, signal, resourceLoaderOptions);
   let session, lifecycle, uiBridge, disposed = false;
   const dispose = async () => {
     if (disposed) return;
@@ -218,12 +216,8 @@ export async function createSdkRuntime(command, signal, nativeShowerRequest, nat
     const sessionManager = SessionManager.inMemory(s.cwd, undefined, nativeEntries ? history : undefined);
     if (!nativeEntries) for (const message of history) sessionManager.appendMessage(message);
     for (const message of await historyWithAttachments(command.sdkHistoryTail ?? [], config, model)) sessionManager.appendMessage(message);
-    const showerTool = config.bundledShower
-      ? createShowerTool({ request: nativeShowerRequest }) : undefined;
-    const appTools = nativeAppRequest ? createAppTools({ request:nativeAppRequest }) : [];
     const result = await s.withHttp(() => createAgentSessionFromServices({
       services: s, model, thinkingLevel: level, sessionManager,
-      customTools: [...appTools, ...(showerTool ? [showerTool] : [])],
     }));
     session = result.session;
     const stream = session.agent.streamFunction;
@@ -336,8 +330,8 @@ export async function createSdkRuntime(command, signal, nativeShowerRequest, nat
 }
 
 /** Settings reads use the same native registry as chat, not a separate model catalog. */
-export async function sdkQuery(command, signal, emit = () => {}, interact = async () => { throw new Error("登录需要用户输入"); }) {
-  const s = await services(command.config, signal);
+export async function sdkQuery(command, signal, emit = () => {}, interact = async () => { throw new Error("登录需要用户输入"); }, resourceLoaderOptions) {
+  const s = await services(command.config, signal, resourceLoaderOptions);
   try {
     return await s.withHttp(async () => {
     if (["packages", "install", "remove", "update", "resource_paths", "resource_toggle"].includes(command.type)) {

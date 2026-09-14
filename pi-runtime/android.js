@@ -2,6 +2,8 @@ import net from "node:net";
 import { randomUUID } from "node:crypto";
 import { createPiRuntime } from "./index.js";
 import { createSdkRuntime, sdkQuery } from "./sdk.js";
+import { createEventBus } from "@earendil-works/pi-coding-agent";
+import phoneControl from "./extensions/phone-control/index.js";
 
 // cross-spawn otherwise changes the process cwd temporarily while resolving cwd-bound commands.
 // That is unsafe when independent session runtimes execute concurrently in this process.
@@ -164,17 +166,26 @@ async function handle(command) {
   operations.set(id, operation);
   if (conversationId) sessions.set(conversationId, operation);
   try {
+    const eventBus = createEventBus();
+    eventBus.on("phone-control:bridge", (bridge) => {
+      bridge.requestApps = (arguments_, signal) => requestApps(operation, arguments_, signal);
+      if (command.type !== "prompt" || command.config?.bundledShower) {
+        bridge.requestShower = (arguments_, signal) => requestShower(operation, arguments_, signal);
+      }
+    });
+    const resourceLoaderOptions = {
+      eventBus, extensionFactories: [{ name: "phone-control", factory: phoneControl }],
+    };
     if (command.type !== "prompt") {
       const result = await sdkQuery(command, controller.signal, sendEvent,
-        (prompt) => requestAuth(prompt, operation));
+        (prompt) => requestAuth(prompt, operation), resourceLoaderOptions);
       sendEvent({ type: "result", result });
       sendEvent({ type: "end", status: "completed" });
       ended = true;
       return;
     }
     const runtime = command.sdk ? await createSdkRuntime(command, controller.signal,
-      (arguments_, signal) => requestShower(operation, arguments_, signal),
-      (arguments_, signal) => requestApps(operation, arguments_, signal)) : createPiRuntime(command);
+      resourceLoaderOptions) : createPiRuntime(command);
     operation.runtime = runtime;
     runtime.subscribe((event) => {
       if (ended) return;

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createShowerTool } from "./shower.js";
+import { createShowerTool } from "./extensions/phone-control/shower.js";
 
 const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aXioAAAAASUVORK5CYII=";
 const calls = [];

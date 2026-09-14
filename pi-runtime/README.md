@@ -2,7 +2,9 @@
 
 Android Pi mode uses the full `@earendil-works/pi-coding-agent` SDK, pinned to **0.85.1**, with matching Pi core/AI packages. `sdk.js` owns session creation, native model/resource loading, tools, thinking levels, compaction, retries, credentials and package operations. The smaller `createPiRuntime` adapter in `index.js` remains for compatibility and regression checks.
 
-The built-in `shower` tool is a direct native bridge to the app's Operit Shower controller, not MCP or loopback HTTP. Node sends request-ID/call-ID tagged operations over the existing same-UID/same-PID local socket; Java validates and serializes them onto the single virtual display. Responses carry real errors, and cancellation or the 20-second timeout sends a native cancel without replay. Screenshots return PNG image content plus both virtual-display and scaled-image dimensions. An explicit `release` owns cleanup across Pi turns.
+The independent [`@e-launcher/pi-phone-control`](extensions/phone-control/README.md) extension owns `shower`, `list_apps` and `search_apps`. Android loads it through Pi's native extension loader as the named bundled extension `phone-control`; `sdk.js` only accepts generic resource-loader options and no longer registers phone tools through `customTools`. Each operation supplies native callbacks through its own loader event bus, preserving conversation isolation. The extension is included in the Android bundle and can also be packaged separately with `npm pack`.
+
+The `shower` tool is a direct native bridge to the app's Operit Shower controller, not MCP or loopback HTTP. Node sends request-ID/call-ID tagged operations over the existing same-UID/same-PID local socket; Java validates and serializes them onto the single virtual display. Responses carry real errors, and cancellation or the 20-second timeout sends a native cancel without replay. Screenshots return PNG image content plus both virtual-display and scaled-image dimensions. An explicit `release` owns cleanup across Pi turns.
 
 ## Configuration and sessions
 

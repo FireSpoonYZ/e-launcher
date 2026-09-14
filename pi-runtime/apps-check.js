@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createAppTools } from "./apps.js";
+import { createAppTools } from "./extensions/phone-control/apps.js";
 
 const calls = [];
 const tools = createAppTools({ request:async (arguments_, signal) => {
