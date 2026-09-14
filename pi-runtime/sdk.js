@@ -8,9 +8,11 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { InMemoryCredentialStore, getSupportedThinkingLevels } from "@earendil-works/pi-ai";
 import undici from "./node_modules/@earendil-works/pi-coding-agent/node_modules/undici/index.js";
+import { getThemeByName } from "./node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/theme.js";
 import { toAgentHistory } from "./index.js";
 import { createShowerTool } from "./shower.js";
 import { createAppTools } from "./apps.js";
+import { ExtensionUiBridge, findRpivTodoTool, readTodoSnapshot, replayRpivTodo } from "./extension-ui.js";
 
 // Some upstream adapters reject a custom fetch unless it is globalThis.fetch. Keep that identity
 // stable while AsyncLocalStorage routes every provider, OAuth and extension fetch to its runtime.
@@ -181,15 +183,17 @@ async function credentialChanges(s, config, emit) {
 export async function createSdkRuntime(command, signal, nativeShowerRequest, nativeAppRequest) {
   const config = command.config;
   const s = await services(config, signal);
-  let session, lifecycle, disposed = false;
+  let session, lifecycle, uiBridge, disposed = false;
   const dispose = async () => {
     if (disposed) return;
     disposed = true;
+    uiBridge?.suspend();
     try {
       if (lifecycle) await s.withHttp(() => lifecycle.dispose());
       else session?.dispose();
     } finally {
-      await s.dispose();
+      try { uiBridge?.dispose(); }
+      finally { await s.dispose(); }
     }
   };
   try {
@@ -221,9 +225,24 @@ export async function createSdkRuntime(command, signal, nativeShowerRequest, nat
       stream(requestModel, context, { ...options, fetch: globalThis.fetch });
     if (session.thinkingLevel !== level) throw new Error(`模型实际支持的思考强度为 ${session.thinkingLevel}，请重新选择`);
     lifecycle = new AgentSessionRuntime(session, s, async () => { throw new Error("不支持在单轮中替换会话"); }, s.diagnostics);
-    await s.withHttp(() => session.bindExtensions({ mode: "print" }));
     const listeners = new Set();
     const emit = (event) => { for (const listener of listeners) listener(event); };
+    const todoTool = await findRpivTodoTool(session.getAllTools());
+    let todo = replayRpivTodo(session.sessionManager.getBranch(), todoTool);
+    let genericUi, uiReady = false;
+    const extensionUi = () => ({ ...genericUi, todo });
+    const emitExtensionUi = () => emit({ type:"extension_ui", state:structuredClone(extensionUi()) });
+    const configuredTheme = s.settingsManager.getTheme();
+    uiBridge = new ExtensionUiBridge({
+      theme:getThemeByName(configuredTheme) ?? getThemeByName("dark") ?? {},
+      ignoredWidgetKeys:todoTool ? new Set(["rpiv-todos"]) : new Set(),
+    });
+    uiBridge.subscribe((snapshot) => {
+      genericUi = snapshot;
+      if (uiReady) emitExtensionUi();
+    });
+    await s.withHttp(() => session.bindExtensions({ uiContext:uiBridge.ui }));
+    uiReady = true;
     let eventQueue = Promise.resolve(), eventError;
     session.subscribe((event) => {
       eventQueue = eventQueue.then(async () => {
@@ -236,6 +255,13 @@ export async function createSdkRuntime(command, signal, nativeShowerRequest, nat
             toolCalls: event.message.content.filter((part) => part.type === "toolCall")
               .map((part) => ({ id: part.id, name: part.name, arguments: JSON.stringify(part.arguments) })) } });
         } else if (event.type === "message_end" && event.message.role === "toolResult") {
+          if (todoTool && event.message.toolName === todoTool.name) {
+            const snapshot = readTodoSnapshot(event.message.details);
+            if (snapshot) {
+              todo = snapshot;
+              emitExtensionUi();
+            }
+          }
           emit({ type: "message", message: { role: "tool",
             content: event.message.content.filter((part) => part.type === "text").map((part) => part.text).join("\n"),
             toolCallId: event.message.toolCallId,
@@ -251,7 +277,11 @@ export async function createSdkRuntime(command, signal, nativeShowerRequest, nat
       }).catch((error) => { eventError ??= error; });
     });
     return {
-      subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
+      subscribe(listener) {
+        listeners.add(listener);
+        listener({ type:"extension_ui", state:structuredClone(extensionUi()) });
+        return () => listeners.delete(listener);
+      },
       abort() { return session.abort(); },
       async prompt(text, attachments = command.attachments) {
         const onAbort = () => { void session.abort(); };
