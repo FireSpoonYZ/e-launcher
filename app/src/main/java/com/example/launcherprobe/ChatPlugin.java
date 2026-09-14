@@ -27,7 +27,8 @@ public final class ChatPlugin extends Plugin {
     @PluginMethod public void snapshot(PluginCall call) { resolve(call, coordinator.snapshot()); }
     @PluginMethod public void getConversation(PluginCall call) { resolve(call, NativeJson.conversation(coordinator.store())); }
     @PluginMethod public void listConversations(PluginCall call) {
-        try { resolve(call, new JSONObject().put("conversations", NativeJson.conversations(coordinator.store().conversations()))); }
+        try { resolve(call, new JSONObject().put("conversations", NativeJson.conversations(
+                coordinator.store().conversations(call.getString("query"))))); }
         catch (Exception exception) { reject(call, exception); }
     }
 

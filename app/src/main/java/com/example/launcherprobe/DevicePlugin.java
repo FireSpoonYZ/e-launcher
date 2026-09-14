@@ -6,10 +6,6 @@ import android.content.Intent;
 import android.net.Uri;
 import android.provider.Settings;
 import android.speech.RecognizerIntent;
-import android.provider.MediaStore;
-
-import androidx.activity.result.PickVisualMediaRequest;
-import androidx.activity.result.contract.ActivityResultContracts;
 
 import com.getcapacitor.JSObject;
 import com.getcapacitor.Plugin;
@@ -90,27 +86,9 @@ public final class DevicePlugin extends Plugin {
         try {
             String kind = required(call, "kind");
             required(call, "conversationId");
-            if ("camera".equals(kind)) {
-                java.io.File camera = new java.io.File(getContext().getCacheDir(), "chat-camera");
-                if (!camera.isDirectory() && !camera.mkdirs()) throw new IllegalStateException("无法准备相机文件");
-                java.io.File capture = new java.io.File(camera, java.util.UUID.randomUUID() + ".jpg");
-                Uri output = androidx.core.content.FileProvider.getUriForFile(getContext(), getContext().getPackageName() + ".files", capture);
-                call.getData().put("capturePath", capture.getAbsolutePath());
-                Intent intent = new Intent(MediaStore.ACTION_IMAGE_CAPTURE).putExtra(MediaStore.EXTRA_OUTPUT, output)
-                        .addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION | Intent.FLAG_GRANT_READ_URI_PERMISSION);
-                if (intent.resolveActivity(getContext().getPackageManager()) == null) throw new IllegalStateException("没有可用的相机应用");
-                startActivityForResult(call, intent, "attachmentResult");
-            } else {
-                boolean image = "image".equals(kind);
-                if (!image && !"file".equals(kind)) throw new IllegalArgumentException("附件类型无效");
-                Intent intent = image
-                        ? new ActivityResultContracts.PickMultipleVisualMedia().createIntent(getContext(),
-                                new PickVisualMediaRequest.Builder()
-                                        .setMediaType(ActivityResultContracts.PickVisualMedia.ImageOnly.INSTANCE).build())
-                        : new Intent(Intent.ACTION_OPEN_DOCUMENT).setType("*/*")
-                                .addCategory(Intent.CATEGORY_OPENABLE).putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
-                startActivityForResult(call, intent, "attachmentResult");
-            }
+            java.io.File capture = "camera".equals(kind) ? AttachmentPicker.cameraFile(getContext()) : null;
+            if (capture != null) call.getData().put("capturePath", capture.getAbsolutePath());
+            startActivityForResult(call, AttachmentPicker.intent(getContext(), kind, capture), "attachmentResult");
         } catch (Exception exception) { reject(call, exception); }
     }
 
@@ -122,32 +100,12 @@ public final class DevicePlugin extends Plugin {
             call.reject("选择已取消"); return;
         }
         worker.execute(() -> {
-            java.util.List<ChatAttachment> imported = new java.util.ArrayList<>();
             try {
-                String conversation = required(call, "conversationId");
-                ChatStore store = ChatCoordinator.get(getContext()).store();
-                store.beginAttachmentImport(conversation);
-                AttachmentStore files = new AttachmentStore(getContext());
-                if (capturePath != null) {
-                    java.io.File capture = new java.io.File(capturePath);
-                    imported.add(files.stageUri(androidx.core.content.FileProvider.getUriForFile(getContext(), getContext().getPackageName() + ".files", capture), true));
-                } else {
-                    Intent data = result.getData();
-                    if (data == null) throw new IllegalArgumentException("未选择附件");
-                    boolean image = "image".equals(call.getString("kind"));
-                    if (data.getClipData() != null) for (int i = 0; i < data.getClipData().getItemCount(); i++)
-                        imported.add(files.stageUri(data.getClipData().getItemAt(i).getUri(), image));
-                    else if (data.getData() != null) imported.add(files.stageUri(data.getData(), image));
-                }
-                java.util.List<ChatAttachment> published = store.publishDraftAttachments(conversation, imported);
+                java.util.List<ChatAttachment> published = AttachmentPicker.importResult(getContext(),
+                        ChatCoordinator.get(getContext()).store(), required(call, "conversationId"),
+                        call.getString("kind"), capturePath == null ? null : new java.io.File(capturePath), result.getData());
                 call.resolve(object("attachments", AttachmentStore.json(published)));
-                imported.clear();
-            } catch (Exception exception) {
-                reject(call, exception);
-            } finally {
-                for (ChatAttachment item : imported) new java.io.File(item.path).delete();
-                if (capturePath != null) new java.io.File(capturePath).delete();
-            }
+            } catch (Exception exception) { reject(call, exception); }
         });
     }
 

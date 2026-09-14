@@ -363,12 +363,12 @@ export function readTodoSnapshot(details) {
     tasks.push({ id:task.id, subject:task.subject, status:task.status });
   }
   if (tasks.some((task) => task.id >= details.nextId)) return undefined;
-  return { tasks, nextId:details.nextId };
+  return { package:RPIV_TODO_PACKAGE, tasks, nextId:details.nextId };
 }
 
 export function replayRpivTodo(branch, recognizedTool) {
   if (!recognizedTool) return null;
-  let snapshot = { tasks:[], nextId:1 };
+  let snapshot = { package:RPIV_TODO_PACKAGE, tasks:[], nextId:1 };
   for (const entry of branch) {
     const message = entry?.type === "message" ? entry.message : undefined;
     if (message?.role !== "toolResult" || message.toolName !== recognizedTool.name) continue;

@@ -7,11 +7,14 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 
 /** App-private conversation trees and provider settings. Backups are disabled in the manifest. */
 public final class ChatStore {
     private static final int MAX_TOOL_ARGUMENTS = 50_000;
+    private static final String TASK_CARDS = "task_cards";
     private static final Object STORE_LOCK = new Object();
     private final Context context;
     private final SharedPreferences preferences;
@@ -48,6 +51,27 @@ public final class ChatStore {
         preferences.edit().putString("pi_selection_" + conversationId, selection.toString()).apply();
     }
 
+    /** A reusable unsent conversation, independent of the currently opened chat. */
+    String homeDraftId() {
+        String id = preferences.getString("home_draft", null);
+        return id != null && tree(id).nodes().isEmpty() ? id : null;
+    }
+
+    String prepareHomeDraft() {
+        synchronized (STORE_LOCK) {
+            String id = homeDraftId();
+            if (id == null) {
+                id = java.util.UUID.randomUUID().toString();
+                preferences.edit().putString("home_draft", id).apply();
+            }
+            return id;
+        }
+    }
+
+    void selectHomeDraft() {
+        preferences.edit().putString("active_chat", prepareHomeDraft()).apply();
+    }
+
     public String draft() { return draft(activeId()); }
     String draft(String conversationId) { return preferences.getString("draft_" + conversationId, ""); }
 
@@ -55,8 +79,8 @@ public final class ChatStore {
 
     void saveDraft(String conversationId, String text) {
         synchronized (STORE_LOCK) {
-            if (!conversationId.equals(activeId()) && !conversationIndex().has(conversationId))
-                throw new IllegalStateException("会话已删除");
+            if (!conversationId.equals(activeId()) && !conversationId.equals(homeDraftId())
+                    && !conversationIndex().has(conversationId)) throw new IllegalStateException("会话已删除");
             SharedPreferences.Editor edit = preferences.edit().putString("draft_" + conversationId, text);
             if (text != null && !text.isEmpty()) registerConversation(edit, conversationId);
             edit.apply();
@@ -84,8 +108,8 @@ public final class ChatStore {
 
     void beginAttachmentImport(String conversationId) {
         synchronized (STORE_LOCK) {
-            if (!conversationId.equals(activeId()) && !conversationIndex().has(conversationId))
-                throw new IllegalStateException("会话已删除");
+            if (!conversationId.equals(activeId()) && !conversationId.equals(homeDraftId())
+                    && !conversationIndex().has(conversationId)) throw new IllegalStateException("会话已删除");
             SharedPreferences.Editor edit = preferences.edit();
             registerConversation(edit, conversationId);
             if (!edit.commit()) throw new IllegalStateException("无法登记附件导入会话");
@@ -150,11 +174,14 @@ public final class ChatStore {
         public final String id;
         public final String title;
         public final long updated;
+        public final String snippet;
 
-        Conversation(String id, String title, long updated) {
+        Conversation(String id, String title, long updated) { this(id, title, updated, null); }
+        Conversation(String id, String title, long updated, String snippet) {
             this.id = id;
             this.title = title;
             this.updated = updated;
+            this.snippet = snippet;
         }
     }
 
@@ -169,6 +196,68 @@ public final class ChatStore {
                     item.optLong("updated")));
         }
         result.sort((left, right) -> Long.compare(right.updated, left.updated));
+        return result;
+    }
+
+    List<Conversation> conversations(String query) {
+        String needle = query == null ? "" : query.trim().toLowerCase(Locale.ROOT);
+        List<Conversation> all = conversations();
+        if (needle.isEmpty()) return all;
+        List<Conversation> matches = new ArrayList<>();
+        for (Conversation conversation : all) {
+            boolean matched = conversation.title.toLowerCase(Locale.ROOT).contains(needle);
+            String snippet = null;
+            for (ConversationTree.Node node : tree(conversation.id, false).nodes()) {
+                String content = node.message.content;
+                if (content == null || content.trim().isEmpty()
+                        || !content.toLowerCase(Locale.ROOT).contains(needle)) continue;
+                matched = true;
+                snippet = content.replaceAll("[\\r\\n]+", " ").trim();
+                snippet = snippet.substring(0, Math.min(120, snippet.length()));
+                break;
+            }
+            if (matched) matches.add(new Conversation(conversation.id, conversation.title,
+                    conversation.updated, snippet));
+        }
+        return matches;
+    }
+
+    List<String> taskCardIds() {
+        synchronized (STORE_LOCK) {
+            try {
+                JSONArray stored = new JSONArray(preferences.getString(TASK_CARDS, "[]"));
+                LinkedHashSet<String> ids = new LinkedHashSet<>();
+                for (int index = 0; index < stored.length(); index++) {
+                    Object value = stored.opt(index);
+                    if (value instanceof String && !((String) value).isEmpty()) ids.add((String) value);
+                }
+                return new ArrayList<>(ids);
+            } catch (org.json.JSONException exception) {
+                throw new IllegalStateException("无法读取任务卡列表", exception);
+            }
+        }
+    }
+
+    void showTaskCard(String conversationId) {
+        synchronized (STORE_LOCK) {
+            List<String> ids = taskCardIds();
+            if (ids.contains(conversationId)) return;
+            ids.add(conversationId);
+            preferences.edit().putString(TASK_CARDS, stringArray(ids).toString()).apply();
+        }
+    }
+
+    void dismissTaskCard(String conversationId) {
+        synchronized (STORE_LOCK) {
+            List<String> ids = taskCardIds();
+            if (!ids.remove(conversationId)) return;
+            preferences.edit().putString(TASK_CARDS, stringArray(ids).toString()).apply();
+        }
+    }
+
+    private static JSONArray stringArray(List<String> values) {
+        JSONArray result = new JSONArray();
+        for (String value : values) result.put(value);
         return result;
     }
 
@@ -196,7 +285,9 @@ public final class ChatStore {
 
     public ConversationTree tree() { return tree(activeId()); }
 
-    ConversationTree tree(String conversation) {
+    ConversationTree tree(String conversation) { return tree(conversation, true); }
+
+    private ConversationTree tree(String conversation, boolean persistLegacyIdentities) {
         try {
             Object stored = new org.json.JSONTokener(preferences.getString(historyKey(conversation), "[]")).nextValue();
             boolean legacy = stored instanceof JSONArray;
@@ -213,7 +304,8 @@ public final class ChatStore {
             }
             ConversationTree tree = new ConversationTree(nodes, legacy ? parent : envelope.optString("leaf", null));
             // Persist generated identities once, before any caller can hold a path containing them.
-            if (legacy && !nodes.isEmpty()) preferences.edit().putString(historyKey(conversation), encodeTree(tree).toString()).apply();
+            if (persistLegacyIdentities && legacy && !nodes.isEmpty())
+                preferences.edit().putString(historyKey(conversation), encodeTree(tree).toString()).apply();
             return tree;
         } catch (Exception exception) {
             throw new IllegalStateException("无法读取聊天记录", exception);
@@ -486,9 +578,13 @@ public final class ChatStore {
             directory.delete();
             JSONObject index = conversationIndex();
             index.remove(conversationId);
+            List<String> taskCards = taskCardIds();
+            taskCards.remove(conversationId);
             SharedPreferences.Editor edit = preferences.edit().remove(historyKey(conversationId))
                     .remove("draft_" + conversationId).remove("draft_attachments_" + conversationId)
-                    .remove("pi_selection_" + conversationId).putString("conversations", index.toString());
+                    .remove("pi_selection_" + conversationId).putString("conversations", index.toString())
+                    .putString(TASK_CARDS, stringArray(taskCards).toString());
+            if (conversationId.equals(preferences.getString("home_draft", null))) edit.remove("home_draft");
             if (conversationId.equals(activeId())) edit.putString("active_chat", java.util.UUID.randomUUID().toString());
             edit.apply();
             cleanupAttachmentsLocked();

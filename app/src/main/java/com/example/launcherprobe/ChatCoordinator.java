@@ -10,6 +10,8 @@ import org.json.JSONObject;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -24,6 +26,7 @@ import java.util.concurrent.atomic.AtomicLong;
 final class ChatCoordinator {
     interface Listener { void changed(List<AgentLoop.Message> messages, JSONObject event); }
 
+    private static final String RPIV_TODO_PACKAGE = "@juicesharp/rpiv-todo";
     private static ChatCoordinator instance;
     static synchronized ChatCoordinator get(Context context) {
         if (instance == null) instance = new ChatCoordinator(context.getApplicationContext());
@@ -106,6 +109,7 @@ final class ChatCoordinator {
             activeRuns.put(conversationId, run);
             try {
                 ChatExecutionService.setActiveCount(context, activeRuns.size());
+                store.showTaskCard(conversationId);
             } catch (RuntimeException failure) {
                 activeRuns.remove(conversationId, run);
                 try { ChatExecutionService.setActiveCount(context, activeRuns.size()); }
@@ -258,6 +262,35 @@ final class ChatCoordinator {
         String trimmed = ((String) value).trim();
         return trimmed.isEmpty() ? null : trimmed;
     }
+    /** Stable home-card order; todo is present only for a validated rpiv-todo snapshot. */
+    JSONArray taskCards() {
+        Map<String, SessionRun> running;
+        Map<String, SessionRun> terminating;
+        synchronized (runLock) {
+            running = new HashMap<>(activeRuns);
+            terminating = new HashMap<>(terminatingRuns);
+        }
+        Map<String, String> titles = new HashMap<>();
+        for (ChatStore.Conversation conversation : store.conversations())
+            titles.put(conversation.id, conversation.title);
+        JSONArray cards = new JSONArray();
+        for (String conversationId : store.taskCardIds()) {
+            SessionRun active = running.get(conversationId);
+            SessionRun ending = terminating.get(conversationId);
+            JSONObject extensionUi = active != null ? active.extensionUi : ending != null ? ending.extensionUi
+                    : parseObject(store.extensionUi(conversationId, store.load(conversationId)));
+            JSONObject todo = todoSnapshot(extensionUi);
+            String modelState = active == null ? "idle" : "stopping".equals(active.status)
+                    ? "stopping" : "running".equals(active.status) ? "working" : "idle";
+            cards.put(json("conversationId", conversationId,
+                    "title", titles.getOrDefault(conversationId, "新对话"),
+                    "modelState", modelState, "todo", todo == null ? JSONObject.NULL : todo));
+        }
+        return cards;
+    }
+
+    /** Hides the card without cancelling its run or deleting its conversation. */
+    void dismissTaskCard(String conversationId) { store.dismissTaskCard(conversationId); }
 
     private void startPi(SessionRun run, String text, List<ChatAttachment> attachments) throws Exception {
         PiConfigStore configStore = new PiConfigStore(context, run.conversationId);
@@ -379,6 +412,11 @@ final class ChatCoordinator {
         } else if ("message".equals(type)) emit(run, "snapshot", null, event);
         else if ("extension_ui".equals(type) && persistenceFailure == null) {
             run.extensionUi = parseObject(event.optJSONObject("state").toString());
+            JSONObject askUser = run.extensionUi.optJSONObject("askUser");
+            if (run.questionnaireReplyPending != null
+                    && (askUser == null || !run.questionnaireReplyPending.equals(askUser.optString("id")))) {
+                run.questionnaireReplyPending = null;
+            }
             emit(run, "extensionUi", null, run.extensionUi);
         } else if ("tool_start".equals(type)) emit(run, "toolStart", null, event);
         else if ("tool_end".equals(type)) emit(run, "toolEnd", null, event);
@@ -386,15 +424,6 @@ final class ChatCoordinator {
             run.status = "running";
             run.message = event.optString("message", "正在回复…");
             emit(run, "runStatus", null, event);
-        } else if ("extension_ui".equals(type)) {
-            JSONObject state = event.optJSONObject("state");
-            run.extensionUi = state == null ? new JSONObject() : state;
-            JSONObject askUser = run.extensionUi.optJSONObject("askUser");
-            if (run.questionnaireReplyPending != null
-                    && (askUser == null || !run.questionnaireReplyPending.equals(askUser.optString("id")))) {
-                run.questionnaireReplyPending = null;
-            }
-            emit(run, "extensionUi", null, run.extensionUi);
         } else if ("questionnaire_reply".equals(type)) {
             String questionnaireId = event.optString("questionnaireId");
             if (questionnaireId.equals(run.questionnaireReplyPending) && !event.optBoolean("accepted")) {
@@ -526,6 +555,35 @@ final class ChatCoordinator {
     private static JSONObject parseObject(String value) {
         try { return new JSONObject(value); }
         catch (org.json.JSONException exception) { return new JSONObject(); }
+    }
+
+    private static JSONObject todoSnapshot(JSONObject extensionUi) {
+        JSONObject source = extensionUi == null ? null : extensionUi.optJSONObject("todo");
+        if (source == null || !RPIV_TODO_PACKAGE.equals(source.optString("package"))) return null;
+        JSONArray sourceTasks = source.optJSONArray("tasks");
+        Long nextId = positiveInteger(source.opt("nextId"));
+        if (sourceTasks == null || nextId == null) return null;
+        Set<Long> ids = new HashSet<>();
+        JSONArray tasks = new JSONArray();
+        for (int index = 0; index < sourceTasks.length(); index++) {
+            JSONObject task = sourceTasks.optJSONObject(index);
+            if (task == null) return null;
+            Long id = positiveInteger(task.opt("id"));
+            Object subject = task.opt("subject");
+            String status = task.optString("status", "");
+            if (id == null || id >= nextId || !ids.add(id) || !(subject instanceof String)
+                    || !("pending".equals(status) || "in_progress".equals(status)
+                    || "completed".equals(status) || "deleted".equals(status))) return null;
+            tasks.put(json("id", id, "subject", subject, "status", status));
+        }
+        return json("package", RPIV_TODO_PACKAGE, "tasks", tasks, "nextId", nextId);
+    }
+
+    private static Long positiveInteger(Object value) {
+        if (!(value instanceof Byte || value instanceof Short
+                || value instanceof Integer || value instanceof Long)) return null;
+        long integer = ((Number) value).longValue();
+        return integer >= 1 && integer <= 9_007_199_254_740_991L ? integer : null;
     }
 
     private static JSONObject json(Object... values) {

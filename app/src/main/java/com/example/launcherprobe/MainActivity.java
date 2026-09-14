@@ -74,9 +74,6 @@ public class MainActivity extends BridgeActivity {
             MainActivity.this.gestureState.setAccessibilityLiveRegion(
                     View.ACCESSIBILITY_LIVE_REGION_POLITE);
         }
-        if (MainActivity.this.compactStatus != null) {
-            MainActivity.this.compactStatus.setText(homeRoleText());
-        }
     };
 
     private RoleManager roles;
@@ -91,10 +88,19 @@ public class MainActivity extends BridgeActivity {
     private LinearLayout pageShell;
     private FrameLayout contentStage;
     private LinearLayout composerDock;
+    // Home task cards are rendered into this host by the task-card UI; it stays directly above the composer.
+    private FrameLayout taskCardHost;
+    private HomeTaskCards homeTaskCards;
+    private HomeInputOverlay homeInputOverlay;
+    private View composerPlaceholder;
+    private TextView attachmentButton, composerClose;
+    private String nativePickerKind, nativePickerConversation, nativeCapturePath;
+    private String voiceConversation;
+    private boolean nativeAttachmentBusy;
+    private boolean closingHomeInput;
     private boolean drawerClosing;
     private TextView state;
     private TextView gestureState;
-    private TextView compactStatus;
     private TextView clock;
     private TextView date;
     private EditText search;
@@ -174,6 +180,9 @@ public class MainActivity extends BridgeActivity {
                         : event.optJSONObject("payload").optString("message"));
             }
             updateAgentControls();
+            String type = event.optString("type");
+            if ("runStatus".equals(type) || "snapshot".equals(type) || "extensionUi".equals(type)
+                    || "end".equals(type) || "error".equals(type)) refreshTaskCards();
         };
         chatCoordinator.addListener(coordinatorListener);
         markdown = ResponseMarkdown.create(this, uri -> launch(new Intent(Intent.ACTION_VIEW, uri)));
@@ -197,7 +206,15 @@ public class MainActivity extends BridgeActivity {
         installPager();
         getOnBackPressedDispatcher().addCallback(this, new androidx.activity.OnBackPressedCallback(true) {
             @Override public void handleOnBackPressed() {
-                if (pager.page() == PagerState.Page.HOME) return;
+                if (pager.page() == PagerState.Page.HOME) {
+                    if (homeInputOverlay != null) {
+                        androidx.core.view.WindowInsetsCompat insets = androidx.core.view.ViewCompat.getRootWindowInsets(root);
+                        if (insets != null && insets.isVisible(androidx.core.view.WindowInsetsCompat.Type.ime()))
+                            getSystemService(InputMethodManager.class).hideSoftInputFromWindow(composerInput.getWindowToken(), 0);
+                        else closeHomeInput(true);
+                    }
+                    return;
+                }
                 setEnabled(false);
                 getOnBackPressedDispatcher().onBackPressed();
                 setEnabled(true);
@@ -205,6 +222,17 @@ public class MainActivity extends BridgeActivity {
         });
         showHome(false);
         if (restoreWebPage) pager.show(PagerState.Page.CHAT, false);
+        if (savedInstanceState != null) {
+            nativePickerKind = savedInstanceState.getString("native_picker_kind");
+            nativePickerConversation = savedInstanceState.getString("native_picker_conversation");
+            nativeCapturePath = savedInstanceState.getString("native_capture_path");
+            voiceConversation = savedInstanceState.getString("voice_conversation");
+            nativeAttachmentBusy = nativePickerKind != null;
+            if (savedInstanceState.getBoolean("native_home_input")) {
+                openHomeInput(false);
+                homeInputOverlay.restore(savedInstanceState);
+            }
+        }
     }
 
     @Override
@@ -223,6 +251,12 @@ public class MainActivity extends BridgeActivity {
     public void onSaveInstanceState(Bundle outState) {
         super.onSaveInstanceState(outState);
         outState.putString(PAGE_KEY, page);
+        outState.putBoolean("native_home_input", homeInputOverlay != null);
+        if (homeInputOverlay != null) homeInputOverlay.save(outState);
+        outState.putString("native_picker_kind", nativePickerKind);
+        outState.putString("native_picker_conversation", nativePickerConversation);
+        outState.putString("native_capture_path", nativeCapturePath);
+        outState.putString("voice_conversation", voiceConversation);
         String webUrl = chatWebView.getUrl();
         outState.putString("web_route", webUrl != null && webUrl.contains("#/")
                 ? webUrl.substring(webUrl.indexOf('#') + 1) : initialWebRoute);
@@ -246,6 +280,8 @@ public class MainActivity extends BridgeActivity {
         refreshGestures.run();
         clockHandler.removeCallbacks(clockTick);
         clockTick.run();
+        refreshTaskCards();
+        refreshHomeComposer();
     }
 
     @Override
@@ -267,6 +303,7 @@ public class MainActivity extends BridgeActivity {
             PiAgentBridge queryBridge = thinkingLevelBridge;
             if (queryBridge != null) queryBridge.abort(thinkingLevelRequestId);
         }
+        if (homeInputOverlay != null) homeInputOverlay.dispose();
         queryExecutor.shutdownNow();
         chatCoordinator.removeListener(coordinatorListener);
         shizukuRepair.destroy();
@@ -302,6 +339,11 @@ public class MainActivity extends BridgeActivity {
                         + JSONObject.quote("#" + initialWebRoute) + ")", null);
             }
             page = changed == PagerState.Page.CHAT ? "search" : "home";
+            if (changed == PagerState.Page.HOME && composerInput != null) refreshHomeComposer();
+            if (taskCardHost != null) {
+                taskCardHost.setVisibility(changed == PagerState.Page.HOME ? View.VISIBLE : View.GONE);
+                if (changed == PagerState.Page.HOME) refreshTaskCards();
+            }
             getWindow().setStatusBarColor(changed == PagerState.Page.CHAT
                     ? appearance.surface : IVORY);
             getWindow().setNavigationBarColor(appearance.surface);
@@ -357,12 +399,12 @@ public class MainActivity extends BridgeActivity {
         contentStage.removeAllViews();
         contentStage.addView(content, match());
         boolean chat = "search".equals(page);
-        composerDock.setVisibility(chat ? View.VISIBLE : View.GONE);
+        composerDock.setVisibility(chat ? View.GONE : View.VISIBLE);
         root.setBackgroundColor(chat ? appearance.surface : IVORY);
         homeWallpaper.setVisibility(chat ? View.INVISIBLE : View.VISIBLE);
         getWindow().setStatusBarColor(chat ? appearance.surface : IVORY);
         getWindow().setNavigationBarColor(appearance.surface);
-        composerInput.setShowSoftInputOnFocus(true);
+        composerInput.setShowSoftInputOnFocus(false);
         if (!firstPage) enterMotion(content, chat ? 24 : -16);
         updateAgentControls();
     }
@@ -377,6 +419,18 @@ public class MainActivity extends BridgeActivity {
         pageShell.setFocusableInTouchMode(true);
         contentStage = new FrameLayout(this);
         pageShell.addView(contentStage, new LinearLayout.LayoutParams(-1, 0, 1));
+        taskCardHost = new FrameLayout(this);
+        taskCardHost.setVisibility(View.GONE);
+        pageShell.addView(taskCardHost, new LinearLayout.LayoutParams(-1, -2));
+        homeTaskCards = new HomeTaskCards(this, pager, id -> {
+            chatStore.selectConversation(id);
+            launchWeb("/chat/" + id, null, null);
+        }, id -> chatCoordinator.cancel(id), id -> {
+            chatCoordinator.dismissTaskCard(id);
+            refreshTaskCards();
+        });
+        taskCardHost.addView(homeTaskCards);
+        refreshTaskCards();
         createComposer();
         pageShell.addView(composerDock, new LinearLayout.LayoutParams(-1, -2));
         root.addView(pageShell, match());
@@ -428,6 +482,7 @@ public class MainActivity extends BridgeActivity {
     }
 
     private void showHome(boolean animated) {
+        if (homeInputOverlay != null) closeHomeInput(false);
         if (treeSheet != null) treeSheet.dismiss();
         View focused = getCurrentFocus();
         if (focused != null) {
@@ -437,6 +492,7 @@ public class MainActivity extends BridgeActivity {
         }
         closeChatDrawer(false);
         if (root != null) {
+            refreshHomeComposer();
             pager.show(PagerState.Page.HOME, animated);
             return;
         }
@@ -449,11 +505,12 @@ public class MainActivity extends BridgeActivity {
         newerMessages = null;
         search = null;
         gestureState = null;
+        state = null;
 
         LinearLayout column = column();
         ScrollView scroll = new ScrollView(this);
         scroll.setClipToPadding(false);
-        scroll.setPadding(0, 0, 0, dp(86));
+        scroll.setPadding(0, 0, 0, dp(8));
         scroll.addView(column, new ScrollView.LayoutParams(-1, -2));
         column.setPadding(dp(22), 0, dp(22), dp(8));
         // Keep labels readable even when the photo mask is only 20%.
@@ -476,14 +533,9 @@ public class MainActivity extends BridgeActivity {
         capability.setPadding(0, dp(6), 0, dp(30));
         column.addView(capability);
 
-        LinearLayout section = row();
         TextView title = label(t("应用"), 25, CHARCOAL);
         title.setTypeface(null, android.graphics.Typeface.BOLD);
-        section.addView(title, new LinearLayout.LayoutParams(0, -2, 1));
-        TextView all = pill(t("全部应用  ›"), view -> showAppPicker());
-        all.setContentDescription(t("查看并搜索全部应用"));
-        section.addView(all);
-        column.addView(section);
+        column.addView(title);
 
         GridLayout grid = appGrid(apps.subList(0, Math.min(8, apps.size())));
         LinearLayout.LayoutParams gridParams = new LinearLayout.LayoutParams(-1, -2);
@@ -495,37 +547,15 @@ public class MainActivity extends BridgeActivity {
             column.addView(empty);
         }
 
-        state = label("", 14, MUTED);
-        state.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_ASSERTIVE);
-        state.setPadding(0, dp(12), 0, dp(8));
-        column.addView(state);
-        if (agentRunning) button(column, t("停止正在运行的助手"), view -> {
-            cancelAgent();
-            showSearch();
-        });
-        compactStatus = label(homeRoleText(), 14, MUTED);
-        compactStatus.setPadding(0, dp(8), 0, dp(16));
-        column.addView(compactStatus);
-
-        LinearLayout chatEntry = row();
-        chatEntry.setGravity(Gravity.CENTER);
-        chatEntry.setPadding(dp(16), 0, dp(12), 0);
-        chatEntry.setBackground(shape(appearance.panel, 28, 1, appearance.border));
-        ImageView bubble = new ImageView(this); bubble.setImageDrawable(new ChatIcon("bubble", appearance.accent));
-        chatEntry.addView(bubble, new LinearLayout.LayoutParams(dp(28), dp(28)));
-        TextView chatLabel = label(t("聊天  ‹"), 16, CHARCOAL);
-        chatLabel.setGravity(Gravity.CENTER_VERTICAL);
-        chatLabel.setPadding(dp(10), 0, 0, 0);
-        chatEntry.addView(chatLabel, new LinearLayout.LayoutParams(-2, -1));
-        chatEntry.setContentDescription(t("打开聊天")); chatEntry.setFocusable(true); chatEntry.setClickable(true);
-        chatEntry.setOnClickListener(view -> showSearch());
-        FrameLayout.LayoutParams entryParams = new FrameLayout.LayoutParams(-2, dp(54), Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
-        entryParams.bottomMargin = dp(16);
-        homeContent.addView(chatEntry, entryParams);
-
         setPage(homeContent);
         pager.show(PagerState.Page.HOME, animated);
         updateClock();
+    }
+
+    private void refreshTaskCards() {
+        if (homeTaskCards == null) return;
+        homeTaskCards.update(chatCoordinator.taskCards());
+        taskCardHost.setVisibility("home".equals(page) && homeInputOverlay == null ? View.VISIBLE : View.GONE);
     }
 
     private void showSearch() {
@@ -534,6 +564,7 @@ public class MainActivity extends BridgeActivity {
 
     private void launchWeb(String route, String prompt, String submissionId) {
         if (route == null || !route.startsWith("/")) throw new IllegalArgumentException("route must be local");
+        if (homeInputOverlay != null) closeHomeInput(false);
         initialWebRoute = route;
         page = "search";
         chatWebView.evaluateJavascript("location.hash=" + JSONObject.quote("#" + route), null);
@@ -548,7 +579,6 @@ public class MainActivity extends BridgeActivity {
     private void showSearchNative() {
         page = "search";
         gestureState = null;
-        compactStatus = null;
         clock = null;
         date = null;
         search = null;
@@ -612,61 +642,174 @@ public class MainActivity extends BridgeActivity {
         updateAgentControls();
     }
 
+    private void openHomeInput(boolean showKeyboard) {
+        if (homeInputOverlay != null) return;
+        int[] start = new int[2]; composerDock.getLocationInWindow(start);
+        int[] origin = new int[2]; root.getLocationInWindow(origin);
+        composerPlaceholder = new View(this);
+        int dockIndex = pageShell.indexOfChild(composerDock);
+        int height = composerDock.getHeight();
+        pageShell.removeView(composerDock);
+        pageShell.addView(composerPlaceholder, dockIndex, new LinearLayout.LayoutParams(-1, height));
+        HomeInputOverlay overlay = new HomeInputOverlay(this, pager, chatStore, apps,
+                composerDock, composerInput, attachmentButton, voiceButton, sendButton,
+                id -> { chatStore.selectConversation(id); launchWeb("/chat/" + id, null, null); }, this::sendMessage);
+        homeInputOverlay = overlay;
+        overlay.setPreparing(nativeAttachmentBusy);
+        composerClose.setVisibility(View.VISIBLE);
+        composerInput.setMaxLines(4);
+        pageShell.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
+        pageShell.setVisibility(View.INVISIBLE);
+        taskCardHost.setVisibility(View.GONE);
+        root.addView(overlay, match());
+        composerDock.setTranslationY(Math.max(0, start[1] - origin[1] - root.getPaddingTop()));
+        composerDock.animate().translationY(0).setDuration(motionDuration(240))
+                .setInterpolator(new android.view.animation.DecelerateInterpolator()).start();
+        composerInput.requestFocus();
+        if (showKeyboard) composerInput.post(() -> {
+            if (homeInputOverlay == overlay && !closingHomeInput)
+                getSystemService(InputMethodManager.class).showSoftInput(composerInput, InputMethodManager.SHOW_IMPLICIT);
+        });
+    }
+
+    private void closeHomeInput(boolean animated) {
+        HomeInputOverlay overlay = homeInputOverlay;
+        if (overlay == null) return;
+        if (closingHomeInput && animated) return;
+        closingHomeInput = true;
+        composerDock.animate().cancel();
+        getSystemService(InputMethodManager.class).hideSoftInputFromWindow(composerInput.getWindowToken(), 0);
+        composerInput.clearFocus();
+        Runnable finish = () -> {
+            if (homeInputOverlay != overlay) return;
+            overlay.dispose(); overlay.removeView(composerDock);
+            root.removeView(overlay);
+            int index = pageShell.indexOfChild(composerPlaceholder);
+            pageShell.removeView(composerPlaceholder);
+            pageShell.addView(composerDock, index, new LinearLayout.LayoutParams(-1, -2));
+            composerDock.setTranslationY(0);
+            homeInputOverlay = null; closingHomeInput = false;
+            composerClose.setVisibility(View.GONE);
+            composerInput.setKeyListener(null); composerInput.setCursorVisible(false);
+            composerInput.setShowSoftInputOnFocus(false); composerInput.setMaxLines(2);
+            composerInput.setContentDescription(t("打开新建对话输入"));
+            attachmentButton.setVisibility(View.VISIBLE); attachmentButton.setEnabled(true);
+            voiceButton.setVisibility(View.VISIBLE); sendButton.setVisibility(View.VISIBLE);
+            pageShell.setVisibility(View.VISIBLE);
+            pageShell.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_AUTO);
+            pageShell.requestFocus(); refreshHomeComposer(); refreshTaskCards();
+        };
+        if (!animated) { finish.run(); return; }
+        int[] target = new int[2]; composerPlaceholder.getLocationInWindow(target);
+        int[] current = new int[2]; composerDock.getLocationInWindow(current);
+        composerDock.animate().translationY(target[1] - current[1]).setDuration(motionDuration(220))
+                .setInterpolator(new android.view.animation.DecelerateInterpolator()).withEndAction(finish).start();
+    }
+
+    private void chooseHomeAttachment(String kind) {
+        if (homeInputOverlay == null || nativeAttachmentBusy) return;
+        java.io.File capture = null;
+        try {
+            nativePickerConversation = homeInputOverlay.draftId();
+            capture = "camera".equals(kind) ? AttachmentPicker.cameraFile(this) : null;
+            Intent intent = AttachmentPicker.intent(this, kind, capture);
+            nativePickerKind = kind; nativeCapturePath = capture == null ? null : capture.getAbsolutePath();
+            nativeAttachmentBusy = true; homeInputOverlay.setPreparing(true);
+            startActivityForResult(intent, 42);
+        } catch (Exception exception) {
+            if (capture != null) capture.delete();
+            nativePickerKind = null; nativeCapturePath = null; nativePickerConversation = null;
+            nativeAttachmentBusy = false; homeInputOverlay.setPreparing(false);
+            failure(exception.getMessage());
+        }
+    }
+
+    private void finishHomeAttachment(int result, Intent data) {
+        final String conversation = nativePickerConversation, kind = nativePickerKind, path = nativeCapturePath;
+        nativePickerConversation = null; nativePickerKind = null; nativeCapturePath = null;
+        if (result != RESULT_OK || conversation == null) {
+            if (path != null) new java.io.File(path).delete();
+            nativeAttachmentBusy = false;
+            if (homeInputOverlay != null) homeInputOverlay.setPreparing(false);
+            return;
+        }
+        final long owner = activityEpoch;
+        queryExecutor.execute(() -> {
+            String error = null;
+            try {
+                AttachmentPicker.importResult(getApplicationContext(), chatStore, conversation, kind,
+                        path == null ? null : new java.io.File(path), data);
+            } catch (Exception exception) { error = exception.getMessage(); }
+            final String message = error;
+            runOnUiThread(() -> {
+                if (!ACTIVITY_EPOCH.owns(owner)) return;
+                nativeAttachmentBusy = false;
+                if (homeInputOverlay != null) { homeInputOverlay.setPreparing(false); homeInputOverlay.refreshAttachments(); }
+                else refreshHomeComposer();
+                if (message != null) failure(message);
+            });
+        });
+    }
+
     private void createComposer() {
         composerDock = column();
         composerDock.setBackgroundColor(Color.TRANSPARENT);
         LinearLayout composer = column();
         composer.setPadding(dp(8), dp(6), dp(8), dp(6));
-        composer.setBackground(shape(appearance.panel, 30, 1, appearance.border));
+        composer.setBackground(shape(appearance.panel, 22, 0, 0));
         composer.setElevation(dp(3));
         composerInput = new EditText(this);
-        composerInput.setHint(t("发送消息"));
-        composerInput.setContentDescription(t("消息输入框"));
+        composerInput.setHint(t("发消息…"));
+        composerInput.setContentDescription(t("打开新建对话输入"));
         composerInput.setTextColor(CHARCOAL);
         composerInput.setHintTextColor(MUTED);
         composerInput.setTextSize(16);
-        composerInput.setInputType(android.text.InputType.TYPE_CLASS_TEXT
-                | android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE
-                | android.text.InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);
-        composerInput.setMaxLines(3);
-        composerInput.setMinHeight(dp(48));
-        composerInput.setMinLines(1);
+        composerInput.setMaxLines(2);
+        composerInput.setMinHeight(dp(44));
         composerInput.setBackgroundColor(Color.TRANSPARENT);
-        composerInput.setPadding(dp(10), dp(8), dp(10), dp(8));
+        composerInput.setPadding(dp(10), dp(6), dp(10), dp(4));
         composerInput.setText(savedDraft);
-        composerInput.addTextChangedListener(new TextWatcher() {
-            public void beforeTextChanged(CharSequence s, int start, int count, int after) { }
-            public void onTextChanged(CharSequence s, int start, int before, int count) {
-                savedDraft = s.toString();
-                if (!"home".equals(page)) chatStore.saveDraft(savedDraft);
-                updateAgentControls();
-            }
-            public void afterTextChanged(Editable value) { }
-        });
-        composer.addView(composerInput, new LinearLayout.LayoutParams(-1, -2));
+        composerInput.setCursorVisible(false);
+        composerInput.setKeyListener(null);
+        composerInput.setShowSoftInputOnFocus(false);
+        composerInput.setOnClickListener(view -> { if (homeInputOverlay == null) openHomeInput(true); });
+        LinearLayout inputRow = row();
+        inputRow.setGravity(Gravity.TOP);
+        inputRow.addView(composerInput, new LinearLayout.LayoutParams(0, -2, 1));
+        composerClose = chatIcon("close", t("关闭输入"), view -> closeHomeInput(true));
+        composerClose.setVisibility(View.GONE);
+        inputRow.addView(composerClose);
+        composer.addView(inputRow, new LinearLayout.LayoutParams(-1, -2));
         LinearLayout actions = row();
-        actions.addView(chatIcon("tree", t("打开对话树"), view -> openConversationTree()));
-        actions.addView(chatIcon("plus", t("搜索与打开应用"), view -> showAppPicker()));
+        attachmentButton = chatIcon("plus", t("添加附件"), view -> {
+            openHomeInput(false);
+            homeInputOverlay.select(2);
+            new android.app.AlertDialog.Builder(this).setItems(
+                    new String[]{t("拍照"), t("上传图片"), t("上传附件")},
+                    (dialog, which) -> chooseHomeAttachment(new String[]{"camera", "image", "file"}[which])).show();
+        });
+        actions.addView(attachmentButton);
         actions.addView(new View(this), new LinearLayout.LayoutParams(0, 1, 1));
-        thinkingLevelButton = chatIcon("gauge", t("切换当前会话思考强度"),
-                view -> showThinkingLevelPicker());
-        actions.addView(thinkingLevelButton);
         voiceButton = chatIcon("mic", t("语音输入"), view -> startDictation());
         actions.addView(voiceButton);
         sendButton = chatIcon("send", t("发送消息"), view -> sendMessage());
         sendButton.setBackground(shape(CHARCOAL, 24, 0, 0));
         actions.addView(sendButton);
-        stopButton = chatIcon("stop", t("停止生成"), view -> cancelAgent());
-        stopButton.setBackground(shape(CHARCOAL, 24, 0, 0));
-        actions.addView(stopButton);
         composer.addView(actions, new LinearLayout.LayoutParams(-1, dp(48)));
         LinearLayout.LayoutParams composerParams = new LinearLayout.LayoutParams(-1, -2);
-        composerParams.setMargins(dp(12), dp(4), dp(12), 0);
+        composerParams.setMargins(dp(12), dp(4), dp(12), dp(8));
         composerDock.addView(composer, composerParams);
-        TextView footer = label(t("AI 生成内容，请核对重要信息"), 11, MUTED);
-        footer.setGravity(Gravity.CENTER);
-        footer.setPadding(0, dp(8), 0, dp(10));
-        composerDock.addView(footer);
+    }
+
+    private void refreshHomeComposer() {
+        if (composerInput == null) return;
+        if (homeInputOverlay != null) { homeInputOverlay.refreshAttachments(); return; }
+        String id = chatStore.homeDraftId();
+        savedDraft = id == null ? "" : chatStore.draft(id);
+        if (!savedDraft.contentEquals(composerInput.getText())) composerInput.setText(savedDraft);
+        int attachments = id == null ? 0 : chatStore.draftAttachments(id).size();
+        composerInput.setHint(attachments == 0 ? t("发消息…") : attachments + t(" 个附件"));
+        updateAgentControls();
     }
 
     private void openConversationTree() {
@@ -917,7 +1060,11 @@ public class MainActivity extends BridgeActivity {
     }
 
     private void startDictation() {
-        if ("home".equals(page)) showSearch();
+        if ("home".equals(page)) {
+            openHomeInput(false);
+            homeInputOverlay.select(2);
+            voiceConversation = homeInputOverlay.draftId();
+        } else voiceConversation = chatStore.activeId();
         Intent intent = new Intent(android.speech.RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
                 .putExtra(android.speech.RecognizerIntent.EXTRA_LANGUAGE_MODEL,
                         android.speech.RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
@@ -930,6 +1077,7 @@ public class MainActivity extends BridgeActivity {
 
     @Override protected void onActivityResult(int request, int result, Intent data) {
         super.onActivityResult(request, result, data);
+        if (request == 42) { finishHomeAttachment(result, data); return; }
         if (request == 702 && result == RESULT_OK && data != null) {
             try {
                 chatStore.setPiSelection(data.getStringExtra("provider"), data.getStringExtra("model"), data.getStringExtra("thinkingLevel"));
@@ -940,10 +1088,12 @@ public class MainActivity extends BridgeActivity {
             ArrayList<String> words = data.getStringArrayListExtra(
                     android.speech.RecognizerIntent.EXTRA_RESULTS);
             if (words != null && !words.isEmpty()) {
-                savedDraft += words.get(0);
-                if (composerInput != null) {
-                    composerInput.setText(savedDraft);
-                    composerInput.setSelection(composerInput.length());
+                String id = voiceConversation;
+                if (id != null) {
+                    try {
+                        if (homeInputOverlay != null && id.equals(homeInputOverlay.draftId())) homeInputOverlay.appendVoice(words.get(0));
+                        else { chatStore.saveDraft(id, chatStore.draft(id) + words.get(0)); refreshHomeComposer(); }
+                    } catch (Exception exception) { failure(exception.getMessage()); }
                 }
             }
         }
@@ -1193,14 +1343,22 @@ public class MainActivity extends BridgeActivity {
     }
 
     private void sendMessage() {
-        String text = composerInput == null ? "" : composerInput.getText().toString().trim();
-        if (text.isEmpty() || chatCoordinator.running(chatStore.activeId()) || thinkingLevelQueryToken != null) return;
+        String text = composerInput == null ? "" : composerInput.getText().toString();
+        String draftId = "home".equals(page) ? chatStore.homeDraftId() : chatStore.activeId();
+        boolean hasAttachments = draftId != null && !chatStore.draftAttachments(draftId).isEmpty();
+        if (text.trim().isEmpty() && !hasAttachments) return;
         if ("home".equals(page)) {
-            if (!chatStore.tree().nodes().isEmpty()) chatStore.newConversation();
-            chatStore.saveDraft(text);
-            launchWeb("/chat/" + chatStore.activeId(), text, java.util.UUID.randomUUID().toString());
+            if (nativeAttachmentBusy || (homeInputOverlay != null && !homeInputOverlay.canSend())) return;
+            try {
+                chatStore.selectHomeDraft();
+                chatStore.saveDraft(text);
+                String id = chatStore.activeId();
+                String accepted = chatCoordinator.send(id, text, java.util.UUID.randomUUID().toString());
+                if (accepted != null) launchWeb("/chat/" + id, null, null);
+            } catch (Exception exception) { failure(exception.getMessage()); }
             return;
         }
+        if (chatCoordinator.running(chatStore.activeId()) || thinkingLevelQueryToken != null) return;
         try { chatCoordinator.send(text, null); }
         catch (Exception exception) { failure(exception.getMessage()); }
     }
@@ -1210,17 +1368,22 @@ public class MainActivity extends BridgeActivity {
     private void savePiPreview() { }
 
     private void updateAgentControls() {
+        if (homeInputOverlay != null) { homeInputOverlay.updateControls(); return; }
+        boolean home = "home".equals(page);
         if (sendButton != null) {
-            boolean hasText = composerInput != null
-                    && !composerInput.getText().toString().trim().isEmpty();
-            boolean enabled = !agentRunning && thinkingLevelQueryToken == null && hasText;
+            boolean hasContent = composerInput != null
+                    && (!composerInput.getText().toString().trim().isEmpty()
+                            || (home ? chatStore.homeDraftId() != null
+                                    && !chatStore.draftAttachments(chatStore.homeDraftId()).isEmpty()
+                                    : !chatStore.draftAttachments().isEmpty()));
+            boolean enabled = hasContent && (home || (!agentRunning && thinkingLevelQueryToken == null));
             sendButton.setEnabled(enabled);
             sendButton.setAlpha(enabled ? 1f : .35f);
-            sendButton.setVisibility(agentRunning ? View.GONE : View.VISIBLE);
+            sendButton.setVisibility(home || !agentRunning ? View.VISIBLE : View.GONE);
         }
         if (stopButton != null) {
-            stopButton.setEnabled(agentRunning);
-            stopButton.setVisibility(agentRunning ? View.VISIBLE : View.GONE);
+            stopButton.setEnabled(!home && agentRunning);
+            stopButton.setVisibility(!home && agentRunning ? View.VISIBLE : View.GONE);
         }
         if (thinkingLevelButton != null) {
             boolean enabled = !agentRunning && thinkingLevelQueryToken == null;
@@ -1717,10 +1880,6 @@ public class MainActivity extends BridgeActivity {
         Toast.makeText(this, message, Toast.LENGTH_LONG).show();
     }
 
-    private String homeRoleText() {
-        return t("默认桌面：") + (roles != null && roles.isRoleHeld(RoleManager.ROLE_HOME) ? t("已设置") : t("未设置"))
-                + t(" · 手势状态可在设置中查看");
-    }
 
     private void updateClock() {
         Date now = new Date();

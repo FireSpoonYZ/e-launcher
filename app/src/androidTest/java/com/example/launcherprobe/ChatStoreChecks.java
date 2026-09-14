@@ -241,7 +241,7 @@ public final class ChatStoreChecks extends Instrumentation {
                     "home wallpaper covers composer");
             require(root.indexOfChild(wallpaper) < root.indexOfChild(pageShell),
                     "wallpaper is behind shell");
-            require(input[0].getShowSoftInputOnFocus(), "home input allows soft keyboard");
+            require(!input[0].getShowSoftInputOnFocus(), "collapsed home input delegates IME to web panel");
             long time = android.os.SystemClock.uptimeMillis();
             android.view.MotionEvent down = android.view.MotionEvent.obtain(time, time,
                     android.view.MotionEvent.ACTION_DOWN, input[0].getWidth() / 2f, input[0].getHeight() / 2f, 0);
@@ -251,9 +251,9 @@ public final class ChatStoreChecks extends Instrumentation {
             input[0].dispatchTouchEvent(up);
             down.recycle();
             up.recycle();
-            require("home".equals(field(activity, "page")), "home input touch stays home");
-            require(input[0].hasFocus(), "home input touch focuses editor");
-            invoke(activity, "showSearch");
+            require("home".equals(field(activity, "page")), "home input stays on native home");
+            require(field(activity, "homeInputOverlay") != null, "native input overlay is open");
+            invoke(activity, "showHome");
         });
         waitForIdleSync();
         runOnMainSync(() -> {
@@ -261,11 +261,11 @@ public final class ChatStoreChecks extends Instrumentation {
             require(field(activity, "composerDock") == dock[0], "dock identity retained");
             require(dock[0].getTranslationY() == 0 && dock[0].getAlpha() == 1f,
                     "page animation excludes dock");
-            activity.onBackPressed();
             input[0].performClick();
-            require("home".equals(field(activity, "page")), "home input click stays home");
+            require("home".equals(field(activity, "page")), "reopening stays on native home");
+            require(field(activity, "homeInputOverlay") != null, "native input overlay reopens");
             require(((android.view.ViewGroup) field(activity, "contentStage")).getChildCount() == 1,
-                    "rapid navigation leaves only one page");
+                    "rapid navigation leaves only one native home page");
             activity.finish();
         });
     }

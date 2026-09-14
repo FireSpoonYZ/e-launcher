@@ -54,7 +54,11 @@ final class NativeJson {
 
     static JSONArray conversations(List<ChatStore.Conversation> values) {
         JSONArray result = new JSONArray();
-        for (ChatStore.Conversation value : values) result.put(object("id", value.id, "title", value.title, "updated", value.updated));
+        for (ChatStore.Conversation value : values) {
+            JSONObject item = object("id", value.id, "title", value.title, "updated", value.updated);
+            if (value.snippet != null) put(item, "snippet", value.snippet);
+            result.put(item);
+        }
         return result;
     }
 

@@ -264,6 +264,7 @@ public class ChatExecutionServiceTest {
         Map<String, ChatCoordinator.SessionRun> active = ReflectionHelpers.getField(coordinator, "activeRuns");
         assertThrows(IllegalStateException.class, () -> coordinator.registerRun(coordinator.store().activeId(), null));
         assertTrue(active.isEmpty());
+        assertTrue("failed registration must not leave a task card", coordinator.store().taskCardIds().isEmpty());
         assertEquals(0, (int) ReflectionHelpers.getStaticField(ChatExecutionService.class, "activeCount"));
     }
 

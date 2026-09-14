@@ -4,7 +4,7 @@ import type { ExtensionUiState, TodoTask } from './native';
 import { shouldFollowTodo, todoScrollTarget, visibleTodoCount, visibleTodoTasks } from './extensionUI';
 import { useText } from './ui';
 
-export function ExtensionDock({conversationId, state}: {conversationId: string; state?: ExtensionUiState}) {
+export function ExtensionDock({conversationId, state, working = false}: {conversationId: string; state?: ExtensionUiState; working?: boolean}) {
   const widgets = state?.widgets ?? [];
   const statuses = state?.statuses ?? [];
   const notifications = state?.notifications ?? [];
@@ -13,13 +13,13 @@ export function ExtensionDock({conversationId, state}: {conversationId: string; 
   if (!state) return null;
   return <section className="extension-dock" aria-label="Extension status">
     {genericWidgets.map(widget => <pre className={`extension-widget ${widget.placement}`} key={widget.key}>{widget.lines.join('\n')}</pre>)}
-    <TodoProgress conversationId={conversationId} todo={state.todo}/>
+    <TodoProgress conversationId={conversationId} todo={todoOwned ? state.todo : null} working={working}/>
     {statuses.map(status => <div className="extension-status" role="status" key={status.key}>{status.text}</div>)}
     {notifications.map(notification => <div className={`extension-notification ${notification.type}`} role="status" aria-live="polite" key={notification.id}>{notification.message}</div>)}
   </section>;
 }
 
-function TodoProgress({conversationId, todo}: {conversationId: string; todo: ExtensionUiState['todo']}) {
+function TodoProgress({conversationId, todo, working}: {conversationId: string; todo: ExtensionUiState['todo']; working: boolean}) {
   const t = useText();
   const tasks = visibleTodoTasks(todo);
   const activeIndex = tasks.findIndex(task => task.status === 'in_progress');
@@ -129,7 +129,7 @@ function TodoProgress({conversationId, todo}: {conversationId: string; todo: Ext
       latestFollow.current();
     }
   };
-  return <div className="todo-progress" aria-label={t('任务进度','Task progress')}>
+  return <div className={`todo-progress${working ? ' model-working' : ''}`} aria-label={t('任务进度','Task progress')}>
     <div className={`todo-scroll${dragging ? ' dragging' : ''}`} ref={scroll} tabIndex={0}
       onScroll={event => {
         positions.current.set(conversationId, event.currentTarget.scrollLeft);

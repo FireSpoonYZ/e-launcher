@@ -27,14 +27,17 @@ try {
   const first = { tasks: [{ id:1, subject:"first", status:"in_progress" }], nextId:2 };
   const later = { tasks: [{ id:1, subject:"first", status:"completed" },
     { id:2, subject:"second", status:"pending" }], nextId:3 };
-  assert.deepEqual(readTodoSnapshot(first), first);
+  const owned = (snapshot) => ({ package:"@juicesharp/rpiv-todo", ...snapshot });
+  assert.deepEqual(readTodoSnapshot(first), owned(first), "validated snapshots carry their verified package identity");
   assert.equal(readTodoSnapshot({ tasks:[{ id:1, subject:"bad", status:"unknown" }], nextId:2 }), undefined);
   assert.deepEqual(replayRpivTodo([
     { type:"message", message:{ role:"toolResult", toolName:"todo", details:first } },
     { type:"message", message:{ role:"toolResult", toolName:"other", details:later } },
     { type:"message", message:{ role:"toolResult", toolName:"todo", details:later } },
     { type:"message", message:{ role:"toolResult", toolName:"todo", details:{ tasks:"corrupt", nextId:9 } } },
-  ], recognized), later, "the last valid package todo snapshot wins even when followed by corrupt data");
+  ], recognized), owned(later), "the last valid package todo snapshot wins even when followed by corrupt data");
+  assert.deepEqual(replayRpivTodo([], recognized), owned({ tasks:[], nextId:1 }),
+    "recognized package replay starts with an explicitly owned empty snapshot");
   assert.equal(replayRpivTodo([{ type:"message", message:{ role:"toolResult", toolName:"todo", details:first } }], undefined), null,
     "history is not guessed from an unconfirmed tool name");
 

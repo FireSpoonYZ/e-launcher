@@ -59,6 +59,12 @@ final class ChatIcon extends Drawable {
             case "compose":
                 path(canvas, 10, 4, 5, 4, 4, 5, 4, 19, 5, 20, 19, 20, 20, 19, 20, 12);
                 path(canvas, 10, 14, 11, 10, 19, 2, 22, 5, 14, 13, 10, 14); break;
+            case "file":
+                path(canvas, 14, 3, 5, 3, 5, 21, 19, 21, 19, 8, 14, 3, 14, 8, 19, 8);
+                line(canvas, 8, 12, 16, 12); line(canvas, 8, 16, 14, 16); break;
+            case "camera":
+                path(canvas, 3, 7, 7, 7, 9, 4, 15, 4, 17, 7, 21, 7, 21, 20, 3, 20, 3, 7);
+                canvas.drawCircle(12, 13, 4, paint); break;
             case "copy":
                 canvas.drawRoundRect(8, 3, 20, 16, 2, 2, paint);
                 path(canvas, 8, 8, 4, 8, 4, 21, 15, 21, 15, 17); break;
