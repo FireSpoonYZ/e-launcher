@@ -15,13 +15,13 @@ export function createShowerTool({ request }) {
   return defineTool({
     name: "shower",
     label: "Operit Shower",
-    description: "只操作宿主分配给当前聊天的 Operit Shower 虚拟屏，不操作手机主屏或其他聊天的屏幕；每个聊天各自一块屏。先 create（默认 720×1280，会自动启动 Shower），再 launch；同一聊天 create 可复用现有屏幕。每次动作后用 screenshot 核实。屏幕可跨回复保留，5 分钟没有工具操作会自动回收；确定不再使用时 release，仅释放本聊天的屏幕。最后一块屏幕关闭后 Shower 空闲 15 秒自动退出。同一应用不能同时由不同聊天的虚拟屏占用，launch 冲突会报错。tap/swipe 坐标始终使用 create 返回的虚拟屏尺寸。截图可能按 maxWidth/maxHeight 等比缩小，返回文字会同时给出虚拟尺寸和图片尺寸；不要把缩小后的图片坐标直接当虚拟坐标。先点击目标输入框再 text：通过系统剪贴板粘贴中文等 Unicode 文本，并全选替换原内容；text 为空或 clear 清空整个输入框。copy(text) 把给定文字写入系统剪贴板；paste 在当前光标处粘贴，替换选中部分。key COPY/CUT 操作当前选区，key A 配合 CTRL 全选。系统剪贴板与主屏应用共享，text/copy 会覆盖剪贴板；按键被系统接受不代表输入框已改变，必须截图确认。服务断开或屏幕空闲超时后先 create，再 launch 和截图重新定位，不要盲目重放旧坐标或动作。",
+    description: "只操作宿主分配给当前聊天的 Operit Shower 虚拟屏，不操作手机主屏或其他聊天的屏幕；每个聊天各自一块屏。先 create（默认采用手机主屏当前完整分辨率和密度，会自动启动 Shower），再 launch；同一聊天 create 可复用现有屏幕。每次动作后用 screenshot 核实。屏幕可跨回复保留，5 分钟没有工具操作会自动回收；确定不再使用时 release，仅释放本聊天的屏幕。最后一块屏幕关闭后 Shower 空闲 15 秒自动退出。同一应用不能同时由不同聊天的虚拟屏占用，launch 冲突会报错。tap/swipe 坐标始终使用 create 返回的虚拟屏尺寸。截图可能按 maxWidth/maxHeight 等比缩小，返回文字会同时给出虚拟尺寸和图片尺寸；不要把缩小后的图片坐标直接当虚拟坐标。先点击目标输入框再 text：通过系统剪贴板粘贴中文等 Unicode 文本，并全选替换原内容；text 为空或 clear 清空整个输入框。copy(text) 把给定文字写入系统剪贴板；paste 在当前光标处粘贴，替换选中部分。key COPY/CUT 操作当前选区，key A 配合 CTRL 全选。系统剪贴板与主屏应用共享，text/copy 会覆盖剪贴板；按键被系统接受不代表输入框已改变，必须截图确认。服务断开或屏幕空闲超时后先 create，再 launch 和截图重新定位，不要盲目重放旧坐标或动作。",
     parameters: Type.Union([
       Type.Object({
         action: Type.Literal("create"),
-        width: Type.Optional(Type.Integer({ minimum: 320, maximum: 1440, description: "虚拟屏宽；会向上对齐到 16 像素" })),
-        height: Type.Optional(Type.Integer({ minimum: 320, maximum: 3200, description: "虚拟屏高；会向上对齐到 16 像素" })),
-        dpi: Type.Optional(Type.Integer({ minimum: 120, maximum: 640 })),
+        width: Type.Optional(Type.Integer({ minimum: 320, maximum: 4096, description: "虚拟屏宽；默认主屏当前完整宽度，会向上对齐到 16 像素" })),
+        height: Type.Optional(Type.Integer({ minimum: 320, maximum: 4096, description: "虚拟屏高；默认主屏当前完整高度，会向上对齐到 16 像素" })),
+        dpi: Type.Optional(Type.Integer({ minimum: 120, maximum: 640, description: "默认主屏当前密度" })),
         bitrateKbps: Type.Optional(Type.Integer({ minimum: 128, maximum: 12000, description: "内部显示 Surface 的 H.264 码率" })),
       }, { additionalProperties: false }),
       Type.Object({ action: Type.Literal("launch"), packageName: Type.String({ minLength: 3, maxLength: 255,

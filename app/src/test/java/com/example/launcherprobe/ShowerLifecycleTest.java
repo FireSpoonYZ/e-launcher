@@ -3,6 +3,7 @@ package com.example.launcherprobe;
 import static org.junit.Assert.*;
 
 import android.os.Binder;
+import android.view.Display;
 import com.ai.assistance.shower.IShowerService;
 import java.lang.reflect.Field;
 import java.lang.reflect.Proxy;
@@ -15,10 +16,50 @@ import org.junit.runner.RunWith;
 import org.robolectric.RobolectricTestRunner;
 import org.robolectric.RuntimeEnvironment;
 import org.robolectric.annotation.Config;
+import org.robolectric.shadows.ShadowDisplayManager;
 
 @RunWith(RobolectricTestRunner.class)
 @Config(sdk = 34, manifest = Config.NONE)
 public class ShowerLifecycleTest {
+    @Test public void defaultCreateUsesCurrentFullDefaultDisplayMetricsInLandscape() throws Exception {
+        ShadowDisplayManager.changeDisplay(Display.DEFAULT_DISPLAY,
+                "w1920dp-h822dp-land-xhdpi");
+        ShowerToolBridge tools = new ShowerToolBridge(RuntimeEnvironment.getApplication());
+        int[] requested = new int[4];
+        Binder binder = new Binder();
+        IShowerService service = (IShowerService) Proxy.newProxyInstance(
+                IShowerService.class.getClassLoader(), new Class<?>[]{IShowerService.class},
+                (proxy, method, args) -> {
+                    switch (method.getName()) {
+                        case "asBinder": return binder;
+                        case "ensureDisplay":
+                            for (int index = 0; index < requested.length; index++) {
+                                requested[index] = (Integer) args[index];
+                            }
+                            return 7;
+                        case "attachClient":
+                        case "touchDisplay":
+                        case "tap": return true;
+                        default: throw new AssertionError("Unexpected Binder call: " + method.getName());
+                    }
+                });
+        Field managerField = ShowerToolBridge.class.getDeclaredField("manager");
+        managerField.setAccessible(true);
+        Field serviceField = ShowerManager.class.getDeclaredField("service");
+        serviceField.setAccessible(true);
+        serviceField.set(managerField.get(tools), service);
+
+        JSONObject created = tools.execute("chat", new JSONObject().put("action", "create"));
+        assertArrayEquals(new int[]{3840, 1648, 320, 500}, requested);
+        assertEquals(3840, created.getInt("width"));
+        assertEquals(1648, created.getInt("height"));
+        assertEquals(320, created.getInt("dpi"));
+        JSONObject tapped = tools.execute("chat", new JSONObject().put("action", "tap")
+                .put("x", 3839).put("y", 1647));
+        assertEquals(3839, tapped.getInt("x"));
+        assertEquals(1647, tapped.getInt("y"));
+    }
+
     @Test public void chatOwnershipReuseReleaseAndExpiredDisplayRecovery() throws Exception {
         ShowerToolBridge tools = new ShowerToolBridge(RuntimeEnvironment.getApplication());
         Set<Integer> active = new HashSet<>();

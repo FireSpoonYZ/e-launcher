@@ -208,8 +208,8 @@ public final class Main {
     private synchronized int createVirtualDisplay(int width, int height, int dpi, int bitRate) {
         int alignedWidth = align(width);
         int alignedHeight = align(height);
-        if (width < 320 || width > 1440 || height < 320 || height > 3200
-                || (long) alignedWidth * alignedHeight > 4_000_000L
+        if (width < 320 || width > 4096 || height < 320 || height > 4096
+                || (long) alignedWidth * alignedHeight > 8_000_000L
                 || dpi < 120 || dpi > 640 || bitRate < 128_000 || bitRate > 12_000_000) {
             throw new IllegalArgumentException("Virtual display configuration is out of range");
         }

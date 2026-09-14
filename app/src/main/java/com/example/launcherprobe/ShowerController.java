@@ -264,9 +264,9 @@ final class ShowerController {
     }
 
     private static void validateDisplay(int width, int height, int dpi, int bitrateKbps) {
-        if (width < 320 || width > 1440 || height < 320 || height > 3200
-                || (long) width * height > 4_000_000L) {
-            throw new IllegalArgumentException("虚拟屏尺寸范围为 320..1440 × 320..3200，且不超过 400 万像素");
+        if (width < 320 || width > 4096 || height < 320 || height > 4096
+                || (long) width * height > 8_000_000L) {
+            throw new IllegalArgumentException("虚拟屏尺寸范围为 320..4096 × 320..4096，且不超过 800 万像素");
         }
         if (dpi < 120 || dpi > 640) throw new IllegalArgumentException("dpi 范围为 120..640");
         if (bitrateKbps < 128 || bitrateKbps > 12_000) {

@@ -1,5 +1,8 @@
 package com.example.launcherprobe;
 
+import android.hardware.display.DisplayManager;
+import android.util.DisplayMetrics;
+import android.view.Display;
 import android.view.KeyEvent;
 
 import org.json.JSONArray;
@@ -51,9 +54,7 @@ final class ShowerToolBridge {
                 ignored -> new ShowerController(context, manager));
         String action = arguments.optString("action", "");
         return switch (action) {
-            case "create" -> controller.create(integer(arguments, "width", 720),
-                    integer(arguments, "height", 1280), integer(arguments, "dpi", 320),
-                    integer(arguments, "bitrateKbps", 500));
+            case "create" -> create(controller, arguments);
             case "launch" -> controller.launch(requiredString(arguments, "packageName", 255));
             case "screenshot" -> controller.screenshot(integer(arguments, "maxWidth", 720),
                     integer(arguments, "maxHeight", 1280));
@@ -69,6 +70,19 @@ final class ShowerToolBridge {
             case "release" -> controller.release();
             default -> throw new IllegalArgumentException("未知 Shower action：" + action);
         };
+    }
+
+    @SuppressWarnings("deprecation") // Real metrics are the default display's full, current logical size.
+    private JSONObject create(ShowerController controller, JSONObject arguments) throws Exception {
+        DisplayManager displays = context.getSystemService(DisplayManager.class);
+        Display display = displays == null ? null : displays.getDisplay(Display.DEFAULT_DISPLAY);
+        if (display == null) throw new IllegalStateException("无法读取系统主屏参数");
+        DisplayMetrics metrics = new DisplayMetrics();
+        display.getRealMetrics(metrics);
+        return controller.create(integer(arguments, "width", metrics.widthPixels),
+                integer(arguments, "height", metrics.heightPixels),
+                integer(arguments, "dpi", metrics.densityDpi),
+                integer(arguments, "bitrateKbps", 500));
     }
 
     void forgetConversation(String conversationId) {
