@@ -10,11 +10,17 @@ import android.content.pm.LauncherApps;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
 import android.content.pm.ShortcutInfo;
+import android.graphics.Bitmap;
+import android.graphics.Canvas;
 import android.graphics.Color;
+import android.graphics.Paint;
 import android.graphics.Rect;
+import android.graphics.RenderEffect;
+import android.graphics.Shader;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
 import android.provider.Settings;
@@ -24,11 +30,15 @@ import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewConfiguration;
+import android.view.ViewGroup;
 import android.view.Window;
 import android.view.WindowManager;
+import android.widget.AbsListView;
+import android.widget.BaseAdapter;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.GridLayout;
+import android.widget.GridView;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
@@ -36,6 +46,7 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -63,9 +74,12 @@ final class HomeDesktop extends FrameLayout {
     private DesktopMenu menu;
     private View dropTarget;
     private Dialog appDialog;
-    private Dialog folderDialog;
     private FrameLayout folderRoot;
+    private FrameLayout folderPanel;
     private GridLayout folderGrid;
+    private Bitmap folderBackdrop;
+    private androidx.activity.OnBackPressedCallback folderBack;
+    private View dragPreview;
     private int activeFolderSlot = -1;
     private boolean disposed;
 
@@ -93,12 +107,12 @@ final class HomeDesktop extends FrameLayout {
     void appsChanged(List<ResolveInfo> value) {
         apps = value;
         render();
-        if (folderDialog != null) renderFolder();
+        if (folderRoot != null) renderFolder();
     }
 
     void shortcutsChanged() {
         render();
-        if (folderDialog != null) renderFolder();
+        if (folderRoot != null) renderFolder();
     }
 
     void packageRemoved(String packageName) {
@@ -128,7 +142,8 @@ final class HomeDesktop extends FrameLayout {
         handler.removeCallbacksAndMessages(null);
         dismissMenu();
         if (appDialog != null) appDialog.dismiss();
-        if (folderDialog != null) folderDialog.dismiss();
+        closeFolder();
+        clearDragPreview();
     }
 
     void showAllApps() {
@@ -163,15 +178,15 @@ final class HomeDesktop extends FrameLayout {
             final int selectedSlot = slot;
             HomeLayout.Item item = layout.get(slot);
             Cell cell = cell(item);
-            cell.setContentDescription(item == null
-                    ? tr("添加到位置 ", "Add to position ") + (slot + 1)
-                    : itemDescription(item));
-            cell.setOnClickListener(view -> activate(item, view, selectedSlot));
-            cell.setOnTouchListener(new HomeTouch(selectedSlot, item, cell));
-            if (item != null) cell.setOnLongClickListener(view -> {
-                showMenu(homeOverlay, view, item, new Location(HOME, selectedSlot, -1));
-                return true;
-            });
+            if (item != null) {
+                cell.setContentDescription(itemDescription(item));
+                cell.setOnClickListener(view -> activate(item, view, selectedSlot));
+                cell.setOnTouchListener(new HomeTouch(selectedSlot, item, cell));
+                cell.setOnLongClickListener(view -> {
+                    showMenu(homeOverlay, view, item, new Location(HOME, selectedSlot, -1));
+                    return true;
+                });
+            }
             GridLayout.LayoutParams params = new GridLayout.LayoutParams(
                     GridLayout.spec(slot / 4), GridLayout.spec(slot % 4, 1f));
             params.width = 0;
@@ -184,22 +199,11 @@ final class HomeDesktop extends FrameLayout {
         Cell cell = new Cell();
         cell.setOrientation(LinearLayout.VERTICAL);
         cell.setGravity(Gravity.TOP | Gravity.CENTER_HORIZONTAL);
-        cell.setClickable(true);
-        cell.setFocusable(true);
+        cell.setClickable(item != null);
+        cell.setFocusable(item != null);
         cell.setPadding(dp(3), dp(10), dp(3), dp(6));
         cell.setBackgroundColor(Color.TRANSPARENT);
-        if (item == null) {
-            TextView add = text("+", 30, colors.muted);
-            add.setGravity(Gravity.CENTER);
-            add.setBackground(shape(0x14000000, 18, 1, colors.border));
-            cell.addView(add, new LinearLayout.LayoutParams(dp(52), dp(52)));
-            TextView name = text(tr("添加", "Add"), 13, colors.muted);
-            name.setGravity(Gravity.CENTER);
-            LinearLayout.LayoutParams nameParams = new LinearLayout.LayoutParams(-1, -2);
-            nameParams.topMargin = dp(7);
-            cell.addView(name, nameParams);
-            return cell;
-        }
+        if (item == null) return cell;
         cell.addView(itemIcon(item, 52), new LinearLayout.LayoutParams(dp(52), dp(52)));
         TextView name = text(itemLabel(item), 13,
                 itemAvailable(item) ? colors.ink : colors.muted);
@@ -276,8 +280,9 @@ final class HomeDesktop extends FrameLayout {
             this.item = item;
             this.view = view;
             longPress = () -> {
-                if (item == null || disposed) return;
+                if (disposed) return;
                 longPressed = true;
+                view.getParent().requestDisallowInterceptTouchEvent(true);
                 view.performLongClick();
             };
         }
@@ -289,7 +294,7 @@ final class HomeDesktop extends FrameLayout {
                     downX = event.getRawX();
                     downY = event.getRawY();
                     longPressed = dragging = moved = false;
-                    if (item != null) handler.postDelayed(longPress, LONG_PRESS_MS);
+                    handler.postDelayed(longPress, LONG_PRESS_MS);
                     return true;
                 case MotionEvent.ACTION_MOVE:
                     if (!longPressed) {
@@ -302,33 +307,37 @@ final class HomeDesktop extends FrameLayout {
                     if (!dragging && distance(event) > touchSlop) {
                         dragging = true;
                         dismissMenu();
-                        view.setAlpha(.72f);
+                        view.setAlpha(.28f);
+                        startDragPreview(item);
                     }
                     if (dragging) updateHomeDrag(event);
                     return true;
                 case MotionEvent.ACTION_UP:
                     handler.removeCallbacks(longPress);
-                    if (dragging) finishHomeDrag();
-                    else if (!longPressed && !moved) view.performClick();
-                    dragging = false;
-                    hoverSlot = -1;
-                    view.setAlpha(1f);
-                    view.setTranslationX(0);
-                    view.setTranslationY(0);
-                    clearDropTarget();
+                    if (dragging) finishHomeDrag(event);
+                    else if (!longPressed && !moved) {
+                        if (folderRoot != null) closeFolder();
+                        else view.performClick();
+                    }
+                    finishTouch();
                     return true;
                 case MotionEvent.ACTION_CANCEL:
                     handler.removeCallbacks(longPress);
-                    dragging = false;
-                    hoverSlot = -1;
-                    view.setAlpha(1f);
-                    view.setTranslationX(0);
-                    view.setTranslationY(0);
-                    clearDropTarget();
+                    finishTouch();
                     return true;
                 default:
                     return true;
             }
+        }
+
+        private void finishTouch() {
+            dragging = false;
+            hoverSlot = -1;
+            view.setAlpha(1f);
+            if (view.getParent() != null) view.getParent().requestDisallowInterceptTouchEvent(false);
+            clearDragPreview();
+            clearDropTarget();
+            restoreFolderSurface();
         }
 
         private float distance(MotionEvent event) {
@@ -336,8 +345,13 @@ final class HomeDesktop extends FrameLayout {
         }
 
         private void updateHomeDrag(MotionEvent event) {
-            view.setTranslationX(event.getRawX() - downX);
-            view.setTranslationY(event.getRawY() - downY);
+            moveDragPreview(event.getRawX(), event.getRawY());
+            if (folderPanel != null && contains(folderPanel, event.getRawX(), event.getRawY())) {
+                hoverSlot = -1;
+                clearDropTarget();
+                restoreFolderSurface();
+                return;
+            }
             int target = homeTarget(event.getRawX(), event.getRawY());
             boolean centered = !item.isFolder() && target >= 0 && target != slot
                     && layout.get(target) != null
@@ -346,18 +360,28 @@ final class HomeDesktop extends FrameLayout {
                 hoverSlot = centered ? target : -1;
                 hoverSince = centered ? android.os.SystemClock.uptimeMillis() : 0;
                 if (centered) handler.postDelayed(() -> {
-                    if (dragging && hoverSlot == target) highlightDrop(target, true);
+                    if (!dragging || hoverSlot != target) return;
+                    highlightDrop(target, true);
+                    if (folderRoot == null && layout.get(target).isFolder()) openFolder(target);
                 }, MERGE_HOVER_MS);
             }
             highlightDrop(target, centered && hoverSlot == target
                     && android.os.SystemClock.uptimeMillis() - hoverSince >= MERGE_HOVER_MS);
         }
 
-        private void finishHomeDrag() {
-            int target = dropTarget == null ? -1 : grid.indexOfChild(dropTarget);
+        private void finishHomeDrag(MotionEvent event) {
+            if (folderPanel != null && contains(folderPanel, event.getRawX(), event.getRawY())) {
+                if (layout.merge(slot, activeFolderSlot, tr("文件夹", "Folder"))) {
+                    persist();
+                    renderFolder();
+                }
+                return;
+            }
+            int target = homeTarget(event.getRawX(), event.getRawY());
             if (target < 0 || target == slot) return;
             boolean merge = target == hoverSlot
                     && android.os.SystemClock.uptimeMillis() - hoverSince >= MERGE_HOVER_MS;
+            closeFolder();
             boolean changed = merge
                     ? layout.merge(slot, target, tr("文件夹", "Folder"))
                     : layout.move(slot, target);
@@ -525,7 +549,7 @@ final class HomeDesktop extends FrameLayout {
                 .setPositiveButton(tr("删除", "Delete"), (dialog, which) -> {
                     layout.remove(slot);
                     persist();
-                    if (folderDialog != null) folderDialog.dismiss();
+                    closeFolder();
                 }).show();
     }
 
@@ -556,95 +580,203 @@ final class HomeDesktop extends FrameLayout {
     private void openFolder(int slot) {
         dismissMenu();
         if (layout.get(slot) == null || !layout.get(slot).isFolder()) return;
-        if (folderDialog != null) folderDialog.dismiss();
+        closeFolder();
+        FrameLayout host = activity.findViewById(android.R.id.content);
+        folderBackdrop = Bitmap.createBitmap(Math.max(1, host.getWidth() / 4),
+                Math.max(1, host.getHeight() / 4), Bitmap.Config.ARGB_8888);
+        Canvas snapshot = new Canvas(folderBackdrop);
+        snapshot.scale(folderBackdrop.getWidth() / (float) host.getWidth(),
+                folderBackdrop.getHeight() / (float) host.getHeight());
+        if (dragPreview != null) dragPreview.setVisibility(INVISIBLE);
+        host.draw(snapshot);
+        if (dragPreview != null) dragPreview.setVisibility(VISIBLE);
         activeFolderSlot = slot;
-        folderDialog = desktopDialog();
         folderRoot = new FrameLayout(activity);
-        folderRoot.setBackgroundColor(0x66000000);
-        folderDialog.setContentView(folderRoot);
-        folderDialog.setOnDismissListener(dialog -> {
-            dismissMenu();
-            folderDialog = null;
-            folderRoot = null;
-            folderGrid = null;
-            activeFolderSlot = -1;
+        folderRoot.setOnTouchListener(new View.OnTouchListener() {
+            View source;
+            float downX, downY;
+            boolean moved;
+
+            @Override public boolean onTouch(View view, MotionEvent event) {
+                if (event.getActionMasked() == MotionEvent.ACTION_DOWN) {
+                    pager.setGestureBlocked(pager.gestureId(), true);
+                    downX = event.getRawX();
+                    downY = event.getRawY();
+                    moved = false;
+                    int target = homeTarget(downX, downY);
+                    source = target >= 0 && layout.get(target) != null ? grid.getChildAt(target) : null;
+                }
+                if (Math.hypot(event.getRawX() - downX, event.getRawY() - downY) > touchSlop) moved = true;
+                if (source != null) {
+                    int[] origin = new int[2];
+                    source.getLocationOnScreen(origin);
+                    MotionEvent forwarded = MotionEvent.obtain(event);
+                    forwarded.setLocation(event.getRawX() - origin[0], event.getRawY() - origin[1]);
+                    source.dispatchTouchEvent(forwarded);
+                    forwarded.recycle();
+                } else if (event.getActionMasked() == MotionEvent.ACTION_UP && !moved) closeFolder();
+                if (event.getActionMasked() == MotionEvent.ACTION_UP
+                        || event.getActionMasked() == MotionEvent.ACTION_CANCEL) source = null;
+                return true;
+            }
         });
-        folderDialog.show();
-        Window window = folderDialog.getWindow();
-        if (window != null) {
-            WindowManager.LayoutParams params = window.getAttributes();
-            params.width = WindowManager.LayoutParams.MATCH_PARENT;
-            params.height = WindowManager.LayoutParams.MATCH_PARENT;
-            window.setAttributes(params);
-            window.setBackgroundDrawableResource(android.R.color.transparent);
-            window.clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);
-            window.setStatusBarColor(colors.background);
-            window.setNavigationBarColor(colors.background);
-        }
+        host.addView(folderRoot, new FrameLayout.LayoutParams(-1, -1));
+        folderBack = new androidx.activity.OnBackPressedCallback(true) {
+            @Override public void handleOnBackPressed() {
+                if (!dismissMenu()) closeFolder();
+            }
+        };
+        ((androidx.activity.ComponentActivity) activity).getOnBackPressedDispatcher().addCallback(folderBack);
         renderFolder();
+        folderPanel.setScaleX(.96f);
+        folderPanel.setScaleY(.96f);
+        folderPanel.setAlpha(0f);
+        folderPanel.animate().scaleX(1f).scaleY(1f).alpha(1f).setDuration(180).start();
+        if (dragPreview != null) dragPreview.bringToFront();
+    }
+
+    private void closeFolder() {
+        if (folderRoot == null) return;
+        dismissMenu();
+        ((ViewGroup) folderRoot.getParent()).removeView(folderRoot);
+        folderBack.remove();
+        folderBack = null;
+        folderRoot = null;
+        folderPanel = null;
+        folderGrid = null;
+        folderBackdrop = null;
+        activeFolderSlot = -1;
     }
 
     private void renderFolder() {
         if (folderRoot == null || activeFolderSlot < 0) return;
         HomeLayout.Item folder = layout.get(activeFolderSlot);
         if (folder == null || !folder.isFolder()) {
-            if (folderDialog != null) folderDialog.dismiss();
+            closeFolder();
             return;
         }
         dismissMenu();
         folderRoot.removeAllViews();
-        folderRoot.setBackgroundColor(0x66000000);
+        folderRoot.setBackgroundColor(0x18000000);
+        androidx.core.view.ViewCompat.setAccessibilityPaneTitle(folderRoot, folder.name);
+        folderPanel = new FrameLayout(activity);
+        int tint = colors.dark ? 0xb3252d28 : 0x99f8faf6;
+        int edge = colors.dark ? 0x44768479 : 0x99ffffff;
+        folderPanel.setBackground(shape(tint, 28, 1, edge));
+        folderPanel.setClipToOutline(true);
+        folderPanel.setElevation(dp(12));
+        folderPanel.setClickable(true);
+        View glass = new View(activity) {
+            final Paint paint = new Paint(Paint.FILTER_BITMAP_FLAG);
+            @Override protected void onDraw(Canvas canvas) {
+                if (folderBackdrop == null) return;
+                View host = activity.findViewById(android.R.id.content);
+                int[] origin = new int[2];
+                int[] position = new int[2];
+                host.getLocationOnScreen(origin);
+                getLocationOnScreen(position);
+                int left = origin[0] - position[0];
+                int top = origin[1] - position[1];
+                canvas.drawBitmap(folderBackdrop, null,
+                        new Rect(left, top, left + host.getWidth(), top + host.getHeight()), paint);
+            }
+        };
+        if (Build.VERSION.SDK_INT >= 31) {
+            glass.setRenderEffect(RenderEffect.createBlurEffect(dp(18), dp(18), Shader.TileMode.CLAMP));
+        }
+        glass.setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_NO);
+        folderPanel.addView(glass, new FrameLayout.LayoutParams(-1, -1));
+        View frost = new View(activity);
+        frost.setBackground(shape(tint, 28, 1, edge));
+        frost.setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_NO);
+        folderPanel.addView(frost, new FrameLayout.LayoutParams(-1, -1));
         LinearLayout content = column();
-        content.setBackgroundColor(colors.surface);
-        content.setPadding(dp(20), dp(12), dp(20), dp(20));
-        LinearLayout header = row();
+        content.setPadding(dp(18), dp(8), dp(18), dp(16));
         TextView title = text(folder.name, 24, colors.ink);
         title.setTypeface(null, android.graphics.Typeface.BOLD);
-        header.addView(title, new LinearLayout.LayoutParams(0, dp(56), 1));
-        TextView rename = compact(tr("重命名", "Rename"), () -> renameFolder(activeFolderSlot));
-        header.addView(rename);
-        TextView close = compact("×", () -> folderDialog.dismiss());
-        close.setTextSize(26);
-        header.addView(close);
-        content.addView(header);
-
-        LinearLayout actions = row();
-        actions.addView(compact(tr("批量添加", "Add apps"), () -> batchAdd(activeFolderSlot)));
-        actions.addView(compact(tr("删除文件夹", "Delete folder"), () -> deleteFolder(activeFolderSlot)));
-        content.addView(actions);
+        title.setGravity(Gravity.CENTER_VERTICAL);
+        title.setPadding(dp(6), 0, dp(6), 0);
+        title.setSingleLine(true);
+        title.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        title.setContentDescription(tr("重命名文件夹 ", "Rename folder ") + folder.name);
+        title.setFocusable(true);
+        title.setOnClickListener(view -> renameFolder(activeFolderSlot));
+        title.setOnLongClickListener(view -> {
+            showMenu(folderRoot, view, folder, new Location(FOLDER, activeFolderSlot, -1));
+            return true;
+        });
+        content.addView(title, new LinearLayout.LayoutParams(-1, dp(60)));
 
         folderGrid = new GridLayout(activity);
-        folderGrid.setColumnCount(4);
-        for (int index = 0; index < folder.children.size(); index++) {
+        folderGrid.setColumnCount(3);
+        int rows = Math.max(2, (folder.children.size() + 2) / 3);
+        for (int index = 0; index < rows * 3; index++) {
             final int childIndex = index;
-            HomeLayout.Item item = folder.children.get(index);
-            Cell cell = cell(item);
-            cell.setContentDescription(itemDescription(item));
-            cell.setOnClickListener(view -> activate(item, view, activeFolderSlot));
-            cell.setOnTouchListener(new FolderTouch(activeFolderSlot, childIndex, item, cell));
-            cell.setOnLongClickListener(view -> {
-                showMenu(folderRoot, view, item,
-                        new Location(FOLDER, activeFolderSlot, childIndex));
-                return true;
-            });
-            GridLayout.LayoutParams params = new GridLayout.LayoutParams();
+            View entry;
+            if (index < folder.children.size()) {
+                HomeLayout.Item item = folder.children.get(index);
+                Cell cell = cell(item);
+                cell.setContentDescription(itemDescription(item));
+                cell.setOnClickListener(view -> activate(item, view, activeFolderSlot));
+                cell.setOnTouchListener(new FolderTouch(activeFolderSlot, childIndex, item, cell));
+                cell.setOnLongClickListener(view -> {
+                    showMenu(folderRoot, view, item, new Location(FOLDER, activeFolderSlot, childIndex));
+                    return true;
+                });
+                entry = cell;
+            } else {
+                entry = new View(activity);
+                entry.setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_NO);
+            }
+            GridLayout.LayoutParams params = new GridLayout.LayoutParams(
+                    GridLayout.spec(index / 3), GridLayout.spec(index % 3, 1f));
             params.width = 0;
-            params.height = dp(116);
-            params.columnSpec = GridLayout.spec(GridLayout.UNDEFINED, 1f);
-            folderGrid.addView(cell, params);
+            params.height = dp(112);
+            folderGrid.addView(entry, params);
         }
-        if (folder.children.isEmpty()) {
-            TextView empty = text(tr("文件夹是空的，可批量添加应用。", "This folder is empty. Add apps in a batch."),
-                    15, colors.muted);
-            empty.setGravity(Gravity.CENTER);
-            empty.setPadding(0, dp(36), 0, dp(36));
-            content.addView(empty);
-        }
-        content.addView(folderGrid, new LinearLayout.LayoutParams(-1, -2));
         ScrollView scroll = new ScrollView(activity);
-        scroll.setFillViewport(true);
-        scroll.addView(content);
-        folderRoot.addView(scroll, new FrameLayout.LayoutParams(-1, -1));
+        scroll.setVerticalScrollBarEnabled(false);
+        scroll.addView(folderGrid, new ScrollView.LayoutParams(-1, -2));
+        if (folder.children.isEmpty()) {
+            TextView empty = text(tr("拖动应用到这里", "Drag apps here"), 15, colors.muted);
+            empty.setGravity(Gravity.CENTER);
+            content.addView(empty, new LinearLayout.LayoutParams(-1, 0, 1));
+        } else content.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
+        folderPanel.addView(content, new FrameLayout.LayoutParams(-1, -1));
+        Rect safe = new Rect();
+        folderRoot.getWindowVisibleDisplayFrame(safe);
+        FrameLayout.LayoutParams panelParams = new FrameLayout.LayoutParams(
+                Math.min(dp(400), safe.width() - dp(48)),
+                Math.min(dp(84 + Math.min(3, rows) * 112), safe.height() - dp(48)), Gravity.CENTER);
+        folderRoot.addView(folderPanel, panelParams);
+    }
+
+    private void startDragPreview(HomeLayout.Item item) {
+        clearDragPreview();
+        FrameLayout host = activity.findViewById(android.R.id.content);
+        dragPreview = itemIcon(item, 56);
+        dragPreview.setElevation(dp(20));
+        dragPreview.setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_NO);
+        host.addView(dragPreview, new FrameLayout.LayoutParams(dp(56), dp(56)));
+    }
+
+    private void moveDragPreview(float rawX, float rawY) {
+        int[] origin = new int[2];
+        ((View) dragPreview.getParent()).getLocationOnScreen(origin);
+        dragPreview.setX(rawX - origin[0] - dp(28));
+        dragPreview.setY(rawY - origin[1] - dp(28));
+    }
+
+    private void clearDragPreview() {
+        if (dragPreview == null) return;
+        ((ViewGroup) dragPreview.getParent()).removeView(dragPreview);
+        dragPreview = null;
+    }
+
+    private void restoreFolderSurface() {
+        if (folderRoot == null) return;
+        folderRoot.setBackgroundColor(0x18000000);
+        folderPanel.setAlpha(1f);
     }
 
     private final class FolderTouch implements View.OnTouchListener {
@@ -658,6 +790,7 @@ final class HomeDesktop extends FrameLayout {
         boolean longPressed;
         boolean dragging;
         boolean moved;
+        boolean outsideFolder;
 
         FolderTouch(int folderSlot, int child, HomeLayout.Item item, View view) {
             this.folderSlot = folderSlot;
@@ -667,6 +800,7 @@ final class HomeDesktop extends FrameLayout {
             longPress = () -> {
                 if (folderRoot == null) return;
                 longPressed = true;
+                view.getParent().requestDisallowInterceptTouchEvent(true);
                 view.performLongClick();
             };
         }
@@ -691,53 +825,52 @@ final class HomeDesktop extends FrameLayout {
                     if (!dragging && distance(event) > touchSlop) {
                         dragging = true;
                         dismissMenu();
-                        folderRoot.setBackgroundColor(Color.TRANSPARENT);
-                        if (folderRoot.getChildCount() > 0) folderRoot.getChildAt(0).setAlpha(.2f);
-                        view.setAlpha(.7f);
+                        view.setAlpha(.28f);
+                        outsideFolder = false;
+                        startDragPreview(item);
                     }
                     if (dragging) {
-                        view.setTranslationX(event.getRawX() - downX);
-                        view.setTranslationY(event.getRawY() - downY);
-                        highlightDrop(homeTarget(event.getRawX(), event.getRawY()), false);
+                        moveDragPreview(event.getRawX(), event.getRawY());
+                        if (!contains(folderPanel, event.getRawX(), event.getRawY())) outsideFolder = true;
+                        folderRoot.setBackgroundColor(outsideFolder ? Color.TRANSPARENT : 0x18000000);
+                        folderPanel.setAlpha(outsideFolder ? 0f : 1f);
+                        if (!outsideFolder) clearDropTarget();
+                        else highlightDrop(homeTarget(event.getRawX(), event.getRawY()), false);
                     }
                     return true;
                 case MotionEvent.ACTION_UP:
                     handler.removeCallbacks(longPress);
                     if (dragging) finishFolderDrag(event);
                     else if (!longPressed && !moved) view.performClick();
-                    restoreFolderSurface();
-                    clearDropTarget();
-                    view.setAlpha(1f);
-                    view.setTranslationX(0);
-                    view.setTranslationY(0);
+                    finishTouch();
                     return true;
                 case MotionEvent.ACTION_CANCEL:
                     handler.removeCallbacks(longPress);
-                    restoreFolderSurface();
-                    clearDropTarget();
-                    view.setAlpha(1f);
-                    view.setTranslationX(0);
-                    view.setTranslationY(0);
+                    finishTouch();
                     return true;
                 default:
                     return true;
             }
         }
 
+        private void finishTouch() {
+            dragging = false;
+            restoreFolderSurface();
+            clearDropTarget();
+            clearDragPreview();
+            view.setAlpha(1f);
+            if (view.getParent() != null) view.getParent().requestDisallowInterceptTouchEvent(false);
+        }
+
         private float distance(MotionEvent event) {
             return (float) Math.hypot(event.getRawX() - downX, event.getRawY() - downY);
         }
 
-        private void restoreFolderSurface() {
-            if (folderRoot == null) return;
-            folderRoot.setBackgroundColor(0x66000000);
-            if (folderRoot.getChildCount() > 0) folderRoot.getChildAt(0).setAlpha(1f);
-        }
-
         private void finishFolderDrag(MotionEvent event) {
-            int targetChild = childTarget(event.getRawX(), event.getRawY());
-            if (targetChild >= 0) {
-                if (layout.moveInFolder(folderSlot, child, targetChild)) {
+            if (!outsideFolder) {
+                int targetChild = childTarget(event.getRawX(), event.getRawY());
+                if (targetChild >= 0 && layout.moveInFolder(folderSlot, child,
+                        Math.min(targetChild, layout.get(folderSlot).children.size() - 1))) {
                     persist();
                     renderFolder();
                 }
@@ -754,7 +887,7 @@ final class HomeDesktop extends FrameLayout {
                 return;
             }
             persist();
-            renderFolder();
+            closeFolder();
         }
     }
 
@@ -797,58 +930,51 @@ final class HomeDesktop extends FrameLayout {
         TextView count = text(tr("全部应用 · ", "All apps · ") + apps.size(), 14, colors.muted);
         count.setPadding(dp(4), dp(12), dp(4), dp(6));
         content.addView(count);
-        GridLayout results = new GridLayout(activity);
-        results.setColumnCount(4);
-        for (ResolveInfo app : apps) {
-            HomeLayout.Item item = HomeLayout.Item.app(
-                    app.activityInfo.packageName, app.activityInfo.name);
-            Cell cell = cell(item);
-            cell.setTag(new String[]{app.loadLabel(packages).toString(), app.activityInfo.packageName});
-            cell.setContentDescription(itemDescription(item));
-            cell.setOnClickListener(view -> {
-                if (targetSlot >= 0) {
-                    layout.set(targetSlot, item);
-                    persist();
-                    appDialog.dismiss();
-                } else if (folderSlot >= 0) {
-                    layout.addToFolder(folderSlot, item);
-                    persist();
-                    appDialog.dismiss();
-                    renderFolder();
-                } else launchApp(item);
-            });
-            cell.setOnTouchListener(new PickerTouch(cell));
-            cell.setOnLongClickListener(view -> {
-                showMenu(root, view, item, new Location(ALL_APPS, -1, -1));
-                return true;
-            });
-            GridLayout.LayoutParams params = new GridLayout.LayoutParams();
-            params.width = 0;
-            params.height = dp(116);
-            params.columnSpec = GridLayout.spec(GridLayout.UNDEFINED, 1f);
-            results.addView(cell, params);
-        }
-        content.addView(results);
+        GridView results = new GridView(activity);
+        results.setNumColumns(4);
+        results.setStretchMode(GridView.STRETCH_COLUMN_WIDTH);
+        results.setSelector(android.R.color.transparent);
+        AppAdapter adapter = new AppAdapter();
+        results.setAdapter(adapter);
+        results.setOnItemClickListener((parent, view, position, id) -> {
+            HomeLayout.Item item = adapter.item(position);
+            if (targetSlot >= 0) {
+                layout.set(targetSlot, item);
+                persist();
+                appDialog.dismiss();
+            } else if (folderSlot >= 0) {
+                layout.addToFolder(folderSlot, item);
+                persist();
+                appDialog.dismiss();
+                renderFolder();
+            } else launchApp(item);
+        });
+        results.setOnItemLongClickListener((parent, view, position, id) -> {
+            showMenu(root, view, adapter.item(position), new Location(ALL_APPS, -1, -1));
+            return true;
+        });
+        results.setOnScrollListener(new AbsListView.OnScrollListener() {
+            @Override public void onScrollStateChanged(AbsListView view, int state) {
+                if (state != SCROLL_STATE_IDLE) dismissMenu();
+            }
+            @Override public void onScroll(AbsListView view, int first, int visible, int total) { }
+        });
+        content.addView(results, new LinearLayout.LayoutParams(-1, 0, 1));
         query.addTextChangedListener(new TextWatcher() {
             @Override public void beforeTextChanged(CharSequence s, int start, int count, int after) { }
             @Override public void afterTextChanged(Editable s) { }
             @Override public void onTextChanged(CharSequence s, int start, int before, int countValue) {
-                int visible = 0;
-                for (int index = 0; index < results.getChildCount(); index++) {
-                    View child = results.getChildAt(index);
-                    String[] metadata = (String[]) child.getTag();
-                    boolean matches = AppSearch.matches(metadata[0], metadata[1], s.toString());
-                    child.setVisibility(matches ? VISIBLE : GONE);
-                    if (matches) visible++;
-                }
+                dismissMenu();
+                adapter.filter(s.toString());
+                results.setSelection(0);
                 count.setText((s.toString().trim().isEmpty() ? tr("全部应用 · ", "All apps · ")
-                        : tr("搜索结果 · ", "Results · ")) + visible);
+                        : tr("搜索结果 · ", "Results · ")) + adapter.getCount());
                 count.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
             }
         });
-        ScrollView scroll = new ScrollView(activity);
-        scroll.addView(content);
-        root.addView(scroll, new FrameLayout.LayoutParams(-1, -1));
+        root.addView(content, new FrameLayout.LayoutParams(-1, -1));
+        content.setFocusableInTouchMode(true);
+        content.requestFocus();
         appDialog.setContentView(root);
         appDialog.setOnDismissListener(dialog -> {
             dismissMenu();
@@ -861,47 +987,59 @@ final class HomeDesktop extends FrameLayout {
             params.width = WindowManager.LayoutParams.MATCH_PARENT;
             params.height = WindowManager.LayoutParams.MATCH_PARENT;
             window.setAttributes(params);
+            window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
+                    | WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN);
         }
     }
 
-    private final class PickerTouch implements View.OnTouchListener {
-        final View view;
-        final Runnable longPress;
-        float downX;
-        float downY;
-        boolean longPressed;
-        boolean moved;
+    private final class AppAdapter extends BaseAdapter {
+        final List<ResolveInfo> catalog = List.copyOf(apps);
+        final ArrayList<ResolveInfo> visible = new ArrayList<>(catalog);
+        final HashMap<ResolveInfo, String> labels = new HashMap<>();
 
-        PickerTouch(View view) {
-            this.view = view;
-            longPress = () -> {
-                longPressed = true;
-                view.performLongClick();
-            };
+        @Override public int getCount() { return visible.size(); }
+        @Override public ResolveInfo getItem(int position) { return visible.get(position); }
+        @Override public long getItemId(int position) { return position; }
+
+        HomeLayout.Item item(int position) {
+            ResolveInfo app = getItem(position);
+            return HomeLayout.Item.app(app.activityInfo.packageName, app.activityInfo.name);
         }
 
-        @Override public boolean onTouch(View ignored, MotionEvent event) {
-            if (event.getActionMasked() == MotionEvent.ACTION_DOWN) {
-                pager.setGestureBlocked(pager.gestureId(), true);
-                downX = event.getRawX();
-                downY = event.getRawY();
-                longPressed = moved = false;
-                handler.postDelayed(longPress, LONG_PRESS_MS);
-                return true;
+        String label(ResolveInfo app) {
+            return labels.computeIfAbsent(app, value -> value.loadLabel(packages).toString());
+        }
+
+        void filter(String query) {
+            visible.clear();
+            for (ResolveInfo app : catalog) {
+                if (query.trim().isEmpty() || AppSearch.matches(label(app), app.activityInfo.packageName, query)) {
+                    visible.add(app);
+                }
             }
-            if (event.getActionMasked() == MotionEvent.ACTION_MOVE
-                    && Math.hypot(event.getRawX() - downX, event.getRawY() - downY) > touchSlop) {
-                moved = true;
-                handler.removeCallbacks(longPress);
-                return true;
+            notifyDataSetChanged();
+        }
+
+        @Override public View getView(int position, View convertView, ViewGroup parent) {
+            Cell cell = (Cell) convertView;
+            if (cell == null) {
+                cell = cell(null);
+                cell.setLayoutParams(new AbsListView.LayoutParams(-1, dp(116)));
+                ImageView icon = new ImageView(activity);
+                cell.addView(icon, new LinearLayout.LayoutParams(dp(52), dp(52)));
+                TextView name = text("", 13, colors.ink);
+                name.setGravity(Gravity.CENTER);
+                name.setMaxLines(2);
+                name.setEllipsize(android.text.TextUtils.TruncateAt.END);
+                LinearLayout.LayoutParams nameParams = new LinearLayout.LayoutParams(-1, -2);
+                nameParams.topMargin = dp(7);
+                cell.addView(name, nameParams);
             }
-            if (event.getActionMasked() == MotionEvent.ACTION_UP) {
-                handler.removeCallbacks(longPress);
-                if (!longPressed && !moved) view.performClick();
-                return true;
-            }
-            if (event.getActionMasked() == MotionEvent.ACTION_CANCEL) handler.removeCallbacks(longPress);
-            return true;
+            ResolveInfo app = getItem(position);
+            ((ImageView) cell.getChildAt(0)).setImageDrawable(app.loadIcon(packages));
+            ((TextView) cell.getChildAt(1)).setText(label(app));
+            cell.setContentDescription(tr("打开 ", "Open ") + label(app));
+            return cell;
         }
     }
 
@@ -1022,10 +1160,8 @@ final class HomeDesktop extends FrameLayout {
     }
 
     private boolean contains(View view, float rawX, float rawY) {
-        int[] position = new int[2];
-        view.getLocationOnScreen(position);
-        return rawX >= position[0] && rawX < position[0] + view.getWidth()
-                && rawY >= position[1] && rawY < position[1] + view.getHeight();
+        Rect bounds = new Rect();
+        return view.getGlobalVisibleRect(bounds) && bounds.contains((int) rawX, (int) rawY);
     }
 
     private boolean centerHit(View view, float rawX, float rawY) {
