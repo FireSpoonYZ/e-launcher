@@ -12,7 +12,13 @@ import { getThemeByName } from "./node_modules/@earendil-works/pi-coding-agent/d
 import { toAgentHistory } from "./index.js";
 import { createShowerTool } from "./shower.js";
 import { createAppTools } from "./apps.js";
-import { ExtensionUiBridge, findRpivTodoTool, readTodoSnapshot, replayRpivTodo } from "./extension-ui.js";
+import {
+  ExtensionUiBridge,
+  findRpivAskUserQuestionTool,
+  findRpivTodoTool,
+  readTodoSnapshot,
+  replayRpivTodo,
+} from "./extension-ui.js";
 
 // Some upstream adapters reject a custom fetch unless it is globalThis.fetch. Keep that identity
 // stable while AsyncLocalStorage routes every provider, OAuth and extension fetch to its runtime.
@@ -228,6 +234,7 @@ export async function createSdkRuntime(command, signal, nativeShowerRequest, nat
     const listeners = new Set();
     const emit = (event) => { for (const listener of listeners) listener(event); };
     const todoTool = await findRpivTodoTool(session.getAllTools());
+    const askUserTool = await findRpivAskUserQuestionTool(session.getAllTools());
     let todo = replayRpivTodo(session.sessionManager.getBranch(), todoTool);
     let genericUi, uiReady = false;
     const extensionUi = () => ({ ...genericUi, todo });
@@ -241,6 +248,14 @@ export async function createSdkRuntime(command, signal, nativeShowerRequest, nat
       genericUi = snapshot;
       if (uiReady) emitExtensionUi();
     });
+    if (askUserTool) {
+      const definition = session.getToolDefinition(askUserTool.name);
+      const execute = definition?.execute;
+      if (typeof execute === "function") {
+        definition.execute = (...args) => uiBridge.runAskUserQuestion(
+          args[1], args[2], () => execute.apply(definition, args));
+      }
+    }
     await s.withHttp(() => session.bindExtensions({ uiContext:uiBridge.ui }));
     uiReady = true;
     let eventQueue = Promise.resolve(), eventError;
@@ -282,6 +297,8 @@ export async function createSdkRuntime(command, signal, nativeShowerRequest, nat
         listener({ type:"extension_ui", state:structuredClone(extensionUi()) });
         return () => listeners.delete(listener);
       },
+      replyAskUserQuestion(id, result) { return uiBridge.replyAskUserQuestion(id, result); },
+      cancelAskUserQuestion(id) { return uiBridge.cancelAskUserQuestion(id); },
       abort() { return session.abort(); },
       async prompt(text, attachments = command.attachments) {
         const onAbort = () => { void session.abort(); };

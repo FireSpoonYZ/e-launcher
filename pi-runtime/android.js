@@ -108,6 +108,25 @@ function requestApps(operation, arguments_, signal) {
 }
 
 async function handle(command) {
+  if (command.type === "questionnaire_submit" || command.type === "questionnaire_cancel") {
+    const operation = operations.get(command.id);
+    const matches = operation && operation.conversationId === command.conversationId
+      && typeof command.questionnaireId === "string";
+    try {
+      if (!matches || !operation.runtime) throw new Error("问卷请求已失效");
+      if (command.type === "questionnaire_cancel") {
+        operation.runtime.cancelAskUserQuestion(command.questionnaireId);
+      } else {
+        operation.runtime.replyAskUserQuestion(command.questionnaireId, command.result);
+      }
+      send({ id:command.id, conversationId:command.conversationId, type:"questionnaire_reply",
+        questionnaireId:command.questionnaireId, accepted:true });
+    } catch (error) {
+      send({ id:command.id, conversationId:command.conversationId, type:"questionnaire_reply",
+        questionnaireId:command.questionnaireId, accepted:false, message:error?.message || String(error) });
+    }
+    return;
+  }
   if (command.type === "shower_response" || command.type === "apps_response") {
     const operation = operations.get(command.id);
     const pending = operation?.nativeCalls.get(command.callId);

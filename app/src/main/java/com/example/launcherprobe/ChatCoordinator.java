@@ -141,6 +141,124 @@ final class ChatCoordinator {
         emit(run, "runStatus", null, json("status", run.status, "message", run.message));
     }
 
+    void submitQuestionnaire(String conversationId, String requestId, String questionnaireId,
+            JSONArray answers, Object globalNote) throws Exception {
+        replyQuestionnaire(conversationId, requestId, questionnaireId,
+                questionnaireResult(questionnaireState(conversationId, requestId, questionnaireId), answers, globalNote), false);
+    }
+
+    void cancelQuestionnaire(String conversationId, String requestId, String questionnaireId) throws Exception {
+        questionnaireState(conversationId, requestId, questionnaireId);
+        replyQuestionnaire(conversationId, requestId, questionnaireId, null, true);
+    }
+
+    private JSONObject questionnaireState(String conversationId, String requestId, String questionnaireId) {
+        synchronized (runLock) {
+            SessionRun run = activeRuns.get(conversationId);
+            if (run == null || !run.requestId.equals(requestId) || run.bridge == null
+                    || questionnaireId.equals(run.questionnaireReplyPending)) {
+                throw new IllegalStateException("问卷请求已失效");
+            }
+            JSONObject askUser = run.extensionUi.optJSONObject("askUser");
+            if (askUser == null || !questionnaireId.equals(askUser.optString("id"))) {
+                throw new IllegalStateException("问卷请求已失效");
+            }
+            return askUser;
+        }
+    }
+
+    private void replyQuestionnaire(String conversationId, String requestId, String questionnaireId,
+            JSONObject result, boolean cancelled) throws Exception {
+        synchronized (runLock) {
+            SessionRun run = activeRuns.get(conversationId);
+            JSONObject askUser = run == null ? null : run.extensionUi.optJSONObject("askUser");
+            if (run == null || !run.requestId.equals(requestId) || run.bridge == null
+                    || run.questionnaireReplyPending != null || askUser == null
+                    || !questionnaireId.equals(askUser.optString("id"))) {
+                throw new IllegalStateException("问卷请求已失效");
+            }
+            run.questionnaireReplyPending = questionnaireId;
+            try {
+                run.bridge.replyQuestionnaire(requestId, conversationId, questionnaireId, result, cancelled);
+            } catch (Exception exception) {
+                run.questionnaireReplyPending = null;
+                throw exception;
+            }
+        }
+    }
+
+    static JSONObject questionnaireResult(JSONObject askUser, JSONArray submitted, Object globalNote)
+            throws org.json.JSONException {
+        JSONArray questions = askUser.optJSONArray("questions");
+        if (questions == null || submitted == null) throw new IllegalArgumentException("问卷答案格式无效");
+        Set<Integer> used = new java.util.HashSet<>();
+        JSONArray answers = new JSONArray();
+        for (int i = 0; i < submitted.length(); i++) {
+            JSONObject candidate = submitted.optJSONObject(i);
+            int questionIndex = candidate == null ? -1 : candidate.optInt("questionIndex", -1);
+            if (questionIndex < 0 || questionIndex >= questions.length() || !used.add(questionIndex)) {
+                throw new IllegalArgumentException("问卷题号无效或重复");
+            }
+            JSONObject question = questions.optJSONObject(questionIndex);
+            JSONArray options = question == null ? null : question.optJSONArray("options");
+            if (options == null) throw new IllegalArgumentException("问卷内容已失效");
+            Set<String> labels = new java.util.HashSet<>();
+            Map<String, String> previews = new java.util.HashMap<>();
+            for (int optionIndex = 0; optionIndex < options.length(); optionIndex++) {
+                JSONObject option = options.optJSONObject(optionIndex);
+                if (option == null || !option.has("label")) throw new IllegalArgumentException("问卷内容已失效");
+                String label = option.optString("label", null);
+                labels.add(label);
+                if (option.has("preview")) previews.put(label, option.optString("preview"));
+            }
+            String kind = candidate.optString("kind");
+            JSONObject answer = new JSONObject().put("questionIndex", questionIndex)
+                    .put("question", question.optString("question")).put("kind", kind);
+            if ("option".equals(kind)) {
+                Object selected = candidate.opt("answer");
+                if (question.optBoolean("multiSelect") || !(selected instanceof String)
+                        || !labels.contains(selected)) throw new IllegalArgumentException("问卷单选答案无效");
+                answer.put("answer", selected);
+                if (previews.containsKey(selected)) answer.put("preview", previews.get(selected));
+            } else if ("multi".equals(kind)) {
+                JSONArray selected = candidate.optJSONArray("selected");
+                if (!question.optBoolean("multiSelect") || selected == null) {
+                    throw new IllegalArgumentException("问卷多选答案无效");
+                }
+                Set<String> selectedLabels = new java.util.HashSet<>();
+                JSONArray normalized = new JSONArray();
+                for (int selectedIndex = 0; selectedIndex < selected.length(); selectedIndex++) {
+                    Object label = selected.opt(selectedIndex);
+                    if (!(label instanceof String) || !labels.contains(label) || !selectedLabels.add((String) label)) {
+                        throw new IllegalArgumentException("问卷多选答案无效");
+                    }
+                    normalized.put(label);
+                }
+                answer.put("answer", JSONObject.NULL).put("selected", normalized);
+            } else if ("custom".equals(kind)) {
+                Object custom = candidate.opt("answer");
+                if (custom != null && custom != JSONObject.NULL && !(custom instanceof String)) {
+                    throw new IllegalArgumentException("问卷自定义答案无效");
+                }
+                answer.put("answer", custom == null ? JSONObject.NULL : custom);
+            } else throw new IllegalArgumentException("问卷答案类型无效");
+            String notes = trimmed(candidate.opt("notes"), "问卷备注必须是文本");
+            if (notes != null) answer.put("notes", notes);
+            answers.put(answer);
+        }
+        JSONObject result = new JSONObject().put("answers", answers);
+        String note = trimmed(globalNote, "问卷备注必须是文本");
+        if (note != null) result.put("globalNote", note);
+        return result;
+    }
+
+    private static String trimmed(Object value, String error) {
+        if (value == null || value == JSONObject.NULL) return null;
+        if (!(value instanceof String)) throw new IllegalArgumentException(error);
+        String trimmed = ((String) value).trim();
+        return trimmed.isEmpty() ? null : trimmed;
+    }
+
     private void startPi(SessionRun run, String text, List<ChatAttachment> attachments) throws Exception {
         PiConfigStore configStore = new PiConfigStore(context, run.conversationId);
         configStore.initialize(context.getSharedPreferences("chat", Context.MODE_PRIVATE));
@@ -268,6 +386,21 @@ final class ChatCoordinator {
             run.status = "running";
             run.message = event.optString("message", "正在回复…");
             emit(run, "runStatus", null, event);
+        } else if ("extension_ui".equals(type)) {
+            JSONObject state = event.optJSONObject("state");
+            run.extensionUi = state == null ? new JSONObject() : state;
+            JSONObject askUser = run.extensionUi.optJSONObject("askUser");
+            if (run.questionnaireReplyPending != null
+                    && (askUser == null || !run.questionnaireReplyPending.equals(askUser.optString("id")))) {
+                run.questionnaireReplyPending = null;
+            }
+            emit(run, "extensionUi", null, run.extensionUi);
+        } else if ("questionnaire_reply".equals(type)) {
+            String questionnaireId = event.optString("questionnaireId");
+            if (questionnaireId.equals(run.questionnaireReplyPending) && !event.optBoolean("accepted")) {
+                run.questionnaireReplyPending = null;
+            }
+            emit(run, "questionnaireReply", null, event);
         } else if ("error".equals(type)) {
             run.error = event.optString("message");
             emit(run, "error", null, event);
@@ -373,6 +506,7 @@ final class ChatCoordinator {
         volatile JSONObject extensionUi = new JSONObject();
         volatile String message = "正在启动…";
         volatile long lastDeltaFlush;
+        String questionnaireReplyPending;
         boolean nodeRegistered;
         boolean terminationAcknowledged;
         boolean timeoutFinalized;

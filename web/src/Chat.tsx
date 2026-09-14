@@ -1,9 +1,5 @@
 import { memo, useEffect, useRef, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
-import remarkMath from 'remark-math';
-import rehypeKatex from 'rehype-katex';
 import { ArrowDown, ArrowUp, Camera, Check, ChevronDown, Copy, GitBranch, Image, Menu, Mic, Paperclip, Plus, RotateCcw, Search, Settings, Share2, Square, SquarePen, Trash2 } from 'lucide-react';
 import { Chat, Device, NativeSettings, type ChatSnapshot, type Conversation, type ConversationNode, type ConversationSummary, type ExtensionUiState, type NativeEvent } from './native';
 import { AttachmentList } from './AttachmentList';
@@ -15,11 +11,14 @@ import { ThinkingControl } from './ThinkingControl';
 import { ComposerPopover } from './ComposerPopover';
 import { useKeyboardVisible } from './useKeyboardVisible';
 import { ExtensionDock } from './ExtensionDock';
+import { Markdown } from './Markdown';
+import { Questionnaire, type QuestionnaireReplyEvent } from './Questionnaire';
 import { Empty, ErrorNotice, Header, Loading, SearchField, errorText, query, useAction, useText } from './ui';
 
 export interface CatalogProvider { id: string; name: string; authMethods: string[]; auth: Record<string, unknown>; models: {id: string; name: string; reasoning: boolean; thinkingLevels: string[]; api: string}[] }
 export function useChat() {
   const [snapshot, setSnapshot] = useState<ChatSnapshot>(); const [error, setError] = useState(''); const [status, setStatus] = useState('');
+  const [questionnaireReply, setQuestionnaireReply] = useState<QuestionnaireReplyEvent>();
   const refreshRef = useRef<() => Promise<void>>(async () => {});
   useEffect(() => {
     let live = true, reading = false, again = false;
@@ -41,6 +40,19 @@ export function useChat() {
       if (!live) return;
       if (!current || reading) { events.push(event); return; }
       const sequence = event.sequence ?? 0;
+      if (event.type === 'questionnaireReply') {
+        const payload = event.payload ?? {};
+        if (typeof payload.questionnaireId === 'string' && typeof payload.accepted === 'boolean') {
+          setQuestionnaireReply({
+            questionnaireId: payload.questionnaireId,
+            accepted: payload.accepted,
+            message: typeof payload.message === 'string' ? payload.message : undefined,
+            conversationId: event.conversationId,
+            requestId: event.requestId,
+            sequence,
+          });
+        }
+      }
       if (sequence <= current.sequence) return;
       if (sequence !== current.sequence + 1 || event.conversationId !== current.conversationId) { void refresh(); return; }
       if (event.type === 'textDelta' && event.requestId === current.requestId && event.nodeId) {
@@ -65,22 +77,13 @@ export function useChat() {
     void listener.then(refresh).catch(e => { if (live) setError(errorText(e)); });
     return () => { live = false; void listener.then(h => h.remove()); };
   }, []);
-  return {snapshot, error, status, refresh: () => refreshRef.current()};
+  return {snapshot, error, status, questionnaireReply, refresh: () => refreshRef.current()};
 }
 export function lineage(conversation: Conversation) {
   const nodes = new Map(conversation.nodes.map(n => [n.id, n])); const path: ConversationNode[] = [];
   for (let id = conversation.leaf; id;) { const node = nodes.get(id); if (!node) break; path.unshift(node); id = node.parentId; }
   return path;
 }
-export const Markdown = memo(function Markdown({text}: {text: string}) {
-  const action = useAction();
-  return <div className="markdown"><ReactMarkdown skipHtml remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]} components={{
-    a: ({href, children}) => <a href={href} onClick={e => { e.preventDefault(); if (href) void action.run(() => Device.openUrl({url: href})); }}>{children}</a>,
-    img: ({alt}) => <span className="secondary">{alt}</span>,
-    pre: ({children}) => <pre tabIndex={0}>{children}</pre>,
-    table: ({children}) => <div className="table-scroll"><table>{children}</table></div>,
-  }}>{text}</ReactMarkdown><ErrorNotice error={action.error}/></div>;
-});
 const MessageView = memo(function MessageView({node, toolResults, pending}: {node: ConversationNode; toolResults: Map<string, ConversationNode[]>; pending: boolean}) {
   const t = useText(); const action = useAction(); const [copied, setCopied] = useState(false); const message = node.message;
   if (message.role === 'system') return null;
@@ -114,6 +117,10 @@ export function ChatPage() {
   const [defaults, setDefaults] = useState<Record<string,unknown>>({});
   const defaultsRequest = useRef(new LatestRequest()).current;
   const conversation = chat.snapshot?.conversation;
+  const questionnaire = chat.snapshot?.extensionUi?.askUser ?? null;
+  useEffect(() => {
+    if (questionnaire) setComposerPanel(null);
+  }, [conversation?.id, chat.snapshot?.requestId, questionnaire?.id]);
   useEffect(() => {
     const request = defaultsRequest.begin();
     setDefaults({});
@@ -157,12 +164,12 @@ export function ChatPage() {
       {path.some(n => n.message.role !== 'system') ? path.filter(node => !paired.embeddedResultIds.has(node.id)).map(node => <MessageView node={node} toolResults={paired.byCall} pending={running && node.id === activeMessage?.id} key={node.id}/>) : <div className="chat-empty"><span className="empty-mark">Pi</span><h1>{t('今天想聊些什么？','What’s on your mind?')}</h1><p>{t('从一个问题开始。','Start with a question.')}</p></div>}
     </section>
     <footer className="composer-wrap">{!following && <button className="scroll-latest icon-button" aria-label={t('回到最新消息','Latest message')} onClick={() => setFollowing(true)}><ArrowDown/></button>}
-      <ErrorNotice error={action.error || chat.error}/>{running && <div className="run-status" role="status"><span className="pulse-dot"/>{chat.status || t('正在回复…','Working…')}</div>}
+      <ErrorNotice error={action.error || chat.error}/>{questionnaire && chat.snapshot.requestId ? <Questionnaire key={`${chat.snapshot.conversationId}:${chat.snapshot.requestId}:${questionnaire.id}`} conversationId={chat.snapshot.conversationId} requestId={chat.snapshot.requestId} questionnaire={questionnaire} reply={chat.questionnaireReply}/> : <>{running && <div className="run-status" role="status"><span className="pulse-dot"/>{chat.status || t('正在回复…','Working…')}</div>}
       {attachmentError&&<div className="attachment-error" role="alert"><span>{attachmentError}</span><button onClick={()=>void chooseAttachment(retryKind)}><RotateCcw/>{t('重试','Retry')}</button></div>}
       <ExtensionDock conversationId={conversation.id} state={chat.snapshot.extensionUi}/>
       <div className="composer">{composerPanel === 'attachments'&&<><button className="attachment-popover-backdrop" aria-label={t('关闭附件菜单','Close attachment menu')} onClick={()=>setComposerPanel(null)}/><div className="attachment-popover" role="menu"><button onClick={()=>void chooseAttachment('camera')}><Camera/>{t('拍照','Take photo')}</button><button onClick={()=>void chooseAttachment('image')}><Image/>{t('上传图片','Upload image')}</button><button onClick={()=>void chooseAttachment('file')}><Paperclip/>{t('上传附件','Upload attachment')}</button></div></>}{!!conversation.draftAttachments.length&&<AttachmentList attachments={conversation.draftAttachments} remove={removeAttachment}/>}<textarea ref={textarea} value={draft} rows={1} placeholder={t('发消息…','Message…')} aria-label={t('消息','Message')} onFocus={()=>composerPanel==='attachments'&&setComposerPanel(null)} onChange={e => changeDraft(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && !e.nativeEvent.isComposing) { e.preventDefault(); void send(); } }}/><div className="composer-tools"><button className="icon-button" aria-label={t('添加附件','Add attachment')} aria-haspopup="menu" aria-expanded={composerPanel==='attachments'} onClick={() => setComposerPanel(composerPanel==='attachments'?null:'attachments')}><Plus/></button>{keyboardVisible && <button className="icon-button" aria-label={t('历史分支','History')} aria-haspopup="dialog" aria-expanded={composerPanel === 'tree'} onPointerDown={e=>e.preventDefault()} onMouseDown={e=>e.preventDefault()} onClick={() => setComposerPanel('tree')}><GitBranch/></button>}<span className="composer-spacer"/>{keyboardVisible && <ThinkingControl open={composerPanel === 'thinking'} onOpenChange={open=>setComposerPanel(open?'thinking':null)} conversation={conversation} level={String(selection.thinkingLevel || '')} disabled={running || action.busy} onChange={chat.refresh}/>}<button className="icon-button" aria-label={t('语音输入','Voice input')} onClick={() => action.run(async () => { await Chat.saveDraft({conversationId:conversation.id,text:draft}); const result = await Device.voice(); setDraft(result.text); })}><Mic/></button>{running ? <button className="send-button" aria-label={t('停止生成','Stop')} onClick={() => action.run(() => Chat.cancel({conversationId:conversation.id}))}><Square/></button> : <button className="send-button" aria-label={t('发送','Send')} disabled={(!draft.trim()&&!conversation.draftAttachments.length) || action.busy || preparing} onClick={send}><ArrowUp/></button>}</div>{preparing&&<small className="preparing" role="status">{t('正在准备附件…','Preparing attachment…')}</small>}</div>
-    </footer>
-    {composerPanel === 'tree' && keyboardVisible && <BranchPopover conversation={conversation} disabled={running} close={()=>setComposerPanel(null)} onChange={async next=>{setDraft(next.draft);await chat.refresh();setComposerPanel(null);}}/>}
+    </>}</footer>
+    {!questionnaire && composerPanel === 'tree' && keyboardVisible && <BranchPopover conversation={conversation} disabled={running} close={()=>setComposerPanel(null)} onChange={async next=>{setDraft(next.draft);await chat.refresh();setComposerPanel(null);}}/>}
     <ConversationDrawer open={panel === 'conversations'} close={() => setPanel(null)} conversation={conversation} activeRuns={chat.snapshot.activeRuns} onChange={changed}/>
     {panel === 'models' && <ModelSheet conversation={conversation} disabled={running} close={() => setPanel(null)} onChange={chat.refresh}/>}
 

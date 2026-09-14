@@ -224,6 +224,19 @@ final class PiAgentBridge {
                 .put("value", value).put("cancelled", cancelled));
     }
 
+    synchronized void replyQuestionnaire(String id, String conversationId, String questionnaireId,
+            JSONObject result, boolean cancelled) throws Exception {
+        Request request = requests.get(id);
+        if (closed || request == null || !conversationId.equals(request.conversationId)) {
+            throw new IllegalStateException("问卷请求已结束");
+        }
+        JSONObject reply = new JSONObject().put("type", cancelled ? "questionnaire_cancel" : "questionnaire_submit")
+                .put("id", id).put("conversationId", conversationId)
+                .put("questionnaireId", questionnaireId);
+        if (!cancelled) reply.put("result", result);
+        write(reply);
+    }
+
     synchronized void abort(String id) {
         if (closed || id == null || !requests.containsKey(id)) return;
         cancelShowerCalls(id);
