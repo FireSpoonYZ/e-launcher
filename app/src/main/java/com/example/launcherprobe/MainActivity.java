@@ -286,6 +286,7 @@ public class MainActivity extends BridgeActivity {
 
     @Override
     public void onPause() {
+        if (homeInputOverlay != null) homeInputOverlay.clearInput();
         savePiPreview();
         shizukuRepair.pause();
         if (GestureService.statusListener == refreshGestures) GestureService.statusListener = null;
@@ -677,6 +678,7 @@ public class MainActivity extends BridgeActivity {
         if (overlay == null) return;
         if (closingHomeInput && animated) return;
         closingHomeInput = true;
+        overlay.clearInput();
         composerDock.animate().cancel();
         getSystemService(InputMethodManager.class).hideSoftInputFromWindow(composerInput.getWindowToken(), 0);
         composerInput.clearFocus();

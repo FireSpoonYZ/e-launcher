@@ -31,7 +31,6 @@ import java.util.function.Consumer;
 /** Native search/composition above HOME. Only an explicit send or history click opens chat. */
 final class HomeInputOverlay extends LinearLayout {
     private final ChatStore store;
-    private final android.content.SharedPreferences queries;
     private final PagerRoot pager;
     private final EditText input;
     private final View plus, voice, send;
@@ -62,9 +61,6 @@ final class HomeInputOverlay extends LinearLayout {
         this.openConversation = openConversation;
         colors = AppAppearance.read(context);
         draftId = store.prepareHomeDraft();
-        queries = context.getSharedPreferences("home_input", Context.MODE_PRIVATE);
-        values[0] = queries.getString("apps", "");
-        values[1] = queries.getString("history", "");
         values[2] = store.draft(draftId);
         setOrientation(VERTICAL);
         setBackgroundColor(colors.background);
@@ -136,10 +132,7 @@ final class HomeInputOverlay extends LinearLayout {
                 if (binding || closed) return;
                 values[tab] = value.toString();
                 if (tab == 2) store.saveDraft(draftId, values[2]);
-                else {
-                    queries.edit().putString(tab == 0 ? "apps" : "history", values[tab]).apply();
-                    searchResults();
-                }
+                else searchResults();
                 updateControls();
             }
         };
@@ -154,10 +147,8 @@ final class HomeInputOverlay extends LinearLayout {
 
     void save(android.os.Bundle state) {
         state.putInt("home_input_tab", tab);
-        state.putString("home_app_query", values[0]); state.putString("home_history_query", values[1]);
     }
     void restore(android.os.Bundle state) {
-        values[0] = state.getString("home_app_query", ""); values[1] = state.getString("home_history_query", "");
         select(Math.max(0, Math.min(2, state.getInt("home_input_tab", 2))));
     }
 
@@ -224,8 +215,11 @@ final class HomeInputOverlay extends LinearLayout {
         if (pendingSearch != null) main.removeCallbacks(pendingSearch);
         if (tab == 0) {
             matchingApps.clear();
-            for (ResolveInfo app : apps) if (AppSearch.matches(app.loadLabel(getContext().getPackageManager()).toString(), app.activityInfo.packageName, values[0])) matchingApps.add(app);
-            empty.setText(t("没有找到应用", "No apps found")); adapter.notifyDataSetChanged();
+            boolean blank = values[0].trim().isEmpty();
+            if (!blank) {
+                for (ResolveInfo app : apps) if (AppSearch.matches(app.loadLabel(getContext().getPackageManager()).toString(), app.activityInfo.packageName, values[0])) matchingApps.add(app);
+            }
+            empty.setText(blank ? "" : t("没有找到应用", "No apps found")); adapter.notifyDataSetChanged();
         } else if (tab == 1) {
             String query = values[1];
             conversations = new ArrayList<>(); adapter.notifyDataSetChanged();
@@ -244,6 +238,16 @@ final class HomeInputOverlay extends LinearLayout {
     }
 
     private void error(String message) { android.widget.Toast.makeText(getContext(), message, android.widget.Toast.LENGTH_LONG).show(); }
+
+    void clearInput() {
+        values[0] = values[1] = values[2] = "";
+        store.saveDraft(draftId, "");
+        binding = true;
+        input.setText("");
+        binding = false;
+        searchResults();
+        updateControls();
+    }
 
     void dispose() {
         closed = true; generation++;
