@@ -229,7 +229,7 @@ small, .secondary { font-size: .85rem; color: var(--muted); }
 .reasoning-ticks i { width: 7px; height: 7px; margin-inline: -3.5px; border-radius: 50%; background: color-mix(in srgb, var(--bg) 50%, transparent); }
 .reasoning-slider:focus-visible { outline: 2px solid var(--text); outline-offset: 3px; }
 .reasoning-thumb { position: absolute; top: 2px; left: calc(var(--progress) - 18px); width: 36px; height: 36px; border: 3px solid var(--control-blue); border-radius: 50%; background: #fff; box-shadow: 0 0 0 2px var(--control-blue); pointer-events: none; }
-.composer-popover-layer { position: fixed; z-index: 20; inset: 0; display: flex; align-items: flex-end; justify-content: center; padding: 12px; pointer-events: auto; }
+.composer-popover-layer { position: fixed; z-index: 20; inset: 0 0 auto; height: var(--viewport-height, 100dvh); display: flex; align-items: flex-end; justify-content: center; padding: 12px; pointer-events: auto; }
 .composer-popover-backdrop { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: transparent; }
 .composer-popover { position: relative; z-index: 1; width: min(100%, 680px); max-height: min(58vh, 520px); overflow-y: auto; padding: 12px 16px 16px; border: 1px solid var(--line); border-radius: 18px; background: var(--bg); box-shadow: 0 12px 36px rgb(0 0 0 / .18); }
 .composer-popover.compact { width: min(100%, 400px); max-height: none; overflow: visible; padding: 16px; }
