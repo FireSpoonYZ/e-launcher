@@ -158,7 +158,8 @@ public final class ChatStore {
             JSONObject previous = index.optJSONObject(conversationId);
             JSONObject item = new JSONObject().put("title",
                     previous == null ? "新对话" : previous.optString("title", "新对话"))
-                    .put("updated", System.currentTimeMillis());
+                    .put("updated", System.currentTimeMillis())
+                    .put("created", previous == null ? System.currentTimeMillis() : previous.optLong("created"));
             if (previous == null || previous.optBoolean("draft_only")) item.put("draft_only", true);
             index.put(conversationId, item);
             edit.putString("conversations", index.toString());
@@ -183,6 +184,11 @@ public final class ChatStore {
             this.updated = updated;
             this.snippet = snippet;
         }
+    }
+
+    long createdAt(String id) {
+        JSONObject item = conversationIndex().optJSONObject(id);
+        return item == null ? 0 : item.optLong("created");
     }
 
     public List<Conversation> conversations() {
@@ -421,7 +427,8 @@ public final class ChatStore {
             if (previous != null && !previous.optBoolean("draft_only")
                     && !"新对话".equals(previous.optString("title")))
                 title = previous.optString("title", title);
-            index.put(conversation, new JSONObject().put("title", title).put("updated", System.currentTimeMillis()));
+            index.put(conversation, new JSONObject().put("title", title).put("updated", System.currentTimeMillis())
+                    .put("created", previous == null ? System.currentTimeMillis() : previous.optLong("created")));
             preferences.edit().putString(historyKey(conversation), encodeTree(tree).toString())
                     .putString("conversations", index.toString()).apply();
         } catch (Exception exception) {
@@ -599,7 +606,8 @@ public final class ChatStore {
             taskCards.remove(conversationId);
             SharedPreferences.Editor edit = preferences.edit().remove(historyKey(conversationId))
                     .remove("draft_" + conversationId).remove("draft_attachments_" + conversationId)
-                    .remove("pi_selection_" + conversationId).putString("conversations", index.toString())
+                    .remove("pi_selection_" + conversationId).remove("run_status_" + conversationId)
+                    .remove("run_error_" + conversationId).putString("conversations", index.toString())
                     .putString(TASK_CARDS, stringArray(taskCards).toString());
             if (conversationId.equals(preferences.getString("home_draft", null))) edit.remove("home_draft");
             if (conversationId.equals(activeId())) edit.putString("active_chat", java.util.UUID.randomUUID().toString());

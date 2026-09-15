@@ -17,10 +17,60 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 
-/** The persisted eight-slot desktop. Folder children are deliberately limited to apps and shortcuts. */
+/** Versioned workspace. Slots are row-major anchors; widget spans reserve surrounding cells. */
 final class HomeLayout {
-    static final int SLOT_COUNT = 8;
-    static final int VERSION = 1;
+    static final int SLOT_COUNT = 32;
+    static final int VERSION = 2;
+    int columns = 4;
+    int rows = 8;
+    private final ArrayList<Item> dock = new ArrayList<>(Collections.nCopies(5, null));
+    private final ArrayList<String> undo = new ArrayList<>();
+    private String committed;
+    int pageSize() { return columns * rows; }
+    int pageCount() { return Math.max(1, (slots.size() + pageSize() - 1) / pageSize()); }
+    int size() { return slots.size(); }
+    List<Item> dock() { return Collections.unmodifiableList(dock); }
+    void setDock(int index, Item item) {
+        if (item != null && (item.isWidget() || item.isFolder())) throw new IllegalArgumentException("Dock 仅支持应用和快捷方式");
+        dock.set(index, item);
+    }
+    void addPage() { slots.addAll(Collections.nCopies(pageSize(), null)); }
+    int ownerAt(int slot) {
+        int page = slot / pageSize(), x = slot % columns, y = slot % pageSize() / columns;
+        for (int i = page * pageSize(); i < Math.min(size(), (page + 1) * pageSize()); i++) {
+            Item item = get(i);
+            if (item != null && x >= i % columns && x < i % columns + item.spanX
+                    && y >= i % pageSize() / columns && y < i % pageSize() / columns + item.spanY) return i;
+        }
+        return -1;
+    }
+    boolean fits(int slot, int spanX, int spanY, int ignore) {
+        if (slot < 0 || slot >= size() || spanX < 1 || spanY < 1
+                || slot % columns + spanX > columns || slot % pageSize() / columns + spanY > rows) return false;
+        for (int y = 0; y < spanY; y++) for (int x = 0; x < spanX; x++) {
+            int owner = ownerAt(slot + y * columns + x);
+            if (owner >= 0 && owner != ignore) return false;
+        }
+        return true;
+    }
+    int vacancy(int spanX, int spanY) {
+        for (int i = 0; i < size(); i++) if (fits(i, spanX, spanY, -1)) return i;
+        int first = size(); addPage(); return first;
+    }
+    boolean resize(int slot, int x, int y) {
+        Item item = get(slot);
+        if (item == null || !item.isWidget() || !fits(slot, x, y, slot)) return false;
+        item.spanX = x; item.spanY = y; return true;
+    }
+    boolean undo() {
+        if (undo.isEmpty()) return false;
+        String previous = undo.remove(undo.size() - 1);
+        try { restore(new JSONObject(previous)); }
+        catch (JSONException e) { throw new IllegalStateException(e); }
+        committed = previous;
+        preferences.edit().putString(LAYOUT_KEY, previous).apply();
+        return true;
+    }
     static final String PREFERENCES = "launcher_home";
     static final String LAYOUT_KEY = "layout";
 
@@ -28,6 +78,22 @@ final class HomeLayout {
         static final String APP = "app";
         static final String SHORTCUT = "shortcut";
         static final String FOLDER = "folder";
+        static final String APPWIDGET = "appwidget";
+        static final String AI_WIDGET = "ai_widget";
+        static final String CLOCK = "clock";
+        static final String WIDGET_PICKER = "widget_picker";
+        static final String ASSISTANT = "assistant";
+        int spanX = 1;
+        int spanY = 1;
+        int appWidgetId = -1;
+        String provider;
+        boolean isWidget() { return APPWIDGET.equals(type) || AI_WIDGET.equals(type) || CLOCK.equals(type) || WIDGET_PICKER.equals(type); }
+        static Item widget(String type, int spanX, int spanY, int id, String provider) {
+            Item item = new Item(type, null, null, null, 0, null, null, null);
+            item.spanX = spanX; item.spanY = spanY; item.appWidgetId = id; item.provider = provider;
+            return item;
+        }
+        static Item assistant() { return new Item(ASSISTANT, null, null, null, 0, null, null, null); }
 
         final String type;
         final String packageName;
@@ -65,7 +131,7 @@ final class HomeLayout {
 
         static Item folder(String id, String name, List<Item> children) {
             for (Item child : children) {
-                if (child == null || FOLDER.equals(child.type)) {
+                if (child == null || (!APP.equals(child.type) && !SHORTCUT.equals(child.type))) {
                     throw new IllegalArgumentException("文件夹不能嵌套");
                 }
             }
@@ -84,12 +150,14 @@ final class HomeLayout {
                     && userSerial == item.userSerial
                     && Objects.equals(folderId, item.folderId)
                     && Objects.equals(name, item.name)
-                    && children.equals(item.children);
+                    && children.equals(item.children)
+                    && spanX == item.spanX && spanY == item.spanY
+                    && appWidgetId == item.appWidgetId && Objects.equals(provider, item.provider);
         }
 
         @Override public int hashCode() {
             return Objects.hash(type, packageName, className, shortcutId, userSerial,
-                    folderId, name, children);
+                    folderId, name, children, spanX, spanY, appWidgetId, provider);
         }
     }
 
@@ -105,27 +173,31 @@ final class HomeLayout {
         SharedPreferences preferences = context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE);
         if (!preferences.contains(LAYOUT_KEY)) {
             ArrayList<Item> initial = emptySlots();
-            for (int index = 0; index < Math.min(SLOT_COUNT, apps.size()); index++) {
-                ResolveInfo app = apps.get(index);
+            ArrayList<ResolveInfo> defaults = new ArrayList<>(apps);
+            defaults.sort(java.util.Comparator.comparingInt(app -> defaultRank(app.loadLabel(context.getPackageManager()).toString())));
+            for (int index = 0; index < Math.min(8, defaults.size()); index++) {
+                ResolveInfo app = defaults.get(index);
                 ComponentName component = new ComponentName(
                         app.activityInfo.packageName, app.activityInfo.name);
-                initial.set(index, Item.app(component.getPackageName(), component.getClassName()));
+                initial.set(index + 12, Item.app(component.getPackageName(), component.getClassName()));
             }
             HomeLayout layout = new HomeLayout(preferences, initial);
+            layout.addDefaults(context, false);
             layout.save();
             return layout;
         }
         try {
             JSONObject source = new JSONObject(preferences.getString(LAYOUT_KEY, ""));
-            if (source.getInt("version") != VERSION) {
-                throw new JSONException("unsupported desktop layout version");
-            }
-            JSONArray stored = source.getJSONArray("slots");
-            ArrayList<Item> slots = emptySlots();
-            for (int index = 0; index < Math.min(SLOT_COUNT, stored.length()); index++) {
-                if (!stored.isNull(index)) slots.set(index, readItem(stored.getJSONObject(index), true));
-            }
-            return new HomeLayout(preferences, slots);
+            int version = source.getInt("version");
+            if (version != 1 && version != VERSION) throw new JSONException("unsupported desktop layout version");
+            HomeLayout layout = new HomeLayout(preferences, emptySlots());
+            layout.restore(source);
+            if (version == 1) {
+                preferences.edit().putString("layout_v1", source.toString()).apply();
+                layout.addDefaults(context, true);
+                layout.save();
+            } else layout.committed = source.toString();
+            return layout;
         } catch (JSONException exception) {
             throw new IllegalStateException("无法读取桌面布局", exception);
         }
@@ -143,20 +215,12 @@ final class HomeLayout {
         slots.set(index, null);
     }
 
-    /** Empty targets are direct moves; occupied targets are stable insertion/reorders. */
+    /** Free-grid moves never shift neighboring icons; occupied targets require an explicit merge. */
     boolean move(int from, int to) {
         if (from == to || slots.get(from) == null) return false;
         Item moving = slots.get(from);
-        if (slots.get(to) == null) {
-            slots.set(from, null);
-            slots.set(to, moving);
-            return true;
-        }
-        if (from < to) {
-            for (int index = from; index < to; index++) slots.set(index, slots.get(index + 1));
-        } else {
-            for (int index = from; index > to; index--) slots.set(index, slots.get(index - 1));
-        }
+        if (!fits(to, moving.spanX, moving.spanY, from)) return false;
+        slots.set(from, null);
         slots.set(to, moving);
         return true;
     }
@@ -165,7 +229,8 @@ final class HomeLayout {
         if (from == to) return false;
         Item moving = slots.get(from);
         Item target = slots.get(to);
-        if (moving == null || target == null || moving.isFolder()) return false;
+        if (moving == null || target == null || moving.isFolder() || moving.isWidget()
+                || Item.ASSISTANT.equals(moving.type) || target.isWidget() || Item.ASSISTANT.equals(target.type)) return false;
         if (target.isFolder()) {
             ArrayList<Item> children = new ArrayList<>(target.children);
             children.add(moving);
@@ -186,7 +251,7 @@ final class HomeLayout {
 
     boolean addToFolder(int slot, Item item) {
         Item folder = slots.get(slot);
-        if (folder == null || !folder.isFolder() || item == null || item.isFolder()) return false;
+        if (folder == null || !folder.isFolder() || item == null || item.isFolder() || item.isWidget() || Item.ASSISTANT.equals(item.type)) return false;
         ArrayList<Item> children = new ArrayList<>(folder.children);
         children.add(item);
         slots.set(slot, Item.folder(folder.folderId, folder.name, children));
@@ -198,7 +263,7 @@ final class HomeLayout {
         if (folder == null || !folder.isFolder()) return 0;
         ArrayList<Item> children = new ArrayList<>(folder.children);
         int added = 0;
-        for (Item item : items) if (item != null && !item.isFolder()) {
+        for (Item item : items) if (item != null && (Item.APP.equals(item.type) || Item.SHORTCUT.equals(item.type))) {
             children.add(item);
             added++;
         }
@@ -269,6 +334,10 @@ final class HomeLayout {
                 changed = true;
             }
         }
+        for (int i = 0; i < dock.size(); i++) {
+            Item item = dock.get(i);
+            if (item != null && packageName.equals(item.packageName)) { dock.set(i, null); changed = true; }
+        }
         return changed;
     }
 
@@ -282,6 +351,8 @@ final class HomeLayout {
                 result.add(item.packageName);
             }
         }
+        for (Item item : dock) if (item != null && item.packageName != null) result.add(item.packageName);
+        result.remove(null);
         return result;
     }
 
@@ -294,6 +365,7 @@ final class HomeLayout {
                 if (child.isShortcut()) result.add(child);
             }
         }
+        for (Item item : dock) if (item != null && item.isShortcut()) result.add(item);
         return result;
     }
 
@@ -303,11 +375,209 @@ final class HomeLayout {
         try {
             target.put("version", VERSION);
             for (Item item : slots) values.put(item == null ? JSONObject.NULL : writeItem(item));
-            target.put("slots", values);
+            target.put("slots", values).put("columns", columns).put("rows", rows);
+            JSONArray dockValues = new JSONArray();
+            for (Item item : dock) dockValues.put(item == null ? JSONObject.NULL : writeItem(item));
+            target.put("dock", dockValues);
         } catch (JSONException impossible) {
             throw new IllegalStateException(impossible);
         }
-        preferences.edit().putString(LAYOUT_KEY, target.toString()).apply();
+        String next = target.toString();
+        if (committed != null && !committed.equals(next)) {
+            undo.add(committed);
+            if (undo.size() > 20) undo.remove(0);
+        }
+        committed = next;
+        preferences.edit().putString(LAYOUT_KEY, next).apply();
+    }
+
+    /** Validates without changing raw. AppWidget IDs are device-local and never restored. */
+    static JSONObject validateBackup(JSONObject raw) throws JSONException {
+        if (raw == null) throw new JSONException("缺少桌面布局");
+        int version = backupInt(raw, "version");
+        if (version != 1 && version != VERSION) throw new JSONException("不支持的桌面版本");
+        int columns = raw.has("columns") ? backupInt(raw, "columns") : 4;
+        int rows = raw.has("rows") ? backupInt(raw, "rows") : 8;
+        if (columns < 3 || columns > 8 || rows < 4 || rows > 12) throw new JSONException("无效的桌面网格");
+        JSONArray source = raw.getJSONArray("slots");
+        if (source.length() > 12000) throw new JSONException("桌面项目过多");
+        int pageSize = columns * rows;
+        int count = Math.max(pageSize, ((source.length() + pageSize - 1) / pageSize) * pageSize);
+        boolean[] occupied = new boolean[count];
+        JSONArray slots = new JSONArray();
+        boolean hasAi = false;
+        for (int i = 0; i < count; i++) {
+            if (i >= source.length() || source.isNull(i)) { slots.put(JSONObject.NULL); continue; }
+            Item item = backupItem(source.getJSONObject(i), true);
+            if (Item.AI_WIDGET.equals(item.type)) {
+                if (hasAi) throw new JSONException("AI 小组件不能重复"); hasAi = true;
+            }
+            if (item.spanX > columns || item.spanY > rows || i % columns + item.spanX > columns
+                    || i % pageSize / columns + item.spanY > rows) throw new JSONException("小组件越过页面边界");
+            for (int y = 0; y < item.spanY; y++) for (int x = 0; x < item.spanX; x++) {
+                int cell = i + y * columns + x;
+                if (occupied[cell]) throw new JSONException("桌面项目重叠");
+                occupied[cell] = true;
+            }
+            slots.put(writeItem(item));
+        }
+        JSONArray sourceDock = raw.optJSONArray("dock"), dock = new JSONArray();
+        if (sourceDock != null && sourceDock.length() != 5) throw new JSONException("Dock 必须包含五个位置");
+        for (int i = 0; i < 5; i++) {
+            if (sourceDock == null || sourceDock.isNull(i)) { dock.put(JSONObject.NULL); continue; }
+            Item item = backupItem(sourceDock.getJSONObject(i), false);
+            dock.put(writeItem(item));
+        }
+        return new JSONObject().put("version", VERSION).put("columns", columns).put("rows", rows)
+                .put("slots", slots).put("dock", dock);
+    }
+
+    private static Item backupItem(JSONObject value, boolean desktop) throws JSONException {
+        String type = value.getString("type");
+        if (Item.APP.equals(type)) return Item.app(required(value, "package"), required(value, "class"));
+        if (Item.SHORTCUT.equals(type)) {
+            Object serial = value.get("user");
+            if (!(serial instanceof Integer) && !(serial instanceof Long)) throw new JSONException("无效用户类型");
+            long user = ((Number) serial).longValue();
+            if (user < 0) throw new JSONException("无效用户");
+            return Item.shortcut(required(value, "package"), required(value, "id"), user);
+        }
+        if (Item.ASSISTANT.equals(type)) return Item.assistant();
+        if (!desktop) throw new JSONException("文件夹不能嵌套，Dock 不支持文件夹或小组件");
+        if (Item.FOLDER.equals(type)) {
+            JSONArray children = value.getJSONArray("children");
+            if (children.length() > 1000) throw new JSONException("文件夹项目过多");
+            ArrayList<Item> items = new ArrayList<>();
+            for (int i = 0; i < children.length(); i++) {
+                Item child = backupItem(children.getJSONObject(i), false);
+                if (!Item.APP.equals(child.type) && !Item.SHORTCUT.equals(child.type)) throw new JSONException("无效文件夹项目");
+                items.add(child);
+            }
+            return Item.folder(required(value, "folderId"), required(value, "name"), items);
+        }
+        if (Item.APPWIDGET.equals(type) || Item.AI_WIDGET.equals(type) || Item.CLOCK.equals(type) || Item.WIDGET_PICKER.equals(type)) {
+            int x = backupInt(value, "spanX"), y = backupInt(value, "spanY");
+            if (x < 1 || y < 1) throw new JSONException("无效小组件尺寸");
+            String provider = null;
+            if (Item.APPWIDGET.equals(type)) {
+                provider = required(value, "provider");
+                if (ComponentName.unflattenFromString(provider) == null) throw new JSONException("无效小组件提供方");
+            }
+            return Item.widget(type, x, y, -1, provider);
+        }
+        throw new JSONException("未知桌面项目类型");
+    }
+    private static int backupInt(JSONObject value, String key) throws JSONException {
+        Object number = value.get(key);
+        if (!(number instanceof Integer) && !(number instanceof Long)) throw new JSONException("无效整数：" + key);
+        long result = ((Number) number).longValue();
+        if (result < Integer.MIN_VALUE || result > Integer.MAX_VALUE) throw new JSONException("整数越界：" + key);
+        return (int) result;
+    }
+    private static String required(JSONObject value, String key) throws JSONException {
+        if (!(value.get(key) instanceof String)) throw new JSONException("无效文字字段：" + key);
+        String text = value.getString(key);
+        if (text.trim().isEmpty() || text.length() > 4096) throw new JSONException("无效字段：" + key);
+        return text;
+    }
+
+    /** Commit first, then release superseded host resources. Failure never replaces the layout. */
+    static void restoreBackup(Context context, JSONObject validated) throws JSONException {
+        JSONObject clean = validateBackup(validated);
+        SharedPreferences preferences = context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE);
+        String old = preferences.getString(LAYOUT_KEY, null);
+        ArrayList<Integer> ids = new ArrayList<>();
+        if (old != null) {
+            JSONObject previous = new JSONObject(old);
+            JSONArray slots = previous.getJSONArray("slots");
+            for (int i = 0; i < slots.length(); i++) {
+                JSONObject item = slots.optJSONObject(i);
+                if (item != null && Item.APPWIDGET.equals(item.optString("type")) && item.optInt("appWidgetId", -1) >= 0)
+                    ids.add(item.getInt("appWidgetId"));
+            }
+        }
+        SharedPreferences.Editor editor = preferences.edit().putString(LAYOUT_KEY, clean.toString());
+        if (old != null) editor.putString("layout_before_restore", old);
+        if (!editor.commit()) {
+            SharedPreferences.Editor rollback = preferences.edit();
+            if (old == null) rollback.remove(LAYOUT_KEY); else rollback.putString(LAYOUT_KEY, old);
+            rollback.commit();
+            throw new JSONException("无法保存桌面备份，已恢复原布局");
+        }
+        SharedPreferences pending = context.getSharedPreferences("desktop_widget_pending", Context.MODE_PRIVATE);
+        int pendingId = pending.getInt("id", -1);
+        if (pendingId >= 0) ids.add(pendingId);
+        pending.edit().clear().commit();
+        android.appwidget.AppWidgetHost host = new android.appwidget.AppWidgetHost(context, DesktopWidgets.HOST_ID);
+        for (int id : ids) {
+            try { host.deleteAppWidgetId(id); }
+            catch (RuntimeException e) { android.util.Log.w("HomeLayout", "Could not release old widget " + id, e); }
+        }
+    }
+
+    private void restore(JSONObject source) throws JSONException {
+        columns = Math.max(3, Math.min(8, source.optInt("columns", 4)));
+        rows = Math.max(4, Math.min(12, source.optInt("rows", 8)));
+        JSONArray stored = source.getJSONArray("slots");
+        if (stored.length() > 12000) throw new JSONException("desktop too large");
+        slots.clear();
+        slots.addAll(Collections.nCopies(Math.max(pageSize(), ((stored.length() + pageSize() - 1) / pageSize()) * pageSize()), null));
+        for (int index = 0; index < stored.length(); index++) {
+            if (stored.isNull(index)) continue;
+            Item item = readItem(stored.getJSONObject(index), true);
+            item.spanX = Math.min(columns, item.spanX);
+            item.spanY = Math.min(rows, item.spanY);
+            slots.set(fits(index, item.spanX, item.spanY, -1) ? index : vacancy(item.spanX, item.spanY), item);
+        }
+        JSONArray values = source.optJSONArray("dock");
+        for (int i = 0; i < dock.size(); i++) {
+            Item item = values == null || i >= values.length() || values.isNull(i) ? null : readItem(values.getJSONObject(i), false);
+            dock.set(i, item);
+        }
+    }
+
+    void configureGrid(int newColumns, int newRows) {
+        newColumns = Math.max(3, Math.min(8, newColumns));
+        newRows = Math.max(4, Math.min(12, newRows));
+        if (columns == newColumns && rows == newRows) return;
+        ArrayList<Item> items = new ArrayList<>(slots);
+        columns = newColumns; rows = newRows;
+        slots.clear(); addPage();
+        for (Item item : items) if (item != null) {
+            item.spanX = Math.min(columns, item.spanX); item.spanY = Math.min(rows, item.spanY);
+            slots.set(vacancy(item.spanX, item.spanY), item);
+        }
+        save();
+    }
+
+    private static int defaultRank(String label) {
+        String value = label.toLowerCase(java.util.Locale.ROOT);
+        String[][] groups = {{"相册", "图库", "gallery", "photos"}, {"日历", "calendar"},
+                {"时钟", "clock"}, {"天气", "weather"}, {"设置", "settings"},
+                {"文件", "files", "file manager"}, {"笔记", "便签", "notes"}, {"微信", "wechat"}};
+        for (int i = 0; i < groups.length; i++) for (String name : groups[i]) if (value.contains(name)) return i;
+        return groups.length;
+    }
+
+    private void addDefaults(Context context, boolean migrated) {
+        slots.set(migrated ? vacancy(4, 1) : 0, Item.widget(Item.CLOCK, 4, 1, -1, null));
+        slots.set(migrated ? vacancy(4, 2) : 4, Item.widget(Item.WIDGET_PICKER, 4, 2, -1, null));
+        slots.set(migrated ? vacancy(4, 3) : 20, Item.widget(Item.AI_WIDGET, 4, 3, -1, null));
+        android.content.Intent[] intents = {
+            new android.content.Intent(android.content.Intent.ACTION_DIAL),
+            new android.content.Intent(android.content.Intent.ACTION_MAIN).addCategory(android.content.Intent.CATEGORY_APP_MESSAGING),
+            new android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse("https://example.com")),
+            new android.content.Intent(android.provider.MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA)
+        };
+        for (int i = 0; i < intents.length; i++) {
+            ResolveInfo resolved = context.getPackageManager().resolveActivity(intents[i], android.content.pm.PackageManager.MATCH_DEFAULT_ONLY);
+            if (resolved != null && resolved.activityInfo != null) {
+                android.content.Intent launch = context.getPackageManager().getLaunchIntentForPackage(resolved.activityInfo.packageName);
+                if (launch != null && launch.getComponent() != null) dock.set(i,
+                        Item.app(launch.getComponent().getPackageName(), launch.getComponent().getClassName()));
+            }
+        }
+        dock.set(4, Item.assistant());
     }
 
     private static ArrayList<Item> emptySlots() {
@@ -316,6 +586,9 @@ final class HomeLayout {
 
     private static JSONObject writeItem(Item item) throws JSONException {
         JSONObject value = new JSONObject().put("type", item.type);
+        if (item.isWidget()) return value.put("spanX", item.spanX).put("spanY", item.spanY)
+                .put("appWidgetId", item.appWidgetId).put("provider", item.provider);
+        if (Item.ASSISTANT.equals(item.type)) return value;
         if (Item.APP.equals(item.type)) {
             return value.put("package", item.packageName).put("class", item.className);
         }
@@ -331,6 +604,10 @@ final class HomeLayout {
 
     private static Item readItem(JSONObject value, boolean allowFolder) throws JSONException {
         String type = value.getString("type");
+        if (allowFolder && (Item.APPWIDGET.equals(type) || Item.AI_WIDGET.equals(type) || Item.CLOCK.equals(type) || Item.WIDGET_PICKER.equals(type)))
+            return Item.widget(type, Math.max(1, value.optInt("spanX", 1)), Math.max(1, value.optInt("spanY", 1)),
+                    value.optInt("appWidgetId", -1), value.optString("provider", null));
+        if (Item.ASSISTANT.equals(type)) return Item.assistant();
         if (Item.APP.equals(type)) return Item.app(value.getString("package"), value.getString("class"));
         if (Item.SHORTCUT.equals(type)) {
             return Item.shortcut(value.getString("package"), value.getString("id"), value.getLong("user"));

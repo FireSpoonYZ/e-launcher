@@ -29,6 +29,28 @@ final class AppAppearance {
         return new AppAppearance(value.equals("dark") || (value.equals("system") && systemDark));
     }
 
+    static AppAppearance readDesktop(Context context) {
+        String theme = new DesktopPreferences(context).theme();
+        boolean systemDark = (context.getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK)
+                == Configuration.UI_MODE_NIGHT_YES;
+        return new AppAppearance(theme.equals("dark") || (theme.equals("system") && systemDark));
+    }
+
+    View desktopWallpaper(Context context) {
+        View view = new View(context);
+        if (new DesktopPreferences(context).wallpaper().equals("system")) {
+            // The activity must set FLAG_SHOW_WALLPAPER; do not read protected wallpaper pixels.
+            view.setBackgroundColor(android.graphics.Color.TRANSPARENT);
+        } else {
+            view.setBackground(new android.graphics.drawable.GradientDrawable(
+                    android.graphics.drawable.GradientDrawable.Orientation.TL_BR,
+                    dark ? new int[]{0xff183533, 0xff102624, 0xff24433e}
+                            : new int[]{0xffe8fafa, 0xffb9e3e2, 0xff8fcacb}));
+        }
+        view.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        return view;
+    }
+
     void apply(Activity activity) {
         activity.setTheme(dark ? android.R.style.Theme_Material_NoActionBar : android.R.style.Theme_Material_Light_NoActionBar);
     }

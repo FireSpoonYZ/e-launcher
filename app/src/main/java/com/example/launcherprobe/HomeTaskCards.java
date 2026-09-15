@@ -18,7 +18,7 @@ import android.view.animation.LinearInterpolator;
 import android.widget.FrameLayout;
 import android.widget.HorizontalScrollView;
 import android.widget.LinearLayout;
-import android.widget.PopupMenu;
+
 import android.widget.ScrollView;
 import android.widget.TextView;
 
@@ -59,7 +59,7 @@ final class HomeTaskCards extends LinearLayout {
 
     HomeTaskCards(Context context, PagerRoot pager, Consumer<String> open,
             Consumer<String> stop, Consumer<String> dismiss) {
-        this(context, pager, AppAppearance.read(context).wallpaper(context), open, stop, dismiss);
+        this(context, pager, AppAppearance.readDesktop(context).wallpaper(context), open, stop, dismiss);
     }
 
     HomeTaskCards(Context context, PagerRoot pager, View wallpaper, Consumer<String> open,
@@ -70,7 +70,7 @@ final class HomeTaskCards extends LinearLayout {
         this.open = open;
         this.stop = stop;
         this.dismiss = dismiss;
-        colors = AppAppearance.read(context);
+        colors = AppAppearance.readDesktop(context);
         setOrientation(VERTICAL);
         setPadding(dp(12), dp(6), dp(12), dp(8));
         setClipChildren(false);
@@ -78,12 +78,22 @@ final class HomeTaskCards extends LinearLayout {
     }
 
     void update(JSONArray value) {
-        cards = value;
+        cards = new JSONArray();
+        if (value != null) for (int i = 0; i < Math.min(5, value.length()); i++)
+            if (value.optJSONObject(i) != null) cards.put(value.optJSONObject(i));
         if (touching || stripSettling) { deferred = true; return; }
         render();
     }
 
     String selectedId() { return selected; }
+
+    /** Invoke only when returning to the desktop, not on background refreshes. */
+    void showLatest() { selected = ""; rendered = ""; render(); }
+
+    private void detail(String id) {
+        getContext().startActivity(new android.content.Intent(getContext(), TaskDetailActivity.class)
+                .putExtra(TaskDetailActivity.EXTRA_CONVERSATION_ID, id));
+    }
 
     void setAvailableHeight(int height) { availableHeight = height; }
 
@@ -105,6 +115,17 @@ final class HomeTaskCards extends LinearLayout {
         return result;
     }
 
+    static String status(JSONObject card) {
+        String model = card.optString("modelState");
+        if ("working".equals(model)) return "正在执行";
+        if ("stopping".equals(model)) return "正在停止…";
+        if ("error".equals(card.optString("runStatus"))) return "执行失败";
+        if ("aborted".equals(card.optString("runStatus"))) return "已停止";
+        List<JSONObject> steps = tasks(card);
+        if (steps.isEmpty()) return "对话已结束";
+        return steps.stream().allMatch(t -> "completed".equals(t.optString("status"))) ? "已完成" : "本轮已结束";
+    }
+
     static boolean animateNode(String modelState, String taskState, boolean enabled) {
         return enabled && "working".equals(modelState) && "in_progress".equals(taskState);
     }
@@ -122,8 +143,19 @@ final class HomeTaskCards extends LinearLayout {
         stripSettling = false;
         deferred = false;
         removeAllViews();
-        setVisibility(cards.length() == 0 ? GONE : VISIBLE);
-        if (card == null) { selected = ""; return; }
+        setVisibility(VISIBLE);
+        if (card == null) {
+            selected = "";
+            LinearLayout empty = new LinearLayout(getContext());
+            empty.setOrientation(VERTICAL); empty.setPadding(dp(20), dp(16), dp(20), dp(16));
+            empty.addView(label(text("✦  AI 助手", "✦  AI assistant"), 18));
+            TextView star = label("✦", 48); star.setTextColor(colors.accent); star.setGravity(Gravity.CENTER);
+            empty.addView(star);
+            TextView start = button(text("开始对话", "Start conversation"), () -> open.accept(""));
+            start.setGravity(Gravity.CENTER); start.setTextColor(colors.accent); empty.addView(start);
+            FrameLayout glass = colors.glass(getContext(), wallpaper, 24);
+            glass.addView(empty); addView(glass, new LayoutParams(-1, -2)); return;
+        }
         selected = card.optString("conversationId");
         String id = selected;
         displayed = id;
@@ -133,36 +165,37 @@ final class HomeTaskCards extends LinearLayout {
         String active = tasks.stream().filter(task -> "in_progress".equals(task.optString("status")))
                 .map(task -> task.optString("subject")).findFirst().orElse("");
         boolean working = "working".equals(model);
-        String status = "stopping".equals(model) ? text("正在停止…", "Stopping…")
-                : working ? (active.isEmpty() ? text("正在处理…", "Working…") : active)
-                : !tasks.isEmpty() && completed == tasks.size() ? text("任务已完成", "Task complete")
-                : !tasks.isEmpty() ? text("等待继续", "Ready to continue") : text("本轮已结束", "Run ended");
+        String status = status(card);
         LinearLayout panel = new LinearLayout(getContext());
         panel.setOrientation(VERTICAL);
         panel.setPadding(dp(20), dp(8), dp(20), dp(8));
         LinearLayout heading = new LinearLayout(getContext());
         heading.setGravity(Gravity.CENTER_VERTICAL);
-        TextView title = button(card.optString("title"), () -> open.accept(id));
+        TextView title = button(text("✦  AI 助手", "✦  AI assistant"), () -> detail(id));
         title.setTextSize(16);
         title.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
         title.setMaxLines(1);
         title.setEllipsize(TextUtils.TruncateAt.END);
         heading.addView(title, new LayoutParams(0, -2, 1));
-        TextView more = iconButton("more", text("任务选项", "Task options"), null);
-        more.setOnClickListener(view -> {
-            PopupMenu menu = new PopupMenu(getContext(), more, Gravity.END);
-            menu.getMenu().add(text(expanded ? "收起任务" : "展开任务", expanded ? "Collapse task" : "Expand task"))
-                    .setOnMenuItemClickListener(item -> { expanded = !expanded; render(); return true; });
-            menu.getMenu().add(text("移除卡片", "Dismiss card"))
-                    .setOnMenuItemClickListener(item -> { dismiss.accept(id); return true; });
-            menu.show();
-        });
-        heading.addView(more, new LayoutParams(dp(48), dp(48)));
+        if (cards.length() > 1) {
+            TextView position = label((index + 1) + "/" + cards.length(), 13);
+            position.setTextColor(colors.muted); heading.addView(position);
+            LinearLayout arrows = new LinearLayout(getContext()); arrows.setOrientation(VERTICAL);
+            TextView up = button("⌃", () -> move(-1));
+            up.setContentDescription(text("上一个对话", "Previous conversation"));
+            TextView down = button("⌄", () -> move(1));
+            down.setContentDescription(text("下一个对话", "Next conversation"));
+            arrows.addView(up, new LayoutParams(dp(48), dp(48)));
+            arrows.addView(down, new LayoutParams(dp(48), dp(48)));
+            heading.addView(arrows);
+        }
         panel.addView(heading);
 
         LinearLayout stateRow = new LinearLayout(getContext());
         stateRow.setGravity(Gravity.CENTER_VERTICAL);
-        TextView state = label(status, expanded ? 25 : 14);
+        TextView state = label(card.optString("title"), 18);
+        state.setOnClickListener(v -> detail(id));
+        state.setFocusable(true);
         state.setMaxLines(expanded ? 2 : 1);
         state.setEllipsize(TextUtils.TruncateAt.END);
         state.setTypeface(Typeface.create(expanded ? "sans-serif-medium" : "sans-serif", Typeface.NORMAL));
@@ -181,6 +214,9 @@ final class HomeTaskCards extends LinearLayout {
         LayoutParams stateParams = new LayoutParams(-1, -2);
         stateParams.topMargin = expanded ? dp(10) : 0;
         panel.addView(stateRow, stateParams);
+        TextView statusLabel = label(status, 13); statusLabel.setTextColor(colors.accent);
+        statusLabel.setOnClickListener(v -> detail(id)); panel.addView(statusLabel);
+        panel.setOnClickListener(v -> detail(id));
         if (!tasks.isEmpty()) {
             TextView count = label(text("已完成 ", "Completed ") + completed + " / " + tasks.size()
                     + text(" 个步骤", " steps"), 14);
@@ -196,44 +232,28 @@ final class HomeTaskCards extends LinearLayout {
             }
         }
         if (!expanded || tasks.isEmpty()) activeByConversation.put(id, null);
-        if (expanded || !"idle".equals(model)) {
-            LinearLayout actions = new LinearLayout(getContext());
-            actions.setGravity(Gravity.CENTER_VERTICAL);
-            TextView details = button(text("查看对话", "View chat"), () -> open.accept(id));
-            decorate(details, "external", colors.ink);
-            actions.addView(details, new LayoutParams(0, dp(48), 1));
-            if (!"idle".equals(model)) {
-                TextView cancel = button(text("stopping".equals(model) ? "正在停止…" : "停止",
-                        "stopping".equals(model) ? "Stopping…" : "Stop"), () -> stop.accept(id));
-                decorate(cancel, "stop", colors.error);
-                cancel.setTextColor(colors.error);
-                cancel.setEnabled(working);
-                cancel.setAlpha(working ? 1f : .5f);
-                cancel.setContentDescription(text("停止生成", "Stop generation"));
-                actions.addView(cancel, new LayoutParams(-2, dp(48)));
-            }
-            LayoutParams actionParams = new LayoutParams(-1, -2);
-            actionParams.topMargin = expanded ? dp(12) : dp(4);
-            panel.addView(actions, actionParams);
-        }
-        if (cards.length() > 1) {
-            LinearLayout navigation = new LinearLayout(getContext());
-            navigation.setGravity(Gravity.CENTER);
-            navigation.addView(iconButton("previous", text("上一个任务", "Previous task"), () -> move(-1)),
-                    new LayoutParams(dp(48), dp(48)));
-            TextView position = label((index + 1) + " / " + cards.length(), 14);
-            position.setTextColor(colors.muted);
-            position.setGravity(Gravity.CENTER);
-            position.setMinWidth(dp(52));
-            navigation.addView(position);
-            navigation.addView(iconButton("next", text("下一个任务", "Next task"), () -> move(1)),
-                    new LayoutParams(dp(48), dp(48)));
-            panel.addView(navigation);
-        }
+        LinearLayout actions = new LinearLayout(getContext());
+        boolean busy = !"idle".equals(model);
+        TextView left = button(busy ? text("stopping".equals(model) ? "正在停止…" : "停止", "Stop")
+                : text("删除", "Delete"), () -> { if (busy) stop.accept(id); else dismiss.accept(id); });
+        left.setTextColor(colors.error); left.setGravity(Gravity.CENTER);
+        left.setEnabled(!"stopping".equals(model));
+        GradientDrawable warning = new GradientDrawable(); warning.setColor(colors.dark ? 0x332e1515 : 0x22db4650);
+        warning.setCornerRadius(dp(16)); left.setBackground(warning);
+        actions.addView(left, new LayoutParams(0, dp(48), 1));
+        TextView chat = button(text("查看对话", "View chat"), () -> open.accept(id));
+        chat.setGravity(Gravity.CENTER); chat.setTextColor(0xffffffff);
+        GradientDrawable primary = new GradientDrawable(); primary.setColor(colors.accent);
+        primary.setCornerRadius(dp(16)); chat.setBackground(primary);
+        LayoutParams chatParams = new LayoutParams(0, dp(48), 1); chatParams.setMarginStart(dp(8));
+        actions.addView(chat, chatParams);
+        LayoutParams actionParams = new LayoutParams(-1, -2); actionParams.topMargin = dp(12);
+        panel.addView(actions, actionParams);
         ScrollView bounded = new ScrollView(getContext()) {
             @Override protected void onMeasure(int w, int h) {
-                int max = Math.min(getResources().getDisplayMetrics().heightPixels * 2 / 5,
-                        Math.max(0, availableHeight - HomeTaskCards.this.getPaddingTop() - HomeTaskCards.this.getPaddingBottom()));
+                int max = Math.max(0, Math.min(MeasureSpec.getSize(h), availableHeight)
+                        - HomeTaskCards.this.getPaddingTop() - HomeTaskCards.this.getPaddingBottom());
+                if (MeasureSpec.getMode(h) == MeasureSpec.UNSPECIFIED) max = availableHeight;
                 super.onMeasure(w, MeasureSpec.makeMeasureSpec(max, MeasureSpec.AT_MOST));
             }
         };
@@ -242,7 +262,19 @@ final class HomeTaskCards extends LinearLayout {
         bounded.addView(panel);
         FrameLayout glass = colors.glass(getContext(), wallpaper, 24);
         glass.addView(bounded, new FrameLayout.LayoutParams(-1, -2));
-        addView(glass, new LayoutParams(-1, -2));
+        FrameLayout stack = new FrameLayout(getContext());
+        int layers = Math.min(2, cards.length() - 1);
+        for (int layer = layers; layer > 0; layer--) {
+            FrameLayout back = colors.glass(getContext(), wallpaper, 24);
+            back.setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_NO);
+            FrameLayout.LayoutParams layerParams = new FrameLayout.LayoutParams(-1, -1);
+            layerParams.setMargins(dp(layer * 8), dp(layer * 5), dp(layer * 8), 0);
+            stack.addView(back, layerParams);
+        }
+        FrameLayout.LayoutParams front = new FrameLayout.LayoutParams(-1, -2);
+        front.bottomMargin = dp(layers * 5);
+        stack.addView(glass, front);
+        addView(stack, new LayoutParams(-1, -2));
     }
 
     private void restoreTaskPosition(HorizontalScrollView strip, List<JSONObject> tasks, String id) {
@@ -342,7 +374,8 @@ final class HomeTaskCards extends LinearLayout {
     private boolean stripTouch;
     @Override public boolean dispatchTouchEvent(MotionEvent event) {
         if (event.getActionMasked() == MotionEvent.ACTION_DOWN) {
-            pager.setGestureBlocked(pager.gestureId(), true);
+            if (pager != null) pager.setGestureBlocked(pager.gestureId(), true);
+            getParent().requestDisallowInterceptTouchEvent(true);
             downX = event.getX(); downY = event.getY(); touching = true; swiping = false;
             View strip = findViewWithTag("todo-strip");
             android.graphics.Rect rect = new android.graphics.Rect();
@@ -355,6 +388,8 @@ final class HomeTaskCards extends LinearLayout {
         boolean handled = super.dispatchTouchEvent(event);
         if (event.getActionMasked() == MotionEvent.ACTION_UP || event.getActionMasked() == MotionEvent.ACTION_CANCEL) {
             touching = false;
+            if (pager != null) pager.setGestureBlocked(pager.gestureId(), false);
+            getParent().requestDisallowInterceptTouchEvent(false);
             if (stripTouch && event.getActionMasked() == MotionEvent.ACTION_UP) {
                 stripSettling = true;
                 scheduleScrollSettle();
@@ -365,8 +400,8 @@ final class HomeTaskCards extends LinearLayout {
 
     @Override public boolean onInterceptTouchEvent(MotionEvent event) {
         if (!stripTouch && cards.length() > 1 && event.getActionMasked() == MotionEvent.ACTION_MOVE
-                && Math.abs(event.getX() - downX) > ViewConfiguration.get(getContext()).getScaledTouchSlop()
-                && Math.abs(event.getX() - downX) > Math.abs(event.getY() - downY) * 1.6f) {
+                && Math.abs(event.getY() - downY) > ViewConfiguration.get(getContext()).getScaledTouchSlop()
+                && Math.abs(event.getY() - downY) > Math.abs(event.getX() - downX) * 1.6f) {
             swiping = true;
             return true;
         }
@@ -376,7 +411,7 @@ final class HomeTaskCards extends LinearLayout {
     @Override public boolean onTouchEvent(MotionEvent event) {
         if (!swiping) return super.onTouchEvent(event);
         if (event.getActionMasked() == MotionEvent.ACTION_UP) {
-            if (Math.abs(event.getX() - downX) > dp(40)) move(event.getX() < downX ? 1 : -1);
+            if (Math.abs(event.getY() - downY) > dp(40)) move(event.getY() < downY ? 1 : -1);
             swiping = false;
             performClick();
         }

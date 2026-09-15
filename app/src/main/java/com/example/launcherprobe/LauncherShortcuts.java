@@ -27,12 +27,14 @@ public final class LauncherShortcuts {
     private static final int RESOLVABLE = VISIBLE
             | LauncherApps.ShortcutQuery.FLAG_MATCH_PINNED;
 
+    private final Context context;
     private final LauncherApps launcherApps;
     private final UserManager users;
     private final Handler main = new Handler(Looper.getMainLooper());
     private LauncherApps.Callback callback;
 
     public LauncherShortcuts(Context context) {
+        this.context = context.getApplicationContext();
         launcherApps = context.getSystemService(LauncherApps.class);
         users = context.getSystemService(UserManager.class);
     }
@@ -46,6 +48,13 @@ public final class LauncherShortcuts {
                 .setActivity(activity)
                 .setQueryFlags(VISIBLE);
         return shortcuts(query, Process.myUserHandle());
+    }
+
+    /** Current personal profile only; work profiles and private space are not exposed here. */
+    public List<ShortcutInfo> searchAll() {
+        if (!hasAccess()) return Collections.emptyList();
+        return shortcuts(new LauncherApps.ShortcutQuery().setQueryFlags(RESOLVABLE),
+                Process.myUserHandle());
     }
 
     public ShortcutInfo resolve(String packageName, String shortcutId, long userSerial) {
@@ -65,6 +74,12 @@ public final class LauncherShortcuts {
 
     public void start(ShortcutInfo shortcut, Rect bounds) {
         launcherApps.startShortcut(shortcut, bounds, null);
+        ComponentName component = shortcut.getActivity();
+        if (component == null) {
+            android.content.Intent launch = context.getPackageManager().getLaunchIntentForPackage(shortcut.getPackage());
+            if (launch != null) component = launch.getComponent();
+        }
+        AppLaunchHistory.record(context, component);
     }
 
     public void pin(ShortcutInfo shortcut) {

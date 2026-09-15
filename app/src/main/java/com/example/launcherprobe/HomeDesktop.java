@@ -66,9 +66,35 @@ final class HomeDesktop extends FrameLayout {
     private final FrameLayout homeOverlay;
     private final PackageManager packages;
     private final AppAppearance colors;
+    private final DesktopPreferences preferences;
+    private final DesktopIconPack iconPack;
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final int touchSlop;
     private final GridLayout grid;
+    private final LinearLayout dock;
+    private final LinearLayout tools;
+    private final TextView pages;
+    private final DesktopWidgets widgets;
+    private final HashMap<Integer, View> homeCells = new HashMap<>();
+    private View aiWidget;
+    private int currentPage;
+    private boolean editing;
+    private Runnable libraryAction = this::showAllApps, searchAction = this::showAllApps;
+    private Runnable assistantAction = () -> {}, settingsAction = () -> {};
+    private int dragHover = -1, edgeDirection;
+    private long dragHoverSince;
+    private Object externalDragToken;
+    private HomeLayout.Item externalDragItem;
+    private final Runnable edgeTurn = new Runnable() {
+        @Override public void run() {
+            if (edgeDirection == 0) return;
+            int next = currentPage + edgeDirection;
+            if (next < 0) return;
+            if (next >= layout.pageCount()) layout.addPage();
+            currentPage = next; render();
+            handler.postDelayed(this, 900);
+        }
+    };
     private List<ResolveInfo> apps;
 
     private DesktopMenu menu;
@@ -93,15 +119,361 @@ final class HomeDesktop extends FrameLayout {
         this.shortcuts = shortcuts;
         this.homeOverlay = homeOverlay;
         packages = activity.getPackageManager();
-        colors = AppAppearance.read(activity);
+        preferences = new DesktopPreferences(activity);
+        iconPack = new DesktopIconPack(activity);
+        layout.configureGrid(preferences.columns(), preferences.rows());
+        colors = AppAppearance.readDesktop(activity);
         touchSlop = ViewConfiguration.get(activity).getScaledTouchSlop();
         setClipChildren(false);
         setClipToPadding(false);
-        grid = new GridLayout(activity);
-        grid.setColumnCount(4);
-        grid.setRowCount(2);
-        addView(grid, new FrameLayout.LayoutParams(-1, dp(232)));
+        grid = new GridLayout(activity) {
+            @Override protected void onMeasure(int widthSpec, int heightSpec) {
+                int width = MeasureSpec.getSize(widthSpec), height = MeasureSpec.getSize(heightSpec);
+                for (int i = 0; i < getChildCount(); i++) {
+                    View child = getChildAt(i);
+                    HomeLayout.Item item = layout.get((Integer) child.getTag());
+                    GridLayout.LayoutParams p = (GridLayout.LayoutParams) child.getLayoutParams();
+                    p.width = Math.max(0, width * (item == null ? 1 : item.spanX) / layout.columns - p.leftMargin - p.rightMargin);
+                    p.height = Math.max(0, height * (item == null ? 1 : item.spanY) / layout.rows - p.topMargin - p.bottomMargin);
+                }
+                super.onMeasure(widthSpec, heightSpec);
+            }
+        };
+        widgets = new DesktopWidgets(activity, layout, this::persist);
+        LinearLayout surface = column();
+        tools = row();
+        tools.addView(compact("＋ 添加", this::showAddMenu));
+        tools.addView(compact("撤销", this::undo));
+        tools.addView(compact("设置", () -> settingsAction.run()));
+        tools.addView(compact("完成", () -> {
+            editing = false; render();
+            new Thread(() -> {
+                try { new DesktopBackup(activity).snapshot(); }
+                catch (Exception e) { activity.runOnUiThread(() -> message("桌面已保存，但历史快照失败：" + e.getMessage())); }
+            }, "desktop-snapshot").start();
+        }));
+        surface.addView(tools, new LinearLayout.LayoutParams(-1, dp(48)));
+        grid.setColumnCount(layout.columns);
+        grid.setRowCount(layout.rows);
+        surface.addView(grid, new LinearLayout.LayoutParams(-1, 0, 1));
+        pages = text("", 16, colors.accent);
+        pages.setGravity(Gravity.CENTER);
+        pages.setOnClickListener(v -> setCurrentPage((currentPage + 1) % layout.pageCount()));
+        surface.addView(pages, new LinearLayout.LayoutParams(-1, dp(24)));
+        dock = row();
+        dock.setBackground(shape(colors.dark ? 0xb3252d28 : 0xbbeffbfa, 26, 1, colors.border));
+        surface.addView(dock, new LinearLayout.LayoutParams(-1, dp(88)));
+        addView(surface, new FrameLayout.LayoutParams(-1, -1));
+        setOnDragListener(this::desktopDrag);
+        setLongClickable(true);
+        setOnLongClickListener(v -> { enterEdit(); return true; });
         render();
+    }
+
+    void setNavigation(Runnable library, Runnable search, Runnable assistant, Runnable settings) {
+        libraryAction = library; searchAction = search; assistantAction = assistant; settingsAction = settings;
+    }
+    void setAiWidget(View view) { aiWidget = view; render(); }
+    void startListening() { widgets.start(); }
+    void stopListening() { widgets.stop(); }
+    boolean onActivityResult(int request, int result, Intent data) { return widgets.result(request, result); }
+    void notifyLayoutChanged() { persist(); }
+    void setCurrentPage(int page) {
+        currentPage = Math.max(0, Math.min(layout.pageCount() - 1, page)); render();
+    }
+    private boolean locked() {
+        return preferences.layoutLocked();
+    }
+    void enterEdit() {
+        if (locked()) { message("桌面布局已锁定"); return; }
+        editing = true; render();
+    }
+    void undo() {
+        if (locked()) return;
+        List<HomeLayout.Item> before = new ArrayList<>(layout.slots());
+        if (!layout.undo()) { message("没有可撤销的整理操作"); return; }
+        for (HomeLayout.Item item : before) if (item != null && HomeLayout.Item.APPWIDGET.equals(item.type)) {
+            boolean retained = false;
+            for (HomeLayout.Item next : layout.slots()) if (next != null && next.appWidgetId == item.appWidgetId) retained = true;
+            if (!retained) widgets.remove(item);
+        }
+        syncPins(); render();
+    }
+    void showAddMenu() {
+        if (locked()) { message("桌面布局已锁定"); return; }
+        new AlertDialog.Builder(activity).setTitle("添加到桌面")
+                .setItems(new String[]{"应用", "系统小组件", "AI 助手小组件", "时钟与日期", "新桌面页"}, (d, choice) -> {
+                    if (choice == 0) showAppPicker(layout.vacancy(1, 1), -1);
+                    if (choice == 1) widgets.choose();
+                    if (choice == 2) {
+                        for (HomeLayout.Item item : layout.slots()) if (item != null && HomeLayout.Item.AI_WIDGET.equals(item.type)) {
+                            message("AI 小组件已在桌面上"); return;
+                        }
+                        int x = Math.min(4, layout.columns), y = Math.min(3, layout.rows);
+                        layout.set(layout.vacancy(x, y), HomeLayout.Item.widget(HomeLayout.Item.AI_WIDGET, x, y, -1, null)); persist();
+                    }
+                    if (choice == 3) {
+                        int x = Math.min(4, layout.columns);
+                        layout.set(layout.vacancy(x, 1), HomeLayout.Item.widget(HomeLayout.Item.CLOCK, x, 1, -1, null)); persist();
+                    }
+                    if (choice == 4) { layout.addPage(); currentPage = layout.pageCount() - 1; persist(); }
+                }).setNegativeButton("取消", null).show();
+    }
+    private void renderDock() {
+        dock.setVisibility(preferences.dockVisible() ? VISIBLE : GONE);
+        dock.removeAllViews();
+        for (int i = 0; i < layout.dock().size(); i++) {
+            int index = i;
+            HomeLayout.Item item = layout.dock().get(i);
+            Cell cell = cell(item);
+            cell.setPadding(dp(2), dp(5), dp(2), 0);
+            if (item == null) {
+                TextView add = text("＋", 26, colors.accent); add.setGravity(Gravity.CENTER);
+                cell.addView(add, new LinearLayout.LayoutParams(-1, dp(52)));
+            }
+            cell.setOnClickListener(v -> {
+                if (item == null || editing) configureDock(index); else activate(item, v, -1);
+            });
+            cell.setOnLongClickListener(v -> {
+                if (locked()) return true;
+                if (item == null) configureDock(index);
+                else { editing = true; tools.setVisibility(VISIBLE); startItemDrag(v, item, -1, index); }
+                return true;
+            });
+            dock.addView(cell, new LinearLayout.LayoutParams(0, -1, 1));
+        }
+    }
+    void editDock() {
+        if (locked()) { message("桌面布局已锁定"); return; }
+        new AlertDialog.Builder(activity).setTitle("配置 Dock")
+                .setItems(new String[]{"第 1 项", "第 2 项", "第 3 项", "第 4 项", "第 5 项"}, (d, which) -> configureDock(which)).show();
+    }
+    void manageFolders() {
+        if (locked()) { message("桌面布局已锁定"); return; }
+        ArrayList<Integer> slots = new ArrayList<>(); ArrayList<String> names = new ArrayList<>();
+        for (int i = 0; i < layout.size(); i++) {
+            HomeLayout.Item item = layout.get(i);
+            if (item != null && item.isFolder()) { slots.add(i); names.add(item.name); }
+        }
+        if (slots.isEmpty()) { enterEdit(); message("长按应用拖到另一图标中心停留，即可创建文件夹"); return; }
+        new AlertDialog.Builder(activity).setTitle("桌面文件夹")
+                .setItems(names.toArray(new String[0]), (d, which) -> {
+                    int slot = slots.get(which); setCurrentPage(slot / layout.pageSize()); openFolder(slot);
+                }).show();
+    }
+    void configureDock(int index) {
+        if (locked()) return;
+        String[] labels = new String[apps.size() + 2];
+        labels[0] = "移除此位置"; labels[1] = "e助手";
+        for (int i = 0; i < apps.size(); i++) labels[i + 2] = apps.get(i).loadLabel(packages).toString();
+        new AlertDialog.Builder(activity).setTitle("Dock 第 " + (index + 1) + " 项")
+                .setItems(labels, (d, which) -> {
+                    HomeLayout.Item item = null;
+                    if (which == 1) item = HomeLayout.Item.assistant();
+                    if (which >= 2) {
+                        ResolveInfo app = apps.get(which - 2);
+                        item = HomeLayout.Item.app(app.activityInfo.packageName, app.activityInfo.name);
+                    }
+                    layout.setDock(index, item); persist();
+                }).show();
+    }
+    private View widgetCell(HomeLayout.Item item, int slot) {
+        FrameLayout frame = new FrameLayout(activity) {
+            float downX, downY;
+            final Runnable hold = () -> {
+                if (!locked()) { editing = true; tools.setVisibility(VISIBLE); startItemDrag(this, item, slot, -1); }
+            };
+            @Override protected void onMeasure(int widthSpec, int heightSpec) {
+                if (HomeLayout.Item.AI_WIDGET.equals(item.type) && aiWidget instanceof HomeTaskCards cards)
+                    cards.setAvailableHeight(MeasureSpec.getSize(heightSpec));
+                super.onMeasure(widthSpec, heightSpec);
+            }
+            @Override public boolean dispatchTouchEvent(MotionEvent event) {
+                if (event.getActionMasked() == MotionEvent.ACTION_DOWN) {
+                    downX = event.getX(); downY = event.getY(); handler.postDelayed(hold, LONG_PRESS_MS);
+                } else if (event.getActionMasked() == MotionEvent.ACTION_UP || event.getActionMasked() == MotionEvent.ACTION_CANCEL
+                        || Math.hypot(event.getX() - downX, event.getY() - downY) > touchSlop) handler.removeCallbacks(hold);
+                return super.dispatchTouchEvent(event);
+            }
+            @Override protected void onDetachedFromWindow() { handler.removeCallbacks(hold); super.onDetachedFromWindow(); }
+        };
+        frame.setBackground(shape(colors.dark ? 0xc0252d28 : 0xddeffbfa, 22, 1, colors.border));
+        frame.setClipToOutline(true);
+        View content = null;
+        if (HomeLayout.Item.AI_WIDGET.equals(item.type)) content = aiWidget;
+        else if (HomeLayout.Item.CLOCK.equals(item.type)) {
+            LinearLayout time = row(); time.setPadding(dp(16), dp(4), dp(16), dp(4));
+            android.widget.TextClock clock = new android.widget.TextClock(activity);
+            clock.setFormat12Hour("h:mm"); clock.setFormat24Hour("HH:mm");
+            clock.setTextColor(colors.ink); clock.setTextSize(38); clock.setTypeface(null, android.graphics.Typeface.BOLD);
+            clock.setAutoSizeTextTypeUniformWithConfiguration(20, 42, 1, android.util.TypedValue.COMPLEX_UNIT_SP);
+            time.addView(clock, new LinearLayout.LayoutParams(0, -2, 1));
+            android.widget.TextClock date = new android.widget.TextClock(activity);
+            date.setFormat12Hour("M月d日 EEEE"); date.setFormat24Hour("M月d日 EEEE");
+            date.setTextColor(colors.ink); date.setTextSize(14);
+            time.addView(date, new LinearLayout.LayoutParams(0, -2, 1)); content = time;
+        } else if (HomeLayout.Item.WIDGET_PICKER.equals(item.type)) {
+            TextView add = text("＋ 添加小组件\n照片、待办等内容由已安装应用提供", 16, colors.accent);
+            add.setGravity(Gravity.CENTER); add.setPadding(dp(12), dp(8), dp(12), dp(8));
+            add.setOnClickListener(v -> { if (!locked()) widgets.choose(); }); content = add;
+        } else content = widgets.view(item);
+        if (content == null) {
+            TextView add = text(HomeLayout.Item.APPWIDGET.equals(item.type) ? "点击重新绑定小组件" : "✦ 开始对话", 18, colors.accent);
+            add.setGravity(Gravity.CENTER);
+            add.setOnClickListener(v -> { if (HomeLayout.Item.APPWIDGET.equals(item.type)) widgets.rebind(slot); else assistantAction.run(); });
+            content = add;
+        }
+        if (content.getParent() instanceof ViewGroup parent) parent.removeView(content);
+        frame.addView(content, new FrameLayout.LayoutParams(-1, -1));
+        if (editing) {
+            View edit = new View(activity);
+            edit.setBackground(shape(0x08228877, 22, 2, colors.accent));
+            edit.setContentDescription("小组件：点击调整尺寸或移除，长按拖动");
+            edit.setOnClickListener(v -> widgetMenu(item, slot));
+            frame.addView(edit, new FrameLayout.LayoutParams(-1, -1));
+        }
+        return frame;
+    }
+    private void widgetMenu(HomeLayout.Item item, int slot) {
+        new AlertDialog.Builder(activity).setTitle("桌面小组件")
+                .setItems(new String[]{"调整尺寸", "从桌面移除"}, (d, choice) -> {
+                    if (choice == 1) { if (widgets.remove(item)) { layout.remove(slot); persist(); } }
+                    else {
+                        ArrayList<String> labels = new ArrayList<>(); ArrayList<int[]> sizes = new ArrayList<>();
+                        for (int y = 1; y <= layout.rows; y++) for (int x = 1; x <= layout.columns; x++) {
+                            if (!layout.fits(slot, x, y, slot) || !widgets.canResize(item, x, y,
+                                    grid.getWidth() / layout.columns, grid.getHeight() / layout.rows)) continue;
+                            if (HomeLayout.Item.AI_WIDGET.equals(item.type) && (x < Math.min(3, layout.columns) || y < 2)) continue;
+                            labels.add(x + " × " + y); sizes.add(new int[]{x, y});
+                        }
+                        new AlertDialog.Builder(activity).setTitle("选择可用网格尺寸")
+                                .setItems(labels.toArray(new String[0]), (dialog, which) -> {
+                                    int[] size = sizes.get(which); if (layout.resize(slot, size[0], size[1])) persist();
+                                }).show();
+                    }
+                }).show();
+    }
+    private record DragItem(HomeLayout.Item item, int slot, int dockIndex) { }
+    /** Search Host.onDragStarted registers its local-state token before revealing this workspace. */
+    void acceptExternalDrag(Object token, HomeLayout.Item item) {
+        if (token == null || item == null || !(HomeLayout.Item.APP.equals(item.type) || item.isShortcut())) return;
+        externalDragToken = token; externalDragItem = item;
+    }
+    void beginExternalDrag(View source, HomeLayout.Item item) {
+        if (item == null || !(HomeLayout.Item.APP.equals(item.type) || item.isShortcut())) return;
+        startItemDrag(source, item, -1, -1);
+    }
+    private void startItemDrag(View source, HomeLayout.Item item, int slot, int dockIndex) {
+        if (locked()) return;
+        pager.setGestureBlocked(pager.gestureId(), true);
+        source.startDragAndDrop(android.content.ClipData.newPlainText("desktop-item", item.type),
+                new View.DragShadowBuilder(source), new DragItem(item, slot, dockIndex), 0);
+    }
+    private boolean desktopDrag(View ignored, android.view.DragEvent event) {
+        if (locked()) return false;
+        DragItem drag;
+        if (event.getLocalState() instanceof DragItem internal) drag = internal;
+        else if (event.getLocalState() == externalDragToken && externalDragItem != null)
+            drag = new DragItem(externalDragItem, -1, -1);
+        else return false;
+        int[] origin = new int[2]; getLocationOnScreen(origin);
+        float x = origin[0] + event.getX(), y = origin[1] + event.getY();
+        switch (event.getAction()) {
+            case android.view.DragEvent.ACTION_DRAG_STARTED:
+                editing = true; tools.setVisibility(VISIBLE); dragHover = -1; return true;
+            case android.view.DragEvent.ACTION_DRAG_LOCATION:
+                int direction = event.getX() < dp(28) ? -1 : event.getX() > getWidth() - dp(28) ? 1 : 0;
+                if (direction != edgeDirection) {
+                    handler.removeCallbacks(edgeTurn); edgeDirection = direction;
+                    if (direction != 0) handler.postDelayed(edgeTurn, 650);
+                }
+                int target = homeTarget(x, y);
+                int owner = target < 0 ? -1 : layout.ownerAt(target);
+                boolean mergeable = owner >= 0 && owner != drag.slot && !drag.item.isWidget() && !drag.item.isFolder()
+                        && !HomeLayout.Item.ASSISTANT.equals(drag.item.type) && !layout.get(owner).isWidget()
+                        && !HomeLayout.Item.ASSISTANT.equals(layout.get(owner).type) && centerHit(homeCells.get(owner), x, y);
+                int hover = mergeable ? owner : -1;
+                if (hover != dragHover) { dragHover = hover; dragHoverSince = android.os.SystemClock.uptimeMillis(); }
+                highlightDrop(owner >= 0 ? owner : target, hover >= 0 && android.os.SystemClock.uptimeMillis() - dragHoverSince >= MERGE_HOVER_MS);
+                return true;
+            case android.view.DragEvent.ACTION_DROP:
+                if (drag.item.isShortcut() && !shortcuts.hasAccess()) { promptDefaultHome(); return false; }
+                boolean changed = false;
+                if (contains(dock, x, y) && !drag.item.isWidget() && !drag.item.isFolder()) {
+                    int[] dockOrigin = new int[2]; dock.getLocationOnScreen(dockOrigin);
+                    int index = Math.max(0, Math.min(4, (int) ((x - dockOrigin[0]) * 5 / Math.max(1, dock.getWidth()))));
+                    HomeLayout.Item existing = layout.dock().get(index);
+                    if (drag.dockIndex >= 0) { layout.setDock(drag.dockIndex, existing); layout.setDock(index, drag.item); changed = true; }
+                    else if (existing == null) {
+                        layout.setDock(index, drag.item); if (drag.slot >= 0) layout.remove(drag.slot); changed = true;
+                    } else message("Dock 位置已占用；点击该位置可明确替换");
+                } else {
+                    int destination = homeTarget(x, y);
+                    if (destination >= 0) {
+                        int targetOwner = layout.ownerAt(destination);
+                        boolean merge = targetOwner >= 0 && targetOwner == dragHover
+                                && android.os.SystemClock.uptimeMillis() - dragHoverSince >= MERGE_HOVER_MS;
+                        if (merge && drag.slot >= 0) changed = layout.merge(drag.slot, targetOwner, "文件夹");
+                        else if (merge && !drag.item.isWidget() && !drag.item.isFolder()
+                                && !HomeLayout.Item.ASSISTANT.equals(drag.item.type)) {
+                            HomeLayout.Item targetItem = layout.get(targetOwner);
+                            if (targetItem.isFolder()) changed = layout.addToFolder(targetOwner, drag.item);
+                            else if (!targetItem.isWidget() && !HomeLayout.Item.ASSISTANT.equals(targetItem.type)) {
+                                layout.set(targetOwner, HomeLayout.Item.folder("文件夹", List.of(targetItem, drag.item))); changed = true;
+                            }
+                        } else if (drag.slot >= 0) changed = layout.move(drag.slot, destination);
+                        else if (layout.fits(destination, drag.item.spanX, drag.item.spanY, -1)) {
+                            layout.set(destination, drag.item); changed = true;
+                        }
+                        if (changed && drag.dockIndex >= 0) layout.setDock(drag.dockIndex, null);
+                    }
+                }
+                if (changed) persist(); else message("无法放在此处，请选择空位或在图标中心停留建立文件夹");
+                return changed;
+            case android.view.DragEvent.ACTION_DRAG_EXITED:
+            case android.view.DragEvent.ACTION_DRAG_ENDED:
+                edgeDirection = 0; handler.removeCallbacks(edgeTurn); clearDropTarget();
+                if (event.getAction() == android.view.DragEvent.ACTION_DRAG_ENDED) {
+                    externalDragToken = null; externalDragItem = null; layout.save(); render();
+                }
+                return true;
+            default: return true;
+        }
+    }
+    private float swipeX, swipeY;
+    @Override public boolean onInterceptTouchEvent(MotionEvent event) {
+        if (event.getActionMasked() == MotionEvent.ACTION_DOWN) {
+            swipeX = event.getX(); swipeY = event.getY();
+            // Workspace, not the Web pager, owns gestures outside interactive widgets.
+            pager.setGestureBlocked(pager.gestureId(), true);
+        }
+        if (event.getActionMasked() == MotionEvent.ACTION_MOVE && !editing) {
+            float dx = event.getX() - swipeX, dy = event.getY() - swipeY;
+            if (Math.abs(dx) > touchSlop * 2 || Math.abs(dy) > touchSlop * 2) {
+                int[] origin = new int[2]; getLocationOnScreen(origin);
+                int slot = homeTarget(origin[0] + swipeX, origin[1] + swipeY);
+                int owner = slot < 0 ? -1 : layout.ownerAt(slot);
+                // Widget children retain their own scrolling and session-switch gestures.
+                if (owner >= 0 && layout.get(owner).isWidget()) return false;
+                return true;
+            }
+        }
+        return super.onInterceptTouchEvent(event);
+    }
+    @Override public boolean onTouchEvent(MotionEvent event) {
+        if (event.getActionMasked() == MotionEvent.ACTION_UP && !editing) {
+            float dx = event.getX() - swipeX, dy = event.getY() - swipeY;
+            if (Math.abs(dx) > dp(48) && Math.abs(dx) > Math.abs(dy)) {
+                setCurrentPage(currentPage + (dx < 0 ? 1 : -1)); return true;
+            }
+            if (Math.abs(dy) > dp(60)) {
+                String action = dy < 0 ? preferences.swipeUp() : preferences.swipeDown();
+                if ("library".equals(action)) libraryAction.run();
+                else if ("search".equals(action)) searchAction.run();
+                return true;
+            }
+        }
+        return super.onTouchEvent(event);
     }
 
     void appsChanged(List<ResolveInfo> value) {
@@ -144,6 +516,7 @@ final class HomeDesktop extends FrameLayout {
         if (appDialog != null) appDialog.dismiss();
         closeFolder();
         clearDragPreview();
+        widgets.stop();
     }
 
     void showAllApps() {
@@ -173,26 +546,49 @@ final class HomeDesktop extends FrameLayout {
         if (disposed) return;
         dismissMenu();
         clearDropTarget();
+        tools.setVisibility(editing ? VISIBLE : GONE);
+        currentPage = Math.min(currentPage, layout.pageCount() - 1);
         grid.removeAllViews();
-        for (int slot = 0; slot < HomeLayout.SLOT_COUNT; slot++) {
+        homeCells.clear();
+        grid.setColumnCount(layout.columns);
+        grid.setRowCount(layout.rows);
+        for (int slot = currentPage * layout.pageSize(); slot < (currentPage + 1) * layout.pageSize(); slot++) {
             final int selectedSlot = slot;
             HomeLayout.Item item = layout.get(slot);
-            Cell cell = cell(item);
-            if (item != null) {
-                cell.setContentDescription(itemDescription(item));
-                cell.setOnClickListener(view -> activate(item, view, selectedSlot));
-                cell.setOnTouchListener(new HomeTouch(selectedSlot, item, cell));
+            if (item == null && layout.ownerAt(slot) >= 0) continue;
+            View cell;
+            if (item != null && item.isWidget()) cell = widgetCell(item, slot);
+            else {
+                cell = cell(item);
+                cell.setOnClickListener(view -> {
+                    if (editing && item != null) showMenu(homeOverlay, view, item, new Location(HOME, selectedSlot, -1));
+                    else if (item != null) activate(item, view, selectedSlot);
+                    else if (editing) showAppPicker(selectedSlot, -1);
+                });
                 cell.setOnLongClickListener(view -> {
-                    showMenu(homeOverlay, view, item, new Location(HOME, selectedSlot, -1));
+                    if (locked()) { message("桌面布局已锁定"); return true; }
+                    if (item == null) enterEdit();
+                    else { editing = true; tools.setVisibility(VISIBLE); startItemDrag(view, item, selectedSlot, -1); }
                     return true;
                 });
+                if (item != null) cell.setContentDescription(itemDescription(item));
             }
+            if (editing && item == null) cell.setBackground(shape(0x15ffffff, 14, 1, colors.border));
+            int local = slot % layout.pageSize();
             GridLayout.LayoutParams params = new GridLayout.LayoutParams(
-                    GridLayout.spec(slot / 4), GridLayout.spec(slot % 4, 1f));
-            params.width = 0;
-            params.height = dp(116);
+                    GridLayout.spec(local / layout.columns, item == null ? 1 : item.spanY),
+                    GridLayout.spec(local % layout.columns, item == null ? 1 : item.spanX));
+            params.width = 0; params.height = 0;
+            params.setMargins(dp(3), dp(3), dp(3), dp(3));
+            cell.setTag(slot);
             grid.addView(cell, params);
+            homeCells.put(slot, cell);
         }
+        StringBuilder dots = new StringBuilder();
+        for (int p = 0; p < layout.pageCount(); p++) dots.append(p == currentPage ? " ● " : " · ");
+        pages.setText(dots);
+        pages.setContentDescription("桌面第 " + (currentPage + 1) + " 页，共 " + layout.pageCount() + " 页；点击下一页");
+        renderDock();
     }
 
     private Cell cell(HomeLayout.Item item) {
@@ -204,8 +600,9 @@ final class HomeDesktop extends FrameLayout {
         cell.setPadding(dp(3), dp(10), dp(3), dp(6));
         cell.setBackgroundColor(Color.TRANSPARENT);
         if (item == null) return cell;
-        cell.addView(itemIcon(item, 52), new LinearLayout.LayoutParams(dp(52), dp(52)));
-        TextView name = text(itemLabel(item), 13,
+        int iconSize = preferences.iconSizeDp();
+        cell.addView(itemIcon(item, iconSize), new LinearLayout.LayoutParams(dp(iconSize), dp(iconSize)));
+        TextView name = text(itemLabel(item), preferences.labelSizeSp(),
                 itemAvailable(item) ? colors.ink : colors.muted);
         name.setGravity(Gravity.CENTER);
         name.setMaxLines(2);
@@ -218,6 +615,12 @@ final class HomeDesktop extends FrameLayout {
 
     private View itemIcon(HomeLayout.Item item, int sizeDp) {
         int size = dp(sizeDp);
+        if (HomeLayout.Item.ASSISTANT.equals(item.type)) {
+            TextView star = text("✦", 38, colors.accent);
+            star.setGravity(Gravity.CENTER);
+            star.setBackground(shape(colors.surface, 14, 0, 0));
+            return star;
+        }
         if (item.isFolder()) return folderIcon(item, size);
         FrameLayout frame = new FrameLayout(activity);
         Drawable icon = item.isShortcut() ? shortcutIcon(item) : appIcon(item.packageName, item.className);
@@ -225,7 +628,7 @@ final class HomeDesktop extends FrameLayout {
         image.setImageDrawable(icon);
         image.setAlpha(icon == null ? .35f : 1f);
         if (icon == null) image.setBackground(shape(colors.panel, 13, 1, colors.border));
-        frame.addView(image, new FrameLayout.LayoutParams(size, size));
+        frame.addView(image, new FrameLayout.LayoutParams(-1, -1));
         if (item.isShortcut()) {
             ImageView badge = new ImageView(activity);
             badge.setImageDrawable(appIcon(item.packageName, null));
@@ -262,136 +665,11 @@ final class HomeDesktop extends FrameLayout {
         return frame;
     }
 
-    private final class HomeTouch implements View.OnTouchListener {
-        final int slot;
-        final HomeLayout.Item item;
-        final View view;
-        final Runnable longPress;
-        float downX;
-        float downY;
-        boolean longPressed;
-        boolean dragging;
-        boolean moved;
-        int hoverSlot = -1;
-        long hoverSince;
-
-        HomeTouch(int slot, HomeLayout.Item item, View view) {
-            this.slot = slot;
-            this.item = item;
-            this.view = view;
-            longPress = () -> {
-                if (disposed) return;
-                longPressed = true;
-                view.getParent().requestDisallowInterceptTouchEvent(true);
-                view.performLongClick();
-            };
-        }
-
-        @Override public boolean onTouch(View ignored, MotionEvent event) {
-            switch (event.getActionMasked()) {
-                case MotionEvent.ACTION_DOWN:
-                    pager.setGestureBlocked(pager.gestureId(), true);
-                    downX = event.getRawX();
-                    downY = event.getRawY();
-                    longPressed = dragging = moved = false;
-                    handler.postDelayed(longPress, LONG_PRESS_MS);
-                    return true;
-                case MotionEvent.ACTION_MOVE:
-                    if (!longPressed) {
-                        if (distance(event) > touchSlop) {
-                            moved = true;
-                            handler.removeCallbacks(longPress);
-                        }
-                        return true;
-                    }
-                    if (!dragging && distance(event) > touchSlop) {
-                        dragging = true;
-                        dismissMenu();
-                        view.setAlpha(.28f);
-                        startDragPreview(item);
-                    }
-                    if (dragging) updateHomeDrag(event);
-                    return true;
-                case MotionEvent.ACTION_UP:
-                    handler.removeCallbacks(longPress);
-                    if (dragging) finishHomeDrag(event);
-                    else if (!longPressed && !moved) {
-                        if (folderRoot != null) closeFolder();
-                        else view.performClick();
-                    }
-                    finishTouch();
-                    return true;
-                case MotionEvent.ACTION_CANCEL:
-                    handler.removeCallbacks(longPress);
-                    finishTouch();
-                    return true;
-                default:
-                    return true;
-            }
-        }
-
-        private void finishTouch() {
-            dragging = false;
-            hoverSlot = -1;
-            view.setAlpha(1f);
-            if (view.getParent() != null) view.getParent().requestDisallowInterceptTouchEvent(false);
-            clearDragPreview();
-            clearDropTarget();
-            restoreFolderSurface();
-        }
-
-        private float distance(MotionEvent event) {
-            return (float) Math.hypot(event.getRawX() - downX, event.getRawY() - downY);
-        }
-
-        private void updateHomeDrag(MotionEvent event) {
-            moveDragPreview(event.getRawX(), event.getRawY());
-            if (folderPanel != null && contains(folderPanel, event.getRawX(), event.getRawY())) {
-                hoverSlot = -1;
-                clearDropTarget();
-                restoreFolderSurface();
-                return;
-            }
-            int target = homeTarget(event.getRawX(), event.getRawY());
-            boolean centered = !item.isFolder() && target >= 0 && target != slot
-                    && layout.get(target) != null
-                    && centerHit(grid.getChildAt(target), event.getRawX(), event.getRawY());
-            if (!centered || target != hoverSlot) {
-                hoverSlot = centered ? target : -1;
-                hoverSince = centered ? android.os.SystemClock.uptimeMillis() : 0;
-                if (centered) handler.postDelayed(() -> {
-                    if (!dragging || hoverSlot != target) return;
-                    highlightDrop(target, true);
-                    if (folderRoot == null && layout.get(target).isFolder()) openFolder(target);
-                }, MERGE_HOVER_MS);
-            }
-            highlightDrop(target, centered && hoverSlot == target
-                    && android.os.SystemClock.uptimeMillis() - hoverSince >= MERGE_HOVER_MS);
-        }
-
-        private void finishHomeDrag(MotionEvent event) {
-            if (folderPanel != null && contains(folderPanel, event.getRawX(), event.getRawY())) {
-                if (layout.merge(slot, activeFolderSlot, tr("文件夹", "Folder"))) {
-                    persist();
-                    renderFolder();
-                }
-                return;
-            }
-            int target = homeTarget(event.getRawX(), event.getRawY());
-            if (target < 0 || target == slot) return;
-            boolean merge = target == hoverSlot
-                    && android.os.SystemClock.uptimeMillis() - hoverSince >= MERGE_HOVER_MS;
-            closeFolder();
-            boolean changed = merge
-                    ? layout.merge(slot, target, tr("文件夹", "Folder"))
-                    : layout.move(slot, target);
-            if (changed) persist();
-        }
-    }
-
     private void activate(HomeLayout.Item item, View source, int slot) {
         if (item == null) {
             showAppPicker(slot, -1);
+        } else if (HomeLayout.Item.ASSISTANT.equals(item.type)) {
+            assistantAction.run();
         } else if (item.isFolder()) {
             openFolder(slot);
         } else if (HomeLayout.Item.APP.equals(item.type)) {
@@ -410,6 +688,10 @@ final class HomeDesktop extends FrameLayout {
     private LinearLayout buildMenu(HomeLayout.Item item, Location location) {
         LinearLayout panel = column();
         panel.setPadding(0, dp(4), 0, dp(8));
+        if (HomeLayout.Item.ASSISTANT.equals(item.type)) {
+            addAction(panel, DesktopMenu.Glyph.REMOVE, "从桌面移除", () -> { layout.remove(location.slot); persist(); });
+            return panel;
+        }
         if (item.isFolder()) {
             TextView heading = text(item.name, 14, colors.muted);
             heading.setPadding(dp(18), dp(10), dp(18), dp(8));
@@ -520,6 +802,7 @@ final class HomeDesktop extends FrameLayout {
     }
 
     private void renameFolder(int slot) {
+        if (locked()) { message("桌面布局已锁定"); return; }
         dismissMenu();
         HomeLayout.Item folder = layout.get(slot);
         if (folder == null || !folder.isFolder()) return;
@@ -554,6 +837,7 @@ final class HomeDesktop extends FrameLayout {
     }
 
     private void batchAdd(int folderSlot) {
+        if (locked()) { message("桌面布局已锁定"); return; }
         dismissMenu();
         String[] labels = new String[apps.size()];
         boolean[] selected = new boolean[apps.size()];
@@ -604,7 +888,7 @@ final class HomeDesktop extends FrameLayout {
                     downY = event.getRawY();
                     moved = false;
                     int target = homeTarget(downX, downY);
-                    source = target >= 0 && layout.get(target) != null ? grid.getChildAt(target) : null;
+                    source = target >= 0 && layout.get(target) != null ? homeCells.get(target) : null;
                 }
                 if (Math.hypot(event.getRawX() - downX, event.getRawY() - downY) > touchSlop) moved = true;
                 if (source != null) {
@@ -648,7 +932,21 @@ final class HomeDesktop extends FrameLayout {
         activeFolderSlot = -1;
     }
 
+    private void sortFolders() {
+        if (!"name".equals(preferences.folderSort())) return;
+        java.text.Collator collator = java.text.Collator.getInstance();
+        for (int i = 0; i < layout.size(); i++) {
+            HomeLayout.Item item = layout.get(i);
+            if (item == null || !item.isFolder()) continue;
+            ArrayList<HomeLayout.Item> children = new ArrayList<>(item.children);
+            children.sort((a, b) -> collator.compare(itemLabel(a), itemLabel(b)));
+            if (!children.equals(item.children)) layout.set(i, HomeLayout.Item.folder(item.folderId, item.name, children));
+        }
+    }
+
     private void renderFolder() {
+        sortFolders();
+        layout.save();
         if (folderRoot == null || activeFolderSlot < 0) return;
         HomeLayout.Item folder = layout.get(activeFolderSlot);
         if (folder == null || !folder.isFolder()) {
@@ -709,7 +1007,7 @@ final class HomeDesktop extends FrameLayout {
 
         folderGrid = new GridLayout(activity);
         folderGrid.setColumnCount(3);
-        int rows = Math.max(2, (folder.children.size() + 2) / 3);
+        int rows = Math.max(2, (folder.children.size() + 3) / 3);
         for (int index = 0; index < rows * 3; index++) {
             final int childIndex = index;
             View entry;
@@ -724,6 +1022,12 @@ final class HomeDesktop extends FrameLayout {
                     return true;
                 });
                 entry = cell;
+            } else if (index == folder.children.size()) {
+                TextView add = text("＋\n添加应用", 20, colors.accent);
+                add.setGravity(Gravity.CENTER);
+                add.setContentDescription("批量添加应用到文件夹");
+                add.setOnClickListener(v -> batchAdd(activeFolderSlot));
+                entry = add;
             } else {
                 entry = new View(activity);
                 entry.setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_NO);
@@ -737,11 +1041,7 @@ final class HomeDesktop extends FrameLayout {
         ScrollView scroll = new ScrollView(activity);
         scroll.setVerticalScrollBarEnabled(false);
         scroll.addView(folderGrid, new ScrollView.LayoutParams(-1, -2));
-        if (folder.children.isEmpty()) {
-            TextView empty = text(tr("拖动应用到这里", "Drag apps here"), 15, colors.muted);
-            empty.setGravity(Gravity.CENTER);
-            content.addView(empty, new LinearLayout.LayoutParams(-1, 0, 1));
-        } else content.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
+        content.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
         folderPanel.addView(content, new FrameLayout.LayoutParams(-1, -1));
         Rect safe = new Rect();
         folderRoot.getWindowVisibleDisplayFrame(safe);
@@ -798,7 +1098,7 @@ final class HomeDesktop extends FrameLayout {
             this.item = item;
             this.view = view;
             longPress = () -> {
-                if (folderRoot == null) return;
+                if (folderRoot == null || locked()) return;
                 longPressed = true;
                 view.getParent().requestDisallowInterceptTouchEvent(true);
                 view.performLongClick();
@@ -835,7 +1135,16 @@ final class HomeDesktop extends FrameLayout {
                         folderRoot.setBackgroundColor(outsideFolder ? Color.TRANSPARENT : 0x18000000);
                         folderPanel.setAlpha(outsideFolder ? 0f : 1f);
                         if (!outsideFolder) clearDropTarget();
-                        else highlightDrop(homeTarget(event.getRawX(), event.getRawY()), false);
+                        else {
+                            highlightDrop(homeTarget(event.getRawX(), event.getRawY()), false);
+                            int[] origin = new int[2]; HomeDesktop.this.getLocationOnScreen(origin);
+                            int direction = event.getRawX() - origin[0] < dp(28) ? -1
+                                    : event.getRawX() - origin[0] > getWidth() - dp(28) ? 1 : 0;
+                            if (direction != edgeDirection) {
+                                handler.removeCallbacks(edgeTurn); edgeDirection = direction;
+                                if (direction != 0) handler.postDelayed(edgeTurn, 650);
+                            }
+                        }
                     }
                     return true;
                 case MotionEvent.ACTION_UP:
@@ -856,6 +1165,7 @@ final class HomeDesktop extends FrameLayout {
         private void finishTouch() {
             dragging = false;
             restoreFolderSurface();
+            edgeDirection = 0; handler.removeCallbacks(edgeTurn);
             clearDropTarget();
             clearDragPreview();
             view.setAlpha(1f);
@@ -868,6 +1178,9 @@ final class HomeDesktop extends FrameLayout {
 
         private void finishFolderDrag(MotionEvent event) {
             if (!outsideFolder) {
+                if ("name".equals(preferences.folderSort())) {
+                    message("当前按名称排序；请在桌面设置中切换为手动排序后拖动"); return;
+                }
                 int targetChild = childTarget(event.getRawX(), event.getRawY());
                 if (targetChild >= 0 && layout.moveInFolder(folderSlot, child,
                         Math.min(targetChild, layout.get(folderSlot).children.size() - 1))) {
@@ -880,7 +1193,7 @@ final class HomeDesktop extends FrameLayout {
             if (targetSlot < 0) return;
             HomeLayout.Item target = layout.get(targetSlot);
             if (target != null && target.isFolder() && !centerHit(
-                    grid.getChildAt(targetSlot), event.getRawX(), event.getRawY())) return;
+                    homeCells.get(targetSlot), event.getRawX(), event.getRawY())) return;
             if (!layout.moveFromFolder(folderSlot, child, targetSlot)) {
                 message(tr("该位置已占用；请从菜单显式选择替换或文件夹。",
                         "That position is occupied; choose a replacement or folder from the menu."));
@@ -1062,11 +1375,14 @@ final class HomeDesktop extends FrameLayout {
     }
 
     private void chooseDestination(HomeLayout.Item item, BeforeCommit beforeCommit) {
+        if (locked()) { message("桌面布局已锁定"); return; }
         dismissMenu();
         ArrayList<Destination> destinations = new ArrayList<>();
         ArrayList<String> labels = new ArrayList<>();
-        for (int slot = 0; slot < HomeLayout.SLOT_COUNT; slot++) {
+        for (int slot = 0; slot < layout.size(); slot++) {
+            if (layout.ownerAt(slot) >= 0 && layout.ownerAt(slot) != slot) continue;
             HomeLayout.Item existing = layout.get(slot);
+            if (existing != null && existing.isWidget()) continue;
             if (existing == null) {
                 destinations.add(new Destination(slot, false));
                 labels.add(tr("位置 ", "Position ") + (slot + 1) + tr("（空）", " (empty)"));
@@ -1112,9 +1428,11 @@ final class HomeDesktop extends FrameLayout {
         HomeLayout.Item moving = folder.children.get(childIndex);
         ArrayList<Destination> destinations = new ArrayList<>();
         ArrayList<String> labels = new ArrayList<>();
-        for (int slot = 0; slot < HomeLayout.SLOT_COUNT; slot++) {
+        for (int slot = 0; slot < layout.size(); slot++) {
             if (slot == folderSlot) continue;
+            if (layout.ownerAt(slot) >= 0 && layout.ownerAt(slot) != slot) continue;
             HomeLayout.Item existing = layout.get(slot);
+            if (existing != null && existing.isWidget()) continue;
             destinations.add(new Destination(slot, existing != null && existing.isFolder()));
             labels.add(existing == null ? tr("位置 ", "Position ") + (slot + 1) + tr("（空）", " (empty)")
                     : existing.isFolder() ? tr("加入文件夹：", "Add to folder: ") + existing.name
@@ -1139,16 +1457,18 @@ final class HomeDesktop extends FrameLayout {
     }
 
     private void persist() {
+        sortFolders();
         layout.save();
         syncPins();
         render();
     }
 
     private int homeTarget(float rawX, float rawY) {
-        for (int index = 0; index < grid.getChildCount(); index++) {
-            if (contains(grid.getChildAt(index), rawX, rawY)) return index;
-        }
-        return -1;
+        if (!contains(grid, rawX, rawY)) return -1;
+        int[] origin = new int[2]; grid.getLocationOnScreen(origin);
+        int x = Math.min(layout.columns - 1, (int) ((rawX - origin[0]) * layout.columns / Math.max(1, grid.getWidth())));
+        int y = Math.min(layout.rows - 1, (int) ((rawY - origin[1]) * layout.rows / Math.max(1, grid.getHeight())));
+        return currentPage * layout.pageSize() + y * layout.columns + x;
     }
 
     private int childTarget(float rawX, float rawY) {
@@ -1165,6 +1485,7 @@ final class HomeDesktop extends FrameLayout {
     }
 
     private boolean centerHit(View view, float rawX, float rawY) {
+        if (view == null) return false;
         int[] position = new int[2];
         view.getLocationOnScreen(position);
         float centerX = position[0] + view.getWidth() / 2f;
@@ -1174,7 +1495,7 @@ final class HomeDesktop extends FrameLayout {
     }
 
     private void highlightDrop(int slot, boolean merge) {
-        View target = slot < 0 ? null : grid.getChildAt(slot);
+        View target = slot < 0 ? null : homeCells.get(slot);
         if (dropTarget == target && target != null) {
             target.setBackground(shape(merge ? 0x33267a69 : 0x14267a69,
                     18, merge ? 2 : 1, colors.accent));
@@ -1229,6 +1550,7 @@ final class HomeDesktop extends FrameLayout {
             Rect bounds = new Rect();
             source.getGlobalVisibleRect(bounds);
             shortcuts.start(shortcut, bounds);
+            AppLaunchHistory.record(activity, shortcut.getActivity());
             dismissMenu();
         } catch (RuntimeException failure) {
             message(tr("无法启动快捷功能：", "Could not start shortcut: ") + failure.getMessage());
@@ -1271,7 +1593,7 @@ final class HomeDesktop extends FrameLayout {
 
     private Drawable appIcon(String packageName, String className) {
         ResolveInfo app = resolveApp(packageName, className);
-        if (app != null) return app.loadIcon(packages);
+        if (app != null) return iconPack.icon(new ComponentName(app.activityInfo.packageName, app.activityInfo.name), app.loadIcon(packages));
         try {
             return packages.getApplicationIcon(packageName);
         } catch (PackageManager.NameNotFoundException ignored) {
@@ -1289,6 +1611,8 @@ final class HomeDesktop extends FrameLayout {
     }
 
     private String itemLabel(HomeLayout.Item item) {
+        if (HomeLayout.Item.ASSISTANT.equals(item.type)) return "e助手";
+        if (item.isWidget()) return "小组件";
         if (item.isFolder()) return item.name;
         if (item.isShortcut()) {
             ShortcutInfo shortcut = resolveShortcut(item);
@@ -1305,7 +1629,7 @@ final class HomeDesktop extends FrameLayout {
     }
 
     private boolean itemAvailable(HomeLayout.Item item) {
-        if (item.isFolder()) return true;
+        if (item.isFolder() || item.isWidget() || HomeLayout.Item.ASSISTANT.equals(item.type)) return true;
         if (item.isShortcut()) {
             ShortcutInfo shortcut = resolveShortcut(item);
             return shortcut != null && shortcut.isEnabled();
@@ -1332,6 +1656,8 @@ final class HomeDesktop extends FrameLayout {
     private void open(Intent intent) {
         try {
             activity.startActivity(intent);
+            if (intent.hasCategory(Intent.CATEGORY_LAUNCHER))
+                AppLaunchHistory.record(activity, intent.getComponent());
         } catch (ActivityNotFoundException | SecurityException failure) {
             message(tr("无法打开：", "Could not open: ") + failure.getClass().getSimpleName());
         }
@@ -1407,6 +1733,20 @@ final class HomeDesktop extends FrameLayout {
 
     private final class Cell extends LinearLayout {
         Cell() { super(activity); }
+        @Override protected void onMeasure(int widthSpec, int heightSpec) {
+            int height = MeasureSpec.getSize(heightSpec);
+            if (getChildCount() > 0 && MeasureSpec.getMode(heightSpec) == MeasureSpec.EXACTLY && height > 0) {
+                int available = Math.max(dp(20), height - getPaddingTop() - getPaddingBottom() - dp(25));
+                View icon = getChildAt(0);
+                ViewGroup.LayoutParams p = icon.getLayoutParams();
+                p.width = p.height = Math.min(dp(preferences.iconSizeDp()), Math.min(available, Math.max(dp(20), MeasureSpec.getSize(widthSpec) - dp(8))));
+                if (getChildCount() > 1 && getChildAt(1) instanceof TextView label) {
+                    label.setMaxLines(1);
+                    ((LinearLayout.LayoutParams) label.getLayoutParams()).topMargin = dp(3);
+                }
+            }
+            super.onMeasure(widthSpec, heightSpec);
+        }
         @Override public boolean performClick() { return super.performClick(); }
     }
 

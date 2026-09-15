@@ -82,6 +82,15 @@ public class MainActivity extends BridgeActivity {
     private LauncherShortcuts launcherShortcuts;
     private HomeLayout homeLayout;
     private HomeDesktop homeDesktop;
+    private NativeSearchPage nativeSearchPage;
+    private long desktopRevision;
+    private AppAppearance desktopAppearance;
+    private boolean desktopSettingsRegistered;
+    private final android.content.BroadcastReceiver desktopSettingsChanged = new android.content.BroadcastReceiver() {
+        @Override public void onReceive(android.content.Context context, Intent intent) {
+            if (desktopRevision != new DesktopPreferences(MainActivity.this).revision()) recreate();
+        }
+    };
     private boolean shortcutListenerRegistered;
     private boolean packageReceiverRegistered;
     private final List<ResolveInfo> apps = new ArrayList<>();
@@ -167,6 +176,8 @@ public class MainActivity extends BridgeActivity {
     @Override
     public void onCreate(Bundle savedInstanceState) {
         appearance = AppAppearance.read(this);
+        desktopAppearance = AppAppearance.readDesktop(this);
+        desktopRevision = new DesktopPreferences(this).revision();
         IVORY = appearance.background; CHARCOAL = appearance.ink; TEAL = appearance.accent; MUTED = appearance.muted;
         appearanceRevision = AppAppearance.revision(this);
         initialWebRoute = "/chat/" + ChatCoordinator.get(this).store().activeId();
@@ -229,6 +240,7 @@ public class MainActivity extends BridgeActivity {
         installPager();
         getOnBackPressedDispatcher().addCallback(this, new androidx.activity.OnBackPressedCallback(true) {
             @Override public void handleOnBackPressed() {
+                if (nativeSearchPage != null) { showDesktop(); return; }
                 if (homeDesktop != null && homeDesktop.dismissMenu()) return;
                 if (pager.page() == PagerState.Page.HOME) {
                     if (homeInputOverlay != null) {
@@ -247,6 +259,7 @@ public class MainActivity extends BridgeActivity {
         showHome(false);
         boolean pinIntent = isPinIntent(getIntent());
         handlePinIntent(getIntent());
+        handleDesktopAction(getIntent());
         if (restoreWebPage && !pinIntent) pager.show(PagerState.Page.CHAT, false);
         if (savedInstanceState != null) {
             nativePickerKind = savedInstanceState.getString("native_picker_kind");
@@ -272,6 +285,7 @@ public class MainActivity extends BridgeActivity {
             showHome(false);
             handlePinIntent(intent);
         }
+        if (pager != null) handleDesktopAction(intent);
     }
 
     @Override
@@ -298,6 +312,12 @@ public class MainActivity extends BridgeActivity {
     @Override
     public void onStart() {
         super.onStart();
+        if (homeDesktop != null) homeDesktop.startListening();
+        if (!desktopSettingsRegistered) {
+            androidx.core.content.ContextCompat.registerReceiver(this, desktopSettingsChanged,
+                    new android.content.IntentFilter(DesktopPreferences.ACTION_CHANGED), androidx.core.content.ContextCompat.RECEIVER_NOT_EXPORTED);
+            desktopSettingsRegistered = true;
+        }
         if (!shortcutListenerRegistered && launcherShortcuts.hasAccess()) try {
             launcherShortcuts.register(() -> runOnUiThread(() -> {
                 if (homeDesktop != null) homeDesktop.shortcutsChanged();
@@ -311,6 +331,7 @@ public class MainActivity extends BridgeActivity {
     @Override
     public void onResume() {
         super.onResume();
+        if (desktopRevision != new DesktopPreferences(this).revision()) { recreate(); return; }
         agentRunning = chatCoordinator.running(chatStore.activeId());
         activePiRequestId = chatCoordinator.requestId();
         if (!agentRunning && !appearanceRevision.equals(AppAppearance.revision(this))) { recreate(); return; }
@@ -321,7 +342,16 @@ public class MainActivity extends BridgeActivity {
         clockHandler.removeCallbacks(clockTick);
         clockTick.run();
         refreshTaskCards();
+        if (homeTaskCards != null && pager.page() == PagerState.Page.HOME) homeTaskCards.showLatest();
+        String taskChat = getIntent().getStringExtra(TaskDetailActivity.EXTRA_OPEN_CHAT);
+        if (taskChat != null) {
+            getIntent().removeExtra(TaskDetailActivity.EXTRA_OPEN_CHAT);
+            if (chatCoordinator.taskCard(taskChat) != null) {
+                chatStore.selectConversation(taskChat); launchWeb("/chat/" + taskChat, null, null);
+            }
+        }
         refreshHomeComposer();
+        if (nativeSearchPage != null) nativeSearchPage.refresh();
         if (homeDesktop != null) {
             homeDesktop.shortcutsChanged();
             homeDesktop.syncPins();
@@ -340,6 +370,8 @@ public class MainActivity extends BridgeActivity {
 
     @Override
     public void onStop() {
+        if (homeDesktop != null) homeDesktop.stopListening();
+        if (desktopSettingsRegistered) { unregisterReceiver(desktopSettingsChanged); desktopSettingsRegistered = false; }
         if (shortcutListenerRegistered) {
             launcherShortcuts.unregister();
             shortcutListenerRegistered = false;
@@ -356,6 +388,7 @@ public class MainActivity extends BridgeActivity {
             PiAgentBridge queryBridge = thinkingLevelBridge;
             if (queryBridge != null) queryBridge.abort(thinkingLevelRequestId);
         }
+        closeNativeSearch();
         if (homeInputOverlay != null) homeInputOverlay.dispose();
         if (homeDesktop != null) homeDesktop.dispose();
         if (packageReceiverRegistered) {
@@ -400,11 +433,13 @@ public class MainActivity extends BridgeActivity {
             if (changed == PagerState.Page.HOME && composerInput != null) refreshHomeComposer();
             if (taskCardHost != null) {
                 taskCardHost.setVisibility(changed == PagerState.Page.HOME ? View.VISIBLE : View.GONE);
-                if (changed == PagerState.Page.HOME) refreshTaskCards();
+                if (changed == PagerState.Page.HOME) { refreshTaskCards(); homeTaskCards.showLatest(); }
             }
             getWindow().setStatusBarColor(changed == PagerState.Page.CHAT
-                    ? appearance.surface : IVORY);
-            getWindow().setNavigationBarColor(appearance.surface);
+                    ? appearance.surface : desktopBackground());
+            getWindow().setNavigationBarColor(changed == PagerState.Page.HOME ? desktopBackground() : appearance.surface);
+            getWindow().getDecorView().setSystemUiVisibility(changed == PagerState.Page.HOME
+                    ? desktopAppearance.systemBarFlags() : appearance.systemBarFlags());
         });
         chatWebView.addJavascriptInterface(new Object() {
             @android.webkit.JavascriptInterface public int gestureId() {
@@ -521,11 +556,12 @@ public class MainActivity extends BridgeActivity {
         contentStage.removeAllViews();
         contentStage.addView(content, match());
         boolean chat = "search".equals(page);
-        composerDock.setVisibility(chat ? View.GONE : View.VISIBLE);
-        root.setBackgroundColor(chat ? appearance.surface : IVORY);
+        composerDock.setVisibility(View.GONE);
+        root.setBackgroundColor(chat ? appearance.surface : desktopBackground());
         homeWallpaper.setVisibility(chat ? View.INVISIBLE : View.VISIBLE);
-        getWindow().setStatusBarColor(chat ? appearance.surface : IVORY);
-        getWindow().setNavigationBarColor(appearance.surface);
+        getWindow().setStatusBarColor(chat ? appearance.surface : desktopBackground());
+        getWindow().setNavigationBarColor(chat ? appearance.surface : desktopBackground());
+        getWindow().getDecorView().setSystemUiVisibility(chat ? appearance.systemBarFlags() : desktopAppearance.systemBarFlags());
         composerInput.setShowSoftInputOnFocus(false);
         if (!firstPage) enterMotion(content, chat ? 24 : -16);
         updateAgentControls();
@@ -534,38 +570,33 @@ public class MainActivity extends BridgeActivity {
     private void createPageShell() {
         root = new FrameLayout(this);
         root.setBackgroundColor(appearance.surface);
-        homeWallpaper = createWallpaper();
-        homeWallpaper.setBackgroundColor(IVORY);
+        homeWallpaper = desktopAppearance.desktopWallpaper(this);
+        if ("system".equals(new DesktopPreferences(this).wallpaper())) {
+            getWindow().addFlags(WindowManager.LayoutParams.FLAG_SHOW_WALLPAPER);
+            getWindow().setBackgroundDrawableResource(android.R.color.transparent);
+        } else getWindow().clearFlags(WindowManager.LayoutParams.FLAG_SHOW_WALLPAPER);
+        root.setBackgroundColor(desktopBackground());
         root.addView(homeWallpaper, match());
-        pageShell = new LinearLayout(this) {
-            @Override protected void onMeasure(int widthSpec, int heightSpec) {
-                if ("home".equals(page) && homeInputOverlay == null && contentStage.getChildCount() > 0) {
-                    // Reserve both app rows and the composer before sizing the task panel.
-                    View home = contentStage.getChildAt(0);
-                    int naturalHeight = MeasureSpec.makeMeasureSpec(0, MeasureSpec.UNSPECIFIED);
-                    home.measure(widthSpec, naturalHeight);
-                    composerDock.measure(widthSpec, naturalHeight);
-                    homeTaskCards.setAvailableHeight(Math.max(0, MeasureSpec.getSize(heightSpec)
-                            - home.getMeasuredHeight() - composerDock.getMeasuredHeight()));
-                }
-                super.onMeasure(widthSpec, heightSpec);
-            }
-        };
+        pageShell = new LinearLayout(this);
         pageShell.setOrientation(LinearLayout.VERTICAL);
         pageShell.setFocusableInTouchMode(true);
         contentStage = new FrameLayout(this);
         pageShell.addView(contentStage, new LinearLayout.LayoutParams(-1, 0, 1));
         taskCardHost = new FrameLayout(this);
         taskCardHost.setVisibility(View.GONE);
-        pageShell.addView(taskCardHost, new LinearLayout.LayoutParams(-1, -2));
         homeTaskCards = new HomeTaskCards(this, pager, homeWallpaper, id -> {
+            if (id.isEmpty()) { chatStore.newConversation(); launchWeb("/chat/" + chatStore.activeId(), null, null); return; }
             chatStore.selectConversation(id);
             launchWeb("/chat/" + id, null, null);
         }, id -> chatCoordinator.cancel(id), id -> {
-            chatCoordinator.dismissTaskCard(id);
-            refreshTaskCards();
+            new android.app.AlertDialog.Builder(this).setTitle("删除此对话？")
+                    .setMessage("此操作将删除对话历史与工作区，无法撤销。")
+                    .setNegativeButton("取消", null).setPositiveButton("删除", (dialog, which) -> {
+                        try { chatCoordinator.deleteConversation(id); }
+                        catch (RuntimeException e) { Toast.makeText(this, e.getMessage(), Toast.LENGTH_LONG).show(); }
+                        refreshTaskCards();
+                    }).show();
         });
-        taskCardHost.addView(homeTaskCards);
         refreshTaskCards();
         createComposer();
         pageShell.addView(composerDock, new LinearLayout.LayoutParams(-1, -2));
@@ -618,6 +649,7 @@ public class MainActivity extends BridgeActivity {
     }
 
     private void showHome(boolean animated) {
+        closeNativeSearch();
         if (homeInputOverlay != null) closeHomeInput(false);
         if (treeSheet != null) treeSheet.dismiss();
         View focused = getCurrentFocus();
@@ -643,34 +675,83 @@ public class MainActivity extends BridgeActivity {
         gestureState = null;
         state = null;
 
-        LinearLayout column = column();
-        column.setPadding(dp(22), dp(8), dp(22), dp(8));
-        // Keep labels readable even when the photo mask is only 20%.
-        if (getSharedPreferences("ui", MODE_PRIVATE).getString("background", "circles").equals("image"))
-            column.setBackgroundColor((appearance.background & 0xffffff) | 0xe6000000);
         FrameLayout homeContent = new FrameLayout(this);
-        homeContent.addView(column, new FrameLayout.LayoutParams(-1, -2));
-
-        LinearLayout top = row();
-        clock = label("", 56, CHARCOAL);
-        clock.setGravity(Gravity.BOTTOM);
-        top.addView(clock, new LinearLayout.LayoutParams(0, -2, 1));
-        TextView allApps = chatIcon("menu", t("查看并搜索全部应用"), view -> homeDesktop.showAllApps());
-        top.addView(allApps);
-        TextView settings = chatIcon("settings", t("打开桌面与手势设置"), view -> launchWeb("/settings", null, null));
-        top.addView(settings);
-        column.addView(top);
-        date = label("", 17, MUTED);
-        column.addView(date);
-
+        homeContent.setPadding(dp(12), dp(8), dp(12), dp(8));
         homeDesktop = new HomeDesktop(this, pager, homeLayout, apps, launcherShortcuts, homeContent);
-        LinearLayout.LayoutParams desktopParams = new LinearLayout.LayoutParams(-1, dp(232));
-        desktopParams.topMargin = dp(12);
-        column.addView(homeDesktop, desktopParams);
+        homeContent.addView(homeDesktop, new FrameLayout.LayoutParams(-1, -1));
+        homeDesktop.setNavigation(this::showAppLibrary, () -> showGlobalSearch(""),
+                () -> launchWeb("/chat/" + chatStore.activeId(), null, null), this::openDesktopSettings);
 
         setPage(homeContent);
+        homeDesktop.setAiWidget(homeTaskCards);
         pager.show(PagerState.Page.HOME, animated);
         updateClock();
+    }
+
+    private int desktopBackground() {
+        return "system".equals(new DesktopPreferences(this).wallpaper()) ? android.graphics.Color.TRANSPARENT : desktopAppearance.background;
+    }
+    private void handleDesktopAction(Intent intent) {
+        String action = intent == null ? null : intent.getStringExtra("desktop_settings_action");
+        if (action == null || homeDesktop == null) return;
+        if (desktopRevision != new DesktopPreferences(this).revision()) { recreate(); return; }
+        intent.removeExtra("desktop_settings_action");
+        showDesktop();
+        homeDesktop.post(() -> {
+            if ("add_widget".equals(action)) homeDesktop.showAddMenu();
+            else if ("edit_dock".equals(action)) homeDesktop.editDock();
+            else if ("manage_folders".equals(action)) homeDesktop.manageFolders();
+            else if ("edit_widgets".equals(action)) homeDesktop.enterEdit();
+        });
+    }
+
+    public void showDesktop() { showHome(); }
+    public void showAppLibrary() { showNativeSearch(NativeSearchPage.Mode.APP_LIBRARY, ""); }
+    public void showGlobalSearch(String initialQuery) { showNativeSearch(NativeSearchPage.Mode.GLOBAL_SEARCH, initialQuery); }
+    private void closeNativeSearch() {
+        if (nativeSearchPage == null) return;
+        NativeSearchPage old = nativeSearchPage;
+        nativeSearchPage = null;
+        old.dispose();
+        root.removeView(old);
+        pageShell.setVisibility(View.VISIBLE);
+    }
+    private void showNativeSearch(NativeSearchPage.Mode mode, String query) {
+        showHome(false);
+        nativeSearchPage = new NativeSearchPage(this, mode, query, new NativeSearchPage.Host() {
+            public void showDesktop() { MainActivity.this.showDesktop(); }
+            public void sendToAssistant(String prompt) { sendSearchToAssistant(prompt); }
+            public void openSettings(String destination) {
+                if ("assistant".equals(destination)) openAssistantSettings();
+                else startActivity(new Intent(MainActivity.this, DesktopSettingsActivity.class)
+                        .putExtra("desktop_destination", destination));
+            }
+            public void onDragStarted(NativeSearchPage.DragItem payload) {
+                HomeLayout.Item item = payload.shortcutId() == null
+                        ? HomeLayout.Item.app(payload.component().getPackageName(), payload.component().getClassName())
+                        : HomeLayout.Item.shortcut(payload.component().getPackageName(), payload.shortcutId(), payload.userSerial());
+                homeDesktop.acceptExternalDrag(payload, item);
+                MainActivity.this.showDesktop();
+            }
+        });
+        // Keep the desktop attached for native DragEvent delivery, but hide its Dock and accessibility tree.
+        pageShell.setVisibility(View.INVISIBLE);
+        root.addView(nativeSearchPage, match());
+    }
+    public void openChat(String conversationId) {
+        chatStore.selectConversation(conversationId);
+        launchWeb("/chat/" + conversationId, null, null);
+    }
+    public void openTaskDetail(String conversationId) {
+        startActivity(new Intent(this, TaskDetailActivity.class)
+                .putExtra(TaskDetailActivity.EXTRA_CONVERSATION_ID, conversationId));
+    }
+    public void openDesktopSettings() {
+        startActivity(new Intent(this, DesktopSettingsActivity.class));
+    }
+    public void openAssistantSettings() { startActivity(new Intent(this, PiSettingsActivity.class)); }
+    void beginDesktopDrag(View source, HomeLayout.Item item) {
+        homeDesktop.beginExternalDrag(source, item); showDesktop();
     }
 
     private void refreshTaskCards() {
@@ -683,9 +764,24 @@ public class MainActivity extends BridgeActivity {
         launchWeb("/chat/" + chatStore.activeId(), null, null);
     }
 
+    /** Explicit local-search AI action: never reuse a draft or submit merely by typing. */
+    public void sendSearchToAssistant(String query) {
+        String prompt = query == null ? "" : query.trim();
+        if (prompt.isEmpty()) return;
+        String conversationId = java.util.UUID.randomUUID().toString();
+        chatStore.selectConversation(conversationId);
+        try {
+            String accepted = chatCoordinator.send(conversationId, prompt, java.util.UUID.randomUUID().toString());
+            if (accepted != null) launchWeb("/chat/" + conversationId, null, null);
+        } catch (Exception exception) {
+            failure(exception.getMessage());
+        }
+    }
+
     private void launchWeb(String route, String prompt, String submissionId) {
         if (route == null || !route.startsWith("/")) throw new IllegalArgumentException("route must be local");
         if (homeInputOverlay != null) closeHomeInput(false);
+        closeNativeSearch();
         initialWebRoute = route;
         page = "search";
         // The retained chat page also needs a refresh when the target hash is unchanged.
@@ -767,6 +863,7 @@ public class MainActivity extends BridgeActivity {
 
     private void openHomeInput(boolean showKeyboard) {
         if (homeInputOverlay != null) return;
+        composerDock.setVisibility(View.VISIBLE);
         int[] start = new int[2]; composerDock.getLocationInWindow(start);
         int[] origin = new int[2]; root.getLocationInWindow(origin);
         composerPlaceholder = new View(this);
@@ -812,6 +909,7 @@ public class MainActivity extends BridgeActivity {
             int index = pageShell.indexOfChild(composerPlaceholder);
             pageShell.removeView(composerPlaceholder);
             pageShell.addView(composerDock, index, new LinearLayout.LayoutParams(-1, -2));
+            composerDock.setVisibility(View.GONE);
             composerDock.setTranslationY(0);
             homeInputOverlay = null; closingHomeInput = false;
             composerClose.setVisibility(View.GONE);
@@ -1219,6 +1317,8 @@ public class MainActivity extends BridgeActivity {
 
     @Override protected void onActivityResult(int request, int result, Intent data) {
         super.onActivityResult(request, result, data);
+        if (nativeSearchPage != null && nativeSearchPage.onActivityResult(request, result, data)) return;
+        if (homeDesktop != null && homeDesktop.onActivityResult(request, result, data)) return;
         if (request == 42) { finishHomeAttachment(result, data); return; }
         if (request == 702 && result == RESULT_OK && data != null) {
             try {

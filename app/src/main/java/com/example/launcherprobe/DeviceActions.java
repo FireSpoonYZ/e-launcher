@@ -45,6 +45,7 @@ final class DeviceActions {
             throw new IllegalArgumentException("应用组件无效");
         context.startActivity(new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
                 .setComponent(new ComponentName(packageName, className)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+        AppLaunchHistory.record(context, new ComponentName(packageName, className));
     }
 
     private static String icon(Drawable drawable) {

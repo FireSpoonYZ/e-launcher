@@ -130,6 +130,8 @@ final class ChatCoordinator {
             PiAgentBridge.forgetConversation(conversationId);
             recentResults.remove(conversationId);
         }
+        JSONObject event = json("type", "conversationDeleted", "conversationId", conversationId);
+        main.post(() -> { for (Listener listener : listeners) listener.changed(Collections.emptyList(), event); });
     }
 
     void cancel(String conversationId) {
@@ -262,31 +264,47 @@ final class ChatCoordinator {
         String trimmed = ((String) value).trim();
         return trimmed.isEmpty() ? null : trimmed;
     }
-    /** Stable home-card order; todo is present only for a validated rpiv-todo snapshot. */
+    /** Same recent-activity order as chat history, excluding unsent drafts. */
     JSONArray taskCards() {
-        Map<String, SessionRun> running;
-        Map<String, SessionRun> terminating;
-        synchronized (runLock) {
-            running = new HashMap<>(activeRuns);
-            terminating = new HashMap<>(terminatingRuns);
-        }
-        Map<String, String> titles = new HashMap<>();
-        for (ChatStore.Conversation conversation : store.conversations())
-            titles.put(conversation.id, conversation.title);
         JSONArray cards = new JSONArray();
-        for (String conversationId : store.taskCardIds()) {
-            SessionRun active = running.get(conversationId);
-            SessionRun ending = terminating.get(conversationId);
-            JSONObject extensionUi = active != null ? active.extensionUi : ending != null ? ending.extensionUi
-                    : parseObject(store.extensionUi(conversationId, store.load(conversationId)));
-            JSONObject todo = todoSnapshot(extensionUi);
-            String modelState = active == null ? "idle" : "stopping".equals(active.status)
-                    ? "stopping" : "running".equals(active.status) ? "working" : "idle";
-            cards.put(json("conversationId", conversationId,
-                    "title", titles.getOrDefault(conversationId, "新对话"),
-                    "modelState", modelState, "todo", todo == null ? JSONObject.NULL : todo));
+        for (ChatStore.Conversation conversation : store.conversations()) {
+            if (store.load(conversation.id).isEmpty()) continue;
+            cards.put(taskCard(conversation.id));
+            if (cards.length() == 5) break;
         }
         return cards;
+    }
+
+    /** Detail lookup is not limited to the desktop's five-card window. */
+    JSONObject taskCard(String conversationId) {
+        ChatStore.Conversation conversation = null;
+        for (ChatStore.Conversation candidate : store.conversations())
+            if (candidate.id.equals(conversationId)) { conversation = candidate; break; }
+        if (conversation == null) return null;
+        SessionRun active = activeRuns.get(conversationId);
+        SessionRun ending = terminatingRuns.get(conversationId);
+        List<AgentLoop.Message> history = store.load(conversationId);
+        JSONObject extensionUi = active != null ? active.extensionUi : ending != null ? ending.extensionUi
+                : parseObject(store.extensionUi(conversationId, history));
+        JSONObject todo = todoSnapshot(extensionUi);
+        String modelState = ending != null ? "stopping" : active == null ? "idle"
+                : "stopping".equals(active.status) ? "stopping" : "working";
+        RunResult result = recentResults.get(conversationId);
+        String response = "";
+        for (int i = history.size() - 1; i >= 0; i--) {
+            AgentLoop.Message message = history.get(i);
+            if ("assistant".equals(message.role) && message.content != null && !message.content.isEmpty()) {
+                response = message.content; break;
+            }
+        }
+        return json("conversationId", conversationId, "title", conversation.title,
+                "modelState", modelState, "todo", todo == null ? JSONObject.NULL : todo,
+                "result", response, "updated", conversation.updated,
+                "created", store.createdAt(conversationId),
+                "runStatus", result == null ? context.getSharedPreferences("chat", Context.MODE_PRIVATE)
+                        .getString("run_status_" + conversationId, "") : result.status,
+                "error", result == null ? context.getSharedPreferences("chat", Context.MODE_PRIVATE)
+                        .getString("run_error_" + conversationId, "") : result.error);
     }
 
     /** Hides the card without cancelling its run or deleting its conversation. */
@@ -483,6 +501,9 @@ final class ChatCoordinator {
             synchronized (run.pendingDelta) { run.pendingDelta.setLength(0); }
             activeRuns.remove(run.conversationId, run);
             recentResults.put(run.conversationId, new RunResult(status, run.error));
+            context.getSharedPreferences("chat", Context.MODE_PRIVATE).edit()
+                    .putString("run_status_" + run.conversationId, status)
+                    .putString("run_error_" + run.conversationId, run.error).apply();
             ChatExecutionService.setActiveCount(context, activeRuns.size());
         }
         if (error != null && !error.isEmpty()) emit(run, "error", null, json("message", error));
