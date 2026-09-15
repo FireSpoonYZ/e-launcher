@@ -688,7 +688,9 @@ public class MainActivity extends BridgeActivity {
         if (homeInputOverlay != null) closeHomeInput(false);
         initialWebRoute = route;
         page = "search";
-        chatWebView.evaluateJavascript("location.hash=" + JSONObject.quote("#" + route), null);
+        // The retained chat page also needs a refresh when the target hash is unchanged.
+        chatWebView.evaluateJavascript("location.hash=" + JSONObject.quote("#" + route)
+                + ";window.dispatchEvent(new Event('native-navigation'))", null);
         pager.show(PagerState.Page.CHAT, true);
         if (prompt != null && submissionId != null) try {
             chatCoordinator.send(prompt, submissionId);

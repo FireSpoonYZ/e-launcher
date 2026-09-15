@@ -74,8 +74,9 @@ export function useChat() {
     };
     refreshRef.current = refresh;
     const listener = Chat.addListener('chatEvent', receive);
+    window.addEventListener('native-navigation', refresh);
     void listener.then(refresh).catch(e => { if (live) setError(errorText(e)); });
-    return () => { live = false; void listener.then(h => h.remove()); };
+    return () => { live = false; window.removeEventListener('native-navigation', refresh); void listener.then(h => h.remove()); };
   }, []);
   return {snapshot, error, status, questionnaireReply, refresh: () => refreshRef.current()};
 }
