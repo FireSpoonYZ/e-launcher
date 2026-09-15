@@ -70,13 +70,23 @@ final class ChatCoordinator {
         return send(conversationId, text, store.draftAttachments(conversationId), submissionId);
     }
 
+    String sendScheduled(String conversationId, String title, String prompt) throws Exception {
+        store.createBackgroundConversation(conversationId, title);
+        return send(conversationId, prompt, Collections.emptyList(), null, true);
+    }
+
     private String send(String conversationId, String text, List<ChatAttachment> attachments,
             String submissionId) throws Exception {
+        return send(conversationId, text, attachments, submissionId, false);
+    }
+
+    private String send(String conversationId, String text, List<ChatAttachment> attachments,
+            String submissionId, boolean background) throws Exception {
         String prompt = text == null ? "" : text.trim();
         if (prompt.isEmpty() && attachments.isEmpty()) throw new IllegalArgumentException("消息不能为空");
         AttachmentStore attachmentStore = new AttachmentStore(context);
         for (ChatAttachment attachment : attachments) attachmentStore.requireFile(attachment);
-        SessionRun run = registerRun(conversationId, submissionId);
+        SessionRun run = registerRun(conversationId, submissionId, background);
         if (run == null) return null;
         try {
             emit(run, "runStatus", null, json("status", "running", "message", run.message));
@@ -94,10 +104,14 @@ final class ChatCoordinator {
     }
 
     SessionRun registerRun(String conversationId, String submissionId) {
+        return registerRun(conversationId, submissionId, false);
+    }
+
+    private SessionRun registerRun(String conversationId, String submissionId, boolean background) {
         SessionRun run = new SessionRun(conversationId, UUID.randomUUID().toString());
         run.extensionUi = parseObject(store.extensionUi(conversationId, store.load(conversationId)));
         synchronized (runLock) {
-            if (!conversationId.equals(store.activeId())) throw new IllegalStateException("会话已切换");
+            if (!background && !conversationId.equals(store.activeId())) throw new IllegalStateException("会话已切换");
             if (activeRuns.containsKey(conversationId)) throw new IllegalStateException("此会话已有一轮正在运行，请先停止");
             if (terminatingRuns.containsKey(conversationId)) throw new IllegalStateException("此会话的后台任务正在结束，请稍后重试");
             if (submissionId != null && !submissionId.isEmpty()) {

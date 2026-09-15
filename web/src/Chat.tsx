@@ -1,7 +1,7 @@
 import { memo, useEffect, useRef, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { ArrowDown, ArrowUp, Camera, Check, ChevronDown, Copy, GitBranch, Image, LoaderCircle, Menu, Mic, Paperclip, Plus, RotateCcw, Search, Settings, Share2, Square, SquarePen, Trash2 } from 'lucide-react';
-import { Chat, Device, NativeSettings, type ChatSnapshot, type Conversation, type ConversationNode, type ConversationSummary, type ExtensionUiState, type NativeEvent } from './native';
+import { ArrowDown, ArrowUp, Camera, Check, ChevronDown, ChevronRight, Clock3, Copy, GitBranch, Image, LoaderCircle, Menu, Mic, Paperclip, Plus, RotateCcw, Search, Settings, Share2, Square, SquarePen, Trash2 } from 'lucide-react';
+import { Chat, Device, NativeSettings, ScheduledTasks, type ChatSnapshot, type Conversation, type ConversationNode, type ConversationSummary, type ExtensionUiState, type NativeEvent } from './native';
 import { AttachmentList } from './AttachmentList';
 import { LatestRequest } from './latestRequest';
 import { pairToolResults, toolCallKey } from './toolResults';
@@ -218,10 +218,18 @@ function BranchPopover({conversation, disabled, close, onChange}: {conversation:
 }
 function ConversationDrawer({open, close, conversation, activeRuns, onChange}: {open: boolean; close(): void; conversation: Conversation; activeRuns: ChatSnapshot['activeRuns']; onChange(): Promise<void>}) {
   const [items, setItems] = useState<ConversationSummary[]>([]); const [search, setSearch] = useState(''); const [remove, setRemove] = useState<ConversationSummary>();
+  const [scheduleCount, setScheduleCount] = useState<number>();
+  useEffect(() => {
+    if (!open) return;
+    let live = true;
+    void ScheduledTasks.snapshot().then(value => { if (live) setScheduleCount(value.tasks.length); })
+      .catch(() => { if (live) setScheduleCount(undefined); });
+    return () => { live = false; };
+  }, [open]);
   const action = useAction(); const t = useText(); const nav = useNavigate();
   const running = new Map(activeRuns.map(run => [run.conversationId, run]));
   useEffect(() => { if (open) void action.run(async () => { setItems((await Chat.listConversations()).conversations); }); }, [open]);
-  return <><Dialog open={open} onOpenChange={value => !value && close()} title={t('会话','Conversations')} drawer><SearchField value={search} onChange={setSearch} placeholder={t('搜索会话','Search conversations')}/><button className="wide-action" onClick={() => action.run(async () => { await Chat.newConversation(); await onChange(); })}><Plus/>{t('新会话','New conversation')}</button><ErrorNotice error={action.error}/><div className="conversation-list">{items.filter(item => item.title.toLowerCase().includes(search.toLowerCase())).map(item => { const run=running.get(item.id); return <div className={`conversation-row ${item.id === conversation.id ? 'selected' : ''}`} key={item.id}><button onClick={() => action.run(async () => { await Chat.selectConversation({conversationId:item.id}); await onChange(); })}><span>{item.title}</span><small>{run ? run.message || t('正在回复…','Working…') : new Date(item.updated).toLocaleDateString()}</small></button><button className="icon-button" aria-label={t('删除会话','Delete conversation')} disabled={!!run} onClick={() => setRemove(item)}><Trash2/></button></div>;})}</div><button className="wide-action drawer-settings" onClick={() => { close(); nav('/settings'); }}><Settings/>{t('设置','Settings')}</button></Dialog><ConfirmDialog open={!!remove} title={t('删除会话？','Delete conversation?')} description={t('会话及所有分支、工作区将被删除。','This conversation, its branches, and workspace will be deleted.')} danger onCancel={() => setRemove(undefined)} onConfirm={() => action.run(async () => { await Chat.deleteConversation({conversationId:remove!.id}); setRemove(undefined); await onChange(); })}/></>;
+  return <><Dialog open={open} onOpenChange={value => !value && close()} title={t('会话','Conversations')} drawer><SearchField value={search} onChange={setSearch} placeholder={t('搜索会话','Search conversations')}/><button className="wide-action" onClick={() => action.run(async () => { await Chat.newConversation(); await onChange(); })}><Plus/>{t('新会话','New conversation')}</button><button className="wide-action drawer-schedules" onClick={() => { close(); nav('/schedules'); }}><Clock3/><span>{t('定时任务','Scheduled tasks')}</span><span className="drawer-schedule-count">{scheduleCount ?? ''}<ChevronRight/></span></button><ErrorNotice error={action.error}/><div className="conversation-list">{items.filter(item => item.title.toLowerCase().includes(search.toLowerCase())).map(item => { const run=running.get(item.id); return <div className={`conversation-row ${item.id === conversation.id ? 'selected' : ''}`} key={item.id}><button onClick={() => action.run(async () => { await Chat.selectConversation({conversationId:item.id}); await onChange(); })}><span>{item.title}</span><small>{run ? run.message || t('正在回复…','Working…') : new Date(item.updated).toLocaleDateString()}</small></button><button className="icon-button" aria-label={t('删除会话','Delete conversation')} disabled={!!run} onClick={() => setRemove(item)}><Trash2/></button></div>;})}</div><button className="wide-action drawer-settings" onClick={() => { close(); nav('/settings'); }}><Settings/>{t('设置','Settings')}</button></Dialog><ConfirmDialog open={!!remove} title={t('删除会话？','Delete conversation?')} description={t('会话及所有分支、工作区将被删除。','This conversation, its branches, and workspace will be deleted.')} danger onCancel={() => setRemove(undefined)} onConfirm={() => action.run(async () => { await Chat.deleteConversation({conversationId:remove!.id}); setRemove(undefined); await onChange(); })}/></>;
 }
 function ModelSheet({conversation, disabled, close, onChange}: {conversation: Conversation; disabled: boolean; close(): void; onChange(): Promise<void>}) {
   const t = useText(); const nav = useNavigate(); const action = useAction();

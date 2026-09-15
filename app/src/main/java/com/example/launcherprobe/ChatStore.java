@@ -278,6 +278,18 @@ public final class ChatStore {
         preferences.edit().putString("active_chat", java.util.UUID.randomUUID().toString()).apply();
     }
 
+    /** Creates a scheduled result destination without changing the visible chat or its draft. */
+    void createBackgroundConversation(String id, String title) throws org.json.JSONException {
+        synchronized (STORE_LOCK) {
+            JSONObject index = conversationIndex();
+            if (index.has(id)) throw new IllegalArgumentException("会话已存在");
+            long now = System.currentTimeMillis();
+            index.put(id, new JSONObject().put("title", title).put("created", now).put("updated", now));
+            if (!preferences.edit().putString("conversations", index.toString()).commit())
+                throw new IllegalStateException("无法创建定时任务会话");
+        }
+    }
+
     public void selectConversation(String id) {
         if (!conversationIndex().has(id)) throw new IllegalArgumentException("会话不存在");
         preferences.edit().putString("active_chat", id).apply();

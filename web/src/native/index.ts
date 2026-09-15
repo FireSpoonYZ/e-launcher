@@ -117,6 +117,23 @@ export interface DevicePlugin {
   close(): Promise<void>;
 }
 
+export type ScheduleRule = { repeat: 'daily'|'weekly'|'monthly'; time: string; weekday: number; monthDay: number };
+export type ScheduledTaskInput = ScheduleRule & { id?: string; revision?: number; title: string; prompt: string };
+export type ScheduledTask = ScheduledTaskInput & { id: string; revision: number; enabled: boolean; createdAt: number; nextRunAt: number };
+export type ScheduleRecord = { id: string; taskId: string; title: string; scheduledAt: number; startedAt: number; finishedAt: number; status: 'running'|'completed'|'error'|'aborted'|'skipped'; reason: string; message: string; conversationId: string|null; conversationAvailable: boolean };
+export type ScheduleSnapshot = { tasks: ScheduledTask[]; records: ScheduleRecord[]; exactAlarmGranted: boolean; schedulingError: string; timeZone: string };
+export type SchedulePreview = { nextRunAt: number; timeZone: string };
+export interface ScheduledTasksPlugin {
+  addListener(event: 'scheduleEvent', listener: () => void): ListenerPromise;
+  snapshot(): Promise<ScheduleSnapshot>;
+  preview(rule: ScheduleRule): Promise<SchedulePreview>;
+  save(task: ScheduledTaskInput): Promise<ScheduleSnapshot>;
+  setEnabled(options: {id: string; revision: number; enabled: boolean}): Promise<ScheduleSnapshot>;
+  delete(options: {id: string; revision: number}): Promise<ScheduleSnapshot>;
+  requestExactAlarm(): Promise<void>;
+  retryScheduling(): Promise<ScheduleSnapshot>;
+}
+export const ScheduledTasks = registerPlugin<ScheduledTasksPlugin>('ScheduledTasks');
 export const Chat = registerPlugin<ChatPlugin>('Chat');
 export const NativeSettings = registerPlugin<SettingsPlugin>('Settings');
 export const Device = registerPlugin<DevicePlugin>('Device');

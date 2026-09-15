@@ -8,6 +8,7 @@ import { ChatPage, HistoryPage } from './Chat';
 import { SettingsHome, GeneralPage, AppearancePage, DevicePage, AboutPage } from './Settings';
 import { ProvidersPage, ResourcesPage } from './Resources';
 import { AdvancedPage, EditorPage } from './Editor';
+import { SchedulesPage, ScheduleHistoryPage } from './Schedules';
 
 declare global {
   interface Window { PagerGesture?: {gestureId(): number; setBlocked(id: number, blocked: boolean): void}; }
@@ -96,6 +97,8 @@ function Shell({initialDevice}: {initialDevice: DeviceState}) {
   return <Environment.Provider value={{device, refresh}}><Navigation/><Routes>
     <Route path="/chat/:conversationId?" element={<ChatPage/>}/>
     <Route path="/history/:conversationId" element={<HistoryPage/>}/>
+    <Route path="/schedules" element={<SchedulesPage/>}/>
+    <Route path="/schedules/history" element={<ScheduleHistoryPage/>}/>
     <Route path="/settings" element={<SettingsHome/>}/>
     <Route path="/settings/general" element={<GeneralPage/>}/>
     <Route path="/settings/appearance" element={<AppearancePage/>}/>
