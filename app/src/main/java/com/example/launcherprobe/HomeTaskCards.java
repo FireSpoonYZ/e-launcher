@@ -171,6 +171,7 @@ final class HomeTaskCards extends LinearLayout {
         panel.setPadding(dp(20), dp(8), dp(20), dp(8));
         LinearLayout heading = new LinearLayout(getContext());
         heading.setGravity(Gravity.CENTER_VERTICAL);
+        heading.setTag("card-switch");
         TextView title = button(text("✦  AI 助手", "✦  AI assistant"), () -> detail(id));
         title.setTextSize(16);
         title.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
@@ -372,15 +373,14 @@ final class HomeTaskCards extends LinearLayout {
     }
 
     private boolean stripTouch;
+    private boolean switchTouch;
     @Override public boolean dispatchTouchEvent(MotionEvent event) {
         if (event.getActionMasked() == MotionEvent.ACTION_DOWN) {
             if (pager != null) pager.setGestureBlocked(pager.gestureId(), true);
             getParent().requestDisallowInterceptTouchEvent(true);
             downX = event.getX(); downY = event.getY(); touching = true; swiping = false;
-            View strip = findViewWithTag("todo-strip");
-            android.graphics.Rect rect = new android.graphics.Rect();
-            stripTouch = strip != null && strip.getGlobalVisibleRect(rect)
-                    && rect.contains((int) event.getRawX(), (int) event.getRawY());
+            stripTouch = hit(findViewWithTag("todo-strip"), event);
+            switchTouch = hit(findViewWithTag("card-switch"), event);
             removeCallbacks(settleScroll);
             stripSettling = false;
             if (stripTouch) followingTarget = -1;
@@ -398,8 +398,14 @@ final class HomeTaskCards extends LinearLayout {
         return handled;
     }
 
+    private boolean hit(View view, MotionEvent event) {
+        android.graphics.Rect rect = new android.graphics.Rect();
+        return view != null && view.getGlobalVisibleRect(rect)
+                && rect.contains((int) event.getRawX(), (int) event.getRawY());
+    }
+
     @Override public boolean onInterceptTouchEvent(MotionEvent event) {
-        if (!stripTouch && cards.length() > 1 && event.getActionMasked() == MotionEvent.ACTION_MOVE
+        if (switchTouch && !stripTouch && cards.length() > 1 && event.getActionMasked() == MotionEvent.ACTION_MOVE
                 && Math.abs(event.getY() - downY) > ViewConfiguration.get(getContext()).getScaledTouchSlop()
                 && Math.abs(event.getY() - downY) > Math.abs(event.getX() - downX) * 1.6f) {
             swiping = true;

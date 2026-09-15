@@ -2,7 +2,9 @@ package com.example.launcherprobe;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
 import android.app.Application;
@@ -17,12 +19,15 @@ import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.robolectric.RobolectricTestRunner;
 import org.robolectric.RuntimeEnvironment;
+import org.robolectric.Shadows;
 import org.robolectric.annotation.Config;
 import org.robolectric.util.ReflectionHelpers;
 
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.stream.Collectors;
 
 @RunWith(RobolectricTestRunner.class)
@@ -125,32 +130,37 @@ public class ChatTaskDataTest {
                 .put("tasks", new JSONArray().put(new JSONObject()
                         .put("id", 1).put("subject", "forged").put("status", "completed")))
                 .put("nextId", 2));
+        stampUpdated(firstId, 1_000L);
+        stampUpdated(secondId, 2_000L);
 
         JSONArray cards = coordinator.taskCards();
-        assertEquals(Arrays.asList(firstId, secondId), ids(cards));
-        assertEquals("Task A", cards.getJSONObject(0).getString("title"));
-        assertEquals("working", cards.getJSONObject(0).getString("modelState"));
-        assertEquals("in_progress", cards.getJSONObject(0).getJSONObject("todo")
+        assertEquals(Arrays.asList(secondId, firstId), ids(cards));
+        JSONObject firstCard = card(cards, firstId);
+        JSONObject secondCard = card(cards, secondId);
+        assertEquals("Task A", firstCard.getString("title"));
+        assertEquals("working", firstCard.getString("modelState"));
+        assertEquals("in_progress", firstCard.getJSONObject("todo")
                 .getJSONArray("tasks").getJSONObject(0).getString("status"));
-        assertTrue(cards.getJSONObject(1).isNull("todo"));
+        assertTrue(secondCard.isNull("todo"));
+        assertEquals("working", secondCard.getString("modelState"));
 
         coordinator.cancel(firstId);
-        cards = coordinator.taskCards();
-        assertEquals("stopping", cards.getJSONObject(0).getString("modelState"));
-        assertEquals("in_progress", cards.getJSONObject(0).getJSONObject("todo")
+        firstCard = card(coordinator.taskCards(), firstId);
+        assertEquals("stopping", firstCard.getString("modelState"));
+        assertEquals("in_progress", firstCard.getJSONObject("todo")
                 .getJSONArray("tasks").getJSONObject(0).getString("status"));
 
         coordinator.finish(first, "aborted", "");
-        cards = coordinator.taskCards();
-        assertEquals("idle", cards.getJSONObject(0).getString("modelState"));
-        assertEquals("in_progress", cards.getJSONObject(0).getJSONObject("todo")
+        firstCard = card(coordinator.taskCards(), firstId);
+        assertEquals("idle", firstCard.getString("modelState"));
+        assertEquals("in_progress", firstCard.getJSONObject("todo")
                 .getJSONArray("tasks").getJSONObject(0).getString("status"));
 
         coordinator.dismissTaskCard(firstId);
-        assertEquals(Collections.singletonList(secondId), ids(coordinator.taskCards()));
+        assertEquals("desktop cards follow history, not dismiss membership",
+                Arrays.asList(secondId, firstId), ids(coordinator.taskCards()));
         assertTrue(store.conversations().stream().anyMatch(item -> firstId.equals(item.id)));
         assertTrue(coordinator.running(secondId));
-        assertEquals(Collections.singletonList(secondId), new ChatStore(application).taskCardIds());
 
         coordinator.finish(second, "completed", "");
         store.selectConversation(firstId);
@@ -158,7 +168,133 @@ public class ChatTaskDataTest {
         assertEquals(Arrays.asList(secondId, firstId), ids(coordinator.taskCards()));
         coordinator.finish(restarted, "completed", "");
         store.clear(firstId);
-        assertEquals(Collections.singletonList(secondId), store.taskCardIds());
+        assertEquals(Collections.singletonList(secondId), ids(coordinator.taskCards()));
+    }
+
+    @Test public void taskCardsLimitToFiveRecentHistoriesAndExcludeUnsentDrafts() throws Exception {
+        ChatCoordinator coordinator = ChatCoordinator.get(application);
+        ChatStore store = coordinator.store();
+        List<String> histories = new ArrayList<>();
+        for (int index = 0; index < 6; index++) {
+            if (index > 0) store.newConversation();
+            store.save(Collections.singletonList(message("user-" + index, "user", "Task " + index)));
+            histories.add(store.activeId());
+        }
+        store.selectHomeDraft();
+        store.saveDraft("unsent home draft");
+        String draftId = store.activeId();
+        assertTrue(store.load(draftId).isEmpty());
+        for (int index = 0; index < histories.size(); index++)
+            stampUpdated(histories.get(index), (index + 1) * 1_000L);
+        stampUpdated(draftId, 99_000L);
+
+        JSONArray cards = coordinator.taskCards();
+        assertEquals(Arrays.asList(
+                histories.get(5), histories.get(4), histories.get(3), histories.get(2), histories.get(1)),
+                ids(cards));
+        assertFalse(ids(cards).contains(histories.get(0)));
+        assertFalse(ids(cards).contains(draftId));
+        assertTrue(store.conversations().stream().anyMatch(item -> draftId.equals(item.id)));
+    }
+
+    @Test public void deleteConversationNotifiesObserversWithMonotonicSequence() throws Exception {
+        ChatCoordinator coordinator = ChatCoordinator.get(application);
+        ChatStore store = coordinator.store();
+        store.save(Collections.singletonList(message("keep-user", "user", "Keep me")));
+        String kept = store.activeId();
+        store.newConversation();
+        store.save(Collections.singletonList(message("gone-user", "user", "Delete me")));
+        String other = store.activeId();
+        store.selectConversation(kept);
+        ChatCoordinator.SessionRun seed = coordinator.registerRun(kept, null);
+        coordinator.finish(seed, "completed", "");
+        idleMain();
+        // useChat treats a missing sequence as 0 and drops sequence <= current.sequence.
+        long before = coordinator.sequence();
+        assertTrue(before > 0);
+
+        List<JSONObject> events = new ArrayList<>();
+        ChatCoordinator.Listener listener = (messages, event) -> events.add(event);
+        coordinator.addListener(listener);
+        try {
+            coordinator.deleteConversation(other);
+            idleMain();
+            assertEquals(1, events.size());
+            JSONObject deletedOther = events.get(0);
+            assertEquals("conversationDeleted", deletedOther.getString("type"));
+            assertEquals(other, deletedOther.getString("conversationId"));
+            assertEquals(before + 1, deletedOther.getLong("sequence"));
+            JSONObject afterOther = coordinator.snapshot();
+            assertEquals(before + 1, afterOther.getLong("sequence"));
+            assertEquals(kept, afterOther.getString("conversationId"));
+            assertEquals(kept, afterOther.getJSONObject("conversation").getString("id"));
+            assertEquals("Keep me", store.load(kept).get(0).content);
+            assertFalse(store.conversations().stream().anyMatch(item -> other.equals(item.id)));
+
+            events.clear();
+            coordinator.deleteConversation(kept);
+            idleMain();
+            assertEquals(1, events.size());
+            JSONObject deletedCurrent = events.get(0);
+            JSONObject afterCurrent = coordinator.snapshot();
+            assertEquals("conversationDeleted", deletedCurrent.getString("type"));
+            assertEquals(kept, deletedCurrent.getString("conversationId"));
+            assertEquals(before + 2, deletedCurrent.getLong("sequence"));
+            assertEquals(before + 2, afterCurrent.getLong("sequence"));
+            assertNotEquals(kept, afterCurrent.getString("conversationId"));
+            assertEquals(afterCurrent.getString("conversationId"),
+                    afterCurrent.getJSONObject("conversation").getString("id"));
+            assertEquals(0, afterCurrent.getJSONObject("conversation").getJSONArray("nodes").length());
+            assertFalse(store.conversations().stream().anyMatch(item -> kept.equals(item.id)));
+            assertFalse(store.conversations().stream().anyMatch(item -> other.equals(item.id)));
+        } finally {
+            coordinator.removeListener(listener);
+        }
+    }
+
+    @Test public void deleteConversationDoesNotEmitWhenRunIsActiveOrTerminating() throws Exception {
+        ChatCoordinator coordinator = ChatCoordinator.get(application);
+        ChatStore store = coordinator.store();
+        store.save(Collections.singletonList(message("busy-user", "user", "Busy chat")));
+        String conversation = store.activeId();
+        ChatCoordinator.SessionRun run = coordinator.registerRun(conversation, null);
+        long before = coordinator.sequence();
+
+        List<JSONObject> events = new ArrayList<>();
+        ChatCoordinator.Listener listener = (messages, event) -> events.add(event);
+        coordinator.addListener(listener);
+        try {
+            IllegalStateException active = assertThrows(IllegalStateException.class,
+                    () -> coordinator.deleteConversation(conversation));
+            assertTrue(active.getMessage().contains("请稍后再删除"));
+            idleMain();
+            assertEquals(0, events.size());
+            assertEquals(before, coordinator.sequence());
+            assertEquals(conversation, coordinator.snapshot().getString("conversationId"));
+            assertTrue(coordinator.running(conversation));
+            assertEquals("Busy chat", store.load(conversation).get(0).content);
+
+            coordinator.finish(run, "completed", "");
+            idleMain();
+            events.clear();
+            @SuppressWarnings("unchecked")
+            Map<String, ChatCoordinator.SessionRun> terminating =
+                    ReflectionHelpers.getField(coordinator, "terminatingRuns");
+            ChatCoordinator.SessionRun ending = new ChatCoordinator.SessionRun(conversation, "ending");
+            terminating.put(conversation, ending);
+            long afterFinish = coordinator.sequence();
+            IllegalStateException endingError = assertThrows(IllegalStateException.class,
+                    () -> coordinator.deleteConversation(conversation));
+            assertTrue(endingError.getMessage().contains("请稍后再删除"));
+            idleMain();
+            assertEquals(0, events.size());
+            assertEquals(afterFinish, coordinator.sequence());
+            assertEquals(conversation, store.activeId());
+            assertEquals("Busy chat", store.load(conversation).get(0).content);
+            terminating.remove(conversation, ending);
+        } finally {
+            coordinator.removeListener(listener);
+        }
     }
 
     @Test public void generatedTitleUpdatesConversationAndHomeCardWithoutTouchingOtherChats() throws Exception {
@@ -182,7 +318,8 @@ public class ChatTaskDataTest {
         ChatStore reopened = new ChatStore(application);
         assertEquals("整理桌面应用", reopened.conversations().stream()
                 .filter(item -> item.id.equals(conversation)).findFirst().get().title);
-        assertEquals("整理桌面应用", coordinator.taskCards().getJSONObject(0).getString("title"));
+        assertEquals("整理桌面应用", card(coordinator.taskCards(), conversation).getString("title"));
+        assertEquals("Other chat", card(coordinator.taskCards(), other).getString("title"));
         assertEquals("Other chat", reopened.conversations().stream()
                 .filter(item -> item.id.equals(other)).findFirst().get().title);
         assertEquals(other, reopened.activeId());
@@ -194,7 +331,8 @@ public class ChatTaskDataTest {
         reopened.save(conversation, next);
         PiTurnPersistence failed = new PiTurnPersistence(reopened, conversation, "next-user", "next-reply", next);
         failed.accept(new JSONObject().put("type", "end").put("status", "error"));
-        assertEquals("整理桌面应用", coordinator.taskCards().getJSONObject(0).getString("title"));
+        assertEquals("整理桌面应用", card(coordinator.taskCards(), conversation).getString("title"));
+        assertEquals("Other chat", card(coordinator.taskCards(), other).getString("title"));
     }
 
     private static AgentLoop.Message message(String id, String role, String content) {
@@ -222,9 +360,28 @@ public class ChatTaskDataTest {
     }
 
     private static List<String> ids(JSONArray cards) throws Exception {
-        List<String> result = new java.util.ArrayList<>();
+        List<String> result = new ArrayList<>();
         for (int index = 0; index < cards.length(); index++)
             result.add(cards.getJSONObject(index).getString("conversationId"));
         return result;
+    }
+
+    private static JSONObject card(JSONArray cards, String conversationId) throws Exception {
+        for (int index = 0; index < cards.length(); index++) {
+            JSONObject card = cards.getJSONObject(index);
+            if (conversationId.equals(card.getString("conversationId"))) return card;
+        }
+        throw new AssertionError("missing card " + conversationId + " in " + ids(cards));
+    }
+
+    private void stampUpdated(String conversationId, long updated) throws Exception {
+        android.content.SharedPreferences prefs = application.getSharedPreferences("chat", Context.MODE_PRIVATE);
+        JSONObject index = new JSONObject(prefs.getString("conversations", "{}"));
+        index.getJSONObject(conversationId).put("updated", updated);
+        prefs.edit().putString("conversations", index.toString()).commit();
+    }
+
+    private static void idleMain() {
+        Shadows.shadowOf(android.os.Looper.getMainLooper()).idle();
     }
 }

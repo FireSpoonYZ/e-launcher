@@ -294,20 +294,21 @@ final class HomeLayout {
         return true;
     }
 
-    /** Leaves the folder unchanged when a non-folder target is occupied. */
+    /** Leaves the folder unchanged when a non-folder target is occupied, including widget spans. */
     boolean moveFromFolder(int folderSlot, int childIndex, int targetSlot) {
         Item folder = slots.get(folderSlot);
         if (folderSlot == targetSlot || folder == null || !folder.isFolder() || childIndex < 0
                 || childIndex >= folder.children.size()) return false;
-        Item target = slots.get(targetSlot);
-        if (target != null && !target.isFolder()) return false;
         Item moving = folder.children.get(childIndex);
-        if (target == null) {
-            slots.set(targetSlot, moving);
-        } else {
+        Item target = slots.get(targetSlot);
+        if (target != null && target.isFolder()) {
             ArrayList<Item> targetChildren = new ArrayList<>(target.children);
             targetChildren.add(moving);
             slots.set(targetSlot, Item.folder(target.folderId, target.name, targetChildren));
+        } else if (!fits(targetSlot, moving.spanX, moving.spanY, -1)) {
+            return false;
+        } else {
+            slots.set(targetSlot, moving);
         }
         ArrayList<Item> children = new ArrayList<>(folder.children);
         children.remove(childIndex);

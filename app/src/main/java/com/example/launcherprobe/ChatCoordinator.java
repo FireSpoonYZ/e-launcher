@@ -130,8 +130,7 @@ final class ChatCoordinator {
             PiAgentBridge.forgetConversation(conversationId);
             recentResults.remove(conversationId);
         }
-        JSONObject event = json("type", "conversationDeleted", "conversationId", conversationId);
-        main.post(() -> { for (Listener listener : listeners) listener.changed(Collections.emptyList(), event); });
+        emit(conversationId, null, "conversationDeleted", null, new JSONObject());
     }
 
     void cancel(String conversationId) {
@@ -535,11 +534,16 @@ final class ChatCoordinator {
     }
 
     private void emit(SessionRun run, String type, String nodeId, JSONObject payload) {
+        emit(run.conversationId, run.requestId, type, nodeId, payload);
+    }
+
+    private void emit(String conversationId, String requestId, String type, String nodeId, JSONObject payload) {
         JSONObject event = json("sequence", sequence.incrementAndGet(), "type", type,
-                "conversationId", run.conversationId, "requestId", run.requestId,
+                "conversationId", conversationId,
+                "requestId", requestId == null ? JSONObject.NULL : requestId,
                 "nodeId", nodeId == null ? JSONObject.NULL : nodeId, "payload", payload);
         List<AgentLoop.Message> messages = Collections.unmodifiableList(
-                new ArrayList<>(store.load(run.conversationId)));
+                new ArrayList<>(store.load(conversationId)));
         main.post(() -> { for (Listener listener : listeners) listener.changed(messages, event); });
     }
 
