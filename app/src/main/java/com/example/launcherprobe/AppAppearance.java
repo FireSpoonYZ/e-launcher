@@ -72,6 +72,56 @@ final class AppAppearance {
         return view;
     }
 
+    android.widget.FrameLayout glass(Context context, View wallpaper, int radiusDp) {
+        float density = context.getResources().getDisplayMetrics().density;
+        View backdrop = new View(context) {
+            private final int[] source = new int[2], destination = new int[2];
+            @Override protected void onDraw(android.graphics.Canvas canvas) {
+                // Draw only the wallpaper into the blurred layer; controls stay sharp.
+                wallpaper.getLocationInWindow(source);
+                getLocationInWindow(destination);
+                int saved = canvas.save();
+                canvas.translate(source[0] - destination[0], source[1] - destination[1]);
+                wallpaper.draw(canvas);
+                canvas.restoreToCount(saved);
+            }
+        };
+        backdrop.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        if (android.os.Build.VERSION.SDK_INT >= 31) {
+            backdrop.setRenderEffect(android.graphics.RenderEffect.createBlurEffect(
+                    18 * density, 18 * density, android.graphics.Shader.TileMode.CLAMP));
+        }
+        android.widget.FrameLayout frame = new android.widget.FrameLayout(context) {
+            @Override protected void onLayout(boolean changed, int left, int top, int right, int bottom) {
+                super.onLayout(changed, left, top, right, bottom);
+                // Decorative layers follow content height without contributing to measurement.
+                for (int i = 0; i < 2; i++) getChildAt(i).layout(0, 0, right - left, bottom - top);
+                backdrop.invalidate();
+            }
+        };
+        android.graphics.drawable.GradientDrawable outline = new android.graphics.drawable.GradientDrawable();
+        outline.setColor(surface);
+        outline.setCornerRadius(radiusDp * density);
+        frame.setBackground(outline);
+        frame.setClipToOutline(true);
+        frame.setElevation(3 * density);
+        frame.setOutlineAmbientShadowColor(dark ? 0xff000000 : 0xff365348);
+        frame.setOutlineSpotShadowColor(dark ? 0xff000000 : 0xff365348);
+        frame.addView(backdrop, new android.widget.FrameLayout.LayoutParams(-1, 0));
+        View tint = new View(context);
+        android.graphics.drawable.GradientDrawable finish = new android.graphics.drawable.GradientDrawable(
+                android.graphics.drawable.GradientDrawable.Orientation.TL_BR,
+                dark ? new int[]{0xc02a352e, 0xb01c2520, 0xc0242c26}
+                        : new int[]{0xa6ffffff, 0x85e7efe6, 0xb8fcfcf7});
+        finish.setDither(true);
+        finish.setCornerRadius(radiusDp * density);
+        finish.setStroke(Math.max(1, Math.round(density)), dark ? 0x405f786a : 0xe6ffffff);
+        tint.setBackground(finish);
+        tint.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        frame.addView(tint, new android.widget.FrameLayout.LayoutParams(-1, 0));
+        return frame;
+    }
+
     static String revision(Context context) {
         android.content.SharedPreferences preferences = context.getSharedPreferences("ui", Context.MODE_PRIVATE);
         return preferences.getString("theme", "system") + ":" + preferences.getString("background", "circles")

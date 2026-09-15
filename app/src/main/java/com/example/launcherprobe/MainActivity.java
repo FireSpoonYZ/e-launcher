@@ -100,6 +100,7 @@ public class MainActivity extends BridgeActivity {
     private HomeInputOverlay homeInputOverlay;
     private View composerPlaceholder;
     private TextView attachmentButton, composerClose;
+    private LinearLayout homeComposerRow, homeComposerActions;
     private String nativePickerKind, nativePickerConversation, nativeCapturePath;
     private String voiceConversation;
     private boolean nativeAttachmentBusy;
@@ -536,14 +537,28 @@ public class MainActivity extends BridgeActivity {
         homeWallpaper = createWallpaper();
         homeWallpaper.setBackgroundColor(IVORY);
         root.addView(homeWallpaper, match());
-        pageShell = column();
+        pageShell = new LinearLayout(this) {
+            @Override protected void onMeasure(int widthSpec, int heightSpec) {
+                if ("home".equals(page) && homeInputOverlay == null && contentStage.getChildCount() > 0) {
+                    // Reserve both app rows and the composer before sizing the task panel.
+                    View home = contentStage.getChildAt(0);
+                    int naturalHeight = MeasureSpec.makeMeasureSpec(0, MeasureSpec.UNSPECIFIED);
+                    home.measure(widthSpec, naturalHeight);
+                    composerDock.measure(widthSpec, naturalHeight);
+                    homeTaskCards.setAvailableHeight(Math.max(0, MeasureSpec.getSize(heightSpec)
+                            - home.getMeasuredHeight() - composerDock.getMeasuredHeight()));
+                }
+                super.onMeasure(widthSpec, heightSpec);
+            }
+        };
+        pageShell.setOrientation(LinearLayout.VERTICAL);
         pageShell.setFocusableInTouchMode(true);
         contentStage = new FrameLayout(this);
         pageShell.addView(contentStage, new LinearLayout.LayoutParams(-1, 0, 1));
         taskCardHost = new FrameLayout(this);
         taskCardHost.setVisibility(View.GONE);
         pageShell.addView(taskCardHost, new LinearLayout.LayoutParams(-1, -2));
-        homeTaskCards = new HomeTaskCards(this, pager, id -> {
+        homeTaskCards = new HomeTaskCards(this, pager, homeWallpaper, id -> {
             chatStore.selectConversation(id);
             launchWeb("/chat/" + id, null, null);
         }, id -> chatCoordinator.cancel(id), id -> {
@@ -629,39 +644,24 @@ public class MainActivity extends BridgeActivity {
         state = null;
 
         LinearLayout column = column();
-        ScrollView scroll = new ScrollView(this);
-        scroll.setClipToPadding(false);
-        scroll.setPadding(0, 0, 0, dp(8));
-        scroll.addView(column, new ScrollView.LayoutParams(-1, -2));
-        column.setPadding(dp(22), 0, dp(22), dp(8));
+        column.setPadding(dp(22), dp(8), dp(22), dp(8));
         // Keep labels readable even when the photo mask is only 20%.
         if (getSharedPreferences("ui", MODE_PRIVATE).getString("background", "circles").equals("image"))
             column.setBackgroundColor((appearance.background & 0xffffff) | 0xe6000000);
         FrameLayout homeContent = new FrameLayout(this);
-        homeContent.addView(scroll, match());
+        homeContent.addView(column, new FrameLayout.LayoutParams(-1, -2));
 
         LinearLayout top = row();
-        clock = label("", 64, CHARCOAL);
+        clock = label("", 56, CHARCOAL);
         clock.setGravity(Gravity.BOTTOM);
         top.addView(clock, new LinearLayout.LayoutParams(0, -2, 1));
-        TextView settings = pill(t("设置"), view -> launchWeb("/settings", null, null));
-        settings.setContentDescription(t("打开桌面与手势设置"));
+        TextView allApps = chatIcon("menu", t("查看并搜索全部应用"), view -> homeDesktop.showAllApps());
+        top.addView(allApps);
+        TextView settings = chatIcon("settings", t("打开桌面与手势设置"), view -> launchWeb("/settings", null, null));
         top.addView(settings);
         column.addView(top);
-        date = label("", 21, CHARCOAL);
+        date = label("", 17, MUTED);
         column.addView(date);
-        TextView capability = label(t("本地桌面 · 可选联网助手"), 14, MUTED);
-        capability.setPadding(0, dp(6), 0, dp(30));
-        column.addView(capability);
-
-        LinearLayout desktopHeading = row();
-        TextView title = label(t("应用"), 25, CHARCOAL);
-        title.setTypeface(null, android.graphics.Typeface.BOLD);
-        desktopHeading.addView(title, new LinearLayout.LayoutParams(0, -2, 1));
-        TextView allApps = pill(t("全部应用  ›"), view -> homeDesktop.showAllApps());
-        allApps.setContentDescription(t("查看并搜索全部应用"));
-        desktopHeading.addView(allApps);
-        column.addView(desktopHeading);
 
         homeDesktop = new HomeDesktop(this, pager, homeLayout, apps, launcherShortcuts, homeContent);
         LinearLayout.LayoutParams desktopParams = new LinearLayout.LayoutParams(-1, dp(232));
@@ -778,6 +778,7 @@ public class MainActivity extends BridgeActivity {
                 composerDock, composerInput, attachmentButton, voiceButton, sendButton,
                 id -> { chatStore.selectConversation(id); launchWeb("/chat/" + id, null, null); }, this::sendMessage);
         homeInputOverlay = overlay;
+        expandHomeComposer(true);
         overlay.setPreparing(nativeAttachmentBusy);
         composerClose.setVisibility(View.VISIBLE);
         composerInput.setMaxLines(4);
@@ -814,9 +815,10 @@ public class MainActivity extends BridgeActivity {
             composerDock.setTranslationY(0);
             homeInputOverlay = null; closingHomeInput = false;
             composerClose.setVisibility(View.GONE);
+            expandHomeComposer(false);
             composerInput.setKeyListener(null); composerInput.setCursorVisible(false);
             composerInput.setFocusable(false);
-            composerInput.setShowSoftInputOnFocus(false); composerInput.setMaxLines(2);
+            composerInput.setShowSoftInputOnFocus(false); composerInput.setMaxLines(1);
             composerInput.setContentDescription(t("打开新建对话输入"));
             attachmentButton.setVisibility(View.VISIBLE); attachmentButton.setEnabled(true);
             voiceButton.setVisibility(View.VISIBLE); sendButton.setVisibility(View.VISIBLE);
@@ -881,8 +883,7 @@ public class MainActivity extends BridgeActivity {
         composerDock.setBackgroundColor(Color.TRANSPARENT);
         LinearLayout composer = column();
         composer.setPadding(dp(8), dp(6), dp(8), dp(6));
-        composer.setBackground(shape(appearance.panel, 22, 0, 0));
-        composer.setElevation(dp(3));
+        composer.setBackgroundColor(Color.TRANSPARENT);
         composerInput = new EditText(this);
         composerInput.setHint(t("发消息…"));
         composerInput.setContentDescription(t("打开新建对话输入"));
@@ -900,13 +901,15 @@ public class MainActivity extends BridgeActivity {
         composerInput.setShowSoftInputOnFocus(false);
         composerInput.setOnClickListener(view -> { if (homeInputOverlay == null) openHomeInput(true); });
         LinearLayout inputRow = row();
-        inputRow.setGravity(Gravity.TOP);
+        homeComposerRow = inputRow;
+        inputRow.setGravity(Gravity.CENTER_VERTICAL);
         inputRow.addView(composerInput, new LinearLayout.LayoutParams(0, -2, 1));
         composerClose = chatIcon("close", t("关闭输入"), view -> closeHomeInput(true));
         composerClose.setVisibility(View.GONE);
         inputRow.addView(composerClose);
         composer.addView(inputRow, new LinearLayout.LayoutParams(-1, -2));
         LinearLayout actions = row();
+        homeComposerActions = actions;
         attachmentButton = chatIcon("plus", t("添加附件"), view -> {
             openHomeInput(false);
             homeInputOverlay.select(2);
@@ -919,12 +922,25 @@ public class MainActivity extends BridgeActivity {
         voiceButton = chatIcon("mic", t("语音输入"), view -> startDictation());
         actions.addView(voiceButton);
         sendButton = chatIcon("send", t("发送消息"), view -> sendMessage());
-        sendButton.setBackground(shape(CHARCOAL, 24, 0, 0));
+        sendButton.setBackground(shape(appearance.accent, 24, 0, 0));
         actions.addView(sendButton);
         composer.addView(actions, new LinearLayout.LayoutParams(-1, dp(48)));
+        FrameLayout glass = appearance.glass(this, homeWallpaper, 28);
+        glass.addView(composer, new FrameLayout.LayoutParams(-1, -2));
         LinearLayout.LayoutParams composerParams = new LinearLayout.LayoutParams(-1, -2);
         composerParams.setMargins(dp(12), dp(4), dp(12), dp(8));
-        composerDock.addView(composer, composerParams);
+        composerDock.addView(glass, composerParams);
+        expandHomeComposer(false);
+    }
+
+    private void expandHomeComposer(boolean expanded) {
+        ((android.view.ViewGroup) voiceButton.getParent()).removeView(voiceButton);
+        ((android.view.ViewGroup) sendButton.getParent()).removeView(sendButton);
+        LinearLayout target = expanded ? homeComposerActions : homeComposerRow;
+        target.addView(voiceButton);
+        target.addView(sendButton);
+        homeComposerActions.setVisibility(expanded ? View.VISIBLE : View.GONE);
+        composerInput.setMaxLines(expanded ? 4 : 1);
     }
 
     private void refreshHomeComposer() {

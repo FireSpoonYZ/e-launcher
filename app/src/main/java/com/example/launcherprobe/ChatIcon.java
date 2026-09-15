@@ -81,6 +81,13 @@ final class ChatIcon extends Drawable {
                     line(canvas, 12, 3, 12, 6); canvas.restore();
                 }
                 break;
+            case "external":
+                path(canvas, 10, 4, 5, 4, 4, 5, 4, 19, 5, 20, 19, 20, 20, 19, 20, 14);
+                path(canvas, 15, 3, 21, 3, 21, 9); line(canvas, 12, 12, 21, 3); break;
+            case "previous":
+                path(canvas, 15, 5, 8, 12, 15, 19); break;
+            case "next":
+                path(canvas, 9, 5, 16, 12, 9, 19); break;
             case "more":
                 paint.setStyle(Paint.Style.FILL);
                 for (int x = 5; x <= 19; x += 7) canvas.drawCircle(x, 12, 1.4f, paint);

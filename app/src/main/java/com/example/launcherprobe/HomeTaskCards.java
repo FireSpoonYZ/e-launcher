@@ -5,14 +5,20 @@ import android.content.Context;
 import android.graphics.Canvas;
 import android.graphics.Paint;
 import android.graphics.RectF;
+import android.content.res.ColorStateList;
+import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
+import android.graphics.drawable.RippleDrawable;
+import android.text.TextUtils;
 import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewConfiguration;
 import android.view.animation.LinearInterpolator;
+import android.widget.FrameLayout;
 import android.widget.HorizontalScrollView;
 import android.widget.LinearLayout;
+import android.widget.PopupMenu;
 import android.widget.ScrollView;
 import android.widget.TextView;
 
@@ -20,42 +26,66 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.Objects;
 import java.util.function.Consumer;
 
 /** Desktop projection of conversation runs; never mutates extension task states. */
 final class HomeTaskCards extends LinearLayout {
     private final PagerRoot pager;
     private final AppAppearance colors;
+    private final View wallpaper;
     private final Consumer<String> open, stop, dismiss;
     private JSONArray cards = new JSONArray();
     private String selected = "";
     private String rendered = "";
-    private boolean expanded;
+    private String displayed = "";
+    private final Map<String, Integer> positions = new HashMap<>();
+    private final Map<String, String> activeByConversation = new HashMap<>();
+    private int followingTarget = -1;
+    private boolean stripSettling;
+    private boolean expanded = true;
+    private int availableHeight = Integer.MAX_VALUE;
     private float downX, downY;
     private boolean swiping;
     private boolean touching;
     private boolean deferred;
+    private final Runnable settleScroll = () -> {
+        stripSettling = false;
+        if (!touching && deferred) { deferred = false; render(); }
+    };
 
     HomeTaskCards(Context context, PagerRoot pager, Consumer<String> open,
             Consumer<String> stop, Consumer<String> dismiss) {
+        this(context, pager, AppAppearance.read(context).wallpaper(context), open, stop, dismiss);
+    }
+
+    HomeTaskCards(Context context, PagerRoot pager, View wallpaper, Consumer<String> open,
+            Consumer<String> stop, Consumer<String> dismiss) {
         super(context);
         this.pager = pager;
+        this.wallpaper = wallpaper;
         this.open = open;
         this.stop = stop;
         this.dismiss = dismiss;
         colors = AppAppearance.read(context);
         setOrientation(VERTICAL);
-        setPadding(dp(12), dp(4), dp(12), 0);
+        setPadding(dp(12), dp(6), dp(12), dp(8));
+        setClipChildren(false);
+        setClipToPadding(false);
     }
 
     void update(JSONArray value) {
         cards = value;
-        if (touching) { deferred = true; return; }
+        if (touching || stripSettling) { deferred = true; return; }
         render();
     }
 
     String selectedId() { return selected; }
+
+    void setAvailableHeight(int height) { availableHeight = height; }
 
     private int index() {
         for (int i = 0; i < cards.length(); i++)
@@ -86,110 +116,227 @@ final class HomeTaskCards extends LinearLayout {
         if (signature.equals(rendered)) return;
         rendered = signature;
         View oldStrip = findViewWithTag("todo-strip");
-        int scrollX = oldStrip == null ? 0 : oldStrip.getScrollX();
-        boolean sameCard = card != null && selected.equals(card.optString("conversationId"));
+        if (oldStrip != null) positions.put(displayed, followingTarget >= 0 ? followingTarget : oldStrip.getScrollX());
+        followingTarget = -1;
+        removeCallbacks(settleScroll);
+        stripSettling = false;
+        deferred = false;
         removeAllViews();
         setVisibility(cards.length() == 0 ? GONE : VISIBLE);
         if (card == null) { selected = ""; return; }
         selected = card.optString("conversationId");
         String id = selected;
+        displayed = id;
         String model = card.optString("modelState");
+        List<JSONObject> tasks = tasks(card);
+        long completed = tasks.stream().filter(task -> "completed".equals(task.optString("status"))).count();
+        String active = tasks.stream().filter(task -> "in_progress".equals(task.optString("status")))
+                .map(task -> task.optString("subject")).findFirst().orElse("");
+        boolean working = "working".equals(model);
+        String status = "stopping".equals(model) ? text("正在停止…", "Stopping…")
+                : working ? (active.isEmpty() ? text("正在处理…", "Working…") : active)
+                : !tasks.isEmpty() && completed == tasks.size() ? text("任务已完成", "Task complete")
+                : !tasks.isEmpty() ? text("等待继续", "Ready to continue") : text("本轮已结束", "Run ended");
         LinearLayout panel = new LinearLayout(getContext());
         panel.setOrientation(VERTICAL);
-        panel.setPadding(dp(14), dp(8), dp(14), dp(8));
-        GradientDrawable background = new GradientDrawable();
-        background.setColor(colors.background);
-        background.setCornerRadius(dp(20));
-        background.setStroke(dp(1), colors.border);
-        panel.setBackground(background);
+        panel.setPadding(dp(20), dp(8), dp(20), dp(8));
         LinearLayout heading = new LinearLayout(getContext());
         heading.setGravity(Gravity.CENTER_VERTICAL);
-        TextView title = button(card.optString("title"), () -> { expanded = !expanded; render(); });
-        title.setTypeface(null, android.graphics.Typeface.BOLD);
+        TextView title = button(card.optString("title"), () -> open.accept(id));
+        title.setTextSize(16);
+        title.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        title.setMaxLines(1);
+        title.setEllipsize(TextUtils.TruncateAt.END);
         heading.addView(title, new LayoutParams(0, -2, 1));
-        TextView toggle = button(expanded ? "⌄" : "⌃", () -> { expanded = !expanded; render(); });
-        toggle.setContentDescription(text(expanded ? "收起任务" : "展开任务", expanded ? "Collapse task" : "Expand task"));
-        heading.addView(toggle, new LayoutParams(dp(44), -2));
-        TextView close = button("×", () -> { dismiss.accept(id); });
-        close.setContentDescription(text("关闭任务卡片", "Dismiss task card"));
-        heading.addView(close, new LayoutParams(dp(44), -2));
+        TextView more = iconButton("more", text("任务选项", "Task options"), null);
+        more.setOnClickListener(view -> {
+            PopupMenu menu = new PopupMenu(getContext(), more, Gravity.END);
+            menu.getMenu().add(text(expanded ? "收起任务" : "展开任务", expanded ? "Collapse task" : "Expand task"))
+                    .setOnMenuItemClickListener(item -> { expanded = !expanded; render(); return true; });
+            menu.getMenu().add(text("移除卡片", "Dismiss card"))
+                    .setOnMenuItemClickListener(item -> { dismiss.accept(id); return true; });
+            menu.show();
+        });
+        heading.addView(more, new LayoutParams(dp(48), dp(48)));
         panel.addView(heading);
-        TextView state = label("working".equals(model) ? text("模型正在工作", "Model working")
-                : "stopping".equals(model) ? text("正在停止…", "Stopping…") : text("模型空闲", "Model idle"), 13);
-        state.setTextColor("working".equals(model) ? colors.accent : colors.muted);
-        panel.addView(state);
-        List<JSONObject> tasks = tasks(card);
+
+        LinearLayout stateRow = new LinearLayout(getContext());
+        stateRow.setGravity(Gravity.CENTER_VERTICAL);
+        TextView state = label(status, expanded ? 25 : 14);
+        state.setMaxLines(expanded ? 2 : 1);
+        state.setEllipsize(TextUtils.TruncateAt.END);
+        state.setTypeface(Typeface.create(expanded ? "sans-serif-medium" : "sans-serif", Typeface.NORMAL));
+        state.setTextColor(expanded ? colors.ink : colors.muted);
+        stateRow.addView(state, new LayoutParams(-2, -2, 1));
+        if (working) {
+            View dot = new View(getContext());
+            GradientDrawable fill = new GradientDrawable();
+            fill.setShape(GradientDrawable.OVAL); fill.setColor(colors.accent);
+            dot.setBackground(fill);
+            dot.setContentDescription(text("正在运行", "Running"));
+            LayoutParams dotParams = new LayoutParams(dp(8), dp(8));
+            dotParams.setMarginStart(dp(10));
+            stateRow.addView(dot, dotParams);
+        }
+        LayoutParams stateParams = new LayoutParams(-1, -2);
+        stateParams.topMargin = expanded ? dp(10) : 0;
+        panel.addView(stateRow, stateParams);
         if (!tasks.isEmpty()) {
-            long completed = tasks.stream().filter(task -> "completed".equals(task.optString("status"))).count();
-            TextView count = label(text("已完成 ", "Completed ") + completed + "/" + tasks.size()
-                    + text(" 个步骤", " steps"), 13);
-            count.setPadding(0, dp(8), 0, dp(8));
+            TextView count = label(text("已完成 ", "Completed ") + completed + " / " + tasks.size()
+                    + text(" 个步骤", " steps"), 14);
+            count.setTextColor(colors.muted);
+            count.setPadding(0, dp(5), 0, expanded ? 0 : dp(8));
             panel.addView(count);
             if (expanded) {
-                // The step strip scrolls independently; swiping the header switches conversations.
-                HorizontalScrollView strip = new HorizontalScrollView(getContext());
-                strip.setHorizontalScrollBarEnabled(false);
-                LinearLayout track = new LinearLayout(getContext()) {
-                    private final Paint line = new Paint(Paint.ANTI_ALIAS_FLAG);
-                    { setWillNotDraw(false); }
-                    @Override protected void onDraw(Canvas canvas) {
-                        super.onDraw(canvas);
-                        line.setColor(colors.border); line.setStrokeWidth(dp(1));
-                        for (int i = 0; i + 1 < getChildCount(); i++) {
-                            View a = getChildAt(i), b = getChildAt(i + 1);
-                            canvas.drawLine(a.getLeft() + a.getWidth() / 2f + dp(16), dp(20),
-                                    b.getLeft() + b.getWidth() / 2f - dp(16), dp(20), line);
-                        }
-                    }
-                };
-                int width = Math.max(dp(100), (getResources().getDisplayMetrics().widthPixels - dp(60)) / 3);
-                for (JSONObject task : tasks) {
-                    LinearLayout node = new LinearLayout(getContext());
-                    node.setOrientation(VERTICAL);
-                    node.setGravity(Gravity.CENTER_HORIZONTAL);
-                    node.setPadding(dp(5), dp(4), dp(5), dp(8));
-                    node.addView(new Marker(getContext(), task.optString("status"), model), new LayoutParams(dp(32), dp(32)));
-                    TextView subject = label(task.optString("subject"), 13);
-                    subject.setGravity(Gravity.CENTER);
-                    subject.setPadding(0, dp(6), 0, 0);
-                    node.addView(subject);
-                    track.addView(node, new LayoutParams(width, -2));
-                }
-                strip.addView(track);
-                if (sameCard) strip.post(() -> strip.scrollTo(scrollX, 0));
-                // Let this region own horizontal dragging instead of the card pager.
-                strip.setTag("todo-strip");
-                panel.addView(strip);
+                HorizontalScrollView strip = taskStrip(tasks, model);
+                restoreTaskPosition(strip, tasks, id);
+                LayoutParams stripParams = new LayoutParams(-1, -2);
+                stripParams.topMargin = dp(18);
+                panel.addView(strip, stripParams);
             }
         }
-        if (expanded) {
+        if (!expanded || tasks.isEmpty()) activeByConversation.put(id, null);
+        if (expanded || !"idle".equals(model)) {
             LinearLayout actions = new LinearLayout(getContext());
-            actions.addView(button(text("在聊天中查看详情", "View conversation"), () -> open.accept(id)), new LayoutParams(0, -2, 1));
+            actions.setGravity(Gravity.CENTER_VERTICAL);
+            TextView details = button(text("查看对话", "View chat"), () -> open.accept(id));
+            decorate(details, "external", colors.ink);
+            actions.addView(details, new LayoutParams(0, dp(48), 1));
             if (!"idle".equals(model)) {
-                TextView cancel = button(text("停止生成", "Stop"), () -> stop.accept(id));
+                TextView cancel = button(text("stopping".equals(model) ? "正在停止…" : "停止",
+                        "stopping".equals(model) ? "Stopping…" : "Stop"), () -> stop.accept(id));
+                decorate(cancel, "stop", colors.error);
                 cancel.setTextColor(colors.error);
-                cancel.setEnabled("working".equals(model));
-                actions.addView(cancel);
+                cancel.setEnabled(working);
+                cancel.setAlpha(working ? 1f : .5f);
+                cancel.setContentDescription(text("停止生成", "Stop generation"));
+                actions.addView(cancel, new LayoutParams(-2, dp(48)));
             }
-            panel.addView(actions);
+            LayoutParams actionParams = new LayoutParams(-1, -2);
+            actionParams.topMargin = expanded ? dp(12) : dp(4);
+            panel.addView(actions, actionParams);
         }
-        ScrollView bounded = new ScrollView(getContext()) {
-            @Override protected void onMeasure(int w, int h) {
-                int max = getResources().getDisplayMetrics().heightPixels * 2 / 5;
-                super.onMeasure(w, MeasureSpec.makeMeasureSpec(max, MeasureSpec.AT_MOST));
-            }
-        };
-        bounded.addView(panel);
-        addView(bounded);
         if (cards.length() > 1) {
             LinearLayout navigation = new LinearLayout(getContext());
             navigation.setGravity(Gravity.CENTER);
-            navigation.addView(button("‹", () -> move(-1)));
-            TextView position = label((index + 1) + " / " + cards.length(), 12);
+            navigation.addView(iconButton("previous", text("上一个任务", "Previous task"), () -> move(-1)),
+                    new LayoutParams(dp(48), dp(48)));
+            TextView position = label((index + 1) + " / " + cards.length(), 14);
+            position.setTextColor(colors.muted);
+            position.setGravity(Gravity.CENTER);
+            position.setMinWidth(dp(52));
             navigation.addView(position);
-            navigation.addView(button("›", () -> move(1)));
-            addView(navigation);
+            navigation.addView(iconButton("next", text("下一个任务", "Next task"), () -> move(1)),
+                    new LayoutParams(dp(48), dp(48)));
+            panel.addView(navigation);
         }
+        ScrollView bounded = new ScrollView(getContext()) {
+            @Override protected void onMeasure(int w, int h) {
+                int max = Math.min(getResources().getDisplayMetrics().heightPixels * 2 / 5,
+                        Math.max(0, availableHeight - HomeTaskCards.this.getPaddingTop() - HomeTaskCards.this.getPaddingBottom()));
+                super.onMeasure(w, MeasureSpec.makeMeasureSpec(max, MeasureSpec.AT_MOST));
+            }
+        };
+        bounded.setVerticalScrollBarEnabled(false);
+        bounded.setOverScrollMode(OVER_SCROLL_NEVER);
+        bounded.addView(panel);
+        FrameLayout glass = colors.glass(getContext(), wallpaper, 24);
+        glass.addView(bounded, new FrameLayout.LayoutParams(-1, -2));
+        addView(glass, new LayoutParams(-1, -2));
+    }
+
+    private void restoreTaskPosition(HorizontalScrollView strip, List<JSONObject> tasks, String id) {
+        strip.addOnLayoutChangeListener(new OnLayoutChangeListener() {
+            @Override public void onLayoutChange(View view, int left, int top, int right, int bottom,
+                    int oldLeft, int oldTop, int oldRight, int oldBottom) {
+                if (right == left || findViewWithTag("todo-strip") != strip) return;
+                strip.removeOnLayoutChangeListener(this);
+                int activeIndex = -1;
+                for (int i = 0; i < tasks.size(); i++) {
+                    if ("in_progress".equals(tasks.get(i).optString("status"))) { activeIndex = i; break; }
+                }
+                String activeId = activeIndex < 0 ? null : tasks.get(activeIndex).optString("id");
+                boolean follow = activeId != null && (!activeByConversation.containsKey(id)
+                        || !Objects.equals(activeByConversation.get(id), activeId));
+                strip.scrollTo(positions.getOrDefault(id, 0), 0);
+                activeByConversation.put(id, activeId);
+                if (!follow) return;
+                LinearLayout track = (LinearLayout) strip.getChildAt(0);
+                View node = track.getChildAt(activeIndex);
+                int target = Math.max(0, Math.min(node.getLeft() + node.getWidth() / 2 - strip.getWidth() / 2,
+                        track.getWidth() - strip.getWidth()));
+                followingTarget = target;
+                positions.put(id, target);
+                if (ValueAnimator.areAnimatorsEnabled()) strip.smoothScrollTo(target, 0);
+                else strip.scrollTo(target, 0);
+            }
+        });
+    }
+
+    private void scheduleScrollSettle() {
+        removeCallbacks(settleScroll);
+        postDelayed(settleScroll, 160);
+    }
+
+    @Override protected void onDetachedFromWindow() {
+        removeCallbacks(settleScroll);
+        stripSettling = false;
+        touching = false;
+        super.onDetachedFromWindow();
+    }
+
+    private HorizontalScrollView taskStrip(List<JSONObject> tasks, String model) {
+        HorizontalScrollView strip = new HorizontalScrollView(getContext());
+        strip.setHorizontalScrollBarEnabled(false);
+        strip.setOverScrollMode(OVER_SCROLL_NEVER);
+        // The step strip scrolls independently; swiping the header switches conversations.
+        strip.setTag("todo-strip");
+        strip.setOnScrollChangeListener((view, x, y, oldX, oldY) -> {
+            if (findViewWithTag("todo-strip") != view) return;
+            if (x == followingTarget) followingTarget = -1;
+            if (stripSettling) scheduleScrollSettle();
+        });
+        LinearLayout track = new LinearLayout(getContext()) {
+            private final Paint line = new Paint(Paint.ANTI_ALIAS_FLAG);
+            { setWillNotDraw(false); }
+            @Override protected void onDraw(Canvas canvas) {
+                super.onDraw(canvas);
+                line.setStrokeWidth(dp(1));
+                for (int i = 0; i + 1 < getChildCount(); i++) {
+                    View a = getChildAt(i), b = getChildAt(i + 1);
+                    line.setColor("completed".equals(tasks.get(i).optString("status"))
+                            ? colors.accent : colors.border);
+                    canvas.drawLine(a.getLeft() + a.getWidth() / 2f + dp(16), dp(24),
+                            b.getLeft() + b.getWidth() / 2f - dp(16), dp(24), line);
+                }
+            }
+        };
+        int width = Math.max(dp(94), (int) ((getResources().getDisplayMetrics().widthPixels - dp(64)) / 3.25f));
+        for (JSONObject task : tasks) {
+            String status = task.optString("status");
+            LinearLayout node = new LinearLayout(getContext());
+            node.setOrientation(VERTICAL);
+            node.setGravity(Gravity.CENTER_HORIZONTAL);
+            node.setPadding(dp(4), dp(4), dp(4), dp(4));
+            node.addView(new Marker(getContext(), status, model), new LayoutParams(dp(40), dp(40)));
+            TextView subject = label(task.optString("subject"), 13);
+            subject.setMaxLines(2);
+            subject.setEllipsize(TextUtils.TruncateAt.END);
+            subject.setTextColor("in_progress".equals(status) ? colors.ink : colors.muted);
+            if ("in_progress".equals(status)) subject.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+            subject.setGravity(Gravity.CENTER);
+            subject.setPadding(0, dp(7), 0, 0);
+            node.addView(subject);
+            node.setContentDescription(task.optString("subject") + ", " + taskStatus(status));
+            track.addView(node, new LayoutParams(width, -2));
+        }
+        strip.addView(track);
+        return strip;
+    }
+
+    private String taskStatus(String status) {
+        return "completed".equals(status) ? text("已完成", "Completed")
+                : "in_progress".equals(status) ? text("进行中", "In progress") : text("待开始", "Pending");
     }
 
     private boolean stripTouch;
@@ -201,11 +348,17 @@ final class HomeTaskCards extends LinearLayout {
             android.graphics.Rect rect = new android.graphics.Rect();
             stripTouch = strip != null && strip.getGlobalVisibleRect(rect)
                     && rect.contains((int) event.getRawX(), (int) event.getRawY());
+            removeCallbacks(settleScroll);
+            stripSettling = false;
+            if (stripTouch) followingTarget = -1;
         }
         boolean handled = super.dispatchTouchEvent(event);
         if (event.getActionMasked() == MotionEvent.ACTION_UP || event.getActionMasked() == MotionEvent.ACTION_CANCEL) {
             touching = false;
-            if (deferred) { deferred = false; render(); }
+            if (stripTouch && event.getActionMasked() == MotionEvent.ACTION_UP) {
+                stripSettling = true;
+                scheduleScrollSettle();
+            } else if (deferred) { deferred = false; render(); }
         }
         return handled;
     }
@@ -241,14 +394,32 @@ final class HomeTaskCards extends LinearLayout {
     private TextView label(String text, int size) {
         TextView view = new TextView(getContext());
         view.setText(text); view.setTextSize(size); view.setTextColor(colors.ink);
+        view.setIncludeFontPadding(false);
         return view;
     }
     private TextView button(String text, Runnable action) {
         TextView view = label(text, 15);
         view.setGravity(Gravity.CENTER_VERTICAL);
-        view.setMinHeight(dp(44)); view.setMinWidth(dp(44));
-        view.setFocusable(true); view.setOnClickListener(v -> action.run());
+        view.setMinHeight(dp(48)); view.setMinWidth(dp(48));
+        GradientDrawable mask = new GradientDrawable();
+        mask.setColor(0xffffffff); mask.setCornerRadius(dp(12));
+        view.setBackground(new RippleDrawable(ColorStateList.valueOf(colors.dark ? 0x2475c3af : 0x18267a69), null, mask));
+        view.setFocusable(true);
+        if (action != null) view.setOnClickListener(v -> action.run());
         return view;
+    }
+    private TextView iconButton(String name, String description, Runnable action) {
+        TextView view = button("", action);
+        decorate(view, name, colors.muted);
+        view.setPadding(dp(13), dp(13), dp(13), dp(13));
+        view.setContentDescription(description);
+        return view;
+    }
+    private void decorate(TextView view, String icon, int color) {
+        ChatIcon drawable = new ChatIcon(icon, color);
+        drawable.setBounds(0, 0, dp(22), dp(22));
+        view.setCompoundDrawablesRelative(drawable, null, null, null);
+        view.setCompoundDrawablePadding(dp(8));
     }
     private String text(String chinese, String english) {
         return getResources().getConfiguration().getLocales().get(0).getLanguage().equals("zh") ? chinese : english;
@@ -262,7 +433,7 @@ final class HomeTaskCards extends LinearLayout {
         private float angle;
         Marker(Context context, String status, String model) {
             super(context); this.status = status; this.model = model;
-            setContentDescription(status);
+            setContentDescription(taskStatus(status));
         }
         @Override protected void onAttachedToWindow() { super.onAttachedToWindow(); updateAnimation(); }
         @Override protected void onWindowVisibilityChanged(int visibility) {
@@ -287,19 +458,25 @@ final class HomeTaskCards extends LinearLayout {
         }
         @Override protected void onDraw(Canvas canvas) {
             super.onDraw(canvas);
-            float x = getWidth() / 2f, y = getHeight() / 2f, radius = dp(10);
+            float x = getWidth() / 2f, y = getHeight() / 2f, radius = dp(13);
             boolean completed = "completed".equals(status), active = "in_progress".equals(status);
             paint.setColor(active || completed ? colors.accent : colors.muted);
-            paint.setStrokeWidth(dp(active ? 3 : 2));
+            paint.setStrokeWidth(dp(1) * 1.5f);
             paint.setStyle(completed ? Paint.Style.FILL : Paint.Style.STROKE);
             canvas.drawCircle(x, y, radius, paint);
             if (completed) {
-                paint.setColor(colors.background); paint.setStyle(Paint.Style.STROKE); paint.setStrokeWidth(dp(2));
+                paint.setColor(colors.dark ? colors.background : 0xffffffff);
+                paint.setStyle(Paint.Style.STROKE); paint.setStrokeWidth(dp(2));
+                paint.setStrokeCap(Paint.Cap.ROUND);
                 canvas.drawLine(x - dp(5), y, x - dp(1), y + dp(4), paint);
                 canvas.drawLine(x - dp(1), y + dp(4), x + dp(5), y - dp(4), paint);
             } else if (active) {
-                paint.setAlpha(40); paint.setStrokeWidth(dp(2));
+                paint.setStyle(Paint.Style.FILL);
+                canvas.drawCircle(x, y, dp(8), paint);
+                paint.setStyle(Paint.Style.STROKE);
+                paint.setAlpha(40); paint.setStrokeWidth(dp(1));
                 canvas.drawCircle(x, y, radius + dp(4), paint); paint.setAlpha(255);
+                paint.setStrokeWidth(dp(2));
                 if (animator != null) canvas.drawArc(new RectF(x-radius-dp(4), y-radius-dp(4), x+radius+dp(4), y+radius+dp(4)), angle, 85, false, paint);
             }
         }
