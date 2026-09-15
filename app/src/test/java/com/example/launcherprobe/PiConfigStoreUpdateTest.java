@@ -18,6 +18,25 @@ import static org.junit.Assert.assertFalse;
 @RunWith(RobolectricTestRunner.class)
 @Config(sdk = 34, shadows = HostAtomicFile.class)
 public class PiConfigStoreUpdateTest {
+    @Test public void titleModelUsesSettingsSnapshotAndWorkspaceOverride() throws Exception {
+        PiConfigStore store = new PiConfigStore(RuntimeEnvironment.getApplication());
+        store.save(false, "settings.json", "{\"defaultModel\":\"chat-model\"}", null);
+        store.save(true, "settings.json", "{}", null);
+        String titleValue = "\"titles/small-model\"";
+        PiSettingsActivity.validateField(new org.json.JSONObject().put("type", "string"),
+                ConfigJson.parse(titleValue)); // Same scalar validation as SettingsPlugin.updateSetting.
+        store.updateSetting(false, "conversationTitle.model", titleValue, "null");
+        org.json.JSONObject snapshot = new org.json.JSONObject(store.snapshot());
+        assertEquals("titles/small-model", snapshot.getJSONObject("settings")
+                .getJSONObject("conversationTitle").getString("model"));
+        assertEquals("chat-model", snapshot.getJSONObject("settings").getString("defaultModel"));
+        store.updateSetting(true, "conversationTitle.model", "\"\"", "null");
+        snapshot = new org.json.JSONObject(store.snapshot());
+        assertEquals("", snapshot.getJSONObject("settings").getJSONObject("conversationTitle").getString("model"));
+        assertEquals("titles/small-model", snapshot.getJSONObject("globalSettings")
+                .getJSONObject("conversationTitle").getString("model"));
+    }
+
     @Test public void updateSettingUsesSchemaPathInsteadOfCreatingDottedKey() throws Exception {
         Context context = RuntimeEnvironment.getApplication();
         PiConfigStore store = new PiConfigStore(context);

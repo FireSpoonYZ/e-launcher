@@ -18,6 +18,16 @@
     "globalOnly": false
   },
   {
+    "key": "conversationTitle.model",
+    "label": "标题生成模型",
+    "group": "模型与思考",
+    "type": "string",
+    "default": "-",
+    "description": "内置 conversation-title 扩展使用的独立模型，格式为 provider/modelId。每轮回复完成后生成会话与任务卡标题；留空停用，不使用聊天模型兜底。沿用该服务商在 Pi 中的认证配置。",
+    "globalOnly": false,
+    "extension": "conversation-title"
+  },
+  {
     "key": "defaultThinkingLevel",
     "options": ["off", "minimal", "low", "medium", "high", "xhigh", "max"],
     "label": "默认思考强度",

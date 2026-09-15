@@ -385,6 +385,23 @@ public final class ChatStore {
             if (entries != null) PiConfigStore.write(piContextFile(conversation, contextNode), entries.toString());
             if (extensionUi != null) PiConfigStore.write(piUiFile(conversation, contextNode), extensionUi.toString());
             mergePiMessages(conversation, userId, messages);
+            if (entries != null) {
+                for (int i = entries.length() - 1; i >= 0; i--) {
+                    JSONObject entry = entries.optJSONObject(i);
+                    if (entry == null || !"session_info".equals(entry.optString("type"))) continue;
+                    String title = entry.optString("name", "").trim();
+                    if (!title.isEmpty()) {
+                        try {
+                            JSONObject index = conversationIndex();
+                            index.getJSONObject(conversation).put("title", title);
+                            preferences.edit().putString("conversations", index.toString()).apply();
+                        } catch (org.json.JSONException exception) {
+                            throw new java.io.IOException("无法保存会话标题", exception);
+                        }
+                    }
+                    break;
+                }
+            }
             preferences.edit().remove("pi_pending_" + conversation + "_" + userId).apply();
         }
     }

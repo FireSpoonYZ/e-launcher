@@ -29,9 +29,12 @@ final class ConfigJson {
 
     static Object parse(String source) throws IOException {
         if (source.length() > MAX_LENGTH) throw new IOException("配置文件不能超过 1 MiB 字符");
-        try (JsonReader reader = new JsonReader(new StringReader(source))) {
+        // Android's strict reader only accepts object/array documents; settings fields can be scalars.
+        try (JsonReader reader = new JsonReader(new StringReader("[" + source + "\n]"))) {
             reader.setLenient(false);
+            reader.beginArray();
             Object result = read(reader, 0);
+            reader.endArray();
             if (reader.peek() != JsonToken.END_DOCUMENT) throw new IOException("JSON 结尾有多余内容");
             return result;
         } catch (IllegalStateException | NumberFormatException exception) {

@@ -273,6 +273,16 @@ try {
   send({ id: "sdk-next", conversationId: "sdk-session", type: "prompt", sdk: true, prompt: "normal", config, sdkHistory });
   assert.equal((await waitFor((event) => event.id === "sdk-next" && event.type === "end")).status, "completed", JSON.stringify(events));
   assert(requests.at(-1).messages.some((message) => message.role === "tool"), "native tool results survive across bridge requests");
+  const titleConfig = structuredClone(config);
+  titleConfig.settings.conversationTitle = { model: "local/title-mock" };
+  titleConfig.models.providers.local.models.push({ id: "title-mock", reasoning: false, input: ["text"] });
+  send({ id: "sdk-title", conversationId: "sdk-title", type: "prompt", sdk: true, prompt: "normal", config: titleConfig });
+  assert.equal((await waitFor((event) => event.id === "sdk-title" && event.type === "end")).status, "completed");
+  assert.equal(requests.at(-1).model, "title-mock", "bundled extension reads its dedicated model setting");
+  assert.equal(events.find((event) => event.id === "sdk-title" && event.type === "context").entries
+    .findLast((entry) => entry.type === "session_info")?.name, "bridge ok");
+  assert.equal(events.filter((event) => event.id === "sdk-title" && event.type === "message").length, 1);
+  console.log("PASS: shipped CJS title extension configuration and native session name export");
   const cwdA = structuredClone(config), cwdB = structuredClone(config);
   cwdA.cwd = path.join(home, "cwd-a"); cwdB.cwd = path.join(home, "cwd-b");
   for (const value of [cwdA, cwdB]) {

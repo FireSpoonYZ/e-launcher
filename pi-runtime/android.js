@@ -4,6 +4,7 @@ import { createPiRuntime } from "./index.js";
 import { createSdkRuntime, sdkQuery } from "./sdk.js";
 import { createEventBus } from "@earendil-works/pi-coding-agent";
 import phoneControl from "./extensions/phone-control/index.js";
+import conversationTitle from "./extensions/conversation-title/index.js";
 
 // cross-spawn otherwise changes the process cwd temporarily while resolving cwd-bound commands.
 // That is unsafe when independent session runtimes execute concurrently in this process.
@@ -174,7 +175,11 @@ async function handle(command) {
       }
     });
     const resourceLoaderOptions = {
-      eventBus, extensionFactories: [{ name: "phone-control", factory: phoneControl }],
+      eventBus, extensionFactories: [
+        { name: "phone-control", factory: phoneControl },
+        { name: "conversation-title", factory: (pi) => conversationTitle(pi,
+          command.config?.settings?.conversationTitle, controller.signal) },
+      ],
     };
     if (command.type !== "prompt") {
       const result = await sdkQuery(command, controller.signal, sendEvent,

@@ -161,6 +161,42 @@ public class ChatTaskDataTest {
         assertEquals(Collections.singletonList(secondId), store.taskCardIds());
     }
 
+    @Test public void generatedTitleUpdatesConversationAndHomeCardWithoutTouchingOtherChats() throws Exception {
+        ChatCoordinator coordinator = ChatCoordinator.get(application);
+        ChatStore store = coordinator.store();
+        store.save(Collections.singletonList(message("title-user", "user", "A long original request")));
+        String conversation = store.activeId();
+        store.showTaskCard(conversation);
+        PiTurnPersistence turn = new PiTurnPersistence(store, conversation, "title-user", "title-reply", store.load());
+        store.newConversation();
+        store.save(Collections.singletonList(message("other-user", "user", "Other chat")));
+        String other = store.activeId();
+        turn.accept(new JSONObject().put("type", "message").put("message",
+                new JSONObject().put("role", "assistant").put("content", "Done")));
+        turn.accept(new JSONObject().put("type", "context").put("entries", new JSONArray()
+                .put(new JSONObject().put("type", "session").put("id", conversation))
+                .put(new JSONObject().put("type", "session_info").put("name", "旧标题"))
+                .put(new JSONObject().put("type", "session_info").put("name", "整理桌面应用"))));
+        turn.accept(new JSONObject().put("type", "end").put("status", "completed"));
+
+        ChatStore reopened = new ChatStore(application);
+        assertEquals("整理桌面应用", reopened.conversations().stream()
+                .filter(item -> item.id.equals(conversation)).findFirst().get().title);
+        assertEquals("整理桌面应用", coordinator.taskCards().getJSONObject(0).getString("title"));
+        assertEquals("Other chat", reopened.conversations().stream()
+                .filter(item -> item.id.equals(other)).findFirst().get().title);
+        assertEquals(other, reopened.activeId());
+        assertTrue(reopened.piResume(conversation, reopened.load(conversation)).contains("整理桌面应用"));
+
+        // A later failed/legacy turn without title metadata keeps the generated title.
+        List<AgentLoop.Message> next = new java.util.ArrayList<>(reopened.load(conversation));
+        next.add(message("next-user", "user", "Continue"));
+        reopened.save(conversation, next);
+        PiTurnPersistence failed = new PiTurnPersistence(reopened, conversation, "next-user", "next-reply", next);
+        failed.accept(new JSONObject().put("type", "end").put("status", "error"));
+        assertEquals("整理桌面应用", coordinator.taskCards().getJSONObject(0).getString("title"));
+    }
+
     private static AgentLoop.Message message(String id, String role, String content) {
         return new AgentLoop.Message(id, role, content, null, Collections.emptyList(), false);
     }
