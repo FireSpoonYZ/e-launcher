@@ -1,13 +1,14 @@
 package com.example.launcherprobe;
 
-import android.animation.ValueAnimator;
 import android.content.Context;
 import android.view.MotionEvent;
 import android.view.VelocityTracker;
 import android.view.View;
 import android.view.ViewConfiguration;
-import android.view.animation.DecelerateInterpolator;
 import android.widget.FrameLayout;
+
+import androidx.dynamicanimation.animation.FloatValueHolder;
+import androidx.dynamicanimation.animation.SpringAnimation;
 
 /** A continuous [chat][home] track. Neither page is recreated during a swipe. */
 final class PagerRoot extends FrameLayout {
@@ -20,8 +21,8 @@ final class PagerRoot extends FrameLayout {
     private View home;
     private PagerState.Page page;
     private VelocityTracker velocity;
-    private ValueAnimator animation;
-    private float downX, downY, startTrack, track;
+    private SpringAnimation animation;
+    private float downX, downY, startTrack, track, settleVelocity;
     private boolean dragging, rejected;
     // JavascriptInterface runs on the WebView bridge thread. Ignore replies to old touches.
     private volatile int gestureId;
@@ -60,7 +61,7 @@ final class PagerRoot extends FrameLayout {
         dragging = false;
         recycleVelocity();
         if (target == PagerState.Page.HOME) hideKeyboard();
-        if (getWidth() == 0 || !animated || !ValueAnimator.areAnimatorsEnabled()) {
+        if (getWidth() == 0 || !animated || !Motion.enabled()) {
             cancelAnimation();
             finishAt(target);
         } else animateTo(target);
@@ -140,6 +141,7 @@ final class PagerRoot extends FrameLayout {
                 PagerState.Page target = PagerState.settle(page, track, getWidth(), velocityX,
                         minimumFlingVelocity, rejected || event.getActionMasked() == MotionEvent.ACTION_CANCEL);
                 dragging = false;
+                settleVelocity = velocityX;
                 recycleVelocity();
                 if (target == PagerState.Page.HOME) hideKeyboard();
                 animateTo(target);
@@ -152,20 +154,18 @@ final class PagerRoot extends FrameLayout {
     private void animateTo(PagerState.Page target) {
         cancelAnimation();
         float end = PagerState.endpoint(target, getWidth());
-        if (track == end || !ValueAnimator.areAnimatorsEnabled()) {
+        float velocityX = settleVelocity;
+        settleVelocity = 0;
+        if (track == end || !Motion.enabled()) {
             finishAt(target);
             return;
         }
-        animation = ValueAnimator.ofFloat(track, end);
-        animation.setDuration(220);
-        animation.setInterpolator(new DecelerateInterpolator());
-        animation.addUpdateListener(value -> applyTrack((float) value.getAnimatedValue()));
-        animation.addListener(new android.animation.AnimatorListenerAdapter() {
-            @Override public void onAnimationEnd(android.animation.Animator value) {
-                if (animation == value) finishAt(target);
-            }
-        });
-        animation.start();
+        FloatValueHolder holder = new FloatValueHolder(track);
+        animation = Motion.spring(holder, track, end, velocityX,
+                (a, value, velocity) -> applyTrack(value),
+                (a, canceled, value, velocity) -> {
+                    if (animation == a && !canceled) finishAt(target);
+                });
     }
 
     private void finishAt(PagerState.Page target) {
@@ -199,7 +199,7 @@ final class PagerRoot extends FrameLayout {
 
     private void cancelAnimation() {
         if (animation == null) return;
-        ValueAnimator current = animation;
+        SpringAnimation current = animation;
         animation = null;
         current.cancel();
     }

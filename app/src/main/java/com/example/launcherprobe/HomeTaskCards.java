@@ -52,6 +52,8 @@ final class HomeTaskCards extends LinearLayout {
     private boolean swiping;
     private boolean touching;
     private boolean deferred;
+    private View switchingOut;
+    private int switchDirection;
     private final Runnable settleScroll = () -> {
         stripSettling = false;
         if (!touching && deferred) { deferred = false; render(); }
@@ -179,7 +181,7 @@ final class HomeTaskCards extends LinearLayout {
             LayoutParams startParams = new LayoutParams(-1, dp(48));
             startParams.setMargins(dp(32), dp(8), dp(32), dp(4));
             panel.addView(start, startParams);
-            addView(glass, new LayoutParams(-1, -1)); return;
+            present(glass); return;
         }
         selected = card.optString("conversationId");
         String id = selected; displayed = id;
@@ -250,7 +252,24 @@ final class HomeTaskCards extends LinearLayout {
         }
         FrameLayout.LayoutParams front = new FrameLayout.LayoutParams(-1, -1);
         front.bottomMargin = dp(layers * 4); stack.addView(glass, front);
-        addView(stack, new LayoutParams(-1, -1));
+        present(stack);
+    }
+
+    private void present(View incoming) {
+        View keep = switchingOut;
+        switchingOut = null;
+        FrameLayout viewport = new FrameLayout(getContext());
+        viewport.addView(incoming, new FrameLayout.LayoutParams(-1, -1));
+        addView(viewport, new LayoutParams(-1, -1));
+        if (keep == null || !Motion.enabled()) return;
+        float distance = Math.max(dp(96), getHeight());
+        float out = switchDirection > 0 ? -distance : distance;
+        incoming.setTranslationY(-out / 4f);
+        incoming.setAlpha(.8f);
+        viewport.addView(keep, new FrameLayout.LayoutParams(-1, -1));
+        keep.animate().translationY(out).alpha(0f).setDuration(Motion.LOCAL).setInterpolator(Motion.EASE)
+                .withEndAction(() -> { if (keep.getParent() == viewport) viewport.removeView(keep); }).start();
+        incoming.animate().translationY(0).alpha(1f).setDuration(Motion.LOCAL).setInterpolator(Motion.EASE).start();
     }
 
     private GradientDrawable fill(int color, int radius) {
@@ -425,8 +444,23 @@ final class HomeTaskCards extends LinearLayout {
 
     @Override public boolean onTouchEvent(MotionEvent event) {
         if (!swiping) return super.onTouchEvent(event);
-        if (event.getActionMasked() == MotionEvent.ACTION_UP) {
-            if (Math.abs(event.getY() - downY) > dp(40)) move(event.getY() < downY ? 1 : -1);
+        View front = getChildCount() == 0 ? null : getChildAt(0);
+        if (event.getActionMasked() == MotionEvent.ACTION_MOVE) {
+            float offset = event.getY() - downY;
+            if (front != null) {
+                front.setTranslationY(offset);
+                front.setAlpha(1f - Math.min(.35f, Math.abs(offset) / Math.max(1f, getHeight())));
+            }
+            return true;
+        }
+        if (event.getActionMasked() == MotionEvent.ACTION_UP || event.getActionMasked() == MotionEvent.ACTION_CANCEL) {
+            boolean commit = event.getActionMasked() == MotionEvent.ACTION_UP && Math.abs(event.getY() - downY) > dp(40);
+            if (commit) move(event.getY() < downY ? 1 : -1);
+            else if (front != null) {
+                Motion.spring(front, androidx.dynamicanimation.animation.DynamicAnimation.TRANSLATION_Y, 0, 0,
+                        (a, canceled, value, velocity) -> front.setAlpha(1f));
+                front.animate().alpha(1f).setDuration(Motion.LOCAL).start();
+            }
             swiping = false;
             performClick();
         }
@@ -437,6 +471,8 @@ final class HomeTaskCards extends LinearLayout {
 
     private void move(int delta) {
         if (cards.length() == 0) return;
+        switchDirection = delta;
+        switchingOut = getChildCount() == 0 ? null : getChildAt(0);
         selected = cards.optJSONObject(Math.floorMod(index() + delta, cards.length())).optString("conversationId");
         render();
     }
@@ -456,6 +492,7 @@ final class HomeTaskCards extends LinearLayout {
         view.setBackground(new RippleDrawable(ColorStateList.valueOf(colors.dark ? 0x2475c3af : 0x18267a69), null, mask));
         view.setFocusable(true);
         if (action != null) view.setOnClickListener(v -> action.run());
+        Motion.press(view);
         return view;
     }
     private TextView iconButton(String name, String description, Runnable action) {

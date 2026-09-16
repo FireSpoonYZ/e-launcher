@@ -28,9 +28,13 @@ import android.text.Editable;
 import android.text.TextWatcher;
 import android.view.Gravity;
 import android.view.MotionEvent;
+import android.view.VelocityTracker;
 import android.view.View;
 import android.view.ViewConfiguration;
 import android.view.ViewGroup;
+
+import androidx.dynamicanimation.animation.FloatValueHolder;
+import androidx.dynamicanimation.animation.SpringAnimation;
 import android.view.Window;
 import android.view.WindowManager;
 import android.widget.AbsListView;
@@ -70,7 +74,10 @@ final class HomeDesktop extends FrameLayout {
     private final DesktopIconPack iconPack;
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final int touchSlop;
-    private final GridLayout grid;
+    private final float minimumFlingVelocity;
+    private final FrameLayout pageTrack;
+    private GridLayout grid;
+    private GridLayout adjacentGrid;
     private final LinearLayout dock;
     private final LinearLayout tools;
     private final TextView pages;
@@ -79,8 +86,10 @@ final class HomeDesktop extends FrameLayout {
     private View aiWidget;
     private int currentPage;
     private boolean editing;
+    private long ignoreEditUntil;
     private Runnable libraryAction = this::showAllApps, searchAction = this::showAllApps;
     private Runnable assistantAction = () -> {}, settingsAction = () -> {};
+    private Overlay overlay;
     private int dragHover = -1, edgeDirection;
     private long dragHoverSince;
     private Object externalDragToken;
@@ -110,6 +119,19 @@ final class HomeDesktop extends FrameLayout {
     private View dragPreview;
     private int activeFolderSlot = -1;
     private boolean disposed;
+    private float swipeX, swipeY, pageOffset, folderFromX, folderFromY, folderFromScale = .92f;
+    private int swipeAxis, pageShift;
+    private boolean paging, pulling, folderClosing;
+    private boolean pullSearch;
+    private float pullProgress;
+    private VelocityTracker swipeVelocity;
+    private SpringAnimation pageSpring;
+    private int folderOriginSlot = -1;
+
+    interface Overlay {
+        void pull(boolean search, float progress);
+        void settle(boolean search, boolean open, float velocity);
+    }
 
     HomeDesktop(Activity activity, PagerRoot pager, HomeLayout layout,
             List<ResolveInfo> apps, LauncherShortcuts shortcuts, FrameLayout homeOverlay) {
@@ -125,22 +147,15 @@ final class HomeDesktop extends FrameLayout {
         iconPack = new DesktopIconPack(activity);
         layout.configureGrid(preferences.columns(), preferences.rows());
         colors = AppAppearance.readDesktop(activity);
-        touchSlop = ViewConfiguration.get(activity).getScaledTouchSlop();
+        ViewConfiguration configuration = ViewConfiguration.get(activity);
+        touchSlop = configuration.getScaledTouchSlop();
+        minimumFlingVelocity = Math.max(configuration.getScaledMinimumFlingVelocity(),
+                600 * getResources().getDisplayMetrics().density);
         setClipChildren(false);
         setClipToPadding(false);
-        grid = new GridLayout(activity) {
-            @Override protected void onMeasure(int widthSpec, int heightSpec) {
-                int width = MeasureSpec.getSize(widthSpec), height = MeasureSpec.getSize(heightSpec);
-                for (int i = 0; i < getChildCount(); i++) {
-                    View child = getChildAt(i);
-                    HomeLayout.Item item = layout.get((Integer) child.getTag());
-                    GridLayout.LayoutParams p = (GridLayout.LayoutParams) child.getLayoutParams();
-                    p.width = Math.max(0, width * (item == null ? 1 : item.spanX) / layout.columns - p.leftMargin - p.rightMargin);
-                    p.height = Math.max(0, height * (item == null ? 1 : item.spanY) / layout.rows - p.topMargin - p.bottomMargin);
-                }
-                super.onMeasure(widthSpec, heightSpec);
-            }
-        };
+        pageTrack = new FrameLayout(activity);
+        pageTrack.setClipChildren(true);
+        grid = pageGrid();
         widgets = new DesktopWidgets(activity, layout, this::persist);
         LinearLayout surface = column();
         tools = row();
@@ -164,7 +179,8 @@ final class HomeDesktop extends FrameLayout {
         surface.addView(tools, new LinearLayout.LayoutParams(-1, dp(48)));
         grid.setColumnCount(layout.columns);
         grid.setRowCount(layout.rows);
-        surface.addView(grid, new LinearLayout.LayoutParams(-1, 0, 1));
+        pageTrack.addView(grid, new FrameLayout.LayoutParams(-1, -1));
+        surface.addView(pageTrack, new LinearLayout.LayoutParams(-1, 0, 1));
         pages = text("", 16, colors.accent);
         pages.setGravity(Gravity.CENTER);
         pages.setOnClickListener(v -> setCurrentPage((currentPage + 1) % layout.pageCount()));
@@ -179,8 +195,9 @@ final class HomeDesktop extends FrameLayout {
         render();
     }
 
-    void setNavigation(Runnable library, Runnable search, Runnable assistant, Runnable settings) {
+    void setNavigation(Runnable library, Runnable search, Runnable assistant, Runnable settings, Overlay overlay) {
         libraryAction = library; searchAction = search; assistantAction = assistant; settingsAction = settings;
+        this.overlay = overlay;
     }
     void setAiWidget(View view) { aiWidget = view; render(); }
     void startListening() { widgets.start(); }
@@ -188,12 +205,18 @@ final class HomeDesktop extends FrameLayout {
     boolean onActivityResult(int request, int result, Intent data) { return widgets.result(request, result); }
     void notifyLayoutChanged() { persist(); }
     void setCurrentPage(int page) {
+        abortPageDrag();
         currentPage = Math.max(0, Math.min(layout.pageCount() - 1, page)); render();
     }
     private boolean locked() {
         return preferences.layoutLocked();
     }
+    void ignoreEdit(int ms) {
+        ignoreEditUntil = android.os.SystemClock.uptimeMillis() + ms;
+        cancelLongPress();
+    }
     void enterEdit() {
+        if (android.os.SystemClock.uptimeMillis() < ignoreEditUntil) return;
         if (locked()) { message("桌面布局已锁定"); return; }
         editing = true; render();
     }
@@ -286,7 +309,8 @@ final class HomeDesktop extends FrameLayout {
                     layout.setDock(index, item); persist();
                 }).show();
     }
-    private View widgetCell(HomeLayout.Item item, int slot) {
+    private View widgetCell(HomeLayout.Item item, int slot) { return widgetCell(item, slot, true); }
+    private View widgetCell(HomeLayout.Item item, int slot, boolean live) {
         FrameLayout frame = new FrameLayout(activity) {
             float downX, downY;
             final Runnable hold = () -> {
@@ -312,8 +336,11 @@ final class HomeDesktop extends FrameLayout {
         }
         View content = null;
         if (HomeLayout.Item.AI_WIDGET.equals(item.type)) {
-            if (aiWidget instanceof HomeTaskCards cards) cards.setEditing(editing);
-            content = aiWidget;
+            if (!live) content = snapshot(aiWidget);
+            else {
+                if (aiWidget instanceof HomeTaskCards cards) cards.setEditing(editing);
+                content = aiWidget;
+            }
         }
         else if (HomeLayout.Item.CLOCK.equals(item.type)) {
             LinearLayout time = row(); time.setPadding(dp(16), dp(4), dp(16), dp(4));
@@ -454,40 +481,176 @@ final class HomeDesktop extends FrameLayout {
             default: return true;
         }
     }
-    private float swipeX, swipeY;
     @Override public boolean onInterceptTouchEvent(MotionEvent event) {
         if (event.getActionMasked() == MotionEvent.ACTION_DOWN) {
             swipeX = event.getX(); swipeY = event.getY();
-            // Workspace, not the Web pager, owns gestures outside interactive widgets.
+            swipeAxis = 0;
             pager.setGestureBlocked(pager.gestureId(), true);
-        }
-        if (event.getActionMasked() == MotionEvent.ACTION_MOVE && !editing) {
+            recycleSwipeVelocity();
+            swipeVelocity = VelocityTracker.obtain();
+            swipeVelocity.addMovement(event);
+        } else if (swipeVelocity != null) swipeVelocity.addMovement(event);
+        if (event.getActionMasked() == MotionEvent.ACTION_MOVE && !editing && folderRoot == null) {
             float dx = event.getX() - swipeX, dy = event.getY() - swipeY;
             if (Math.abs(dx) > touchSlop * 2 || Math.abs(dy) > touchSlop * 2) {
                 int[] origin = new int[2]; getLocationOnScreen(origin);
                 int slot = homeTarget(origin[0] + swipeX, origin[1] + swipeY);
                 int owner = slot < 0 ? -1 : layout.ownerAt(slot);
-                // Widget children retain their own scrolling and session-switch gestures.
                 if (owner >= 0 && layout.get(owner).isWidget()) return false;
                 return true;
             }
         }
+        if ((event.getActionMasked() == MotionEvent.ACTION_UP || event.getActionMasked() == MotionEvent.ACTION_CANCEL)
+                && !paging && !pulling) recycleSwipeVelocity();
         return super.onInterceptTouchEvent(event);
     }
     @Override public boolean onTouchEvent(MotionEvent event) {
-        if (event.getActionMasked() == MotionEvent.ACTION_UP && !editing) {
-            float dx = event.getX() - swipeX, dy = event.getY() - swipeY;
-            if (Math.abs(dx) > dp(48) && Math.abs(dx) > Math.abs(dy)) {
-                setCurrentPage(currentPage + (dx < 0 ? 1 : -1)); return true;
-            }
-            if (Math.abs(dy) > dp(60)) {
-                String action = dy < 0 ? preferences.swipeUp() : preferences.swipeDown();
-                if ("library".equals(action)) libraryAction.run();
-                else if ("search".equals(action)) searchAction.run();
+        if (editing || folderRoot != null) return super.onTouchEvent(event);
+        if (swipeVelocity != null) swipeVelocity.addMovement(event);
+        int action = event.getActionMasked();
+        if (action == MotionEvent.ACTION_MOVE) {
+            trackSwipe(event.getX() - swipeX, event.getY() - swipeY);
+            if (paging || pulling) return true;
+        } else if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+            if (paging || pulling) {
+                float velocityX = 0, velocityY = 0;
+                if (swipeVelocity != null) {
+                    swipeVelocity.computeCurrentVelocity(1000);
+                    velocityX = swipeVelocity.getXVelocity();
+                    velocityY = swipeVelocity.getYVelocity();
+                }
+                settleSwipe(velocityX, velocityY, action == MotionEvent.ACTION_CANCEL);
+                recycleSwipeVelocity();
+                pager.setGestureBlocked(pager.gestureId(), false);
                 return true;
             }
+            recycleSwipeVelocity();
+            pager.setGestureBlocked(pager.gestureId(), false);
         }
         return super.onTouchEvent(event);
+    }
+
+    private void trackSwipe(float dx, float dy) {
+        if (swipeAxis == 0) {
+            if (Math.abs(dx) < touchSlop && Math.abs(dy) < touchSlop) return;
+            swipeAxis = Math.abs(dx) > Math.abs(dy) * 1.1f ? 1 : 2;
+        }
+        if (swipeAxis == 1) {
+            pulling = false;
+            int shift = dx < 0 ? 1 : -1;
+            if (dx == 0 || !prepareAdjacent(shift)) {
+                applyPageOffset(0);
+                return;
+            }
+            paging = true;
+            applyPageOffset(dx);
+            return;
+        }
+        String action = dy < 0 ? preferences.swipeUp() : preferences.swipeDown();
+        boolean search = "search".equals(action);
+        if (!"library".equals(action) && !search) return;
+        paging = false;
+        pulling = true;
+        pullSearch = search;
+        float range = Math.max(dp(160), getHeight() * .45f);
+        pullProgress = Math.max(0, Math.min(1, Math.abs(dy) / range));
+        if (overlay != null) overlay.pull(search, pullProgress);
+    }
+
+    private void settleSwipe(float velocityX, float velocityY, boolean cancel) {
+        if (paging) {
+            settlePage(velocityX, cancel);
+            paging = false;
+            return;
+        }
+        if (pulling) {
+            float directed = pullSearch ? velocityY : -velocityY;
+            boolean open = !cancel && Motion.crossed(pullProgress, directed, minimumFlingVelocity, false);
+            if (overlay != null) overlay.settle(pullSearch, open, velocityY);
+            else if (open) {
+                if (pullSearch) searchAction.run(); else libraryAction.run();
+            }
+            pulling = false;
+            pullProgress = 0;
+            return;
+        }
+        abortPageDrag();
+    }
+
+    private boolean prepareAdjacent(int shift) {
+        int next = currentPage + shift;
+        if (next < 0 || next >= layout.pageCount()) {
+            dropAdjacent();
+            pageShift = 0;
+            return false;
+        }
+        if (pageShift == shift && adjacentGrid != null) return true;
+        dropAdjacent();
+        pageShift = shift;
+        adjacentGrid = pageGrid();
+        fillPage(adjacentGrid, next, false);
+        pageTrack.addView(adjacentGrid, 0, new FrameLayout.LayoutParams(-1, -1));
+        return true;
+    }
+
+    private void applyPageOffset(float offset) {
+        int width = Math.max(1, pageTrack.getWidth());
+        pageOffset = Math.max(-width, Math.min(width, offset));
+        if (pageShift > 0) pageOffset = Math.min(0, pageOffset);
+        if (pageShift < 0) pageOffset = Math.max(0, pageOffset);
+        grid.setTranslationX(pageOffset);
+        if (adjacentGrid != null) adjacentGrid.setTranslationX(pageOffset + (pageShift > 0 ? width : -width));
+    }
+
+    private void settlePage(float velocityX, boolean cancel) {
+        int width = Math.max(1, pageTrack.getWidth());
+        boolean commit = !cancel && pageShift != 0 && adjacentGrid != null
+                && Motion.crossed(Math.abs(pageOffset) / (float) width,
+                pageShift > 0 ? -velocityX : velocityX, minimumFlingVelocity, false);
+        float end = commit ? (pageShift > 0 ? -width : width) : 0;
+        if (pageSpring != null) { pageSpring.cancel(); pageSpring = null; }
+        FloatValueHolder holder = new FloatValueHolder(pageOffset);
+        int shift = pageShift;
+        pageSpring = Motion.spring(holder, pageOffset, end, velocityX,
+                (a, value, velocity) -> applyPageOffset(value),
+                (a, canceled, value, velocity) -> {
+                    if (canceled) return;
+                    pageSpring = null;
+                    if (commit) commitPage(shift);
+                    else abortPageDrag();
+                });
+    }
+
+    private void commitPage(int shift) {
+        currentPage = Math.max(0, Math.min(layout.pageCount() - 1, currentPage + shift));
+        pageTrack.removeView(grid);
+        grid = adjacentGrid;
+        adjacentGrid = null;
+        pageShift = 0;
+        pageOffset = 0;
+        if (grid != null) grid.setTranslationX(0);
+        fillPage(grid, currentPage, true);
+        updatePageDots();
+    }
+
+    private void dropAdjacent() {
+        if (adjacentGrid == null) return;
+        pageTrack.removeView(adjacentGrid);
+        adjacentGrid = null;
+    }
+
+    private void abortPageDrag() {
+        if (pageSpring != null) { pageSpring.cancel(); pageSpring = null; }
+        dropAdjacent();
+        pageShift = 0;
+        pageOffset = 0;
+        paging = false;
+        if (grid != null) grid.setTranslationX(0);
+    }
+
+    private void recycleSwipeVelocity() {
+        if (swipeVelocity != null) swipeVelocity.recycle();
+        swipeVelocity = null;
     }
 
     void appsChanged(List<ResolveInfo> value) {
@@ -526,9 +689,11 @@ final class HomeDesktop extends FrameLayout {
     void dispose() {
         disposed = true;
         handler.removeCallbacksAndMessages(null);
+        recycleSwipeVelocity();
+        abortPageDrag();
         dismissMenu();
         if (appDialog != null) appDialog.dismiss();
-        closeFolder();
+        closeFolder(false);
         clearDragPreview();
         widgets.stop();
     }
@@ -558,20 +723,43 @@ final class HomeDesktop extends FrameLayout {
 
     private void render() {
         if (disposed) return;
+        abortPageDrag();
         dismissMenu();
         clearDropTarget();
         tools.setVisibility(editing ? VISIBLE : GONE);
         currentPage = Math.min(currentPage, layout.pageCount() - 1);
-        grid.removeAllViews();
-        homeCells.clear();
-        grid.setColumnCount(layout.columns);
-        grid.setRowCount(layout.rows);
-        for (int slot = currentPage * layout.pageSize(); slot < (currentPage + 1) * layout.pageSize(); slot++) {
+        fillPage(grid, currentPage, true);
+        updatePageDots();
+        renderDock();
+    }
+
+    private GridLayout pageGrid() {
+        return new GridLayout(activity) {
+            @Override protected void onMeasure(int widthSpec, int heightSpec) {
+                int width = MeasureSpec.getSize(widthSpec), height = MeasureSpec.getSize(heightSpec);
+                for (int i = 0; i < getChildCount(); i++) {
+                    View child = getChildAt(i);
+                    HomeLayout.Item item = layout.get((Integer) child.getTag());
+                    GridLayout.LayoutParams p = (GridLayout.LayoutParams) child.getLayoutParams();
+                    p.width = Math.max(0, width * (item == null ? 1 : item.spanX) / layout.columns - p.leftMargin - p.rightMargin);
+                    p.height = Math.max(0, height * (item == null ? 1 : item.spanY) / layout.rows - p.topMargin - p.bottomMargin);
+                }
+                super.onMeasure(widthSpec, heightSpec);
+            }
+        };
+    }
+
+    private void fillPage(GridLayout target, int page, boolean primary) {
+        target.removeAllViews();
+        if (primary) homeCells.clear();
+        target.setColumnCount(layout.columns);
+        target.setRowCount(layout.rows);
+        for (int slot = page * layout.pageSize(); slot < (page + 1) * layout.pageSize(); slot++) {
             final int selectedSlot = slot;
             HomeLayout.Item item = layout.get(slot);
             if (item == null && layout.ownerAt(slot) >= 0) continue;
             View cell;
-            if (item != null && item.isWidget()) cell = widgetCell(item, slot);
+            if (item != null && item.isWidget()) cell = widgetCell(item, slot, primary);
             else {
                 cell = cell(item);
                 cell.setOnClickListener(view -> {
@@ -599,14 +787,30 @@ final class HomeDesktop extends FrameLayout {
             params.width = 0; params.height = 0;
             params.setMargins(dp(3), dp(3), dp(3), dp(3));
             cell.setTag(slot);
-            grid.addView(cell, params);
-            homeCells.put(slot, cell);
+            target.addView(cell, params);
+            if (primary) homeCells.put(slot, cell);
         }
+    }
+
+    private void updatePageDots() {
         StringBuilder dots = new StringBuilder();
         for (int p = 0; p < layout.pageCount(); p++) dots.append(p == currentPage ? " ● " : " · ");
         pages.setText(dots);
         pages.setContentDescription("桌面第 " + (currentPage + 1) + " 页，共 " + layout.pageCount() + " 页；点击下一页");
-        renderDock();
+    }
+
+    private View snapshot(View source) {
+        if (source == null || source.getWidth() <= 0 || source.getHeight() <= 0) {
+            View placeholder = new View(activity);
+            placeholder.setBackground(shape(colors.dark ? 0xb3375a66 : 0xa3f2fdff, 22, 0, 0));
+            return placeholder;
+        }
+        Bitmap bitmap = Bitmap.createBitmap(source.getWidth(), source.getHeight(), Bitmap.Config.ARGB_8888);
+        source.draw(new Canvas(bitmap));
+        ImageView image = new ImageView(activity);
+        image.setImageBitmap(bitmap);
+        image.setScaleType(ImageView.ScaleType.FIT_XY);
+        return image;
     }
 
     private Cell cell(HomeLayout.Item item) {
@@ -893,7 +1097,7 @@ final class HomeDesktop extends FrameLayout {
     private void openFolder(int slot) {
         dismissMenu();
         if (layout.get(slot) == null || !layout.get(slot).isFolder()) return;
-        closeFolder();
+        closeFolder(false);
         FrameLayout host = activity.findViewById(android.R.id.content);
         folderBackdrop = Bitmap.createBitmap(Math.max(1, host.getWidth() / 4),
                 Math.max(1, host.getHeight() / 4), Bitmap.Config.ARGB_8888);
@@ -948,19 +1152,77 @@ final class HomeDesktop extends FrameLayout {
             }
         };
         ((androidx.activity.ComponentActivity) activity).getOnBackPressedDispatcher().addCallback(folderBack);
+        folderOriginSlot = slot;
+        folderClosing = false;
         renderFolder();
-        folderPanel.setScaleX(.96f);
-        folderPanel.setScaleY(.96f);
-        folderPanel.setAlpha(0f);
-        folderPanel.animate().scaleX(1f).scaleY(1f).alpha(1f).setDuration(180).start();
+        playFolderOpen();
         if (dragPreview != null) dragPreview.bringToFront();
     }
 
-    private void closeFolder() {
+    private void closeFolder() { closeFolder(true); }
+
+    private void closeFolder(boolean animated) {
         if (folderRoot == null) return;
+        if (folderClosing && animated) return;
         dismissMenu();
-        ((ViewGroup) folderRoot.getParent()).removeView(folderRoot);
-        folderBack.remove();
+        if (!animated || !Motion.enabled() || folderSurface == null) {
+            teardownFolder();
+            return;
+        }
+        folderClosing = true;
+        if (folderBackground != null) folderBackground.animate().alpha(0f).setDuration(Motion.LOCAL).start();
+        folderSurface.animate().cancel();
+        folderSurface.animate().translationX(folderFromX).translationY(folderFromY)
+                .scaleX(folderFromScale).scaleY(folderFromScale).alpha(0f)
+                .setDuration(Motion.PAGE).setInterpolator(Motion.EASE)
+                .withEndAction(this::teardownFolder).start();
+    }
+
+    private void playFolderOpen() {
+        if (folderSurface == null) return;
+        folderSurface.setAlpha(0f);
+        if (folderBackground != null) folderBackground.setAlpha(0f);
+        folderSurface.post(() -> {
+            if (folderSurface == null || folderClosing) return;
+            View source = homeCells.get(folderOriginSlot);
+            if (source != null && source.getWidth() > 0) {
+                int[] from = new int[2], to = new int[2];
+                source.getLocationOnScreen(from);
+                folderSurface.getLocationOnScreen(to);
+                folderFromX = from[0] + source.getWidth() / 2f - (to[0] + folderSurface.getWidth() / 2f);
+                folderFromY = from[1] + source.getHeight() / 2f - (to[1] + folderSurface.getHeight() / 2f);
+                folderFromScale = Math.max(.18f, source.getWidth() / (float) Math.max(1, folderSurface.getWidth()));
+            } else {
+                folderFromX = 0;
+                folderFromY = dp(24);
+                folderFromScale = .92f;
+            }
+            if (!Motion.enabled()) {
+                folderSurface.setAlpha(1f);
+                folderSurface.setTranslationX(0);
+                folderSurface.setTranslationY(0);
+                folderSurface.setScaleX(1f);
+                folderSurface.setScaleY(1f);
+                if (folderBackground != null) folderBackground.setAlpha(1f);
+                return;
+            }
+            folderSurface.setTranslationX(folderFromX);
+            folderSurface.setTranslationY(folderFromY);
+            folderSurface.setScaleX(folderFromScale);
+            folderSurface.setScaleY(folderFromScale);
+            folderSurface.animate().translationX(0).translationY(0).scaleX(1f).scaleY(1f).alpha(1f)
+                    .setDuration(Motion.PAGE).setInterpolator(Motion.EASE).start();
+            if (folderBackground != null) folderBackground.animate().alpha(1f).setDuration(Motion.LOCAL).start();
+        });
+    }
+
+    private void teardownFolder() {
+        if (folderRoot == null) return;
+        folderClosing = false;
+        if (folderSurface != null) folderSurface.animate().cancel();
+        if (folderBackground != null) folderBackground.animate().cancel();
+        if (folderRoot.getParent() instanceof ViewGroup parent) parent.removeView(folderRoot);
+        if (folderBack != null) folderBack.remove();
         folderBack = null;
         folderRoot = null;
         folderPanel = null;
@@ -970,6 +1232,7 @@ final class HomeDesktop extends FrameLayout {
         folderGrid = null;
         folderBackdrop = null;
         activeFolderSlot = -1;
+        folderOriginSlot = -1;
     }
 
     private void sortFolders() {
@@ -1777,6 +2040,7 @@ final class HomeDesktop extends FrameLayout {
         view.setClickable(true);
         view.setFocusable(true);
         view.setOnClickListener(ignored -> action.run());
+        Motion.press(view);
         return view;
     }
 

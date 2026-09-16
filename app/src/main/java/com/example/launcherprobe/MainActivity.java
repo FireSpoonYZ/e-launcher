@@ -83,6 +83,9 @@ public class MainActivity extends BridgeActivity {
     private HomeLayout homeLayout;
     private HomeDesktop homeDesktop;
     private NativeSearchPage nativeSearchPage;
+    private NativeSearchPage.Mode searchMode;
+    private boolean searchClosing;
+    private androidx.dynamicanimation.animation.SpringAnimation searchSpring;
     private long desktopRevision;
     private AppAppearance desktopAppearance;
     private boolean desktopSettingsRegistered;
@@ -650,7 +653,7 @@ public class MainActivity extends BridgeActivity {
     }
 
     private void showHome(boolean animated) {
-        closeNativeSearch();
+        closeNativeSearch(animated);
         if (homeInputOverlay != null) closeHomeInput(false);
         if (treeSheet != null) treeSheet.dismiss();
         View focused = getCurrentFocus();
@@ -681,7 +684,15 @@ public class MainActivity extends BridgeActivity {
         homeDesktop = new HomeDesktop(this, pager, homeLayout, apps, launcherShortcuts, homeContent);
         homeContent.addView(homeDesktop, new FrameLayout.LayoutParams(-1, -1));
         homeDesktop.setNavigation(this::showAppLibrary, () -> showGlobalSearch(""),
-                () -> launchWeb("/chat/" + chatStore.activeId(), null, null), this::openDesktopSettings);
+                () -> launchWeb("/chat/" + chatStore.activeId(), null, null), this::openDesktopSettings,
+                new HomeDesktop.Overlay() {
+                    @Override public void pull(boolean search, float progress) {
+                        pullNativeSearch(search, progress);
+                    }
+                    @Override public void settle(boolean search, boolean open, float velocity) {
+                        settleNativeSearch(search, open, velocity);
+                    }
+                });
 
         setPage(homeContent);
         homeDesktop.setAiWidget(homeTaskCards);
@@ -709,18 +720,31 @@ public class MainActivity extends BridgeActivity {
     public void showDesktop() { showHome(); }
     public void showAppLibrary() { showNativeSearch(NativeSearchPage.Mode.APP_LIBRARY, ""); }
     public void showGlobalSearch(String initialQuery) { showNativeSearch(NativeSearchPage.Mode.GLOBAL_SEARCH, initialQuery); }
-    private void closeNativeSearch() {
+    private void closeNativeSearch() { closeNativeSearch(true); }
+    private void closeNativeSearch(boolean animated) {
         if (nativeSearchPage == null) return;
-        NativeSearchPage old = nativeSearchPage;
-        nativeSearchPage = null;
-        old.dispose();
-        root.removeView(old);
-        pageShell.setVisibility(View.VISIBLE);
+        if (!animated || !Motion.enabled()) {
+            finishNativeSearch();
+            return;
+        }
+        settleNativeSearch(searchMode == NativeSearchPage.Mode.GLOBAL_SEARCH, false, 0);
     }
     private void showNativeSearch(NativeSearchPage.Mode mode, String query) {
-        showHome(false);
-        nativeSearchPage = new NativeSearchPage(this, mode, query, new NativeSearchPage.Host() {
-            public void showDesktop() { MainActivity.this.showDesktop(); }
+        prepareDesktopForSearch();
+        attachNativeSearch(mode, query);
+        settleNativeSearch(mode == NativeSearchPage.Mode.GLOBAL_SEARCH, true, 0);
+    }
+    private void prepareDesktopForSearch() {
+        if (root == null || homeDesktop == null) showHome(false);
+        else {
+            if (homeInputOverlay != null) closeHomeInput(false);
+            if (treeSheet != null) treeSheet.dismiss();
+            pager.show(PagerState.Page.HOME, false);
+        }
+    }
+    private NativeSearchPage.Host searchHost() {
+        return new NativeSearchPage.Host() {
+            public void showDesktop() { closeNativeSearch(true); }
             public void sendToAssistant(String prompt) { sendSearchToAssistant(prompt); }
             public void openSettings(String destination) {
                 if ("assistant".equals(destination)) openAssistantSettings();
@@ -732,12 +756,81 @@ public class MainActivity extends BridgeActivity {
                         ? HomeLayout.Item.app(payload.component().getPackageName(), payload.component().getClassName())
                         : HomeLayout.Item.shortcut(payload.component().getPackageName(), payload.shortcutId(), payload.userSerial());
                 homeDesktop.acceptExternalDrag(payload, item);
-                MainActivity.this.showDesktop();
+                closeNativeSearch(false);
             }
-        });
-        // Keep the desktop attached for native DragEvent delivery, but hide its Dock and accessibility tree.
-        pageShell.setVisibility(View.INVISIBLE);
+        };
+    }
+    private void attachNativeSearch(NativeSearchPage.Mode mode, String query) {
+        if (nativeSearchPage != null && searchMode == mode && !searchClosing) return;
+        finishNativeSearch();
+        searchMode = mode;
+        searchClosing = false;
+        nativeSearchPage = new NativeSearchPage(this, mode, query, searchHost());
+        nativeSearchPage.setTranslationY(searchOffscreen(mode));
         root.addView(nativeSearchPage, match());
+        nativeSearchPage.bringToFront();
+    }
+    private float searchOffscreen(NativeSearchPage.Mode mode) {
+        float height = Math.max(1, root == null ? 1 : root.getHeight());
+        return mode == NativeSearchPage.Mode.APP_LIBRARY ? height : -height;
+    }
+    private void applySearchProgress(float progress) {
+        if (nativeSearchPage == null) return;
+        float clamped = Math.max(0, Math.min(1, progress));
+        nativeSearchPage.setTranslationY((1 - clamped) * (searchMode == NativeSearchPage.Mode.APP_LIBRARY
+                ? Math.max(1, root.getHeight()) : -Math.max(1, root.getHeight())));
+    }
+    private void pullNativeSearch(boolean search, float progress) {
+        prepareDesktopForSearch();
+        NativeSearchPage.Mode mode = search ? NativeSearchPage.Mode.GLOBAL_SEARCH : NativeSearchPage.Mode.APP_LIBRARY;
+        if (nativeSearchPage == null || searchMode != mode || searchClosing) attachNativeSearch(mode, "");
+        if (searchSpring != null) { searchSpring.cancel(); searchSpring = null; }
+        searchClosing = false;
+        pageShell.setVisibility(View.VISIBLE);
+        applySearchProgress(progress);
+    }
+    private void settleNativeSearch(boolean search, boolean open, float velocity) {
+        NativeSearchPage.Mode mode = search ? NativeSearchPage.Mode.GLOBAL_SEARCH : NativeSearchPage.Mode.APP_LIBRARY;
+        if (nativeSearchPage == null) {
+            if (open) showNativeSearch(mode, "");
+            return;
+        }
+        if (searchSpring != null) { searchSpring.cancel(); searchSpring = null; }
+        float end = open ? 0 : searchOffscreen(searchMode);
+        searchClosing = !open;
+        pageShell.setVisibility(View.VISIBLE);
+        if (!open && homeDesktop != null) homeDesktop.ignoreEdit(600);
+        NativeSearchPage page = nativeSearchPage;
+        if (!Motion.enabled()) {
+            page.setTranslationY(end);
+            if (open) hideDesktopForSearch();
+            else finishNativeSearch();
+            return;
+        }
+        searchSpring = Motion.spring(page, androidx.dynamicanimation.animation.DynamicAnimation.TRANSLATION_Y,
+                end, velocity, (a, canceled, value, vel) -> {
+                    if (canceled) return;
+                    searchSpring = null;
+                    if (open) hideDesktopForSearch();
+                    else if (nativeSearchPage == page) finishNativeSearch();
+                });
+    }
+    private void hideDesktopForSearch() {
+        if (nativeSearchPage != null) nativeSearchPage.setTranslationY(0);
+        pageShell.setVisibility(View.INVISIBLE);
+        searchClosing = false;
+    }
+    private void finishNativeSearch() {
+        if (searchSpring != null) { searchSpring.cancel(); searchSpring = null; }
+        NativeSearchPage old = nativeSearchPage;
+        nativeSearchPage = null;
+        searchClosing = false;
+        if (old != null) {
+            old.dispose();
+            if (old.getParent() == root) root.removeView(old);
+        }
+        if (pageShell != null) pageShell.setVisibility(View.VISIBLE);
+        if (homeDesktop != null) homeDesktop.ignoreEdit(600);
     }
     public void openChat(String conversationId) {
         chatStore.selectConversation(conversationId);
@@ -1084,42 +1177,19 @@ public class MainActivity extends BridgeActivity {
     }
 
     private long motionDuration(long milliseconds) {
-        return android.animation.ValueAnimator.areAnimatorsEnabled() ? milliseconds : 0;
+        return Motion.duration(milliseconds);
     }
 
     private void enterMotion(View view, int offsetDp) {
-        view.animate().cancel();
-        if (!android.animation.ValueAnimator.areAnimatorsEnabled()) {
-            view.setAlpha(1f);
-            view.setTranslationY(0);
-            return;
-        }
-        view.setAlpha(0f);
-        view.setTranslationY(dp(offsetDp));
-        view.animate().alpha(1f).translationY(0).setDuration(260)
-                .setInterpolator(new android.view.animation.DecelerateInterpolator()).start();
+        Motion.enter(view, dp(offsetDp));
     }
 
     private void pressFeedback(View view) {
-        android.animation.StateListAnimator states = new android.animation.StateListAnimator();
-        android.animation.ObjectAnimator pressed = android.animation.ObjectAnimator.ofPropertyValuesHolder(view,
-                android.animation.PropertyValuesHolder.ofFloat(View.SCALE_X, .96f),
-                android.animation.PropertyValuesHolder.ofFloat(View.SCALE_Y, .96f));
-        pressed.setDuration(motionDuration(90));
-        states.addState(new int[]{android.R.attr.state_pressed, android.R.attr.state_enabled}, pressed);
-        android.animation.ObjectAnimator released = android.animation.ObjectAnimator.ofPropertyValuesHolder(view,
-                android.animation.PropertyValuesHolder.ofFloat(View.SCALE_X, 1f),
-                android.animation.PropertyValuesHolder.ofFloat(View.SCALE_Y, 1f));
-        released.setDuration(motionDuration(140));
-        states.addState(new int[]{}, released);
-        view.setStateListAnimator(states);
+        Motion.press(view);
     }
 
     private void animateExpansion(LinearLayout parent) {
-        if (android.animation.ValueAnimator.areAnimatorsEnabled()) {
-            android.transition.TransitionManager.beginDelayedTransition(parent,
-                    new android.transition.AutoTransition().setDuration(180));
-        }
+        Motion.expand(parent);
     }
 
     private void dialogMotion(Dialog dialog, boolean bottomSheet) {

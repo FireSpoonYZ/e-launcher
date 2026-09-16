@@ -17,7 +17,9 @@ import android.text.Editable;
 import android.text.TextWatcher;
 import android.view.Gravity;
 import android.view.MotionEvent;
+import android.view.VelocityTracker;
 import android.view.View;
+import android.view.ViewConfiguration;
 import android.view.ViewGroup;
 import android.view.inputmethod.InputMethodManager;
 import android.widget.BaseAdapter;
@@ -74,6 +76,12 @@ public final class NativeSearchPage extends FrameLayout {
     private int filter;
     private boolean disposed;
     private final Runnable query = this::search;
+    private final int touchSlop;
+    private final float minimumFlingVelocity;
+    private float closeDownY;
+    private boolean closing;
+    private boolean closeFromHeader;
+    private VelocityTracker closeVelocity;
 
     public NativeSearchPage(Activity activity, Mode mode, String initialQuery, Host host) {
         super(activity);
@@ -81,9 +89,14 @@ public final class NativeSearchPage extends FrameLayout {
         this.mode = mode;
         this.host = host;
         colors = AppAppearance.readDesktop(activity);
+        ViewConfiguration configuration = ViewConfiguration.get(activity);
+        touchSlop = configuration.getScaledTouchSlop();
+        minimumFlingVelocity = Math.max(configuration.getScaledMinimumFlingVelocity(),
+                600 * getResources().getDisplayMetrics().density);
         View wallpaper = colors.desktopWallpaper(activity);
         addView(wallpaper, new LayoutParams(-1, -1));
         setFocusableInTouchMode(true);
+        setClickable(true);
         LinearLayout content = column();
         content.setPadding(dp(18), dp(14), dp(18), dp(8));
         addView(content, new LayoutParams(-1, -1));
@@ -191,14 +204,61 @@ public final class NativeSearchPage extends FrameLayout {
     }
 
     @Override public boolean dispatchTouchEvent(MotionEvent event) {
-        // Search owns its gestures and IME; never let a desktop pager intercept this surface.
-        if (event.getActionMasked() == MotionEvent.ACTION_DOWN) {
+        int action = event.getActionMasked();
+        if (action == MotionEvent.ACTION_DOWN) {
             for (android.view.ViewParent parent = getParent(); parent != null; parent = parent.getParent()) {
                 parent.requestDisallowInterceptTouchEvent(true);
                 if (parent instanceof PagerRoot pager) pager.setGestureBlocked(pager.gestureId(), true);
             }
+            closeDownY = event.getY();
+            closing = false;
+            closeFromHeader = !onList(event);
+            recycleCloseVelocity();
+            closeVelocity = VelocityTracker.obtain();
+            closeVelocity.addMovement(event);
+        } else if (closeVelocity != null) closeVelocity.addMovement(event);
+        if (!closing && action == MotionEvent.ACTION_MOVE) {
+            float dy = event.getY() - closeDownY;
+            boolean pull = mode == Mode.APP_LIBRARY ? dy > touchSlop : dy < -touchSlop;
+            if (pull) {
+                closing = true;
+                MotionEvent cancel = MotionEvent.obtain(event);
+                cancel.setAction(MotionEvent.ACTION_CANCEL);
+                super.dispatchTouchEvent(cancel);
+                cancel.recycle();
+            }
+        }
+        if (closing) {
+            if (action == MotionEvent.ACTION_MOVE) {
+                float dy = event.getY() - closeDownY;
+                setTranslationY(mode == Mode.APP_LIBRARY ? Math.max(0, dy) : Math.min(0, dy));
+                return true;
+            }
+            if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+                float velocityY = 0;
+                if (closeVelocity != null) {
+                    closeVelocity.computeCurrentVelocity(1000);
+                    velocityY = closeVelocity.getYVelocity();
+                }
+                recycleCloseVelocity();
+                float progress = Math.abs(getTranslationY()) / Math.max(1, getHeight());
+                boolean dismiss = action != MotionEvent.ACTION_CANCEL
+                        && Motion.crossed(progress, mode == Mode.APP_LIBRARY ? velocityY : -velocityY,
+                        minimumFlingVelocity, false);
+                closing = false;
+                if (dismiss) host.showDesktop();
+                else Motion.spring(this, androidx.dynamicanimation.animation.DynamicAnimation.TRANSLATION_Y,
+                        0, velocityY, null);
+                return true;
+            }
+            return true;
         }
         return super.dispatchTouchEvent(event);
+    }
+
+    @Override public void requestDisallowInterceptTouchEvent(boolean disallowIntercept) {
+        if (disallowIntercept && (closeFromHeader || canDismiss())) return;
+        super.requestDisallowInterceptTouchEvent(disallowIntercept);
     }
 
     @Override protected void onDetachedFromWindow() {
@@ -231,6 +291,7 @@ public final class NativeSearchPage extends FrameLayout {
     public void dispose() {
         keyboard().hideSoftInputFromWindow(input.getWindowToken(), 0);
         disposed = true;
+        recycleCloseVelocity();
         cancelSearch();
         main.removeCallbacksAndMessages(null);
         worker.shutdownNow();
@@ -239,6 +300,61 @@ public final class NativeSearchPage extends FrameLayout {
     private void close() {
         keyboard().hideSoftInputFromWindow(input.getWindowToken(), 0);
         host.showDesktop();
+    }
+
+    @Override public boolean onInterceptTouchEvent(MotionEvent event) {
+        return closing || super.onInterceptTouchEvent(event);
+    }
+
+    @Override public boolean onTouchEvent(MotionEvent event) {
+        if (!closing) return super.onTouchEvent(event);
+        if (closeVelocity != null) closeVelocity.addMovement(event);
+        switch (event.getActionMasked()) {
+            case MotionEvent.ACTION_MOVE:
+                float dy = event.getY() - closeDownY;
+                if (mode == Mode.APP_LIBRARY) setTranslationY(Math.max(0, dy));
+                else setTranslationY(Math.min(0, dy));
+                return true;
+            case MotionEvent.ACTION_UP:
+            case MotionEvent.ACTION_CANCEL:
+                float velocityY = 0;
+                if (closeVelocity != null) {
+                    closeVelocity.computeCurrentVelocity(1000);
+                    velocityY = closeVelocity.getYVelocity();
+                }
+                recycleCloseVelocity();
+                float progress = Math.abs(getTranslationY()) / Math.max(1, getHeight());
+                boolean dismiss = event.getActionMasked() != MotionEvent.ACTION_CANCEL
+                        && Motion.crossed(progress, mode == Mode.APP_LIBRARY ? velocityY : -velocityY,
+                        minimumFlingVelocity, false);
+                closing = false;
+                if (dismiss) host.showDesktop();
+                else Motion.spring(this, androidx.dynamicanimation.animation.DynamicAnimation.TRANSLATION_Y,
+                        0, velocityY, null);
+                return true;
+            default:
+                return true;
+        }
+    }
+
+    private boolean canDismiss() {
+        if (list.getChildCount() == 0) return true;
+        if (list.getFirstVisiblePosition() > 0) return false;
+        View first = list.getChildAt(0);
+        return first == null || first.getTop() >= list.getPaddingTop() - touchSlop;
+    }
+
+    private boolean onList(MotionEvent event) {
+        int[] origin = new int[2];
+        list.getLocationOnScreen(origin);
+        int x = (int) event.getRawX(), y = (int) event.getRawY();
+        return x >= origin[0] && x < origin[0] + list.getWidth()
+                && y >= origin[1] && y < origin[1] + list.getHeight();
+    }
+
+    private void recycleCloseVelocity() {
+        if (closeVelocity != null) closeVelocity.recycle();
+        closeVelocity = null;
     }
 
     private void search() {
@@ -687,7 +803,7 @@ public final class NativeSearchPage extends FrameLayout {
     private TextView action(String value, View.OnClickListener click) {
         TextView view = text(value, 14, colors.accent); view.setGravity(Gravity.CENTER);
         view.setMinWidth(dp(48)); view.setMinHeight(dp(48)); view.setPadding(dp(8), 0, dp(8), 0);
-        view.setFocusable(true); view.setOnClickListener(click); return view;
+        view.setFocusable(true); view.setOnClickListener(click); Motion.press(view); return view;
     }
     private InputMethodManager keyboard() { return activity.getSystemService(InputMethodManager.class); }
     private int dp(int value) { return Math.round(value * getResources().getDisplayMetrics().density); }
