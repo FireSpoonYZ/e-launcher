@@ -562,7 +562,11 @@ final class HomeLayout {
 
     private void addDefaults(Context context, boolean migrated) {
         slots.set(migrated ? vacancy(4, 1) : 0, Item.widget(Item.CLOCK, 4, 1, -1, null));
-        slots.set(migrated ? vacancy(4, 2) : 4, Item.widget(Item.WIDGET_PICKER, 4, 2, -1, null));
+        if (migrated) slots.set(vacancy(4, 2), Item.widget(Item.WIDGET_PICKER, 4, 2, -1, null));
+        else {
+            slots.set(4, Item.widget(Item.WIDGET_PICKER, 2, 2, -1, null));
+            slots.set(6, Item.widget(Item.WIDGET_PICKER, 2, 2, -1, null));
+        }
         slots.set(migrated ? vacancy(4, 3) : 20, Item.widget(Item.AI_WIDGET, 4, 3, -1, null));
         android.content.Intent[] intents = {
             new android.content.Intent(android.content.Intent.ACTION_DIAL),

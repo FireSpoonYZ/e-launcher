@@ -102,6 +102,8 @@ final class HomeDesktop extends FrameLayout {
     private Dialog appDialog;
     private FrameLayout folderRoot;
     private FrameLayout folderPanel;
+    private View folderBackground;
+    private LinearLayout folderSurface;
     private GridLayout folderGrid;
     private Bitmap folderBackdrop;
     private androidx.activity.OnBackPressedCallback folderBack;
@@ -142,16 +144,23 @@ final class HomeDesktop extends FrameLayout {
         widgets = new DesktopWidgets(activity, layout, this::persist);
         LinearLayout surface = column();
         tools = row();
-        tools.addView(compact("＋ 添加", this::showAddMenu));
-        tools.addView(compact("撤销", this::undo));
-        tools.addView(compact("设置", () -> settingsAction.run()));
-        tools.addView(compact("完成", () -> {
+        TextView add = compact("添加", this::showAddMenu);
+        toolbarIcon(add, "plus"); tools.addView(add);
+        tools.addView(new View(activity), new LinearLayout.LayoutParams(0, 1, 1));
+        ImageView more = new ImageView(activity);
+        more.setImageDrawable(new ChatIcon("more", colors.muted)); more.setPadding(dp(13), dp(13), dp(13), dp(13));
+        more.setContentDescription("更多整理操作"); more.setFocusable(true);
+        more.setOnClickListener(v -> new AlertDialog.Builder(activity).setItems(new String[]{"撤销上次修改", "桌面设置"},
+                (dialog, which) -> { if (which == 0) undo(); else settingsAction.run(); }).show());
+        tools.addView(more, new LinearLayout.LayoutParams(dp(48), dp(48)));
+        TextView done = compact("完成", () -> {
             editing = false; render();
             new Thread(() -> {
                 try { new DesktopBackup(activity).snapshot(); }
                 catch (Exception e) { activity.runOnUiThread(() -> message("桌面已保存，但历史快照失败：" + e.getMessage())); }
             }, "desktop-snapshot").start();
-        }));
+        });
+        toolbarIcon(done, "check"); tools.addView(done);
         surface.addView(tools, new LinearLayout.LayoutParams(-1, dp(48)));
         grid.setColumnCount(layout.columns);
         grid.setRowCount(layout.rows);
@@ -161,7 +170,7 @@ final class HomeDesktop extends FrameLayout {
         pages.setOnClickListener(v -> setCurrentPage((currentPage + 1) % layout.pageCount()));
         surface.addView(pages, new LinearLayout.LayoutParams(-1, dp(24)));
         dock = row();
-        dock.setBackground(shape(colors.dark ? 0xb3252d28 : 0xbbeffbfa, 26, 1, colors.border));
+        dock.setBackground(shape(colors.dark ? 0xc0274855 : 0xbbebfaff, 24, 0, 0));
         surface.addView(dock, new LinearLayout.LayoutParams(-1, dp(88)));
         addView(surface, new FrameLayout.LayoutParams(-1, -1));
         setOnDragListener(this::desktopDrag);
@@ -297,10 +306,15 @@ final class HomeDesktop extends FrameLayout {
             }
             @Override protected void onDetachedFromWindow() { handler.removeCallbacks(hold); super.onDetachedFromWindow(); }
         };
-        frame.setBackground(shape(colors.dark ? 0xc0252d28 : 0xddeffbfa, 22, 1, colors.border));
-        frame.setClipToOutline(true);
+        if (!HomeLayout.Item.AI_WIDGET.equals(item.type)) {
+            frame.setBackground(shape(colors.dark ? 0xc0254552 : 0xcceffbff, 22, 0, 0));
+            frame.setClipToOutline(true);
+        }
         View content = null;
-        if (HomeLayout.Item.AI_WIDGET.equals(item.type)) content = aiWidget;
+        if (HomeLayout.Item.AI_WIDGET.equals(item.type)) {
+            if (aiWidget instanceof HomeTaskCards cards) cards.setEditing(editing);
+            content = aiWidget;
+        }
         else if (HomeLayout.Item.CLOCK.equals(item.type)) {
             LinearLayout time = row(); time.setPadding(dp(16), dp(4), dp(16), dp(4));
             android.widget.TextClock clock = new android.widget.TextClock(activity);
@@ -327,7 +341,7 @@ final class HomeDesktop extends FrameLayout {
         frame.addView(content, new FrameLayout.LayoutParams(-1, -1));
         if (editing) {
             View edit = new View(activity);
-            edit.setBackground(shape(0x08228877, 22, 2, colors.accent));
+            edit.setBackground(shape(0x08ffffff, 22, 1, colors.dark ? 0x99a9d6e0 : 0xddffffff));
             edit.setContentDescription("小组件：点击调整尺寸或移除，长按拖动");
             edit.setOnClickListener(v -> widgetMenu(item, slot));
             frame.addView(edit, new FrameLayout.LayoutParams(-1, -1));
@@ -573,7 +587,11 @@ final class HomeDesktop extends FrameLayout {
                 });
                 if (item != null) cell.setContentDescription(itemDescription(item));
             }
-            if (editing && item == null) cell.setBackground(shape(0x15ffffff, 14, 1, colors.border));
+            if (editing && item == null) {
+                GradientDrawable vacant = shape(0x08ffffff, 12, 0, 0);
+                vacant.setStroke(dp(1), colors.dark ? 0x99a9d6e0 : 0xddffffff, dp(5), dp(4));
+                cell.setBackground(vacant);
+            }
             int local = slot % layout.pageSize();
             GridLayout.LayoutParams params = new GridLayout.LayoutParams(
                     GridLayout.spec(local / layout.columns, item == null ? 1 : item.spanY),
@@ -597,7 +615,7 @@ final class HomeDesktop extends FrameLayout {
         cell.setGravity(Gravity.TOP | Gravity.CENTER_HORIZONTAL);
         cell.setClickable(item != null);
         cell.setFocusable(item != null);
-        cell.setPadding(dp(3), dp(10), dp(3), dp(6));
+        cell.setPadding(dp(3), 0, dp(3), 0);
         cell.setBackgroundColor(Color.TRANSPARENT);
         if (item == null) return cell;
         int iconSize = preferences.iconSizeDp();
@@ -605,10 +623,11 @@ final class HomeDesktop extends FrameLayout {
         TextView name = text(itemLabel(item), preferences.labelSizeSp(),
                 itemAvailable(item) ? colors.ink : colors.muted);
         name.setGravity(Gravity.CENTER);
-        name.setMaxLines(2);
+        name.setIncludeFontPadding(false);
+        name.setMaxLines(1);
         name.setEllipsize(android.text.TextUtils.TruncateAt.END);
         LinearLayout.LayoutParams nameParams = new LinearLayout.LayoutParams(-1, -2);
-        nameParams.topMargin = dp(7);
+        nameParams.topMargin = dp(3);
         cell.addView(name, nameParams);
         return cell;
     }
@@ -616,8 +635,9 @@ final class HomeDesktop extends FrameLayout {
     private View itemIcon(HomeLayout.Item item, int sizeDp) {
         int size = dp(sizeDp);
         if (HomeLayout.Item.ASSISTANT.equals(item.type)) {
-            TextView star = text("✦", 38, colors.accent);
-            star.setGravity(Gravity.CENTER);
+            ImageView star = new ImageView(activity);
+            star.setImageDrawable(new ChatIcon("sparkles", colors.accent));
+            star.setPadding(dp(10), dp(10), dp(10), dp(10));
             star.setBackground(shape(colors.surface, 14, 0, 0));
             return star;
         }
@@ -642,25 +662,34 @@ final class HomeDesktop extends FrameLayout {
     }
 
     private View folderIcon(HomeLayout.Item folder, int size) {
-        FrameLayout frame = new FrameLayout(activity);
-        frame.setBackground(shape(colors.panel, 14, 1, colors.border));
-        int miniature = Math.round(size * .34f);
-        int margin = Math.round(size * .12f);
+        FrameLayout frame = new FrameLayout(activity) {
+            @Override protected void onMeasure(int widthSpec, int heightSpec) {
+                int side = MeasureSpec.getSize(widthSpec);
+                int miniature = Math.round(side * .34f), margin = Math.round(side * .12f);
+                int stride = side - margin * 2 - miniature;
+                for (int i = 0; i < getChildCount(); i++) if (getChildAt(i) instanceof ImageView) {
+                    FrameLayout.LayoutParams p = (FrameLayout.LayoutParams) getChildAt(i).getLayoutParams();
+                    p.width = p.height = miniature;
+                    p.leftMargin = margin + (i % 2) * stride;
+                    p.topMargin = margin + (i / 2) * stride;
+                }
+                super.onMeasure(widthSpec, heightSpec);
+            }
+        };
+        frame.setBackground(shape(colors.dark ? 0xcc294f5d : 0xccdff4fa, 14, 1, colors.border));
+        frame.setClipToOutline(true);
         for (int index = 0; index < Math.min(4, folder.children.size()); index++) {
             HomeLayout.Item child = folder.children.get(index);
-            Drawable drawable = child.isShortcut() ? shortcutIcon(child)
-                    : appIcon(child.packageName, child.className);
             ImageView icon = new ImageView(activity);
-            icon.setImageDrawable(drawable);
-            FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(miniature, miniature);
-            params.leftMargin = margin + (index % 2) * (miniature + dp(3));
-            params.topMargin = margin + (index / 2) * (miniature + dp(3));
-            frame.addView(icon, params);
+            icon.setImageDrawable(child.isShortcut() ? shortcutIcon(child) : appIcon(child.packageName, child.className));
+            frame.addView(icon, new FrameLayout.LayoutParams(0, 0));
         }
         if (folder.children.isEmpty()) {
-            TextView empty = text("□", 26, colors.muted);
-            empty.setGravity(Gravity.CENTER);
-            frame.addView(empty, new FrameLayout.LayoutParams(-1, -1));
+            android.widget.ImageView empty = new android.widget.ImageView(activity);
+            empty.setImageDrawable(DesktopMenu.icon(DesktopMenu.Glyph.FOLDER, colors.muted));
+            empty.setPadding(dp(12), dp(12), dp(12), dp(12));
+            empty.setBackground(frame.getBackground());
+            return empty;
         }
         return frame;
     }
@@ -891,6 +920,14 @@ final class HomeDesktop extends FrameLayout {
                     source = target >= 0 && layout.get(target) != null ? homeCells.get(target) : null;
                 }
                 if (Math.hypot(event.getRawX() - downX, event.getRawY() - downY) > touchSlop) moved = true;
+                if (event.getActionMasked() == MotionEvent.ACTION_UP && !moved
+                        && event.getEventTime() - event.getDownTime() < LONG_PRESS_MS) {
+                    if (source != null) {
+                        MotionEvent cancel = MotionEvent.obtain(event); cancel.setAction(MotionEvent.ACTION_CANCEL);
+                        source.dispatchTouchEvent(cancel); cancel.recycle();
+                    }
+                    source = null; closeFolder(); return true;
+                }
                 if (source != null) {
                     int[] origin = new int[2];
                     source.getLocationOnScreen(origin);
@@ -927,6 +964,9 @@ final class HomeDesktop extends FrameLayout {
         folderBack = null;
         folderRoot = null;
         folderPanel = null;
+        folderBackground = null; folderSurface = null;
+        colors.applySystemBars(activity, Color.TRANSPARENT);
+        pager.setGestureBlocked(pager.gestureId(), false);
         folderGrid = null;
         folderBackdrop = null;
         activeFolderSlot = -1;
@@ -955,41 +995,23 @@ final class HomeDesktop extends FrameLayout {
         }
         dismissMenu();
         folderRoot.removeAllViews();
-        folderRoot.setBackgroundColor(0x18000000);
+        folderRoot.setBackgroundColor(Color.TRANSPARENT);
         androidx.core.view.ViewCompat.setAccessibilityPaneTitle(folderRoot, folder.name);
+        ImageView background = new ImageView(activity);
+        background.setImageBitmap(folderBackdrop); background.setScaleType(ImageView.ScaleType.FIT_XY);
+        background.setColorFilter(0x66233f50, android.graphics.PorterDuff.Mode.SRC_ATOP);
+        if (Build.VERSION.SDK_INT >= 31)
+            background.setRenderEffect(RenderEffect.createBlurEffect(dp(18), dp(18), Shader.TileMode.CLAMP));
+        background.setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_NO);
+        folderBackground = background;
+        folderRoot.addView(background, new FrameLayout.LayoutParams(-1, -1));
+        activity.getWindow().getDecorView().setSystemUiVisibility(0);
         folderPanel = new FrameLayout(activity);
-        int tint = colors.dark ? 0xb3252d28 : 0x99f8faf6;
-        int edge = colors.dark ? 0x44768479 : 0x99ffffff;
-        folderPanel.setBackground(shape(tint, 28, 1, edge));
-        folderPanel.setClipToOutline(true);
-        folderPanel.setElevation(dp(12));
-        folderPanel.setClickable(true);
-        View glass = new View(activity) {
-            final Paint paint = new Paint(Paint.FILTER_BITMAP_FLAG);
-            @Override protected void onDraw(Canvas canvas) {
-                if (folderBackdrop == null) return;
-                View host = activity.findViewById(android.R.id.content);
-                int[] origin = new int[2];
-                int[] position = new int[2];
-                host.getLocationOnScreen(origin);
-                getLocationOnScreen(position);
-                int left = origin[0] - position[0];
-                int top = origin[1] - position[1];
-                canvas.drawBitmap(folderBackdrop, null,
-                        new Rect(left, top, left + host.getWidth(), top + host.getHeight()), paint);
-            }
-        };
-        if (Build.VERSION.SDK_INT >= 31) {
-            glass.setRenderEffect(RenderEffect.createBlurEffect(dp(18), dp(18), Shader.TileMode.CLAMP));
-        }
-        glass.setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_NO);
-        folderPanel.addView(glass, new FrameLayout.LayoutParams(-1, -1));
-        View frost = new View(activity);
-        frost.setBackground(shape(tint, 28, 1, edge));
-        frost.setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_NO);
-        folderPanel.addView(frost, new FrameLayout.LayoutParams(-1, -1));
+        folderPanel.setBackground(shape(colors.dark ? 0xe6254553 : 0xcce6f7fc, 28, 1,
+                colors.dark ? 0x66578293 : 0xb3ffffff));
+        folderPanel.setClipToOutline(true); folderPanel.setElevation(dp(4)); folderPanel.setClickable(true);
         LinearLayout content = column();
-        content.setPadding(dp(18), dp(8), dp(18), dp(16));
+        content.setPadding(dp(16), dp(12), dp(16), dp(12));
         TextView title = text(folder.name, 24, colors.ink);
         title.setTypeface(null, android.graphics.Typeface.BOLD);
         title.setGravity(Gravity.CENTER_VERTICAL);
@@ -1003,7 +1025,16 @@ final class HomeDesktop extends FrameLayout {
             showMenu(folderRoot, view, folder, new Location(FOLDER, activeFolderSlot, -1));
             return true;
         });
-        content.addView(title, new LinearLayout.LayoutParams(-1, dp(60)));
+        title.setMaxWidth(dp(220));
+        LinearLayout titleRow = row(); titleRow.setGravity(Gravity.CENTER);
+        titleRow.addView(title, new LinearLayout.LayoutParams(-2, dp(56)));
+        ImageView rename = new ImageView(activity);
+        rename.setImageDrawable(DesktopMenu.icon(DesktopMenu.Glyph.RENAME, colors.muted));
+        rename.setPadding(dp(8), dp(14), dp(8), dp(14));
+        rename.setContentDescription("重命名文件夹"); rename.setFocusable(true);
+        rename.setOnClickListener(v -> renameFolder(activeFolderSlot));
+        titleRow.addView(rename, new LinearLayout.LayoutParams(dp(40), dp(48)));
+        content.addView(titleRow, new LinearLayout.LayoutParams(-1, dp(64)));
 
         folderGrid = new GridLayout(activity);
         folderGrid.setColumnCount(3);
@@ -1023,11 +1054,16 @@ final class HomeDesktop extends FrameLayout {
                 });
                 entry = cell;
             } else if (index == folder.children.size()) {
-                TextView add = text("＋\n添加应用", 20, colors.accent);
-                add.setGravity(Gravity.CENTER);
-                add.setContentDescription("批量添加应用到文件夹");
-                add.setOnClickListener(v -> batchAdd(activeFolderSlot));
-                entry = add;
+                LinearLayout add = column(); add.setGravity(Gravity.TOP | Gravity.CENTER_HORIZONTAL);
+                ImageView plus = new ImageView(activity);
+                plus.setImageDrawable(new ChatIcon("plus", colors.muted));
+                plus.setPadding(dp(15), dp(15), dp(15), dp(15));
+                plus.setBackground(shape(colors.dark ? 0x663b6877 : 0x77ffffff, 14, 1, colors.border));
+                add.addView(plus, new LinearLayout.LayoutParams(dp(preferences.iconSizeDp()), dp(preferences.iconSizeDp())));
+                TextView name = text("添加应用", preferences.labelSizeSp(), colors.ink);
+                name.setPadding(0, dp(3), 0, 0); name.setGravity(Gravity.CENTER); add.addView(name);
+                add.setContentDescription("批量添加应用到文件夹"); add.setFocusable(true);
+                add.setOnClickListener(v -> batchAdd(activeFolderSlot)); entry = add;
             } else {
                 entry = new View(activity);
                 entry.setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_NO);
@@ -1045,10 +1081,14 @@ final class HomeDesktop extends FrameLayout {
         folderPanel.addView(content, new FrameLayout.LayoutParams(-1, -1));
         Rect safe = new Rect();
         folderRoot.getWindowVisibleDisplayFrame(safe);
-        FrameLayout.LayoutParams panelParams = new FrameLayout.LayoutParams(
-                Math.min(dp(400), safe.width() - dp(48)),
-                Math.min(dp(84 + Math.min(3, rows) * 112), safe.height() - dp(48)), Gravity.CENTER);
-        folderRoot.addView(folderPanel, panelParams);
+        folderSurface = column();
+        int panelHeight = Math.min(dp(88 + Math.min(3, rows) * 112), safe.height() - dp(96));
+        folderSurface.addView(folderPanel, new LinearLayout.LayoutParams(-1, panelHeight));
+        TextView hint = text("点击空白处收起", 13, 0xddeafaff);
+        hint.setGravity(Gravity.CENTER); hint.setOnClickListener(v -> closeFolder());
+        folderSurface.addView(hint, new LinearLayout.LayoutParams(-1, dp(44)));
+        folderRoot.addView(folderSurface, new FrameLayout.LayoutParams(
+                Math.min(dp(400), safe.width() - dp(48)), -2, Gravity.CENTER));
     }
 
     private void startDragPreview(HomeLayout.Item item) {
@@ -1075,8 +1115,8 @@ final class HomeDesktop extends FrameLayout {
 
     private void restoreFolderSurface() {
         if (folderRoot == null) return;
-        folderRoot.setBackgroundColor(0x18000000);
-        folderPanel.setAlpha(1f);
+        folderBackground.setAlpha(1f);
+        folderSurface.setAlpha(1f);
     }
 
     private final class FolderTouch implements View.OnTouchListener {
@@ -1132,8 +1172,8 @@ final class HomeDesktop extends FrameLayout {
                     if (dragging) {
                         moveDragPreview(event.getRawX(), event.getRawY());
                         if (!contains(folderPanel, event.getRawX(), event.getRawY())) outsideFolder = true;
-                        folderRoot.setBackgroundColor(outsideFolder ? Color.TRANSPARENT : 0x18000000);
-                        folderPanel.setAlpha(outsideFolder ? 0f : 1f);
+                        folderBackground.setAlpha(outsideFolder ? 0f : 1f);
+                        folderSurface.setAlpha(outsideFolder ? 0f : 1f);
                         if (!outsideFolder) clearDropTarget();
                         else {
                             highlightDrop(homeTarget(event.getRawX(), event.getRawY()), false);
@@ -1345,7 +1385,7 @@ final class HomeDesktop extends FrameLayout {
                 name.setMaxLines(2);
                 name.setEllipsize(android.text.TextUtils.TruncateAt.END);
                 LinearLayout.LayoutParams nameParams = new LinearLayout.LayoutParams(-1, -2);
-                nameParams.topMargin = dp(7);
+                nameParams.topMargin = dp(3);
                 cell.addView(name, nameParams);
             }
             ResolveInfo app = getItem(position);
@@ -1718,6 +1758,15 @@ final class HomeDesktop extends FrameLayout {
         parent.addView(divider, params);
     }
 
+    private void toolbarIcon(TextView view, String name) {
+        ChatIcon icon = new ChatIcon(name, colors.ink); icon.setBounds(0, 0, dp(18), dp(18));
+        view.setCompoundDrawablesRelative(icon, null, null, null); view.setCompoundDrawablePadding(dp(5));
+        view.setTextColor(colors.ink);
+        view.setBackground(new android.graphics.drawable.InsetDrawable(shape(colors.dark ? 0x88456d7a : 0x668dccda, 20, 0, 0),
+                0, dp(5), 0, dp(5)));
+        view.setPadding(dp(12), 0, dp(12), 0);
+    }
+
     private TextView compact(String label, Runnable action) {
         TextView view = text(label, 14, colors.accent);
         view.setGravity(Gravity.CENTER);
@@ -1736,14 +1785,19 @@ final class HomeDesktop extends FrameLayout {
         @Override protected void onMeasure(int widthSpec, int heightSpec) {
             int height = MeasureSpec.getSize(heightSpec);
             if (getChildCount() > 0 && MeasureSpec.getMode(heightSpec) == MeasureSpec.EXACTLY && height > 0) {
-                int available = Math.max(dp(20), height - getPaddingTop() - getPaddingBottom() - dp(25));
-                View icon = getChildAt(0);
-                ViewGroup.LayoutParams p = icon.getLayoutParams();
-                p.width = p.height = Math.min(dp(preferences.iconSizeDp()), Math.min(available, Math.max(dp(20), MeasureSpec.getSize(widthSpec) - dp(8))));
+                int reserved = 0;
                 if (getChildCount() > 1 && getChildAt(1) instanceof TextView label) {
                     label.setMaxLines(1);
-                    ((LinearLayout.LayoutParams) label.getLayoutParams()).topMargin = dp(3);
+                    LinearLayout.LayoutParams labelParams = (LinearLayout.LayoutParams) label.getLayoutParams();
+                    labelParams.topMargin = dp(3);
+                    label.measure(MeasureSpec.makeMeasureSpec(MeasureSpec.getSize(widthSpec), MeasureSpec.AT_MOST),
+                            MeasureSpec.makeMeasureSpec(0, MeasureSpec.UNSPECIFIED));
+                    reserved = label.getMeasuredHeight() + labelParams.topMargin;
                 }
+                int available = Math.max(dp(20), height - getPaddingTop() - getPaddingBottom() - reserved);
+                ViewGroup.LayoutParams p = getChildAt(0).getLayoutParams();
+                p.width = p.height = Math.min(dp(preferences.iconSizeDp()), Math.min(available,
+                        Math.max(dp(20), MeasureSpec.getSize(widthSpec) - getPaddingLeft() - getPaddingRight())));
             }
             super.onMeasure(widthSpec, heightSpec);
         }

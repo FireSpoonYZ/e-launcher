@@ -46,8 +46,8 @@ final class HomeTaskCards extends LinearLayout {
     private final Map<String, String> activeByConversation = new HashMap<>();
     private int followingTarget = -1;
     private boolean stripSettling;
-    private boolean expanded = true;
     private int availableHeight = Integer.MAX_VALUE;
+    private boolean editing;
     private float downX, downY;
     private boolean swiping;
     private boolean touching;
@@ -72,7 +72,7 @@ final class HomeTaskCards extends LinearLayout {
         this.dismiss = dismiss;
         colors = AppAppearance.readDesktop(context);
         setOrientation(VERTICAL);
-        setPadding(dp(12), dp(6), dp(12), dp(8));
+        setPadding(0, 0, 0, 0);
         setClipChildren(false);
         setClipToPadding(false);
     }
@@ -96,6 +96,16 @@ final class HomeTaskCards extends LinearLayout {
     }
 
     void setAvailableHeight(int height) { availableHeight = height; }
+    void setEditing(boolean value) {
+        if (editing == value) return;
+        editing = value; render();
+    }
+
+    @Override protected void onMeasure(int widthSpec, int heightSpec) {
+        if (availableHeight != Integer.MAX_VALUE)
+            heightSpec = MeasureSpec.makeMeasureSpec(availableHeight, MeasureSpec.EXACTLY);
+        super.onMeasure(widthSpec, heightSpec);
+    }
 
     private int index() {
         for (int i = 0; i < cards.length(); i++)
@@ -133,149 +143,148 @@ final class HomeTaskCards extends LinearLayout {
     private void render() {
         int index = index();
         JSONObject card = cards.optJSONObject(index);
-        String signature = String.valueOf(card) + index + ":" + cards.length() + ":" + expanded;
+        String signature = String.valueOf(card) + index + ":" + cards.length() + ":" + editing;
         if (signature.equals(rendered)) return;
         rendered = signature;
         View oldStrip = findViewWithTag("todo-strip");
         if (oldStrip != null) positions.put(displayed, followingTarget >= 0 ? followingTarget : oldStrip.getScrollX());
         followingTarget = -1;
         removeCallbacks(settleScroll);
-        stripSettling = false;
-        deferred = false;
-        removeAllViews();
-        setVisibility(VISIBLE);
+        stripSettling = false; deferred = false;
+        removeAllViews(); setVisibility(VISIBLE);
+
+        LinearLayout panel = new LinearLayout(getContext());
+        panel.setOrientation(VERTICAL);
+        panel.setPadding(dp(14), dp(4), dp(14), dp(10));
+        FrameLayout glass = colors.glass(getContext(), wallpaper, 22);
+        glass.addView(panel, new FrameLayout.LayoutParams(-1, -1));
         if (card == null) {
             selected = "";
-            LinearLayout empty = new LinearLayout(getContext());
-            empty.setOrientation(VERTICAL); empty.setPadding(dp(20), dp(16), dp(20), dp(16));
-            empty.addView(label(text("✦  AI 助手", "✦  AI assistant"), 18));
-            TextView star = label("✦", 48); star.setTextColor(colors.accent); star.setGravity(Gravity.CENTER);
-            empty.addView(star);
+            TextView brand = label(text("AI 助手", "AI assistant"), 15);
+            decorate(brand, "sparkles", colors.accent);
+            brand.setGravity(Gravity.CENTER_VERTICAL);
+            brand.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+            panel.addView(brand, new LayoutParams(-1, dp(40)));
+            LinearLayout message = new LinearLayout(getContext());
+            message.setOrientation(VERTICAL); message.setGravity(Gravity.CENTER);
+            android.widget.ImageView star = new android.widget.ImageView(getContext());
+            star.setImageDrawable(new ChatIcon("sparkles", colors.accent));
+            message.addView(star, new LayoutParams(dp(56), dp(56)));
+            TextView prompt = label(text("开始一个新对话", "Start a new conversation"), 16);
+            prompt.setPadding(0, dp(12), 0, 0); message.addView(prompt);
+            panel.addView(message, new LayoutParams(-1, 0, 1));
             TextView start = button(text("开始对话", "Start conversation"), () -> open.accept(""));
-            start.setGravity(Gravity.CENTER); start.setTextColor(colors.accent); empty.addView(start);
-            FrameLayout glass = colors.glass(getContext(), wallpaper, 24);
-            glass.addView(empty); addView(glass, new LayoutParams(-1, -2)); return;
+            start.setGravity(Gravity.CENTER); start.setTextColor(0xffffffff);
+            start.setBackground(fill(colors.accent, 18));
+            LayoutParams startParams = new LayoutParams(-1, dp(48));
+            startParams.setMargins(dp(32), dp(8), dp(32), dp(4));
+            panel.addView(start, startParams);
+            addView(glass, new LayoutParams(-1, -1)); return;
         }
         selected = card.optString("conversationId");
-        String id = selected;
-        displayed = id;
+        String id = selected; displayed = id;
         String model = card.optString("modelState");
         List<JSONObject> tasks = tasks(card);
         long completed = tasks.stream().filter(task -> "completed".equals(task.optString("status"))).count();
-        String active = tasks.stream().filter(task -> "in_progress".equals(task.optString("status")))
-                .map(task -> task.optString("subject")).findFirst().orElse("");
-        boolean working = "working".equals(model);
-        String status = status(card);
-        LinearLayout panel = new LinearLayout(getContext());
-        panel.setOrientation(VERTICAL);
-        panel.setPadding(dp(20), dp(8), dp(20), dp(8));
         LinearLayout heading = new LinearLayout(getContext());
-        heading.setGravity(Gravity.CENTER_VERTICAL);
-        heading.setTag("card-switch");
-        TextView title = button(text("✦  AI 助手", "✦  AI assistant"), () -> detail(id));
-        title.setTextSize(16);
-        title.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-        title.setMaxLines(1);
-        title.setEllipsize(TextUtils.TruncateAt.END);
-        heading.addView(title, new LayoutParams(0, -2, 1));
-        if (cards.length() > 1) {
-            TextView position = label((index + 1) + "/" + cards.length(), 13);
-            position.setTextColor(colors.muted); heading.addView(position);
-            LinearLayout arrows = new LinearLayout(getContext()); arrows.setOrientation(VERTICAL);
-            TextView up = button("⌃", () -> move(-1));
-            up.setContentDescription(text("上一个对话", "Previous conversation"));
-            TextView down = button("⌄", () -> move(1));
-            down.setContentDescription(text("下一个对话", "Next conversation"));
-            arrows.addView(up, new LayoutParams(dp(48), dp(48)));
-            arrows.addView(down, new LayoutParams(dp(48), dp(48)));
-            heading.addView(arrows);
-        }
-        panel.addView(heading);
+        heading.setGravity(Gravity.CENTER_VERTICAL); heading.setTag("card-switch");
+        heading.setOnClickListener(v -> detail(id));
+        heading.setContentDescription(text("查看任务详情", "View task details"));
+        TextView brand = label(text("AI 助手", "AI assistant"), 15);
+        brand.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        decorate(brand, "sparkles", colors.accent);
+        heading.addView(brand);
+        TextView state = label(status(card), 10);
+        state.setTextColor(colors.accent); state.setPadding(dp(8), dp(4), dp(8), dp(4));
+        state.setBackground(fill(colors.dark ? 0xff254c59 : 0xffd9f3f7, 20));
+        LayoutParams stateParams = new LayoutParams(-2, -2); stateParams.setMarginStart(dp(8));
+        heading.addView(state, stateParams);
+        View space = new View(getContext()); heading.addView(space, new LayoutParams(0, 1, 1));
+        TextView position = label(text("对话 ", "Chat ") + (index + 1) + "/" + cards.length(), 11);
+        position.setTextColor(colors.muted); heading.addView(position);
+        if (cards.length() > 1) heading.addView(new ConversationSwitch(), new LayoutParams(dp(48), dp(48)));
+        panel.addView(heading, new LayoutParams(-1, dp(48)));
 
-        LinearLayout stateRow = new LinearLayout(getContext());
-        stateRow.setGravity(Gravity.CENTER_VERTICAL);
-        TextView state = label(card.optString("title"), 18);
-        state.setOnClickListener(v -> detail(id));
-        state.setFocusable(true);
-        state.setMaxLines(expanded ? 2 : 1);
-        state.setEllipsize(TextUtils.TruncateAt.END);
-        state.setTypeface(Typeface.create(expanded ? "sans-serif-medium" : "sans-serif", Typeface.NORMAL));
-        state.setTextColor(expanded ? colors.ink : colors.muted);
-        stateRow.addView(state, new LayoutParams(-2, -2, 1));
-        if (working) {
-            View dot = new View(getContext());
-            GradientDrawable fill = new GradientDrawable();
-            fill.setShape(GradientDrawable.OVAL); fill.setColor(colors.accent);
-            dot.setBackground(fill);
-            dot.setContentDescription(text("正在运行", "Running"));
-            LayoutParams dotParams = new LayoutParams(dp(8), dp(8));
-            dotParams.setMarginStart(dp(10));
-            stateRow.addView(dot, dotParams);
-        }
-        LayoutParams stateParams = new LayoutParams(-1, -2);
-        stateParams.topMargin = expanded ? dp(10) : 0;
-        panel.addView(stateRow, stateParams);
-        TextView statusLabel = label(status, 13); statusLabel.setTextColor(colors.accent);
-        statusLabel.setOnClickListener(v -> detail(id)); panel.addView(statusLabel);
-        panel.setOnClickListener(v -> detail(id));
-        if (!tasks.isEmpty()) {
-            TextView count = label(text("已完成 ", "Completed ") + completed + " / " + tasks.size()
-                    + text(" 个步骤", " steps"), 14);
-            count.setTextColor(colors.muted);
-            count.setPadding(0, dp(5), 0, expanded ? 0 : dp(8));
-            panel.addView(count);
-            if (expanded) {
-                HorizontalScrollView strip = taskStrip(tasks, model);
-                restoreTaskPosition(strip, tasks, id);
-                LayoutParams stripParams = new LayoutParams(-1, -2);
-                stripParams.topMargin = dp(18);
-                panel.addView(strip, stripParams);
-            }
-        }
-        if (!expanded || tasks.isEmpty()) activeByConversation.put(id, null);
+        LinearLayout body = new LinearLayout(getContext()); body.setOrientation(VERTICAL);
+        TextView title = label(card.optString("title"), 17);
+        title.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        title.setMaxLines(1); title.setEllipsize(TextUtils.TruncateAt.END);
+        title.setOnClickListener(v -> detail(id)); body.addView(title);
+        TextView count = label(tasks.isEmpty() ? text("打开对话查看完整内容", "Open the conversation for details")
+                : text("已完成 ", "Completed ") + completed + text(" 项，共 ", " of ") + tasks.size() + text(" 项", " steps"), 12);
+        count.setTextColor(colors.muted); count.setPadding(0, dp(4), 0, 0); body.addView(count);
+        if (!tasks.isEmpty() && !editing) {
+            HorizontalScrollView strip = taskStrip(tasks, model);
+            restoreTaskPosition(strip, tasks, id);
+            LayoutParams stripParams = new LayoutParams(-1, -2); stripParams.topMargin = dp(7);
+            body.addView(strip, stripParams);
+        } else activeByConversation.put(id, null);
+        ScrollView bodyScroll = new ScrollView(getContext());
+        bodyScroll.setVerticalScrollBarEnabled(false); bodyScroll.setOverScrollMode(OVER_SCROLL_NEVER);
+        bodyScroll.addView(body); panel.addView(bodyScroll, new LayoutParams(-1, 0, 1));
+
         LinearLayout actions = new LinearLayout(getContext());
         boolean busy = !"idle".equals(model);
         TextView left = button(busy ? text("stopping".equals(model) ? "正在停止…" : "停止", "Stop")
                 : text("删除", "Delete"), () -> { if (busy) stop.accept(id); else dismiss.accept(id); });
         left.setTextColor(colors.error); left.setGravity(Gravity.CENTER);
         left.setEnabled(!"stopping".equals(model));
-        GradientDrawable warning = new GradientDrawable(); warning.setColor(colors.dark ? 0x332e1515 : 0x22db4650);
-        warning.setCornerRadius(dp(16)); left.setBackground(warning);
+        left.setBackground(fill(colors.dark ? 0xff4a303c : 0xfff4dfe4, 16));
         actions.addView(left, new LayoutParams(0, dp(48), 1));
         TextView chat = button(text("查看对话", "View chat"), () -> open.accept(id));
         chat.setGravity(Gravity.CENTER); chat.setTextColor(0xffffffff);
-        GradientDrawable primary = new GradientDrawable(); primary.setColor(colors.accent);
-        primary.setCornerRadius(dp(16)); chat.setBackground(primary);
+        chat.setBackground(fill(colors.accent, 16));
         LayoutParams chatParams = new LayoutParams(0, dp(48), 1); chatParams.setMarginStart(dp(8));
         actions.addView(chat, chatParams);
-        LayoutParams actionParams = new LayoutParams(-1, -2); actionParams.topMargin = dp(12);
+        LayoutParams actionParams = new LayoutParams(-1, dp(48)); actionParams.topMargin = dp(7);
         panel.addView(actions, actionParams);
-        ScrollView bounded = new ScrollView(getContext()) {
-            @Override protected void onMeasure(int w, int h) {
-                int max = Math.max(0, Math.min(MeasureSpec.getSize(h), availableHeight)
-                        - HomeTaskCards.this.getPaddingTop() - HomeTaskCards.this.getPaddingBottom());
-                if (MeasureSpec.getMode(h) == MeasureSpec.UNSPECIFIED) max = availableHeight;
-                super.onMeasure(w, MeasureSpec.makeMeasureSpec(max, MeasureSpec.AT_MOST));
-            }
-        };
-        bounded.setVerticalScrollBarEnabled(false);
-        bounded.setOverScrollMode(OVER_SCROLL_NEVER);
-        bounded.addView(panel);
-        FrameLayout glass = colors.glass(getContext(), wallpaper, 24);
-        glass.addView(bounded, new FrameLayout.LayoutParams(-1, -2));
+
         FrameLayout stack = new FrameLayout(getContext());
         int layers = Math.min(2, cards.length() - 1);
         for (int layer = layers; layer > 0; layer--) {
-            FrameLayout back = colors.glass(getContext(), wallpaper, 24);
+            View back = new View(getContext());
+            back.setBackground(fill(colors.dark ? 0xb3375a66 : 0xa3f2fdff, 22));
             back.setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_NO);
-            FrameLayout.LayoutParams layerParams = new FrameLayout.LayoutParams(-1, -1);
-            layerParams.setMargins(dp(layer * 8), dp(layer * 5), dp(layer * 8), 0);
-            stack.addView(back, layerParams);
+            FrameLayout.LayoutParams p = new FrameLayout.LayoutParams(-1, -1);
+            p.setMargins(dp(layer * 7), dp(layer * 4), dp(layer * 7), 0); stack.addView(back, p);
         }
-        FrameLayout.LayoutParams front = new FrameLayout.LayoutParams(-1, -2);
-        front.bottomMargin = dp(layers * 5);
-        stack.addView(glass, front);
-        addView(stack, new LayoutParams(-1, -2));
+        FrameLayout.LayoutParams front = new FrameLayout.LayoutParams(-1, -1);
+        front.bottomMargin = dp(layers * 4); stack.addView(glass, front);
+        addView(stack, new LayoutParams(-1, -1));
+    }
+
+    private GradientDrawable fill(int color, int radius) {
+        GradientDrawable drawable = new GradientDrawable();
+        drawable.setColor(color); drawable.setCornerRadius(dp(radius)); return drawable;
+    }
+
+    private final class ConversationSwitch extends View {
+        private int direction = 1;
+        private final ChatIcon up = new ChatIcon("up", colors.muted), down = new ChatIcon("down", colors.muted);
+        ConversationSwitch() {
+            super(HomeTaskCards.this.getContext()); setClickable(true); setFocusable(true);
+            setContentDescription(text("切换对话，上半部为上一个，下半部为下一个", "Switch conversation: previous above, next below"));
+        }
+        @Override protected void onDraw(Canvas canvas) {
+            int x = (getWidth() - dp(16)) / 2;
+            up.setBounds(x, dp(6), x + dp(16), dp(22)); up.draw(canvas);
+            down.setBounds(x, dp(26), x + dp(16), dp(42)); down.draw(canvas);
+        }
+        @Override public boolean onTouchEvent(MotionEvent event) {
+            if (event.getActionMasked() == MotionEvent.ACTION_DOWN) direction = event.getY() < getHeight() / 2f ? -1 : 1;
+            return super.onTouchEvent(event);
+        }
+        @Override public boolean performClick() { super.performClick(); move(direction); direction = 1; return true; }
+        @Override public void onInitializeAccessibilityNodeInfo(android.view.accessibility.AccessibilityNodeInfo info) {
+            super.onInitializeAccessibilityNodeInfo(info);
+            info.setClassName("android.widget.Button");
+            info.addAction(new android.view.accessibility.AccessibilityNodeInfo.AccessibilityAction(4096, text("下一个对话", "Next conversation")));
+            info.addAction(new android.view.accessibility.AccessibilityNodeInfo.AccessibilityAction(8192, text("上一个对话", "Previous conversation")));
+        }
+        @Override public boolean performAccessibilityAction(int action, android.os.Bundle arguments) {
+            if (action == 4096 || action == 8192) { move(action == 4096 ? 1 : -1); return true; }
+            return super.performAccessibilityAction(action, arguments);
+        }
     }
 
     private void restoreTaskPosition(HorizontalScrollView strip, List<JSONObject> tasks, String id) {
@@ -339,26 +348,26 @@ final class HomeTaskCards extends LinearLayout {
                     View a = getChildAt(i), b = getChildAt(i + 1);
                     line.setColor("completed".equals(tasks.get(i).optString("status"))
                             ? colors.accent : colors.border);
-                    canvas.drawLine(a.getLeft() + a.getWidth() / 2f + dp(16), dp(24),
-                            b.getLeft() + b.getWidth() / 2f - dp(16), dp(24), line);
+                    canvas.drawLine(a.getLeft() + a.getWidth() / 2f + dp(13), dp(19),
+                            b.getLeft() + b.getWidth() / 2f - dp(13), dp(19), line);
                 }
             }
         };
-        int width = Math.max(dp(94), (int) ((getResources().getDisplayMetrics().widthPixels - dp(64)) / 3.25f));
+        int width = Math.max(dp(58), (getResources().getDisplayMetrics().widthPixels - dp(60)) / Math.min(5, tasks.size()));
         for (JSONObject task : tasks) {
             String status = task.optString("status");
             LinearLayout node = new LinearLayout(getContext());
             node.setOrientation(VERTICAL);
             node.setGravity(Gravity.CENTER_HORIZONTAL);
-            node.setPadding(dp(4), dp(4), dp(4), dp(4));
-            node.addView(new Marker(getContext(), status, model), new LayoutParams(dp(40), dp(40)));
-            TextView subject = label(task.optString("subject"), 13);
-            subject.setMaxLines(2);
+            node.setPadding(dp(2), dp(2), dp(2), dp(2));
+            node.addView(new TaskStepMarker(getContext(), status, model, colors.accent), new LayoutParams(dp(34), dp(34)));
+            TextView subject = label(task.optString("subject"), 11);
+            subject.setMaxLines(1);
             subject.setEllipsize(TextUtils.TruncateAt.END);
             subject.setTextColor("in_progress".equals(status) ? colors.ink : colors.muted);
             if ("in_progress".equals(status)) subject.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
             subject.setGravity(Gravity.CENTER);
-            subject.setPadding(0, dp(7), 0, 0);
+            subject.setPadding(0, dp(4), 0, 0);
             node.addView(subject);
             node.setContentDescription(task.optString("subject") + ", " + taskStatus(status));
             track.addView(node, new LayoutParams(width, -2));
@@ -467,59 +476,4 @@ final class HomeTaskCards extends LinearLayout {
     }
     private int dp(int value) { return Math.round(value * getResources().getDisplayMetrics().density); }
 
-    private final class Marker extends View {
-        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final String status, model;
-        private ValueAnimator animator;
-        private float angle;
-        Marker(Context context, String status, String model) {
-            super(context); this.status = status; this.model = model;
-            setContentDescription(taskStatus(status));
-        }
-        @Override protected void onAttachedToWindow() { super.onAttachedToWindow(); updateAnimation(); }
-        @Override protected void onWindowVisibilityChanged(int visibility) {
-            super.onWindowVisibilityChanged(visibility); updateAnimation();
-        }
-        @Override protected void onVisibilityChanged(View changed, int visibility) {
-            super.onVisibilityChanged(changed, visibility); updateAnimation();
-        }
-        private void updateAnimation() {
-            if (animator != null) { animator.cancel(); animator = null; }
-            if (isAttachedToWindow() && isShown() && getWindowVisibility() == VISIBLE && animateNode(model, status, ValueAnimator.areAnimatorsEnabled())) {
-                animator = ValueAnimator.ofFloat(0, 360);
-                animator.setDuration(1200); animator.setRepeatCount(ValueAnimator.INFINITE);
-                animator.setInterpolator(new LinearInterpolator());
-                animator.addUpdateListener(value -> { angle = (float) value.getAnimatedValue(); invalidate(); });
-                animator.start();
-            }
-        }
-        @Override protected void onDetachedFromWindow() {
-            if (animator != null) { animator.cancel(); animator = null; }
-            super.onDetachedFromWindow();
-        }
-        @Override protected void onDraw(Canvas canvas) {
-            super.onDraw(canvas);
-            float x = getWidth() / 2f, y = getHeight() / 2f, radius = dp(13);
-            boolean completed = "completed".equals(status), active = "in_progress".equals(status);
-            paint.setColor(active || completed ? colors.accent : colors.muted);
-            paint.setStrokeWidth(dp(1) * 1.5f);
-            paint.setStyle(completed ? Paint.Style.FILL : Paint.Style.STROKE);
-            canvas.drawCircle(x, y, radius, paint);
-            if (completed) {
-                paint.setColor(colors.dark ? colors.background : 0xffffffff);
-                paint.setStyle(Paint.Style.STROKE); paint.setStrokeWidth(dp(2));
-                paint.setStrokeCap(Paint.Cap.ROUND);
-                canvas.drawLine(x - dp(5), y, x - dp(1), y + dp(4), paint);
-                canvas.drawLine(x - dp(1), y + dp(4), x + dp(5), y - dp(4), paint);
-            } else if (active) {
-                paint.setStyle(Paint.Style.FILL);
-                canvas.drawCircle(x, y, dp(8), paint);
-                paint.setStyle(Paint.Style.STROKE);
-                paint.setAlpha(40); paint.setStrokeWidth(dp(1));
-                canvas.drawCircle(x, y, radius + dp(4), paint); paint.setAlpha(255);
-                paint.setStrokeWidth(dp(2));
-                if (animator != null) canvas.drawArc(new RectF(x-radius-dp(4), y-radius-dp(4), x+radius+dp(4), y+radius+dp(4)), angle, 85, false, paint);
-            }
-        }
-    }
 }

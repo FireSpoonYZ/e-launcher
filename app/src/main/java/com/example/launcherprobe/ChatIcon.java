@@ -26,6 +26,75 @@ final class ChatIcon extends Drawable {
         canvas.translate(getBounds().left, getBounds().top);
         canvas.scale(getBounds().width() / 24f, getBounds().height() / 24f);
         switch (name) {
+            case "sparkles":
+                paint.setStyle(Paint.Style.FILL);
+                Path star = new Path();
+                star.moveTo(10, 1);
+                star.cubicTo(11.5f, 1, 11, 6.5f, 13, 8);
+                star.cubicTo(14.5f, 9, 19, 9, 19, 10.5f);
+                star.cubicTo(19, 12, 14.5f, 12, 13, 13.5f);
+                star.cubicTo(11, 15, 11.5f, 20, 10, 20);
+                star.cubicTo(8.5f, 20, 9, 15, 7, 13.5f);
+                star.cubicTo(5.5f, 12, 1, 12, 1, 10.5f);
+                star.cubicTo(1, 9, 5.5f, 9, 7, 8);
+                star.cubicTo(9, 6.5f, 8.5f, 1, 10, 1); star.close();
+                canvas.drawPath(star, paint);
+                path(canvas, 19, 15, 20.2f, 18, 23, 19, 20.2f, 20, 19, 23, 17.8f, 20, 15, 19, 17.8f, 18);
+                paint.setStyle(Paint.Style.STROKE); break;
+            case "up":
+                path(canvas, 5, 15, 12, 8, 19, 15); break;
+            case "down":
+                path(canvas, 5, 9, 12, 16, 19, 9); break;
+            case "check":
+                path(canvas, 5, 12, 10, 17, 20, 7); break;
+            case "grid":
+                paint.setStyle(Paint.Style.FILL);
+                canvas.drawRoundRect(3, 3, 10, 10, 2, 2, paint); canvas.drawRoundRect(14, 3, 21, 10, 2, 2, paint);
+                canvas.drawRoundRect(3, 14, 10, 21, 2, 2, paint); canvas.drawRoundRect(14, 14, 21, 21, 2, 2, paint);
+                paint.setStyle(Paint.Style.STROKE); break;
+            case "link":
+                canvas.save(); canvas.rotate(45, 12, 12);
+                canvas.drawRoundRect(8, 2, 16, 13, 4, 4, paint);
+                canvas.drawRoundRect(8, 11, 16, 22, 4, 4, paint); canvas.restore(); break;
+            case "paper-plane":
+                path(canvas, 3, 10, 21, 3, 14, 21, 10, 14, 3, 10);
+                line(canvas, 10, 14, 21, 3); break;
+            case "desktop":
+                paint.setStyle(Paint.Style.FILL);
+                path(canvas, 2, 10, 12, 2, 22, 10, 19, 10, 19, 22, 14, 22, 14, 15, 10, 15, 10, 22, 5, 22, 5, 10);
+                paint.setStyle(Paint.Style.STROKE); break;
+            case "dock":
+                paint.setStyle(Paint.Style.FILL); canvas.drawRoundRect(3, 3, 21, 21, 3, 3, paint);
+                int dockColor = paint.getColor(); paint.setColor(0xffffffff);
+                canvas.drawCircle(8, 16, 2, paint); canvas.drawCircle(16, 16, 2, paint);
+                paint.setColor(dockColor); paint.setStyle(Paint.Style.STROKE); break;
+            case "folder":
+                path(canvas, 3, 8, 21, 8, 21, 21, 3, 21, 3, 4, 10, 4, 12, 7, 21, 7, 21, 8); break;
+            case "gesture":
+                Path finger = new Path(); finger.moveTo(9, 13); finger.lineTo(9, 4);
+                finger.cubicTo(9, 1, 13, 1, 13, 4); finger.lineTo(13, 11);
+                finger.lineTo(16, 10); finger.lineTo(21, 13); finger.lineTo(20, 20);
+                finger.cubicTo(19, 24, 12, 23, 10, 21); finger.lineTo(4, 14);
+                finger.cubicTo(2, 11, 5, 9, 7, 12); finger.lineTo(9, 14); canvas.drawPath(finger, paint); break;
+            case "palette":
+                Path palette = new Path(); palette.moveTo(12, 3);
+                palette.cubicTo(24, 3, 25, 16, 17, 15); palette.cubicTo(12, 14, 17, 21, 11, 21);
+                palette.cubicTo(0, 21, 0, 3, 12, 3); canvas.drawPath(palette, paint);
+                paint.setStyle(Paint.Style.FILL);
+                canvas.drawCircle(7, 9, 1.3f, paint); canvas.drawCircle(12, 7, 1.3f, paint); canvas.drawCircle(17, 10, 1.3f, paint);
+                paint.setStyle(Paint.Style.STROKE); break;
+            case "cloud":
+            case "cloud-upload":
+                Path cloud = new Path(); cloud.moveTo(6, 19);
+                cloud.cubicTo(-1, 19, 0, 9, 7, 10); cloud.cubicTo(6, 1, 19, 1, 18, 10);
+                cloud.cubicTo(25, 9, 25, 19, 18, 19); cloud.close(); canvas.drawPath(cloud, paint);
+                if ("cloud-upload".equals(name)) { line(canvas, 12, 18, 12, 10); path(canvas, 9, 13, 12, 10, 15, 13); }
+                break;
+            case "lock":
+                canvas.drawRoundRect(5, 10, 19, 22, 2, 2, paint);
+                canvas.drawArc(8, 2, 16, 15, 180, 180, false, paint); line(canvas, 12, 15, 12, 18); break;
+            case "list":
+                for (int y = 6; y <= 18; y += 6) { canvas.drawCircle(4, y, .8f, paint); line(canvas, 9, y, 21, y); } break;
             case "tree":
                 canvas.drawCircle(12, 4, 2.5f, paint);
                 canvas.drawCircle(5, 19, 2.5f, paint);

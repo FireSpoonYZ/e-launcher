@@ -87,78 +87,82 @@ public final class NativeSearchPage extends FrameLayout {
         LinearLayout content = column();
         content.setPadding(dp(18), dp(14), dp(18), dp(8));
         addView(content, new LayoutParams(-1, -1));
-        LinearLayout title = line();
-        TextView heading = text(mode == Mode.APP_LIBRARY ? "应用库" : "本地搜索", 27, colors.ink);
-        heading.setTypeface(null, android.graphics.Typeface.BOLD);
-        title.addView(heading, new LinearLayout.LayoutParams(0, -2, 1));
         if (mode == Mode.APP_LIBRARY) {
-            TextView more = action("⋮", v -> libraryOptions());
-            more.setContentDescription("应用库选项");
-            title.addView(more);
+            LinearLayout title = line();
+            TextView heading = text("应用库", 25, colors.ink);
+            heading.setTypeface(null, android.graphics.Typeface.BOLD);
+            title.addView(heading, new LinearLayout.LayoutParams(0, dp(48), 1));
+            heading.setGravity(Gravity.CENTER_VERTICAL);
+            ImageView more = symbol("more", colors.ink); more.setRotation(90);
+            more.setPadding(dp(13), dp(13), dp(13), dp(13));
+            more.setContentDescription("应用库选项"); more.setFocusable(true);
+            more.setOnClickListener(v -> libraryOptions());
+            title.addView(more, new LinearLayout.LayoutParams(dp(48), dp(48))); content.addView(title);
         }
-        title.addView(action("取消", v -> close()));
-        content.addView(title);
-        FrameLayout searchGlass = colors.glass(activity, wallpaper, 22);
-        LinearLayout searchBar = line();
-        searchBar.setPadding(dp(12), 0, dp(4), 0);
-        ImageView magnifier = new ImageView(activity);
-        magnifier.setImageDrawable(new ChatIcon("search", colors.muted));
+        LinearLayout searchRow = line();
+        FrameLayout searchGlass = new FrameLayout(activity); searchGlass.setBackground(panel(false));
+        LinearLayout searchBar = line(); searchBar.setPadding(dp(12), 0, 0, 0);
+        ImageView magnifier = symbol("search", colors.muted);
         magnifier.setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_NO);
-        searchBar.addView(magnifier, new LinearLayout.LayoutParams(dp(24), dp(24)));
-        input = new EditText(activity);
-        input.setSingleLine(true);
-        input.setTextColor(colors.ink);
-        input.setHintTextColor(colors.muted);
-        input.setTextSize(17);
+        searchBar.addView(magnifier, new LinearLayout.LayoutParams(dp(22), dp(22)));
+        input = new EditText(activity); input.setSingleLine(true);
+        input.setTextColor(colors.ink); input.setHintTextColor(colors.muted); input.setTextSize(16);
         input.setHint(mode == Mode.APP_LIBRARY ? "搜索应用" : "搜索应用、快捷方式、设置与文件");
         input.setBackgroundColor(android.graphics.Color.TRANSPARENT);
-        input.setPadding(dp(10), dp(12), dp(6), dp(12));
+        input.setPadding(dp(10), 0, 0, 0);
         input.setImeOptions(android.view.inputmethod.EditorInfo.IME_ACTION_SEARCH);
-        searchBar.addView(input, new LinearLayout.LayoutParams(0, -2, 1));
-        TextView clear = action("×", v -> input.setText(""));
-        clear.setContentDescription("清空搜索");
-        searchBar.addView(clear);
-        searchGlass.addView(searchBar, new LayoutParams(-1, -2));
-        LinearLayout.LayoutParams searchParams = new LinearLayout.LayoutParams(-1, -2);
-        searchParams.topMargin = dp(14);
-        searchParams.bottomMargin = dp(12);
-        content.addView(searchGlass, searchParams);
-        if (mode == Mode.APP_LIBRARY) {
-            LinearLayout tabs = line();
-            String[] labels = {"全部", "最近使用", "最近安装"};
-            for (int i = 0; i < labels.length; i++) {
-                final int selected = i;
-                TextView tab = action(labels[i], v -> {
-                    filter = selected;
-                    for (int j = 0; j < tabs.getChildCount(); j++) {
-                        tabs.getChildAt(j).setSelected(j == filter);
-                        ((TextView) tabs.getChildAt(j)).setTextColor(j == filter ? colors.accent : colors.muted);
-                    }
-                    search();
-                });
-                tab.setTextColor(i == 0 ? colors.accent : colors.muted);
-                tab.setSelected(i == 0);
-                tabs.addView(tab, new LinearLayout.LayoutParams(0, -2, 1));
-            }
-            content.addView(tabs);
-        }
+        searchBar.addView(input, new LinearLayout.LayoutParams(0, dp(48), 1));
+        ImageView clear = symbol("close", colors.muted); clear.setPadding(dp(15), dp(15), dp(15), dp(15));
+        clear.setContentDescription("清空搜索"); clear.setFocusable(true); clear.setOnClickListener(v -> input.setText(""));
+        clear.setVisibility(initialQuery == null || initialQuery.isEmpty() ? INVISIBLE : VISIBLE);
+        searchBar.addView(clear, new LinearLayout.LayoutParams(dp(48), dp(48)));
+        searchGlass.addView(searchBar, new LayoutParams(-1, -1));
+        searchRow.addView(searchGlass, new LinearLayout.LayoutParams(0, dp(48), 1));
+        if (mode == Mode.GLOBAL_SEARCH) searchRow.addView(action("取消", v -> close()));
+        LinearLayout.LayoutParams searchParams = new LinearLayout.LayoutParams(-1, dp(48));
+        searchParams.topMargin = mode == Mode.APP_LIBRARY ? dp(10) : 0;
+        searchParams.bottomMargin = dp(10); content.addView(searchRow, searchParams);
         LinearLayout results = line();
         results.setGravity(Gravity.TOP);
         list = new ListView(activity);
         list.setDivider(null);
+        list.setVerticalScrollBarEnabled(false);
         list.setClipToPadding(false);
         list.setPadding(0, 0, 0, dp(16));
         list.setAdapter(adapter);
         list.setBackgroundColor(android.graphics.Color.TRANSPARENT);
         results.addView(list, new LinearLayout.LayoutParams(0, -1, 1));
-        alphabet = column();
-        alphabet.setGravity(Gravity.CENTER);
-        results.addView(alphabet, new LinearLayout.LayoutParams(dp(22), -1));
+        alphabet = new LinearLayout(activity) {
+            @Override protected void onMeasure(int widthSpec, int heightSpec) {
+                super.onMeasure(widthSpec, MeasureSpec.makeMeasureSpec(Math.min(dp(440), MeasureSpec.getSize(heightSpec)), MeasureSpec.EXACTLY));
+            }
+        };
+        alphabet.setOrientation(LinearLayout.VERTICAL); alphabet.setGravity(Gravity.CENTER);
+        LinearLayout.LayoutParams alphabetParams = new LinearLayout.LayoutParams(dp(22), -1);
+        alphabetParams.gravity = Gravity.BOTTOM; results.addView(alphabet, alphabetParams);
+        list.setOnScrollListener(new android.widget.AbsListView.OnScrollListener() {
+            public void onScrollStateChanged(android.widget.AbsListView view, int state) { }
+            public void onScroll(android.widget.AbsListView view, int first, int visible, int total) {
+                if (sectionPositions.isEmpty()) return;
+                String selected = sectionPositions.keySet().iterator().next();
+                for (Map.Entry<String, Integer> section : sectionPositions.entrySet()) {
+                    if (section.getValue() > first) break;
+                    selected = section.getKey();
+                }
+                for (int i = 0; i < alphabet.getChildCount(); i++) {
+                    TextView letter = (TextView) alphabet.getChildAt(i);
+                    boolean active = selected.contentEquals(letter.getText());
+                    letter.setTextColor(active ? colors.ink : colors.muted);
+                    letter.setBackground(active ? panel(true) : null);
+                }
+            }
+        });
         content.addView(results, new LinearLayout.LayoutParams(-1, 0, 1));
         input.setText(initialQuery == null ? "" : initialQuery);
         input.addTextChangedListener(new TextWatcher() {
             @Override public void beforeTextChanged(CharSequence s, int start, int count, int after) { }
             @Override public void onTextChanged(CharSequence s, int start, int before, int count) {
+                clear.setVisibility(s.length() == 0 ? INVISIBLE : VISIBLE);
                 cancelSearch();
                 renderImmediate();
                 main.removeCallbacks(query);
@@ -268,7 +272,7 @@ public final class NativeSearchPage extends FrameLayout {
             if (!valid(version)) return;
             rows.add(new Row(message, null, null, false));
             rows.add(new Row("重试", null, this::refresh, false));
-            adapter.notifyDataSetChanged();
+            notifyRows();
         });
     }
 
@@ -280,8 +284,8 @@ public final class NativeSearchPage extends FrameLayout {
         String value = input.getText().toString().trim();
         if (mode == Mode.GLOBAL_SEARCH) {
             if (!value.isEmpty()) {
-                header("✦  AI 助手");
-                rows.add(new Row("发送给 AI 助手：" + value + "\n新建对话并发送  ›", null, () -> {
+                header("AI 助手");
+                rows.add(new Row("发送给 AI 助手：" + value, null, () -> {
                     String prompt = input.getText().toString().trim();
                     if (prompt.isEmpty()) return;
                     keyboard().hideSoftInputFromWindow(input.getWindowToken(), 0);
@@ -292,7 +296,7 @@ public final class NativeSearchPage extends FrameLayout {
                 rows.add(new Row("授权文件夹以搜索文件名", null, this::authorizeDirectory, false));
             }
         }
-        adapter.notifyDataSetChanged();
+        notifyRows();
     }
 
     private void render(LauncherSearchIndex.Result result) {
@@ -324,17 +328,20 @@ public final class NativeSearchPage extends FrameLayout {
                     groups.computeIfAbsent(app.name().section(), ignored -> new ArrayList<>()).add(app);
                 for (Map.Entry<String, List<LauncherSearchIndex.App>> entry : groups.entrySet()) {
                     sectionPositions.put(entry.getKey(), rows.size());
-                    header(entry.getKey());
-                    appGrid(entry.getValue());
+                    List<LauncherSearchIndex.App> group = entry.getValue();
+                    for (int i = 0; i < group.size(); i += 3) {
+                        Row row = new Row(null, group.subList(i, Math.min(i + 3, group.size())), null, false);
+                        row.grouped = true; row.section = i == 0 ? entry.getKey() : ""; rows.add(row);
+                    }
                 }
                 buildAlphabet();
             }
             if (apps.isEmpty()) rows.add(new Row(filter == 1 ? "暂无真实启动记录" : "没有匹配的应用", null, null, false));
         } else if (!value.isEmpty()) {
-            header("▦  应用");
+            header("应用");
             for (LauncherSearchIndex.App app : result.apps()) rows.add(new Row(app.label(), List.of(app), () -> launch(app), false));
             if (result.apps().isEmpty()) rows.add(new Row("没有匹配的应用", null, null, false));
-            header("↗  快捷方式");
+            header("快捷方式");
             for (LauncherSearchIndex.Shortcut shortcut : result.shortcuts()) {
                 Row row = new Row(shortcut.label(), null, () -> launch(shortcut), false);
                 row.shortcut = shortcut;
@@ -343,20 +350,28 @@ public final class NativeSearchPage extends FrameLayout {
             if (!result.shortcutNotice().isEmpty()) rows.add(new Row(result.shortcutNotice(), null,
                     () -> open(new Intent(Settings.ACTION_HOME_SETTINGS)), false));
             else if (result.shortcuts().isEmpty()) rows.add(new Row("没有匹配的快捷方式", null, null, false));
-            header("⚙  设置");
+            header("设置");
             for (LauncherSearchIndex.Setting setting : result.settings())
                 rows.add(new Row(setting.label(), null, () -> {
                     if (setting.intent() != null) open(setting.intent());
                     else host.openSettings(setting.destination());
                 }, false));
             if (result.settings().isEmpty()) rows.add(new Row("没有匹配的设置", null, null, false));
-            header("▤  文件");
+            header("文件");
             for (LauncherSearchIndex.FileResult file : result.files())
                 rows.add(new Row(file.name(), null, () -> open(new Intent(Intent.ACTION_VIEW)
                         .setDataAndType(file.uri(), file.mime() == null ? "application/octet-stream" : file.mime())
                         .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)), false));
-            rows.add(new Row(result.fileNotice(), null, null, false));
+            if (!result.fileNotice().isEmpty()) rows.add(new Row(result.fileNotice(), null, null, false));
             rows.add(new Row("授权文件夹", null, this::authorizeDirectory, false));
+        }
+        notifyRows();
+    }
+
+    private void notifyRows() {
+        if (mode == Mode.GLOBAL_SEARCH) {
+            String section = "";
+            for (Row row : rows) { if (row.heading) section = row.title; row.section = section; }
         }
         adapter.notifyDataSetChanged();
     }
@@ -462,9 +477,10 @@ public final class NativeSearchPage extends FrameLayout {
 
     private void libraryOptions() {
         new AlertDialog.Builder(activity).setTitle("应用库")
-                .setItems(new String[]{"编辑应用搜索别名", "刷新应用", "桌面搜索设置"}, (dialog, which) -> {
-                    if (which == 1) { refresh(); return; }
-                    if (which == 2) { host.openSettings("search"); return; }
+                .setItems(new String[]{"全部应用", "最近使用", "最近安装", "编辑应用搜索别名", "刷新应用", "桌面搜索设置"}, (dialog, which) -> {
+                    if (which < 3) { filter = which; search(); return; }
+                    if (which == 4) { refresh(); return; }
+                    if (which == 5) { host.openSettings("search"); return; }
                     if (index == null) { message("正在读取应用，请稍候"); return; }
                     List<LauncherSearchIndex.App> apps = index.apps;
                     new AlertDialog.Builder(activity).setTitle("选择应用")
@@ -498,6 +514,11 @@ public final class NativeSearchPage extends FrameLayout {
             if (row.title == null) {
                 LinearLayout grid = line();
                 grid.setGravity(Gravity.TOP);
+                if (row.grouped) {
+                    TextView section = text(row.section, 16, colors.ink);
+                    section.setPadding(0, dp(12), 0, 0); section.setAccessibilityHeading(true);
+                    grid.addView(section, new LinearLayout.LayoutParams(dp(24), -2));
+                }
                 for (LauncherSearchIndex.App app : row.apps) {
                     LinearLayout cell = column();
                     cell.setGravity(Gravity.CENTER);
@@ -506,7 +527,7 @@ public final class NativeSearchPage extends FrameLayout {
                     cell.addView(icon, new LinearLayout.LayoutParams(dp(52), dp(52)));
                     TextView label = text(app.label(), 13, colors.ink);
                     label.setGravity(Gravity.CENTER);
-                    label.setMaxLines(2);
+                    label.setMaxLines(1);
                     label.setEllipsize(android.text.TextUtils.TruncateAt.END);
                     label.setPadding(0, dp(7), 0, 0);
                     cell.addView(label, new LinearLayout.LayoutParams(-1, -2));
@@ -526,14 +547,19 @@ public final class NativeSearchPage extends FrameLayout {
                     });
                     grid.addView(cell, new LinearLayout.LayoutParams(0, -2, 1));
                 }
-                for (int i = row.apps.size(); i < 4; i++) grid.addView(new View(activity), new LinearLayout.LayoutParams(0, 1, 1));
+                for (int i = row.apps.size(); i < (row.grouped ? 3 : 4); i++) grid.addView(new View(activity), new LinearLayout.LayoutParams(0, 1, 1));
                 return grid;
             }
             LinearLayout outer = column();
-            outer.setPadding(0, dp(3), 0, dp(3));
+            boolean group = mode == Mode.GLOBAL_SEARCH && !row.section.isEmpty();
+            boolean last = position + 1 == rows.size() || rows.get(position + 1).heading;
+            outer.setPadding(0, dp(row.heading ? 8 : group ? 0 : 3), 0, dp(group ? (last ? 4 : 0) : 3));
             LinearLayout content = line();
-            content.setPadding(dp(12), dp(row.heading ? 10 : 12), dp(8), dp(row.heading ? 6 : 12));
+            content.setPadding(dp(group ? 10 : 0), dp(row.heading ? 8 : 6), dp(8), dp(6));
             if (!row.heading) content.setBackground(panel(row.accent));
+            if (row.heading && group) {
+                content.addView(symbol(sectionIcon(row.section), colors.accent), new LinearLayout.LayoutParams(dp(20), dp(20)));
+            }
             if (row.apps != null) {
                 LauncherSearchIndex.App app = row.apps.get(0);
                 content.addView(icon(app), new LinearLayout.LayoutParams(dp(42), dp(42)));
@@ -551,22 +577,61 @@ public final class NativeSearchPage extends FrameLayout {
                     return true;
                 });
             }
-            TextView label = text(row.title, row.heading ? 16 : 15, row.accent ? colors.accent : colors.ink);
-            label.setPadding(row.apps != null || row.shortcut != null ? dp(12) : 0, 0, dp(6), 0);
+            if (!row.heading && row.apps == null && row.shortcut == null && row.click != null) {
+                ImageView icon = symbol(row.accent ? "paper-plane" : sectionIcon(row.section), colors.accent);
+                GradientDrawable tile = panel(true); tile.setCornerRadius(dp(10));
+                icon.setBackground(tile); icon.setPadding(dp(9), dp(9), dp(9), dp(9));
+                content.addView(icon, new LinearLayout.LayoutParams(dp(38), dp(38)));
+            }
+            LinearLayout words = column();
+            words.setPadding(row.heading && group || row.apps != null || row.shortcut != null || row.click != null ? dp(10) : 0, 0, dp(6), 0);
+            TextView label = text(row.title, row.heading ? 15 : row.click == null ? 12 : 14,
+                    row.click == null && !row.heading ? colors.muted : colors.ink);
             if (row.heading) { label.setTypeface(null, android.graphics.Typeface.BOLD); label.setAccessibilityHeading(true); }
-            content.addView(label, new LinearLayout.LayoutParams(0, -2, 1));
+            else { label.setMaxLines(2); label.setEllipsize(android.text.TextUtils.TruncateAt.END); }
+            words.addView(label);
+            if (row.accent) {
+                label.setTypeface(null, android.graphics.Typeface.BOLD);
+                TextView subtitle = text("新建对话并发送", 11, colors.muted); subtitle.setPadding(0, dp(3), 0, 0); words.addView(subtitle);
+            }
+            content.addView(words, new LinearLayout.LayoutParams(0, -2, 1));
             if (row.click != null) {
-                content.setMinimumHeight(dp(56));
-                content.setFocusable(true);
-                content.setOnClickListener(v -> row.click.run());
-                if (!row.accent) content.addView(action("打开", v -> row.click.run()));
+                content.setMinimumHeight(dp(52)); content.setFocusable(true); content.setOnClickListener(v -> row.click.run());
+                if (row.accent) {
+                    ImageView next = symbol("next", colors.accent);
+                    content.addView(next, new LinearLayout.LayoutParams(dp(18), dp(18)));
+                } else {
+                    TextView open = action("打开", v -> row.click.run());
+                    open.setTextSize(13);
+                    open.setBackground(new android.graphics.drawable.InsetDrawable(panel(true), 0, dp(7), 0, dp(7)));
+                    open.setPadding(dp(10), 0, dp(10), 0);
+                    content.addView(open, new LinearLayout.LayoutParams(dp(62), dp(48)));
+                }
             }
             if (row.apps != null) {
-                TextView more = action("⋮", v -> editAlias(row.apps.get(0)));
-                more.setContentDescription("编辑 " + row.title + " 的搜索别名");
-                content.addView(more);
+                LauncherSearchIndex.App app = row.apps.get(0);
+                content.setAccessibilityDelegate(new View.AccessibilityDelegate() {
+                    @Override public void onInitializeAccessibilityNodeInfo(View host, android.view.accessibility.AccessibilityNodeInfo info) {
+                        super.onInitializeAccessibilityNodeInfo(host, info);
+                        info.addAction(new android.view.accessibility.AccessibilityNodeInfo.AccessibilityAction(android.R.id.edit, "编辑搜索别名"));
+                    }
+                    @Override public boolean performAccessibilityAction(View host, int action, android.os.Bundle args) {
+                        if (action == android.R.id.edit) { editAlias(app); return true; }
+                        return super.performAccessibilityAction(host, action, args);
+                    }
+                });
             }
-            outer.addView(content, new LinearLayout.LayoutParams(-1, -2));
+            if (group) {
+                FrameLayout groupSurface = new FrameLayout(activity);
+                GradientDrawable background = new GradientDrawable();
+                background.setColor(colors.dark ? 0xef193640 : 0xeff8fdff);
+                float top = row.heading ? dp(20) : 0, bottom = last ? dp(20) : 0;
+                background.setCornerRadii(new float[]{top, top, top, top, bottom, bottom, bottom, bottom});
+                groupSurface.setBackground(background);
+                FrameLayout.LayoutParams p = new FrameLayout.LayoutParams(-1, -2);
+                p.setMargins(dp(8), 0, dp(8), row.heading ? 0 : dp(8));
+                groupSurface.addView(content, p); outer.addView(groupSurface);
+            } else outer.addView(content, new LinearLayout.LayoutParams(-1, -2));
             return outer;
         }
     }
@@ -585,11 +650,25 @@ public final class NativeSearchPage extends FrameLayout {
         final List<LauncherSearchIndex.App> apps;
         final Runnable click;
         final boolean accent;
-        boolean heading;
+        boolean heading, grouped;
+        String section = "";
         LauncherSearchIndex.Shortcut shortcut;
         Row(String title, List<LauncherSearchIndex.App> apps, Runnable click, boolean accent) {
             this.title = title; this.apps = apps; this.click = click; this.accent = accent;
         }
+    }
+
+    private String sectionIcon(String section) {
+        return switch (section) {
+            case "AI 助手" -> "sparkles";
+            case "应用" -> "grid";
+            case "快捷方式" -> "link";
+            case "设置" -> "settings";
+            default -> "file";
+        };
+    }
+    private ImageView symbol(String name, int color) {
+        ImageView image = new ImageView(activity); image.setImageDrawable(new ChatIcon(name, color)); return image;
     }
 
     private GradientDrawable panel(boolean accent) {
@@ -597,7 +676,7 @@ public final class NativeSearchPage extends FrameLayout {
         background.setColor((colors.dark ? 0xdf000000 : 0xc9000000) | ((accent ? colors.accent : colors.surface) & 0xffffff));
         if (accent) background.setColor((colors.dark ? 0x44000000 : 0x22000000) | (colors.accent & 0xffffff));
         background.setCornerRadius(dp(20));
-        background.setStroke(dp(1), colors.border);
+        background.setStroke(Math.max(1, dp(1) / 2), colors.dark ? colors.border : 0x80ffffff);
         return background;
     }
     private LinearLayout column() { LinearLayout view = new LinearLayout(activity); view.setOrientation(LinearLayout.VERTICAL); return view; }

@@ -436,11 +436,8 @@ public class MainActivity extends BridgeActivity {
                 taskCardHost.setVisibility(changed == PagerState.Page.HOME ? View.VISIBLE : View.GONE);
                 if (changed == PagerState.Page.HOME) { refreshTaskCards(); homeTaskCards.showLatest(); }
             }
-            getWindow().setStatusBarColor(changed == PagerState.Page.CHAT
-                    ? appearance.surface : desktopBackground());
-            getWindow().setNavigationBarColor(changed == PagerState.Page.HOME ? desktopBackground() : appearance.surface);
-            getWindow().getDecorView().setSystemUiVisibility(changed == PagerState.Page.HOME
-                    ? desktopAppearance.systemBarFlags() : appearance.systemBarFlags());
+            if (changed == PagerState.Page.HOME) desktopAppearance.applySystemBars(this, Color.TRANSPARENT);
+            else appearance.applySystemBars(this, appearance.surface);
         });
         chatWebView.addJavascriptInterface(new Object() {
             @android.webkit.JavascriptInterface public int gestureId() {
@@ -560,9 +557,8 @@ public class MainActivity extends BridgeActivity {
         composerDock.setVisibility(View.GONE);
         root.setBackgroundColor(chat ? appearance.surface : desktopBackground());
         homeWallpaper.setVisibility(chat ? View.INVISIBLE : View.VISIBLE);
-        getWindow().setStatusBarColor(chat ? appearance.surface : desktopBackground());
-        getWindow().setNavigationBarColor(chat ? appearance.surface : desktopBackground());
-        getWindow().getDecorView().setSystemUiVisibility(chat ? appearance.systemBarFlags() : desktopAppearance.systemBarFlags());
+        if (chat) appearance.applySystemBars(this, appearance.surface);
+        else desktopAppearance.applySystemBars(this, Color.TRANSPARENT);
         composerInput.setShowSoftInputOnFocus(false);
         if (!firstPage) enterMotion(content, chat ? 24 : -16);
         updateAgentControls();
@@ -570,6 +566,7 @@ public class MainActivity extends BridgeActivity {
 
     private void createPageShell() {
         root = new FrameLayout(this);
+        root.setClipToPadding(false);
         root.setBackgroundColor(appearance.surface);
         homeWallpaper = desktopAppearance.desktopWallpaper(this);
         if ("system".equals(new DesktopPreferences(this).wallpaper())) {
@@ -633,6 +630,9 @@ public class MainActivity extends BridgeActivity {
             ScrollAnchor anchor = preserveChat && !follow ? visibleAnchor() : null;
             if (follow) pendingScrollToBottom = true;
             view.setPadding(left, top, right, bottom);
+            FrameLayout.LayoutParams wallpaperParams = (FrameLayout.LayoutParams) homeWallpaper.getLayoutParams();
+            wallpaperParams.setMargins(-left, -top, -right, -bottom);
+            homeWallpaper.setLayoutParams(wallpaperParams);
             if (preserveChat) {
                 long generation = ++renderGeneration;
                 chatScroll.post(() -> {
