@@ -26,6 +26,7 @@ import org.robolectric.Shadows;
 import org.robolectric.annotation.Config;
 import org.robolectric.annotation.GraphicsMode;
 
+import java.time.Duration;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -135,6 +136,7 @@ public class DesktopMenuTest {
             assertNotNull("First back must keep the folder open", scene.folderLayer());
             assertFalse("Menu is already closed", scene.desktop.dismissMenu());
             scene.activity.getOnBackPressedDispatcher().onBackPressed();
+            Shadows.shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(Motion.PAGE));
             assertNull(scene.folderLayer());
         }
     }
