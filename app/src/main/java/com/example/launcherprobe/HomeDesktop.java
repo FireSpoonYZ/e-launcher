@@ -119,7 +119,7 @@ final class HomeDesktop extends FrameLayout {
     private View dragPreview;
     private int activeFolderSlot = -1;
     private boolean disposed;
-    private float swipeX, swipeY, pageOffset, folderFromX, folderFromY, folderFromScale = .92f;
+    private float swipeX, swipeY, swipeStartOffset, pageOffset, folderFromX, folderFromY, folderFromScale = .92f;
     private int swipeAxis, pageShift;
     private boolean paging, pulling, folderClosing;
     private boolean pullSearch;
@@ -483,12 +483,18 @@ final class HomeDesktop extends FrameLayout {
     }
     @Override public boolean onInterceptTouchEvent(MotionEvent event) {
         if (event.getActionMasked() == MotionEvent.ACTION_DOWN) {
+            // Take over at the displayed position before a new gesture can replace the target page.
+            cancelPageSpring();
+            swipeStartOffset = pageOffset;
             swipeX = event.getX(); swipeY = event.getY();
-            swipeAxis = 0;
+            paging = adjacentGrid != null;
+            pulling = false;
+            swipeAxis = paging ? 1 : 0;
             pager.setGestureBlocked(pager.gestureId(), true);
             recycleSwipeVelocity();
             swipeVelocity = VelocityTracker.obtain();
             swipeVelocity.addMovement(event);
+            if (paging) return true;
         } else if (swipeVelocity != null) swipeVelocity.addMovement(event);
         if (event.getActionMasked() == MotionEvent.ACTION_MOVE && !editing && folderRoot == null) {
             float dx = event.getX() - swipeX, dy = event.getY() - swipeY;
@@ -508,6 +514,7 @@ final class HomeDesktop extends FrameLayout {
         if (editing || folderRoot != null) return super.onTouchEvent(event);
         if (swipeVelocity != null) swipeVelocity.addMovement(event);
         int action = event.getActionMasked();
+        if (action == MotionEvent.ACTION_DOWN && paging) return true;
         if (action == MotionEvent.ACTION_MOVE) {
             trackSwipe(event.getX() - swipeX, event.getY() - swipeY);
             if (paging || pulling) return true;
@@ -537,13 +544,14 @@ final class HomeDesktop extends FrameLayout {
         }
         if (swipeAxis == 1) {
             pulling = false;
-            int shift = dx < 0 ? 1 : -1;
-            if (dx == 0 || !prepareAdjacent(shift)) {
+            float offset = swipeStartOffset + dx;
+            int shift = offset < 0 ? 1 : -1;
+            if (offset == 0 || !prepareAdjacent(shift)) {
                 applyPageOffset(0);
                 return;
             }
             paging = true;
-            applyPageOffset(dx);
+            applyPageOffset(offset);
             return;
         }
         String action = dy < 0 ? preferences.swipeUp() : preferences.swipeDown();
@@ -608,13 +616,18 @@ final class HomeDesktop extends FrameLayout {
                 && Motion.crossed(Math.abs(pageOffset) / (float) width,
                 pageShift > 0 ? -velocityX : velocityX, minimumFlingVelocity, false);
         float end = commit ? (pageShift > 0 ? -width : width) : 0;
-        if (pageSpring != null) { pageSpring.cancel(); pageSpring = null; }
-        FloatValueHolder holder = new FloatValueHolder(pageOffset);
+        cancelPageSpring();
         int shift = pageShift;
+        if (pageOffset == end || !Motion.enabled()) {
+            if (commit) commitPage(shift);
+            else abortPageDrag();
+            return;
+        }
+        FloatValueHolder holder = new FloatValueHolder(pageOffset);
         pageSpring = Motion.spring(holder, pageOffset, end, velocityX,
                 (a, value, velocity) -> applyPageOffset(value),
                 (a, canceled, value, velocity) -> {
-                    if (canceled) return;
+                    if (canceled || pageSpring != a) return;
                     pageSpring = null;
                     if (commit) commitPage(shift);
                     else abortPageDrag();
@@ -639,8 +652,15 @@ final class HomeDesktop extends FrameLayout {
         adjacentGrid = null;
     }
 
+    private void cancelPageSpring() {
+        if (pageSpring == null) return;
+        SpringAnimation current = pageSpring;
+        pageSpring = null;
+        current.cancel();
+    }
+
     private void abortPageDrag() {
-        if (pageSpring != null) { pageSpring.cancel(); pageSpring = null; }
+        cancelPageSpring();
         dropAdjacent();
         pageShift = 0;
         pageOffset = 0;
