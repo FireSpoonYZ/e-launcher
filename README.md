@@ -102,13 +102,15 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/verify.ps1
 
 脚本要求 `JAVA_HOME` 指向 JDK 21，`ANDROID_HOME` 未设置时使用 `$env:LOCALAPPDATA\Android\Sdk`，并通过仓库内 `gradlew.bat` 运行纯 Java 断言检查、Gradle `:app:testDebugUnitTest :app:assembleDebug :app:lintDebug :shower-server:lintDebug`、Shower 单 dex/必需类与旧 Lamda 引用检查，以及空白/行尾风格检查。逻辑检查在 `tests/com/example/launcherprobe/GestureChecks.java` 和 `AgentChecks.java`，不使用 Android stub 或第三方测试框架；Gradle unit-test 任务运行 `app/src/test` 下的 Robolectric 回归，覆盖凭据、请求持久化、设置重建和公开元数据边界；Windows 测试仅适配 AtomicFile 的底层替换操作，不替换业务逻辑。纯 Java 检查覆盖反馈进度/阈值与各类清理状态，但不能证明 WindowManager、MotionEvent 或 ROM 转场行为。成功构建的调试 APK 位于 `app/build/outputs/apk/debug/app-debug.apk`。
 
+日常开发在 `develop`。每次 push 会构建 debug APK，在对应 GitHub Actions run 的 Artifacts 里下载，保留 7 天。合并或推到 `main` 时额外构建 release APK，并覆盖 GitHub Release [`latest`](https://github.com/FireSpoonYZ/e-launcher/releases/tag/latest)。CI 需要仓库 secret `DEBUG_KEYSTORE_BASE64`（项目根目录 `debug.keystore` 的 base64）。
+
 纯 Java 检查的编译产物位于 `build/test-classes/`。思考强度浮窗的真机触摸回归脚本为 `scripts/check-thinking-slider.mjs`，设备连接和运行方式见文件开头的说明。
 
 ### 跨电脑使用同一开发签名
 
 Debug 构建固定使用项目根目录的 `debug.keystore`，不再使用各电脑自动生成的 `~/.android/debug.keystore`。该文件已加入 `.gitignore`，需要通过私密渠道将**同一份文件**复制到其他电脑的项目根目录；缺失时 Gradle 会报错，不会自动生成替代密钥。首次配置沿用本机已有开发密钥，因此签名与本机此前构建的 APK 一致。
 
-这是标准 Android debug 密钥，别名为 `androiddebugkey`，存储和密钥密码均为公开默认值 `android`，仅用于开发，不用于正式发布。Release 签名尚未配置。不要在另一台电脑重新生成密钥或随意替换此文件，否则旧签名的应用无法覆盖更新。当前开发证书 SHA-256：
+这是标准 Android debug 密钥，别名为 `androiddebugkey`，存储和密钥密码均为公开默认值 `android`，仅用于开发，不用于正式发布。本地 debug 构建和 CI 的 debug/release APK 都用这一份密钥，因此可以互相覆盖安装。不要在另一台电脑重新生成密钥或随意替换此文件，否则旧签名的应用无法覆盖更新。当前开发证书 SHA-256：
 
 ```text
 6f6ff43d800aa2eb8444a78d4f3992a0157f5bae2ca0a31a97da753187d01ffb
