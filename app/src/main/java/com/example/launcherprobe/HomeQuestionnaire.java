@@ -134,6 +134,7 @@ final class HomeQuestionnaire extends LinearLayout {
         JSONObject question = questions.optJSONObject(draft.page);
         Answer answer = draft.answer(question.optInt("questionIndex"));
         ScrollView scroll = new ScrollView(getContext());
+        scroll.setTag("questionnaire-scroll");
         scroll.setVerticalScrollBarEnabled(false);
         scroll.setOverScrollMode(OVER_SCROLL_NEVER);
         LinearLayout body = new LinearLayout(getContext());

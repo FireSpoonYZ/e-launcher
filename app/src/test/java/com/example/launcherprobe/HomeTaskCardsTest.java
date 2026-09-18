@@ -2,6 +2,11 @@ package com.example.launcherprobe;
 
 import static org.junit.Assert.*;
 
+import android.app.Application;
+import android.os.Looper;
+import android.widget.HorizontalScrollView;
+import org.robolectric.Shadows;
+import java.time.Duration;
 import android.graphics.Rect;
 import android.view.MotionEvent;
 import android.view.View;
@@ -219,6 +224,162 @@ public class HomeTaskCardsTest {
             assertTrue(child.getBottom() <= parent.getHeight());
             if (child instanceof ViewGroup group) assertChildrenFit(group);
         }
+    }
+
+    @Test public void unconstrainedBodySwipeSwitchesCardsAndCancelsChildClick() throws Exception {
+        android.content.Context context = RuntimeEnvironment.getApplication();
+        PagerRoot pager = new PagerRoot(context, new View(context), PagerState.Page.HOME, page -> {});
+        HomeTaskCards cards = new HomeTaskCards(context, pager, id -> {}, id -> {}, id -> {});
+        pager.setHome(cards);
+        JSONArray data = twoTodoCards();
+        cards.setAvailableHeight(800);
+        cards.update(data);
+        pager.measure(View.MeasureSpec.makeMeasureSpec(600, View.MeasureSpec.EXACTLY),
+                View.MeasureSpec.makeMeasureSpec(800, View.MeasureSpec.EXACTLY));
+        pager.layout(0, 0, 600, 800);
+        ScrollView scroll = first(cards, ScrollView.class);
+        View heading = headingOf(cards);
+        TextView title = firstExact(scroll, "A");
+        assertNotNull(scroll);
+        assertNotNull(heading);
+        assertNotNull(title);
+        assertTrue(scroll.getChildAt(0).getHeight() <= scroll.getHeight());
+        assertEquals("a", cards.selectedId());
+        Rect headingRect = new Rect();
+        Rect bodyRect = new Rect();
+        Rect titleRect = new Rect();
+        assertTrue(heading.getGlobalVisibleRect(headingRect));
+        assertTrue(scroll.getGlobalVisibleRect(bodyRect));
+        assertTrue(title.getGlobalVisibleRect(titleRect));
+        int bodyX = titleRect.centerX();
+        int bodyY = titleRect.centerY();
+        assertTrue(bodyRect.contains(bodyX, bodyY));
+        assertFalse(headingRect.contains(bodyX, bodyY));
+        touch(pager, MotionEvent.ACTION_DOWN, bodyX, bodyY, 0);
+        touch(pager, MotionEvent.ACTION_MOVE, bodyX, bodyY + 20, 16);
+        touch(pager, MotionEvent.ACTION_MOVE, bodyX, bodyY + 120, 32);
+        touch(pager, MotionEvent.ACTION_UP, bodyX, bodyY + 200, 48);
+        assertEquals(PagerState.Page.HOME, pager.page());
+        assertEquals("b", cards.selectedId());
+        assertNull(Shadows.shadowOf((Application) context).getNextStartedActivity());
+        pager.measure(View.MeasureSpec.makeMeasureSpec(600, View.MeasureSpec.EXACTLY),
+                View.MeasureSpec.makeMeasureSpec(800, View.MeasureSpec.EXACTLY));
+        pager.layout(0, 0, 600, 800);
+        Shadows.shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(300));
+
+        heading = headingOf(cards);
+        assertTrue(heading.getGlobalVisibleRect(headingRect));
+        try {
+            heading.performClick();
+            fail("detail starts an activity");
+        } catch (android.util.AndroidRuntimeException e) {
+            assertTrue(e.getMessage().contains("FLAG_ACTIVITY_NEW_TASK"));
+        }
+        data.getJSONObject(0).put("modelState", "idle");
+        cards.update(data);
+        assertEquals("b", cards.selectedId());
+    }
+
+    @Test public void actionSwipeSwitchesCardsWithoutClick() throws Exception {
+        android.content.Context context = RuntimeEnvironment.getApplication();
+        boolean[] opened = {false};
+        PagerRoot pager = new PagerRoot(context, new View(context), PagerState.Page.HOME, page -> {});
+        HomeTaskCards cards = new HomeTaskCards(context, pager, id -> opened[0] = true, id -> {}, id -> {});
+        pager.setHome(cards);
+        cards.setAvailableHeight(800);
+        cards.update(twoTodoCards());
+        pager.measure(View.MeasureSpec.makeMeasureSpec(600, View.MeasureSpec.EXACTLY),
+                View.MeasureSpec.makeMeasureSpec(800, View.MeasureSpec.EXACTLY));
+        pager.layout(0, 0, 600, 800);
+        TextView chat = firstExact(cards, "查看对话", "View chat");
+        assertNotNull(chat);
+        Rect rect = new Rect();
+        assertTrue(chat.getGlobalVisibleRect(rect));
+        touch(pager, MotionEvent.ACTION_DOWN, rect.centerX(), rect.centerY(), 0);
+        touch(pager, MotionEvent.ACTION_MOVE, rect.centerX(), rect.centerY() + 20, 16);
+        touch(pager, MotionEvent.ACTION_MOVE, rect.centerX(), rect.centerY() + 120, 32);
+        touch(pager, MotionEvent.ACTION_UP, rect.centerX(), rect.centerY() + 200, 48);
+        assertEquals(PagerState.Page.HOME, pager.page());
+        assertEquals("b", cards.selectedId());
+        assertFalse(opened[0]);
+        assertNull(Shadows.shadowOf((Application) context).getNextStartedActivity());
+    }
+
+    @Test public void overflowingStripScrollsHorizontallyWithoutSwitchingCards() throws Exception {
+        android.content.Context context = RuntimeEnvironment.getApplication();
+        PagerRoot pager = new PagerRoot(context, new View(context), PagerState.Page.HOME, page -> {});
+        HomeTaskCards cards = new HomeTaskCards(context, pager, id -> {}, id -> {}, id -> {});
+        pager.setHome(cards);
+        JSONArray tasks = new JSONArray();
+        for (int i = 0; i < 20; i++) {
+            tasks.put(new JSONObject().put("id", "t" + i).put("subject", "Step " + i)
+                    .put("status", i == 1 ? "in_progress" : i == 0 ? "completed" : "pending"));
+        }
+        JSONObject todo = new JSONObject().put("package", "@juicesharp/rpiv-todo").put("tasks", tasks);
+        JSONArray data = new JSONArray()
+                .put(new JSONObject().put("conversationId", "a").put("title", "A").put("modelState", "working").put("todo", todo))
+                .put(new JSONObject().put("conversationId", "b").put("title", "B").put("modelState", "idle").put("todo", new JSONObject(todo.toString())));
+        cards.setAvailableHeight(800);
+        cards.update(data);
+        pager.measure(View.MeasureSpec.makeMeasureSpec(600, View.MeasureSpec.EXACTLY),
+                View.MeasureSpec.makeMeasureSpec(800, View.MeasureSpec.EXACTLY));
+        pager.layout(0, 0, 600, 800);
+        HorizontalScrollView strip = cards.findViewWithTag("todo-strip");
+        assertNotNull(strip);
+        strip.scrollTo(0, 0);
+        assertTrue(strip.getChildAt(0).getWidth() > strip.getWidth());
+        Rect stripRect = new Rect();
+        assertTrue(strip.getGlobalVisibleRect(stripRect));
+        int x = stripRect.centerX(), y = stripRect.centerY();
+        touch(pager, MotionEvent.ACTION_DOWN, x, y, 0);
+        touch(pager, MotionEvent.ACTION_MOVE, x - 20, y, 16);
+        touch(pager, MotionEvent.ACTION_MOVE, x - 120, y, 32);
+        touch(pager, MotionEvent.ACTION_UP, x - 200, y, 48);
+        assertEquals(PagerState.Page.HOME, pager.page());
+        assertEquals("a", cards.selectedId());
+        assertTrue(strip.getScrollX() > 0);
+    }
+
+    @Test public void questionnaireScrollAfterChoosingDoesNotSwitchConversation() throws Exception {
+        android.content.Context context = RuntimeEnvironment.getApplication();
+        PagerRoot pager = new PagerRoot(context, new View(context), PagerState.Page.HOME, page -> {});
+        HomeTaskCards cards = new HomeTaskCards(context, pager, id -> {}, id -> {}, id -> {});
+        cards.setQuestionReply((conversation, request, question, answers, cancelled) -> {});
+        pager.setHome(cards);
+        JSONObject card = HomeQuestionnaireTest.card();
+        JSONArray options = card.getJSONObject("askUser").getJSONArray("questions").getJSONObject(0).getJSONArray("options");
+        for (int i = 0; i < 10; i++) options.put(new JSONObject().put("label", "Extra " + i).put("description", "Description"));
+        cards.update(new JSONArray().put(card).put(new JSONObject().put("conversationId", "b").put("modelState", "idle")));
+        cards.findViewWithTag("option:Compact").performClick();
+        cards.setAvailableHeight(360);
+        pager.measure(View.MeasureSpec.makeMeasureSpec(600, View.MeasureSpec.EXACTLY),
+                View.MeasureSpec.makeMeasureSpec(360, View.MeasureSpec.EXACTLY));
+        pager.layout(0, 0, 600, 360);
+        ScrollView scroll = cards.findViewWithTag("questionnaire-scroll");
+        assertTrue(scroll.canScrollVertically(1));
+        Rect rect = new Rect();
+        assertTrue(scroll.getGlobalVisibleRect(rect));
+        int x = rect.centerX(), y = rect.centerY();
+        touch(pager, MotionEvent.ACTION_DOWN, x, y, 0);
+        touch(pager, MotionEvent.ACTION_MOVE, x, y - 20, 16);
+        touch(pager, MotionEvent.ACTION_MOVE, x, y - 100, 32);
+        touch(pager, MotionEvent.ACTION_UP, x, y - 140, 48);
+        assertEquals("a", cards.selectedId());
+        assertEquals(PagerState.Page.HOME, pager.page());
+        assertTrue(scroll.getScrollY() > 0);
+        assertTrue(cards.findViewWithTag("option:Compact").createAccessibilityNodeInfo().isChecked());
+    }
+
+    private static JSONArray twoTodoCards() throws Exception {
+        JSONObject todo = new JSONObject()
+                .put("package", "@juicesharp/rpiv-todo")
+                .put("tasks", new JSONArray()
+                        .put(new JSONObject().put("id", "t1").put("subject", "Completed step").put("status", "completed"))
+                        .put(new JSONObject().put("id", "t2").put("subject", "Active step").put("status", "in_progress"))
+                        .put(new JSONObject().put("id", "t3").put("subject", "Pending step").put("status", "pending")));
+        return new JSONArray()
+                .put(new JSONObject().put("conversationId", "a").put("title", "A").put("modelState", "working").put("todo", todo))
+                .put(new JSONObject().put("conversationId", "b").put("title", "B").put("modelState", "idle").put("todo", new JSONObject(todo.toString())));
     }
 
     private static void stopFling(ScrollView scroll) {

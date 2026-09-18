@@ -54,9 +54,13 @@ final class HomeTaskCards extends LinearLayout {
     private int availableHeight = Integer.MAX_VALUE;
     private boolean editing;
     private float downX, downY;
+    private int axis;
     private boolean swiping;
+    private boolean steal;
     private boolean touching;
+    private boolean bodyTouch;
     private boolean deferred;
+    private ScrollView bodyScroll;
     private View switchingOut;
     private int switchDirection;
     private final Runnable settleScroll = () -> {
@@ -174,6 +178,7 @@ final class HomeTaskCards extends LinearLayout {
         removeCallbacks(settleScroll);
         stripSettling = false; deferred = false;
         removeAllViews(); setVisibility(VISIBLE);
+        bodyScroll = null;
 
         LinearLayout panel = new LinearLayout(getContext());
         panel.setOrientation(VERTICAL);
@@ -182,6 +187,7 @@ final class HomeTaskCards extends LinearLayout {
         glass.addView(panel, new FrameLayout.LayoutParams(-1, -1));
         if (card == null) {
             selected = "";
+            bodyScroll = null;
             TextView brand = label(text("AI 助手", "AI assistant"), 15);
             decorate(brand, "sparkles", colors.accent);
             brand.setGravity(Gravity.CENTER_VERTICAL);
@@ -256,7 +262,7 @@ final class HomeTaskCards extends LinearLayout {
                 LayoutParams stripParams = new LayoutParams(-1, -2); stripParams.topMargin = dp(7);
                 body.addView(strip, stripParams);
             } else activeByConversation.put(id, null);
-            ScrollView bodyScroll = new ScrollView(getContext());
+            bodyScroll = new ScrollView(getContext());
             bodyScroll.setVerticalScrollBarEnabled(false); bodyScroll.setOverScrollMode(OVER_SCROLL_NEVER);
             bodyScroll.addView(body); panel.addView(bodyScroll, new LayoutParams(-1, 0, 1));
 
@@ -448,29 +454,52 @@ final class HomeTaskCards extends LinearLayout {
     }
 
     private boolean stripTouch;
-    private boolean switchTouch;
     @Override public boolean dispatchTouchEvent(MotionEvent event) {
-        if (event.getActionMasked() == MotionEvent.ACTION_DOWN) {
+        int action = event.getActionMasked();
+        if (action == MotionEvent.ACTION_DOWN) {
             if (pager != null) pager.setGestureBlocked(pager.gestureId(), true);
-            getParent().requestDisallowInterceptTouchEvent(true);
-            downX = event.getX(); downY = event.getY(); touching = true; swiping = false;
+            downX = event.getX(); downY = event.getY();
+            touching = true; swiping = false; steal = false; axis = 0;
             stripTouch = hit(findViewWithTag("todo-strip"), event);
-            switchTouch = hit(findViewWithTag("card-switch"), event);
+            ScrollView questionnaireScroll = findViewWithTag("questionnaire-scroll");
+            if (questionnaireScroll != null) bodyScroll = questionnaireScroll;
+            bodyTouch = bodyScroll != null && hit(bodyScroll, event);
             removeCallbacks(settleScroll);
             stripSettling = false;
             if (stripTouch) followingTarget = -1;
-        }
+        } else if (action == MotionEvent.ACTION_MOVE) lockAxis(event);
         boolean handled = super.dispatchTouchEvent(event);
-        if (event.getActionMasked() == MotionEvent.ACTION_UP || event.getActionMasked() == MotionEvent.ACTION_CANCEL) {
+        if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
             touching = false;
-            if (pager != null) pager.setGestureBlocked(pager.gestureId(), false);
-            getParent().requestDisallowInterceptTouchEvent(false);
-            if (stripTouch && event.getActionMasked() == MotionEvent.ACTION_UP) {
+            if (getParent() != null) getParent().requestDisallowInterceptTouchEvent(false);
+            if (action == MotionEvent.ACTION_UP && pager != null)
+                pager.setGestureBlocked(pager.gestureId(), false);
+            if (stripTouch && action == MotionEvent.ACTION_UP) {
                 stripSettling = true;
                 scheduleScrollSettle();
             } else if (deferred) { deferred = false; render(); }
         }
         return handled;
+    }
+
+    private void lockAxis(MotionEvent event) {
+        if (axis != 0) return;
+        float dx = event.getX() - downX, dy = event.getY() - downY;
+        int slop = ViewConfiguration.get(getContext()).getScaledTouchSlop();
+        if (Math.abs(dx) <= slop && Math.abs(dy) <= slop) return;
+        axis = Math.abs(dx) > Math.abs(dy) * 1.1f ? 1 : 2;
+        if (axis == 2) {
+            boolean keep = bodyTouch && overflowing(bodyScroll) && bodyScroll.canScrollVertically(dy < 0 ? 1 : -1);
+            if (keep || cards.length() > 1) {
+                if (getParent() != null) getParent().requestDisallowInterceptTouchEvent(true);
+                if (!keep && cards.length() > 1) swiping = steal = true;
+            }
+        } else {
+            View strip = findViewWithTag("todo-strip");
+            boolean keep = stripTouch && overflowing(strip) && strip.canScrollHorizontally(dx < 0 ? 1 : -1);
+            if (getParent() != null) getParent().requestDisallowInterceptTouchEvent(keep);
+            steal = !keep;
+        }
     }
 
     private boolean hit(View view, MotionEvent event) {
@@ -479,18 +508,29 @@ final class HomeTaskCards extends LinearLayout {
                 && rect.contains((int) event.getRawX(), (int) event.getRawY());
     }
 
-    @Override public boolean onInterceptTouchEvent(MotionEvent event) {
-        if (switchTouch && !stripTouch && cards.length() > 1 && event.getActionMasked() == MotionEvent.ACTION_MOVE
-                && Math.abs(event.getY() - downY) > ViewConfiguration.get(getContext()).getScaledTouchSlop()
-                && Math.abs(event.getY() - downY) > Math.abs(event.getX() - downX) * 1.6f) {
-            swiping = true;
-            return true;
+    private static boolean overflowing(View view) {
+        if (view instanceof ScrollView scroll) {
+            View child = scroll.getChildCount() == 0 ? null : scroll.getChildAt(0);
+            return child != null && child.getHeight() > scroll.getHeight();
+        }
+        if (view instanceof HorizontalScrollView strip) {
+            View child = strip.getChildCount() == 0 ? null : strip.getChildAt(0);
+            return child != null && child.getWidth() > strip.getWidth();
         }
         return false;
     }
 
+    @Override public boolean onInterceptTouchEvent(MotionEvent event) {
+        return steal;
+    }
+
     @Override public boolean onTouchEvent(MotionEvent event) {
-        if (!swiping) return super.onTouchEvent(event);
+        if (!swiping) {
+            if (!steal) return super.onTouchEvent(event);
+            if (event.getActionMasked() == MotionEvent.ACTION_UP || event.getActionMasked() == MotionEvent.ACTION_CANCEL)
+                steal = false;
+            return true;
+        }
         View front = getChildCount() == 0 ? null : getChildAt(0);
         if (event.getActionMasked() == MotionEvent.ACTION_MOVE) {
             float offset = event.getY() - downY;
@@ -508,7 +548,7 @@ final class HomeTaskCards extends LinearLayout {
                         (a, canceled, value, velocity) -> front.setAlpha(1f));
                 front.animate().alpha(1f).setDuration(Motion.LOCAL).start();
             }
-            swiping = false;
+            swiping = steal = false;
             performClick();
         }
         return true;

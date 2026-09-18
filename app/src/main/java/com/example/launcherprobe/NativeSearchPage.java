@@ -7,6 +7,7 @@ import android.content.ClipDescription;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
+import android.graphics.Rect;
 import android.graphics.drawable.GradientDrawable;
 import android.os.CancellationSignal;
 import android.os.Handler;
@@ -137,6 +138,7 @@ public final class NativeSearchPage extends FrameLayout {
         searchParams.bottomMargin = dp(10); content.addView(searchRow, searchParams);
         LinearLayout results = line();
         results.setGravity(Gravity.TOP);
+        results.setBaselineAligned(false);
         list = new ListView(activity);
         list.setDivider(null);
         list.setVerticalScrollBarEnabled(false);
@@ -220,7 +222,7 @@ public final class NativeSearchPage extends FrameLayout {
         if (!closing && action == MotionEvent.ACTION_MOVE) {
             float dy = event.getY() - closeDownY;
             boolean pull = mode == Mode.APP_LIBRARY ? dy > touchSlop : dy < -touchSlop;
-            if (pull) {
+            if (pull && (closeFromHeader || canDismiss())) {
                 closing = true;
                 MotionEvent cancel = MotionEvent.obtain(event);
                 cancel.setAction(MotionEvent.ACTION_CANCEL);
@@ -338,18 +340,28 @@ public final class NativeSearchPage extends FrameLayout {
     }
 
     private boolean canDismiss() {
-        if (list.getChildCount() == 0) return true;
-        if (list.getFirstVisiblePosition() > 0) return false;
+        return mode == Mode.APP_LIBRARY ? !listCanScrollTowardStart() : !listCanScrollTowardEnd();
+    }
+
+    private boolean listCanScrollTowardStart() {
+        if (list.getHeight() <= 0 || list.getChildCount() == 0) return false;
+        if (list.getFirstVisiblePosition() > 0) return true;
         View first = list.getChildAt(0);
-        return first == null || first.getTop() >= list.getPaddingTop() - touchSlop;
+        return first != null && first.getTop() < list.getPaddingTop() - touchSlop;
+    }
+
+    private boolean listCanScrollTowardEnd() {
+        if (list.getHeight() <= 0 || list.getChildCount() == 0) return false;
+        if (list.getLastVisiblePosition() < list.getCount() - 1) return true;
+        View last = list.getChildAt(list.getChildCount() - 1);
+        return last != null && last.getBottom() > list.getHeight() - list.getPaddingBottom() + touchSlop;
     }
 
     private boolean onList(MotionEvent event) {
-        int[] origin = new int[2];
-        list.getLocationOnScreen(origin);
-        int x = (int) event.getRawX(), y = (int) event.getRawY();
-        return x >= origin[0] && x < origin[0] + list.getWidth()
-                && y >= origin[1] && y < origin[1] + list.getHeight();
+        if (list.getWidth() <= 0 || list.getHeight() <= 0) return false;
+        Rect bounds = new Rect(0, 0, list.getWidth(), list.getHeight());
+        offsetDescendantRectToMyCoords(list, bounds);
+        return bounds.contains((int) event.getX(), (int) event.getY());
     }
 
     private void recycleCloseVelocity() {
@@ -493,7 +505,11 @@ public final class NativeSearchPage extends FrameLayout {
     }
 
     private void buildAlphabet() {
-        alphabet.setVisibility(sectionPositions.isEmpty() ? GONE : VISIBLE);
+        if (!input.getText().toString().trim().isEmpty() || sectionPositions.isEmpty()) {
+            alphabet.setVisibility(GONE);
+            return;
+        }
+        alphabet.setVisibility(VISIBLE);
         for (String section : sectionPositions.keySet()) {
             TextView letter = text(section, 11, colors.accent);
             letter.setGravity(Gravity.CENTER);

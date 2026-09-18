@@ -26,6 +26,7 @@ import org.robolectric.Shadows;
 import org.robolectric.annotation.Config;
 import org.robolectric.annotation.GraphicsMode;
 
+import java.time.Duration;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -136,7 +137,7 @@ public class DesktopMenuTest {
             assertFalse("Menu is already closed", scene.desktop.dismissMenu());
             scene.activity.getOnBackPressedDispatcher().onBackPressed();
             // closeFolder() animates for Motion.PAGE; teardownFolder runs on the end action.
-            Shadows.shadowOf(Looper.getMainLooper()).idleFor(java.time.Duration.ofMillis(Motion.PAGE));
+            Shadows.shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(Motion.PAGE));
             assertNull(scene.folderLayer());
         }
     }
