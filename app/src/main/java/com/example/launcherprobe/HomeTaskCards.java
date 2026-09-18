@@ -173,28 +173,27 @@ final class HomeTaskCards extends LinearLayout {
             decorate(brand, "sparkles", colors.accent);
             brand.setGravity(Gravity.CENTER_VERTICAL);
             brand.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-            panel.addView(brand, new LayoutParams(-1, dp(40)));
-            LinearLayout message = new LinearLayout(getContext());
-            message.setOrientation(VERTICAL); message.setGravity(Gravity.CENTER);
+            LinearLayout heading = new LinearLayout(getContext());
+            heading.setGravity(Gravity.CENTER_VERTICAL);
+            heading.addView(brand, new LayoutParams(0, -1, 1));
+            if (archived != null) heading.addView(iconButton("folder",
+                    text("已归档对话", "Archived chats"), archived), new LayoutParams(dp(48), dp(48)));
+            panel.addView(heading, new LayoutParams(-1, dp(48)));
             android.widget.ImageView star = new android.widget.ImageView(getContext());
-            star.setImageDrawable(new ChatIcon("sparkles", colors.accent));
-            message.addView(star, new LayoutParams(dp(56), dp(56)));
-            TextView prompt = label(text("开始一个新对话", "Start a new conversation"), 16);
-            prompt.setPadding(0, dp(12), 0, 0); message.addView(prompt);
-            panel.addView(message, new LayoutParams(-1, 0, 1));
+            star.setImageDrawable(new android.graphics.drawable.DrawableWrapper(new ChatIcon("sparkles", colors.accent)) {
+                @Override public int getIntrinsicWidth() { return dp(56); }
+                @Override public int getIntrinsicHeight() { return dp(56); }
+            });
+            star.setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_NO);
+            LayoutParams starParams = new LayoutParams(dp(56), 0, 1);
+            starParams.gravity = Gravity.CENTER_HORIZONTAL;
+            panel.addView(star, starParams);
             TextView start = button(text("开始对话", "Start conversation"), () -> open.accept(""));
             start.setGravity(Gravity.CENTER); start.setTextColor(0xffffffff);
             start.setBackground(fill(colors.accent, 18));
             LayoutParams startParams = new LayoutParams(-1, dp(48));
             startParams.setMargins(dp(32), dp(8), dp(32), dp(4));
             panel.addView(start, startParams);
-            if (archived != null) {
-                TextView archivedButton = button(text("已归档对话", "Archived chats"), archived);
-                archivedButton.setGravity(Gravity.CENTER); archivedButton.setTextColor(colors.accent);
-                LayoutParams archivedParams = new LayoutParams(-1, dp(48));
-                archivedParams.setMargins(dp(32), 0, dp(32), dp(4));
-                panel.addView(archivedButton, archivedParams);
-            }
             present(glass); return;
         }
         selected = card.optString("conversationId");

@@ -170,10 +170,55 @@ public class HomeTaskCardsTest {
         pager.measure(View.MeasureSpec.makeMeasureSpec(600, View.MeasureSpec.EXACTLY),
                 View.MeasureSpec.makeMeasureSpec(800, View.MeasureSpec.EXACTLY));
         pager.layout(0, 0, 600, 800);
-        TextView entry = firstExact(cards, "Archived chats", "已归档对话");
+        View entry = findDescription(cards, "Archived chats", "已归档对话");
         assertNotNull(entry);
         entry.performClick();
         assertTrue(listed.get());
+    }
+
+    @Test public void emptyCardActionsFitWhenAvailableSizeChanges() {
+        android.content.Context context = RuntimeEnvironment.getApplication();
+        HomeTaskCards cards = new HomeTaskCards(context, null, new View(context),
+                id -> {}, id -> {}, id -> {}, () -> {});
+        cards.update(new JSONArray());
+        float density = context.getResources().getDisplayMetrics().density;
+        for (int widthDp : new int[]{260, 354, 420}) {
+            for (int heightDp : new int[]{160, 220, 244, 280, 400, 160}) {
+                int width = Math.round(widthDp * density), height = Math.round(heightDp * density);
+                cards.setAvailableHeight(height);
+                cards.measure(View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY),
+                        View.MeasureSpec.makeMeasureSpec(height, View.MeasureSpec.EXACTLY));
+                cards.layout(0, 0, width, height);
+                View archive = findDescription(cards, "Archived chats", "已归档对话");
+                View start = firstExact(cards, "Start conversation", "开始对话");
+                Rect archiveBounds = new Rect(), startBounds = new Rect();
+                archive.getDrawingRect(archiveBounds);
+                start.getDrawingRect(startBounds);
+                cards.offsetDescendantRectToMyCoords(archive, archiveBounds);
+                cards.offsetDescendantRectToMyCoords(start, startBounds);
+                Rect bounds = new Rect(0, 0, width, height);
+                assertTrue(bounds.contains(archiveBounds));
+                assertTrue(bounds.contains(startBounds));
+                assertFalse(Rect.intersects(archiveBounds, startBounds));
+                assertTrue(start.getHeight() >= Math.round(48 * density));
+                assertTrue(archive.getHeight() >= Math.round(48 * density));
+                assertChildrenFit(cards);
+                android.widget.ImageView star = first(cards, android.widget.ImageView.class);
+                Rect iconBounds = star.getDrawable().getBounds();
+                assertTrue(iconBounds.width() > 0);
+                assertEquals(iconBounds.width(), iconBounds.height());
+            }
+        }
+    }
+
+    private static void assertChildrenFit(ViewGroup parent) {
+        for (int i = 0; i < parent.getChildCount(); i++) {
+            View child = parent.getChildAt(i);
+            assertTrue(child.getLeft() >= 0 && child.getTop() >= 0);
+            assertTrue(child.getRight() <= parent.getWidth());
+            assertTrue(child.getBottom() <= parent.getHeight());
+            if (child instanceof ViewGroup group) assertChildrenFit(group);
+        }
     }
 
     private static void stopFling(ScrollView scroll) {
