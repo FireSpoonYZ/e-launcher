@@ -1,5 +1,11 @@
 {
   "扩展社区": "Package community",
+  "目录来自 pi.dev，按官网排序；安装来源为 npm。": "Catalog and sorting from pi.dev; packages install from npm.",
+  "下载量最多": "Most downloads",
+  "最近发布": "Recently published",
+  "名称 A–Z": "A–Z",
+  "排序：": "Sort: ",
+  "排序方式": "Sort by",
   "应用版本：": "App version: ",
   "Pi Coding Agent SDK 0.85.1 · 本地 Node Agent": "Pi Coding Agent SDK 0.85.1 · Local Node Agent",
   "源码": "Source code",

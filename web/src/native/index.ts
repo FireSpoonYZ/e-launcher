@@ -90,7 +90,7 @@ export interface SettingsPlugin {
   query(options: {operation: QueryOperation; arguments?: Record<string, unknown>}): Promise<{requestId: string; cancellable: boolean}>;
   cancelQuery(): Promise<void>;
   replyAuth(options: {requestId: string; promptId: string; value?: string; cancelled?: boolean}): Promise<void>;
-  publicSearch(options?: {query?: string; kind?: ''|'extension'|'skill'|'theme'|'prompt'; offset?: number}): Promise<Record<string, unknown>>;
+  publicSearch(options?: {query?: string; kind?: ''|'extension'|'skill'|'theme'|'prompt'; sort?: 'downloads'|'recent'|'name'; offset?: number}): Promise<Record<string, unknown>>;
   latestRelease(): Promise<{release: Record<string, unknown>|null}>;
 }
 

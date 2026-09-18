@@ -52,7 +52,7 @@ public final class PiSettingsActivity extends Activity {
     private boolean queryRunning;
     private okhttp3.Call publicCall;
     private int publicRequest;
-    private String communityQuery = "", communityKind = "", npmPackageSource = "";
+    private String communityQuery = "", communityKind = "", communitySort = "downloads", npmPackageSource = "";
     private int communityOffset;
     private JSONArray packageSnapshot;
     private android.app.ProgressDialog queryProgress;
@@ -86,6 +86,7 @@ public final class PiSettingsActivity extends Activity {
                 project = state.getBoolean("project");
                 communityQuery = state.getString("communityQuery", "");
                 communityKind = state.getString("communityKind", "");
+                communitySort = state.getString("communitySort", "downloads");
                 npmPackageSource = state.getString("npmPackageSource", "");
                 communityOffset = state.getInt("communityOffset", 0);
                 page = state.getString("page", "设置");
@@ -108,6 +109,7 @@ public final class PiSettingsActivity extends Activity {
         out.putBoolean("project", project);
         out.putString("communityQuery", communityQuery);
         out.putString("communityKind", communityKind);
+        out.putString("communitySort", communitySort);
         out.putString("npmPackageSource", npmPackageSource);
         out.putInt("communityOffset", communityOffset);
         out.putStringArrayList("back", new ArrayList<>(back));
@@ -365,7 +367,7 @@ public final class PiSettingsActivity extends Activity {
         message.setText(t("读取中…"));
         queries.execute(() -> {
             JSONObject result = null; String failure = null;
-            try { result = SettingsCatalog.read(call, release); }
+            try { result = release ? SettingsCatalog.read(call, true) : SettingsCatalog.readCatalog(call); }
             catch (Exception exception) { failure = exception.getMessage(); }
             JSONObject value = result; String error = failure;
             runOnUiThread(() -> {
@@ -414,7 +416,7 @@ public final class PiSettingsActivity extends Activity {
 
     private void community() throws Exception {
         scope();
-        note(t("npm 公共社区；类型仅按关键词分类，未解析包内容。安装第三方包可能执行代码，请仅安装可信来源。"));
+        note(t("目录来自 pi.dev，按官网排序；安装来源为 npm。"));
         EditText query = input(t("搜索包名称或描述"), communityQuery);
         query.addTextChangedListener(watcher(() -> communityQuery = query.getText().toString()));
         String[] kinds = {"", "extension", "skill", "theme", "prompt"};
@@ -422,6 +424,12 @@ public final class PiSettingsActivity extends Activity {
         action(t("类型筛选：") + labels[java.util.Arrays.asList(kinds).indexOf(communityKind)], () ->
                 new AlertDialog.Builder(this).setTitle(t("关键词分类")).setItems(labels, (d, which) -> {
                     communityKind = kinds[which]; communityOffset = 0; render();
+                }).setNegativeButton(t("取消"), null).show());
+        String[] sorts = {"downloads", "recent", "name"};
+        String[] sortLabels = {t("下载量最多"), t("最近发布"), t("名称 A–Z")};
+        action(t("排序：") + sortLabels[java.util.Arrays.asList(sorts).indexOf(communitySort)], () ->
+                new AlertDialog.Builder(this).setTitle(t("排序方式")).setItems(sortLabels, (d, which) -> {
+                    communitySort = sorts[which]; communityOffset = 0; render();
                 }).setNegativeButton(t("取消"), null).show());
         action(t("查询"), () -> { communityOffset = 0; render(); });
         action(t("检查配置与安装状态（SDK）"), () -> runQuery("packages", new JSONObject(), value -> {
@@ -437,7 +445,8 @@ public final class PiSettingsActivity extends Activity {
         Button next = button(t("下一页"), () -> { communityOffset += SettingsCatalog.PAGE_SIZE; render(); });
         paging.addView(previous); paging.addView(next); previous.setEnabled(communityOffset > 0); next.setEnabled(false);
         int offset = communityOffset;
-        publicJson(SettingsCatalog.searchUrl(communityQuery, communityKind, offset), false, message, response -> {
+        publicJson(SettingsCatalog.searchUrl(communityQuery, communityKind, communitySort, offset), false, message, response -> {
+            communityOffset = response.optInt("offset", offset);
             JSONArray objects = response.optJSONArray("objects");
             if (objects == null || !response.has("total")) { message.setText(t("读取失败：") + t("社区数据无效")); return; }
             long total = response.optLong("total"); int shown = 0;
@@ -470,9 +479,10 @@ public final class PiSettingsActivity extends Activity {
                             .setNegativeButton(t("取消"), null).show();
                 }));
             }
-            message.setText(t("搜索结果总数：") + total + t(" · 页码：") + (offset / SettingsCatalog.PAGE_SIZE + 1)
+            previous.setEnabled(communityOffset > 0);
+            message.setText(t("搜索结果总数：") + total + t(" · 页码：") + (communityOffset / SettingsCatalog.PAGE_SIZE + 1)
                     + (shown == 0 ? "\n" + t("本页没有符合关键词的包，可尝试下一页或更换查询。") : ""));
-            next.setEnabled(objects.length() > 0 && (long) offset + SettingsCatalog.PAGE_SIZE < total);
+            next.setEnabled(objects.length() > 0 && (long) communityOffset + SettingsCatalog.PAGE_SIZE < total);
         });
     }
 

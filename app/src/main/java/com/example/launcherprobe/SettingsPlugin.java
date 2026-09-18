@@ -356,10 +356,10 @@ public final class SettingsPlugin extends Plugin {
         worker.execute(() -> {
             try {
                 String kind = call.getString("kind", "");
-                if (!Arrays.asList("", "extension", "skill", "theme", "prompt").contains(kind)) throw new IllegalArgumentException("kind 无效");
-                okhttp3.Call request = SettingsCatalog.call(SettingsCatalog.searchUrl(call.getString("query", ""), kind, call.getInt("offset", 0)));
+                okhttp3.Call request = SettingsCatalog.call(SettingsCatalog.searchUrl(call.getString("query", ""), kind,
+                        call.getString("sort", "downloads"), call.getInt("offset", 0)));
                 publicCall = request;
-                JSONObject response = SettingsCatalog.read(request, false);
+                JSONObject response = SettingsCatalog.readCatalog(request);
                 if (publicCall == request) { publicCall = null; call.resolve(js(response)); }
             } catch (Exception exception) { if (!call.isReleased()) reject(call, exception); }
         });
