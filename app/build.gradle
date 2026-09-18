@@ -14,7 +14,18 @@ def copyWebAssets = tasks.register('copyWebAssets', Exec) {
     workingDir rootProject.projectDir
     commandLine npmCommand + ['exec', '--', 'cap', 'copy', 'android']
 }
-tasks.named('preBuild') { dependsOn copyWebAssets }
+def installPiDependencies = tasks.register('installPiDependencies', Exec) {
+    workingDir rootProject.file('pi-runtime')
+    commandLine npmCommand + ['ci']
+    inputs.files rootProject.file('pi-runtime/package.json'), rootProject.file('pi-runtime/package-lock.json')
+    outputs.file rootProject.file('pi-runtime/node_modules/.package-lock.json')
+}
+def buildPiRuntime = tasks.register('buildPiRuntime', Exec) {
+    dependsOn installPiDependencies
+    workingDir rootProject.file('pi-runtime')
+    commandLine npmCommand + ['run', 'build:android']
+}
+tasks.named('preBuild') { dependsOn copyWebAssets, buildPiRuntime }
 
 android {
     namespace 'com.example.launcherprobe'

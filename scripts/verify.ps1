@@ -62,6 +62,15 @@ if ($LASTEXITCODE -ne 0 -or $showerEntries -notcontains 'classes.dex' -or $showe
     throw 'Generated Operit Shower server asset must contain exactly one dex payload'
 }
 Add-Type -AssemblyName System.IO.Compression.FileSystem
+$apk = [IO.Compression.ZipFile]::OpenRead((Resolve-Path 'app/build/outputs/apk/debug/app-debug.apk'))
+try {
+    $npmVersion = (Get-Content 'pi-runtime/package.json' -Raw | ConvertFrom-Json).dependencies.npm
+    foreach ($asset in 'assets/pi-runtime.cjs', 'assets/pi-sdk/package.json',
+            "assets/npm/$npmVersion/bin/npm-cli.js", "assets/npm/$npmVersion/payload-complete.txt") {
+        $entry = $apk.GetEntry($asset)
+        if ($null -eq $entry -or $entry.Length -eq 0) { throw "APK is missing required pi runtime asset: $asset" }
+    }
+} finally { $apk.Dispose() }
 $zip = [IO.Compression.ZipFile]::OpenRead((Resolve-Path $showerAsset))
 try {
     $dexStream = $zip.GetEntry('classes.dex').Open()
@@ -95,4 +104,4 @@ foreach ($file in $files) {
         throw "Style check failed: $($file.FullName)"
     }
 }
-Write-Output "PASS: style/legacy checks ($($files.Count) files); Java checks, Shower asset, assembleDebug and lintDebug"
+Write-Output "PASS: style/legacy checks ($($files.Count) files); Java checks, Pi runtime assets, Shower asset, assembleDebug and lintDebug"
