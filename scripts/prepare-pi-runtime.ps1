@@ -31,8 +31,7 @@ Push-Location (Join-Path $root 'pi-runtime')
 try {
     $npmVersion = '11.6.2'
     $npmIntegrity = 'sha512-7iKzNfy8lWYs3zq4oFPa8EXZz5xt9gQNKJZau3B1ErLBb6bF7sBJ00x09485DOvRT2l5Gerbl3VlZNT57MxJVA=='
-    $lock = Get-Content package-lock.json -Raw | ConvertFrom-Json
-    $lockedNpm = $lock.packages.'node_modules/npm'
+    $lockedNpm = node -p "JSON.stringify(require('./package-lock.json').packages['node_modules/npm']||{})" | ConvertFrom-Json
     if ($lockedNpm.version -ne $npmVersion -or $lockedNpm.integrity -ne $npmIntegrity -or
             $lockedNpm.resolved -ne "https://registry.npmjs.org/npm/-/npm-$npmVersion.tgz") {
         throw 'Official npm package lock does not match the pinned payload'
