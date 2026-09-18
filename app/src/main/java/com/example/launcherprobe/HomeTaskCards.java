@@ -32,7 +32,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.function.Consumer;
 
-/** Desktop projection of conversation runs; never mutates extension task states. */
+/** Desktop projection of conversation runs with live questionnaire replies. */
 final class HomeTaskCards extends LinearLayout {
     private final PagerRoot pager;
     private final AppAppearance colors;
@@ -45,6 +45,10 @@ final class HomeTaskCards extends LinearLayout {
     private String displayed = "";
     private final Map<String, Integer> positions = new HashMap<>();
     private final Map<String, String> activeByConversation = new HashMap<>();
+    private final Map<String, HomeQuestionnaire.Draft> questionDrafts = new HashMap<>();
+    private HomeQuestionnaire.Reply questionReply;
+
+    void setQuestionReply(HomeQuestionnaire.Reply reply) { questionReply = reply; }
     private int followingTarget = -1;
     private boolean stripSettling;
     private int availableHeight = Integer.MAX_VALUE;
@@ -90,6 +94,13 @@ final class HomeTaskCards extends LinearLayout {
         cards = new JSONArray();
         if (value != null) for (int i = 0; i < Math.min(5, value.length()); i++)
             if (value.optJSONObject(i) != null) cards.put(value.optJSONObject(i));
+        questionDrafts.entrySet().removeIf(entry -> {
+            for (int i = 0; i < cards.length(); i++) {
+                JSONObject card = cards.optJSONObject(i);
+                if (entry.getKey().equals(card.optString("conversationId"))) return !entry.getValue().matches(card);
+            }
+            return true;
+        });
         if (touching || stripSettling) { deferred = true; return; }
         render();
     }
@@ -136,6 +147,8 @@ final class HomeTaskCards extends LinearLayout {
 
     static String status(JSONObject card) {
         String model = card.optString("modelState");
+        if (HomeQuestionnaire.liveQuestion(card) != null)
+            return card.optBoolean("questionnairePending") ? "正在提交…" : "需要回答";
         if ("working".equals(model)) return "正在执行";
         if ("stopping".equals(model)) return "正在停止…";
         if ("error".equals(card.optString("runStatus"))) return "执行失败";
@@ -199,12 +212,13 @@ final class HomeTaskCards extends LinearLayout {
         selected = card.optString("conversationId");
         String id = selected; displayed = id;
         String model = card.optString("modelState");
+        boolean questioning = HomeQuestionnaire.liveQuestion(card) != null && questionReply != null && !editing;
         List<JSONObject> tasks = tasks(card);
         long completed = tasks.stream().filter(task -> "completed".equals(task.optString("status"))).count();
         LinearLayout heading = new LinearLayout(getContext());
         heading.setGravity(Gravity.CENTER_VERTICAL); heading.setTag("card-switch");
-        heading.setOnClickListener(v -> detail(id));
-        heading.setContentDescription(text("查看任务详情", "View task details"));
+        heading.setOnClickListener(v -> { if (questioning) open.accept(id); else detail(id); });
+        heading.setContentDescription(questioning ? text("查看对话", "View chat") : text("查看任务详情", "View task details"));
         TextView brand = label(text("AI 助手", "AI assistant"), 15);
         brand.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
         decorate(brand, "sparkles", colors.accent);
@@ -215,46 +229,53 @@ final class HomeTaskCards extends LinearLayout {
         LayoutParams stateParams = new LayoutParams(-2, -2); stateParams.setMarginStart(dp(8));
         heading.addView(state, stateParams);
         View space = new View(getContext()); heading.addView(space, new LayoutParams(0, 1, 1));
-        if (archived != null) heading.addView(iconButton("folder",
+        if (questioning) heading.addView(iconButton("question-bubble", text("查看对话", "View chat"),
+                () -> open.accept(id)), new LayoutParams(dp(48), dp(48)));
+        else if (archived != null) heading.addView(iconButton("folder",
                 text("已归档对话", "Archived chats"), archived), new LayoutParams(dp(48), dp(48)));
-        TextView position = label(text("对话 ", "Chat ") + (index + 1) + "/" + cards.length(), 11);
+        TextView position = label((questioning ? "" : text("对话 ", "Chat ")) + (index + 1) + "/" + cards.length(), 11);
         position.setTextColor(colors.muted); heading.addView(position);
-        if (cards.length() > 1) heading.addView(new ConversationSwitch(), new LayoutParams(dp(48), dp(48)));
+        if (cards.length() > 1) heading.addView(new ConversationSwitch(questioning), new LayoutParams(dp(48), dp(48)));
         panel.addView(heading, new LayoutParams(-1, dp(48)));
 
-        LinearLayout body = new LinearLayout(getContext()); body.setOrientation(VERTICAL);
-        TextView title = label(card.optString("title"), 17);
-        title.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-        title.setMaxLines(1); title.setEllipsize(TextUtils.TruncateAt.END);
-        title.setOnClickListener(v -> detail(id)); body.addView(title);
-        TextView count = label(tasks.isEmpty() ? text("打开对话查看完整内容", "Open the conversation for details")
-                : text("已完成 ", "Completed ") + completed + text(" 项，共 ", " of ") + tasks.size() + text(" 项", " steps"), 12);
-        count.setTextColor(colors.muted); count.setPadding(0, dp(4), 0, 0); body.addView(count);
-        if (!tasks.isEmpty() && !editing) {
-            HorizontalScrollView strip = taskStrip(tasks, model);
-            restoreTaskPosition(strip, tasks, id);
-            LayoutParams stripParams = new LayoutParams(-1, -2); stripParams.topMargin = dp(7);
-            body.addView(strip, stripParams);
-        } else activeByConversation.put(id, null);
-        ScrollView bodyScroll = new ScrollView(getContext());
-        bodyScroll.setVerticalScrollBarEnabled(false); bodyScroll.setOverScrollMode(OVER_SCROLL_NEVER);
-        bodyScroll.addView(body); panel.addView(bodyScroll, new LayoutParams(-1, 0, 1));
+        if (questioning) {
+            HomeQuestionnaire.Draft draft = questionDrafts.computeIfAbsent(id, ignored -> new HomeQuestionnaire.Draft(card));
+            panel.addView(new HomeQuestionnaire(getContext(), card, draft, questionReply, colors), new LayoutParams(-1, 0, 1));
+        } else {
+            LinearLayout body = new LinearLayout(getContext()); body.setOrientation(VERTICAL);
+            TextView title = label(card.optString("title"), 17);
+            title.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+            title.setMaxLines(1); title.setEllipsize(TextUtils.TruncateAt.END);
+            title.setOnClickListener(v -> detail(id)); body.addView(title);
+            TextView count = label(tasks.isEmpty() ? text("打开对话查看完整内容", "Open the conversation for details")
+                    : text("已完成 ", "Completed ") + completed + text(" 项，共 ", " of ") + tasks.size() + text(" 项", " steps"), 12);
+            count.setTextColor(colors.muted); count.setPadding(0, dp(4), 0, 0); body.addView(count);
+            if (!tasks.isEmpty() && !editing) {
+                HorizontalScrollView strip = taskStrip(tasks, model);
+                restoreTaskPosition(strip, tasks, id);
+                LayoutParams stripParams = new LayoutParams(-1, -2); stripParams.topMargin = dp(7);
+                body.addView(strip, stripParams);
+            } else activeByConversation.put(id, null);
+            ScrollView bodyScroll = new ScrollView(getContext());
+            bodyScroll.setVerticalScrollBarEnabled(false); bodyScroll.setOverScrollMode(OVER_SCROLL_NEVER);
+            bodyScroll.addView(body); panel.addView(bodyScroll, new LayoutParams(-1, 0, 1));
 
-        LinearLayout actions = new LinearLayout(getContext());
-        boolean busy = !"idle".equals(model);
-        TextView left = button(busy ? text("stopping".equals(model) ? "正在停止…" : "停止", "Stop")
-                : text("归档", "Archive"), () -> { if (busy) stop.accept(id); else dismiss.accept(id); });
-        left.setTextColor(colors.error); left.setGravity(Gravity.CENTER);
-        left.setEnabled(!"stopping".equals(model));
-        left.setBackground(fill(colors.dark ? 0xff4a303c : 0xfff4dfe4, 16));
-        actions.addView(left, new LayoutParams(0, dp(48), 1));
-        TextView chat = button(text("查看对话", "View chat"), () -> open.accept(id));
-        chat.setGravity(Gravity.CENTER); chat.setTextColor(0xffffffff);
-        chat.setBackground(fill(colors.accent, 16));
-        LayoutParams chatParams = new LayoutParams(0, dp(48), 1); chatParams.setMarginStart(dp(8));
-        actions.addView(chat, chatParams);
-        LayoutParams actionParams = new LayoutParams(-1, dp(48)); actionParams.topMargin = dp(7);
-        panel.addView(actions, actionParams);
+            LinearLayout actions = new LinearLayout(getContext());
+            boolean busy = !"idle".equals(model);
+            TextView left = button(busy ? text("stopping".equals(model) ? "正在停止…" : "停止", "Stop")
+                    : text("归档", "Archive"), () -> { if (busy) stop.accept(id); else dismiss.accept(id); });
+            left.setTextColor(colors.error); left.setGravity(Gravity.CENTER);
+            left.setEnabled(!"stopping".equals(model));
+            left.setBackground(fill(colors.dark ? 0xff4a303c : 0xfff4dfe4, 16));
+            actions.addView(left, new LayoutParams(0, dp(48), 1));
+            TextView chat = button(text("查看对话", "View chat"), () -> open.accept(id));
+            chat.setGravity(Gravity.CENTER); chat.setTextColor(0xffffffff);
+            chat.setBackground(fill(colors.accent, 16));
+            LayoutParams chatParams = new LayoutParams(0, dp(48), 1); chatParams.setMarginStart(dp(8));
+            actions.addView(chat, chatParams);
+            LayoutParams actionParams = new LayoutParams(-1, dp(48)); actionParams.topMargin = dp(7);
+            panel.addView(actions, actionParams);
+        }
 
         FrameLayout stack = new FrameLayout(getContext());
         int layers = Math.min(2, cards.length() - 1);
@@ -295,17 +316,28 @@ final class HomeTaskCards extends LinearLayout {
     private final class ConversationSwitch extends View {
         private int direction = 1;
         private final ChatIcon up = new ChatIcon("up", colors.muted), down = new ChatIcon("down", colors.muted);
-        ConversationSwitch() {
+        private final boolean horizontal;
+        ConversationSwitch(boolean horizontal) {
             super(HomeTaskCards.this.getContext()); setClickable(true); setFocusable(true);
-            setContentDescription(text("切换对话，上半部为上一个，下半部为下一个", "Switch conversation: previous above, next below"));
+            this.horizontal = horizontal;
+            setContentDescription(horizontal
+                    ? text("切换对话，左侧为上一个，右侧为下一个", "Switch conversation: previous left, next right")
+                    : text("切换对话，上半部为上一个，下半部为下一个", "Switch conversation: previous above, next below"));
         }
         @Override protected void onDraw(Canvas canvas) {
+            if (horizontal) {
+                int y = (getHeight() - dp(16)) / 2;
+                up.setBounds(dp(4), y, dp(20), y + dp(16)); up.draw(canvas);
+                down.setBounds(dp(28), y, dp(44), y + dp(16)); down.draw(canvas);
+                return;
+            }
             int x = (getWidth() - dp(16)) / 2;
             up.setBounds(x, dp(6), x + dp(16), dp(22)); up.draw(canvas);
             down.setBounds(x, dp(26), x + dp(16), dp(42)); down.draw(canvas);
         }
         @Override public boolean onTouchEvent(MotionEvent event) {
-            if (event.getActionMasked() == MotionEvent.ACTION_DOWN) direction = event.getY() < getHeight() / 2f ? -1 : 1;
+            if (event.getActionMasked() == MotionEvent.ACTION_DOWN) direction =
+                    (horizontal ? event.getX() < getWidth() / 2f : event.getY() < getHeight() / 2f) ? -1 : 1;
             return super.onTouchEvent(event);
         }
         @Override public boolean performClick() { super.performClick(); move(direction); direction = 1; return true; }

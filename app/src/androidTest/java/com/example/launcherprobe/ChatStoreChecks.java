@@ -13,17 +13,33 @@ import java.util.Collections;
 public final class ChatStoreChecks extends Instrumentation {
     private boolean storageOnly;
     private boolean npmOnly;
+    private boolean questionnaireOnly;
 
     @Override public void onCreate(Bundle arguments) {
         super.onCreate(arguments);
         storageOnly = arguments != null && "store".equals(arguments.getString("checks"));
         npmOnly = arguments != null && "npm".equals(arguments.getString("checks"));
+        questionnaireOnly = arguments != null && "questionnaire".equals(arguments.getString("checks"));
         start();
     }
 
     @Override public void onStart() {
         Bundle result = new Bundle();
         try {
+            if (questionnaireOnly) {
+                ActivityMonitor monitor = addMonitor(MainActivity.class.getName(), null, false);
+                getTargetContext().startActivity(new android.content.Intent(android.content.Intent.ACTION_MAIN)
+                        .addCategory(android.content.Intent.CATEGORY_HOME)
+                        .setClass(getTargetContext(), MainActivity.class)
+                        .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK));
+                Activity foreground = monitor.waitForActivityWithTimeout(15000);
+                removeMonitor(monitor);
+                if (foreground == null) throw new AssertionError("Could not foreground the desktop for questionnaire checks");
+                waitForIdleSync();
+                result.putString("stream", HomeQuestionnaireChecks.run(this, foreground) + "\n");
+                finish(Activity.RESULT_OK, result);
+                return;
+            }
             if (npmOnly) {
                 ActivityMonitor monitor = addMonitor(MainActivity.class.getName(), null, false);
                 try (android.os.ParcelFileDescriptor launch = getUiAutomation(android.app.UiAutomation.FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES)

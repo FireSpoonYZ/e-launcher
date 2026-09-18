@@ -171,6 +171,30 @@ public class ChatTaskDataTest {
         assertEquals(Collections.singletonList(secondId), ids(coordinator.taskCards()));
     }
 
+    @Test public void questionnairesOnlyProjectFromCurrentLiveRun() throws Exception {
+        ChatCoordinator coordinator = ChatCoordinator.get(application);
+        ChatStore store = coordinator.store();
+        store.save(Collections.singletonList(message("ask-user", "user", "Ask me")));
+        String id = store.activeId();
+        JSONObject ask = HomeQuestionnaireTest.card().getJSONObject("askUser");
+        persistTodo(store, id, "ask-user", "ask-reply", new JSONObject().put("askUser", ask));
+        assertTrue(coordinator.taskCard(id).isNull("askUser"));
+        ChatCoordinator.SessionRun run = coordinator.registerRun(id, null);
+        assertTrue("a new run must not revive a persisted question", coordinator.taskCard(id).isNull("askUser"));
+        run.extensionUi = new JSONObject().put("askUser", ask);
+        assertEquals("q", coordinator.taskCard(id).getJSONObject("askUser").getString("id"));
+        assertEquals(run.requestId, coordinator.taskCard(id).getString("requestId"));
+        run.questionnaireReplyPending = "q";
+        assertTrue(coordinator.taskCard(id).getBoolean("questionnairePending"));
+        run.questionnaireReplyPending = null;
+        run.questionnaireError = "try again";
+        assertEquals("try again", coordinator.taskCard(id).getString("questionnaireError"));
+        coordinator.cancel(id);
+        assertTrue(coordinator.taskCard(id).isNull("askUser"));
+        coordinator.finish(run, "aborted", "");
+        assertTrue(coordinator.taskCard(id).isNull("askUser"));
+    }
+
     @Test public void taskCardsLimitToFiveRecentHistoriesAndExcludeUnsentDrafts() throws Exception {
         ChatCoordinator coordinator = ChatCoordinator.get(application);
         ChatStore store = coordinator.store();

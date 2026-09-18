@@ -153,6 +153,29 @@ final class ChatIcon extends Drawable {
             case "external":
                 path(canvas, 10, 4, 5, 4, 4, 5, 4, 19, 5, 20, 19, 20, 20, 19, 20, 14);
                 path(canvas, 15, 3, 21, 3, 21, 9); line(canvas, 12, 12, 21, 3); break;
+            case "question-bubble":
+                path(canvas, 4, 21, 4, 5, 6, 3, 20, 3, 22, 5, 22, 17, 20, 19, 7, 19, 4, 21);
+                line(canvas, 8, 8, 18, 8); line(canvas, 8, 12, 15, 12); break;
+            case "radio-off":
+                canvas.drawCircle(12, 12, 8, paint); break;
+            case "radio-on":
+                paint.setStyle(Paint.Style.FILL);
+                canvas.drawCircle(12, 12, 9, paint);
+                int radioColor = paint.getColor();
+                paint.setColor(0xfff0fbfd); canvas.drawCircle(12, 12, 3.2f, paint);
+                paint.setColor(radioColor); paint.setStyle(Paint.Style.STROKE); break;
+            case "checkbox-off":
+            case "checkbox-on":
+                canvas.drawRoundRect(4, 4, 20, 20, 3, 3, paint);
+                if ("checkbox-on".equals(name)) path(canvas, 7, 12, 11, 16, 17, 8);
+                break;
+            case "pencil":
+                path(canvas, 4, 20, 5, 14, 17, 2, 22, 7, 10, 19, 4, 20);
+                line(canvas, 14, 5, 19, 10); break;
+            case "arrow-left":
+                line(canvas, 4, 12, 21, 12); path(canvas, 11, 5, 4, 12, 11, 19); break;
+            case "arrow-right":
+                line(canvas, 3, 12, 20, 12); path(canvas, 13, 5, 20, 12, 13, 19); break;
             case "previous":
                 path(canvas, 15, 5, 8, 12, 15, 19); break;
             case "next":

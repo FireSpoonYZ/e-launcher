@@ -200,6 +200,7 @@ public class MainActivity extends BridgeActivity {
             String type = event.optString("type");
             if ("runStatus".equals(type) || "snapshot".equals(type) || "extensionUi".equals(type)
                     || "end".equals(type) || "error".equals(type)
+                    || "questionnairePending".equals(type) || "questionnaireReply".equals(type)
                     || "conversationArchived".equals(type) || "conversationRestored".equals(type)
                     || "conversationDeleted".equals(type)) refreshTaskCards();
         };
@@ -574,6 +575,10 @@ public class MainActivity extends BridgeActivity {
         taskCardHost.setVisibility(View.GONE);
         homeTaskCards = new HomeTaskCards(this, pager, homeWallpaper, this::openConversation,
                 id -> chatCoordinator.cancel(id), this::archiveConversation, this::showArchivedList);
+        homeTaskCards.setQuestionReply((conversationId, requestId, questionnaireId, answers, cancelled) -> {
+            if (cancelled) chatCoordinator.cancelQuestionnaire(conversationId, requestId, questionnaireId);
+            else chatCoordinator.submitQuestionnaire(conversationId, requestId, questionnaireId, answers, null);
+        });
         refreshTaskCards();
         createComposer();
         pageShell.addView(composerDock, new LinearLayout.LayoutParams(-1, -2));

@@ -111,6 +111,8 @@ final class ChatCoordinator {
     private SessionRun registerRun(String conversationId, String submissionId, boolean background) {
         SessionRun run = new SessionRun(conversationId, UUID.randomUUID().toString());
         run.extensionUi = parseObject(store.extensionUi(conversationId, store.load(conversationId)));
+        // Questions belong to one live request, unlike durable todo snapshots.
+        run.extensionUi.remove("askUser");
         synchronized (runLock) {
             if (store.isArchived(conversationId)) throw new IllegalStateException("请先恢复此会话再发送");
             if (!background && !conversationId.equals(store.activeId())) throw new IllegalStateException("会话已切换");
@@ -241,8 +243,10 @@ final class ChatCoordinator {
                 throw new IllegalStateException("问卷请求已失效");
             }
             run.questionnaireReplyPending = questionnaireId;
+            run.questionnaireError = "";
             try {
                 run.bridge.replyQuestionnaire(requestId, conversationId, questionnaireId, result, cancelled);
+                emit(run, "questionnairePending", null, json("questionnaireId", questionnaireId));
             } catch (Exception exception) {
                 run.questionnaireReplyPending = null;
                 throw exception;
@@ -346,6 +350,7 @@ final class ChatCoordinator {
         JSONObject todo = todoSnapshot(extensionUi);
         String modelState = ending != null ? "stopping" : active == null ? "idle"
                 : "stopping".equals(active.status) ? "stopping" : "working";
+        JSONObject askUser = "working".equals(modelState) ? active.extensionUi.optJSONObject("askUser") : null;
         RunResult result = recentResults.get(conversationId);
         String response = "";
         for (int i = history.size() - 1; i >= 0; i--) {
@@ -356,6 +361,10 @@ final class ChatCoordinator {
         }
         return json("conversationId", conversationId, "title", conversation.title,
                 "modelState", modelState, "todo", todo == null ? JSONObject.NULL : todo,
+                "askUser", askUser == null ? JSONObject.NULL : askUser,
+                "requestId", active == null ? JSONObject.NULL : active.requestId,
+                "questionnairePending", askUser != null && active.questionnaireReplyPending != null,
+                "questionnaireError", askUser == null ? "" : active.questionnaireError,
                 "result", response, "updated", conversation.updated,
                 "created", store.createdAt(conversationId),
                 "runStatus", result == null ? context.getSharedPreferences("chat", Context.MODE_PRIVATE)
@@ -487,8 +496,13 @@ final class ChatCoordinator {
             flushPiDelta(false, run);
         } else if ("message".equals(type)) emit(run, "snapshot", null, event);
         else if ("extension_ui".equals(type) && persistenceFailure == null) {
+            JSONObject previousQuestion = run.extensionUi.optJSONObject("askUser");
             run.extensionUi = parseObject(event.optJSONObject("state").toString());
             JSONObject askUser = run.extensionUi.optJSONObject("askUser");
+            if (askUser == null || previousQuestion == null
+                    || !askUser.optString("id").equals(previousQuestion.optString("id"))) {
+                run.questionnaireError = "";
+            }
             if (run.questionnaireReplyPending != null
                     && (askUser == null || !run.questionnaireReplyPending.equals(askUser.optString("id")))) {
                 run.questionnaireReplyPending = null;
@@ -504,6 +518,7 @@ final class ChatCoordinator {
             String questionnaireId = event.optString("questionnaireId");
             if (questionnaireId.equals(run.questionnaireReplyPending) && !event.optBoolean("accepted")) {
                 run.questionnaireReplyPending = null;
+                run.questionnaireError = event.optString("message", "回答未被接受，请重试");
             }
             emit(run, "questionnaireReply", null, event);
         } else if ("error".equals(type)) {
@@ -624,7 +639,8 @@ final class ChatCoordinator {
         volatile JSONObject extensionUi = new JSONObject();
         volatile String message = "正在启动…";
         volatile long lastDeltaFlush;
-        String questionnaireReplyPending;
+        volatile String questionnaireReplyPending;
+        volatile String questionnaireError = "";
         boolean nodeRegistered;
         boolean terminationAcknowledged;
         boolean timeoutFinalized;
