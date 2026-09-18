@@ -37,8 +37,6 @@ jobs:
             package-lock.json
             pi-runtime/package-lock.json
 
-      - uses: android-actions/setup-android@v3
-
       - uses: actions/cache@v4
         with:
           path: |
@@ -48,7 +46,11 @@ jobs:
           key: android-36-ndk-28.2.13676358-cmake-3.22.1
 
       - name: Install Android packages
-        run: sdkmanager "platforms;android-36" "ndk;28.2.13676358" "cmake;3.22.1"
+        run: |
+          set -euo pipefail
+          : "${ANDROID_HOME:?ANDROID_HOME is not set}"
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platforms;android-36" "ndk;28.2.13676358" "cmake;3.22.1"
 
       - name: Restore debug keystore
         env:
