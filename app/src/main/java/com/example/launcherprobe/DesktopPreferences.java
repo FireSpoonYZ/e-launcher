@@ -26,7 +26,10 @@ public final class DesktopPreferences {
     public boolean searchShortcuts() { return prefs.getBoolean("searchShortcuts", true); }
     public String folderSort() { return prefs.getString("folderSort", "manual"); }
     public String swipeUp() { return prefs.getString("swipeUp", "library"); }
-    public String swipeDown() { return prefs.getString("swipeDown", "search"); }
+    public String swipeDown() {
+        String value = prefs.getString("swipeDown", "none");
+        return "search".equals(value) ? "none" : value;
+    }
     public String theme() { return prefs.getString("theme", "system"); }
     public String wallpaper() { return prefs.getString("wallpaper", "mint"); }
     public String iconPack() { return prefs.getString("iconPack", ""); }

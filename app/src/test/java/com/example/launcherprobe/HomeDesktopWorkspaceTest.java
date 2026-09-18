@@ -124,7 +124,21 @@ public class HomeDesktopWorkspaceTest {
             assertEquals(View.GONE, scene.tools().getVisibility());
             Dialog picker = ReflectionHelpers.getField(scene.desktop, "appDialog");
             assertNull(picker);
-            assertNull(firstDescribed(scene.desktop, "从桌面移除", "Remove from Home"));
+            assertNull(removeChip(scene.activity.getWindow().getDecorView()));
+        }
+    }
+
+    @Test public void iconLongPressWithoutMoveShowsAppMenu() {
+        try (var controller = Robolectric.buildActivity(ComponentActivity.class).setup()) {
+            Scene scene = new Scene(controller.get());
+            scene.appCell().performLongClick();
+            scene.layout();
+            assertFalse(scene.editing());
+            assertEquals(View.GONE, scene.tools().getVisibility());
+            DesktopMenu menu = first(scene.activity.findViewById(android.R.id.content), DesktopMenu.class);
+            assertNotNull(menu);
+            assertNotNull(firstDescribed(menu, "应用信息", "App info"));
+            assertNotNull(firstDescribed(menu, "卸载", "Uninstall"));
         }
     }
 
@@ -136,18 +150,21 @@ public class HomeDesktopWorkspaceTest {
             assertFalse(scene.editing());
             assertEquals(View.GONE, scene.tools().getVisibility());
             scene.layout();
-            View chip = firstDescribed(scene.desktop, "从桌面移除", "Remove from Home");
+            Shadows.shadowOf(Looper.getMainLooper()).idle();
+            View chip = removeChip(scene.activity.getWindow().getDecorView());
             assertNotNull(chip);
-            assertEquals(View.VISIBLE, chip.getVisibility());
-            assertTrue(chip.getWidth() > 0);
-            float x = chip.getLeft() + chip.getWidth() / 2f;
-            float y = chip.getTop() + chip.getHeight() / 2f;
-            assertTrue(scene.desktop.dispatchDragEvent(dragEvent(DragEvent.ACTION_DROP, state, x, y)));
+            assertEquals(1f, chip.getAlpha(), .01f);
+            assertEquals(0, chip.getTop());
+            assertEquals(scene.activity.getWindow().getDecorView().getWidth(), chip.getWidth());
+            assertTrue(chip.getBackground() instanceof GradientDrawable);
+            assertEquals(0f, ((GradientDrawable) chip.getBackground()).getCornerRadius(), .01f);
+            float[] point = dropPointOn(chip, scene.desktop);
+            assertTrue("drop on remove zone", scene.desktop.dispatchDragEvent(dragEvent(DragEvent.ACTION_DROP, state, point[0], point[1])));
             scene.desktop.dispatchDragEvent(dragEvent(DragEvent.ACTION_DRAG_ENDED, state));
             assertNull(scene.model.get(0));
             assertFalse(scene.editing());
             assertEquals(View.GONE, scene.tools().getVisibility());
-            assertEquals(View.GONE, chip.getVisibility());
+            assertEquals(0f, chip.getAlpha(), .01f);
         }
     }
 
@@ -157,13 +174,13 @@ public class HomeDesktopWorkspaceTest {
             Object state = dragItem(scene.model.get(0), 0, -1);
             assertTrue(scene.desktop.dispatchDragEvent(dragEvent(DragEvent.ACTION_DRAG_STARTED, state)));
             scene.layout();
-            View chip = firstDescribed(scene.desktop, "从桌面移除", "Remove from Home");
+            View chip = removeChip(scene.activity.getWindow().getDecorView());
             assertNotNull(chip);
             scene.desktop.dispatchDragEvent(dragEvent(DragEvent.ACTION_DRAG_ENDED, state));
             assertNotNull(scene.model.get(0));
             assertEquals(HomeLayout.Item.APP, scene.model.get(0).type);
             assertFalse(scene.editing());
-            assertEquals(View.GONE, chip.getVisibility());
+            assertEquals(0f, chip.getAlpha(), .01f);
         }
     }
 
@@ -338,6 +355,10 @@ public class HomeDesktopWorkspaceTest {
             pager.measure(View.MeasureSpec.makeMeasureSpec(1000, View.MeasureSpec.EXACTLY),
                     View.MeasureSpec.makeMeasureSpec(1600, View.MeasureSpec.EXACTLY));
             pager.layout(0, 0, 1000, 1600);
+            View decor = activity.getWindow().getDecorView();
+            decor.measure(View.MeasureSpec.makeMeasureSpec(1000, View.MeasureSpec.EXACTLY),
+                    View.MeasureSpec.makeMeasureSpec(1600, View.MeasureSpec.EXACTLY));
+            decor.layout(0, 0, 1000, 1600);
         }
 
         GridLayout grid() { return ReflectionHelpers.getField(desktop, "grid"); }
@@ -402,6 +423,31 @@ public class HomeDesktopWorkspaceTest {
                 animation.doAnimationFrame(frame);
             }
         }
+    }
+
+    private static View removeChip(View root) {
+        return firstDescribed(root, "从桌面移除", "Remove from Home");
+    }
+
+    private static float[] dropPointOn(View chip, View desktop) {
+        int[] chipOrigin = new int[2], deskOrigin = new int[2];
+        chip.getLocationOnScreen(chipOrigin);
+        desktop.getLocationOnScreen(deskOrigin);
+        return new float[]{
+                chipOrigin[0] - deskOrigin[0] + chip.getWidth() / 2f,
+                chipOrigin[1] - deskOrigin[1] + chip.getHeight() / 2f
+        };
+    }
+
+    private static <T extends View> T first(View view, Class<T> type) {
+        if (type.isInstance(view)) return type.cast(view);
+        if (view instanceof ViewGroup group) {
+            for (int i = 0; i < group.getChildCount(); i++) {
+                T found = first(group.getChildAt(i), type);
+                if (found != null) return found;
+            }
+        }
+        return null;
     }
 
     private static View firstDescribed(View view, String... texts) {

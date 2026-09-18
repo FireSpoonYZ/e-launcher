@@ -8,7 +8,9 @@ import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.graphics.Rect;
+import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
+import android.util.LruCache;
 import android.os.CancellationSignal;
 import android.os.Handler;
 import android.os.Looper;
@@ -71,6 +73,7 @@ public final class NativeSearchPage extends FrameLayout {
     private final Map<String, Integer> sectionPositions = new LinkedHashMap<>();
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private final Handler main = new Handler(Looper.getMainLooper());
+    private final LruCache<String, Drawable> icons = new LruCache<>(160);
     private CancellationSignal cancellation;
     private LauncherSearchIndex index;
     private int generation;
@@ -639,50 +642,22 @@ public final class NativeSearchPage extends FrameLayout {
         @Override public int getCount() { return rows.size(); }
         @Override public Object getItem(int position) { return rows.get(position); }
         @Override public long getItemId(int position) { return position; }
+        @Override public int getViewTypeCount() { return 3; }
+        @Override public int getItemViewType(int position) {
+            Row row = rows.get(position);
+            if (row.title != null) return 2;
+            return row.grouped ? 1 : 0;
+        }
         @Override public boolean areAllItemsEnabled() { return false; }
         @Override public boolean isEnabled(int position) { return false; }
         @Override public View getView(int position, View recycled, ViewGroup parent) {
             Row row = rows.get(position);
-            if (row.title == null) {
-                LinearLayout grid = line();
-                grid.setGravity(Gravity.TOP);
-                if (row.grouped) {
-                    TextView section = text(row.section, 16, colors.ink);
-                    section.setPadding(0, dp(12), 0, 0); section.setAccessibilityHeading(true);
-                    grid.addView(section, new LinearLayout.LayoutParams(dp(24), -2));
-                }
-                for (LauncherSearchIndex.App app : row.apps) {
-                    LinearLayout cell = column();
-                    cell.setGravity(Gravity.CENTER);
-                    cell.setPadding(dp(2), dp(8), dp(2), dp(10));
-                    ImageView icon = icon(app);
-                    cell.addView(icon, new LinearLayout.LayoutParams(dp(52), dp(52)));
-                    TextView label = text(app.label(), 13, colors.ink);
-                    label.setGravity(Gravity.CENTER);
-                    label.setMaxLines(1);
-                    label.setEllipsize(android.text.TextUtils.TruncateAt.END);
-                    label.setPadding(0, dp(7), 0, 0);
-                    cell.addView(label, new LinearLayout.LayoutParams(-1, -2));
-                    cell.setContentDescription(app.label() + "，长按拖到桌面");
-                    cell.setFocusable(true);
-                    cell.setOnClickListener(v -> launch(app));
-                    cell.setOnLongClickListener(v -> { startDrag(v, new DragItem(app.component(), null, app.userSerial(), app.label())); return true; });
-                    cell.setAccessibilityDelegate(new View.AccessibilityDelegate() {
-                        @Override public void onInitializeAccessibilityNodeInfo(View host, android.view.accessibility.AccessibilityNodeInfo info) {
-                            super.onInitializeAccessibilityNodeInfo(host, info);
-                            info.addAction(new android.view.accessibility.AccessibilityNodeInfo.AccessibilityAction(android.R.id.edit, "编辑搜索别名"));
-                        }
-                        @Override public boolean performAccessibilityAction(View host, int action, android.os.Bundle args) {
-                            if (action == android.R.id.edit) { editAlias(app); return true; }
-                            return super.performAccessibilityAction(host, action, args);
-                        }
-                    });
-                    grid.addView(cell, new LinearLayout.LayoutParams(0, -2, 1));
-                }
-                for (int i = row.apps.size(); i < (row.grouped ? 3 : 4); i++) grid.addView(new View(activity), new LinearLayout.LayoutParams(0, 1, 1));
-                return grid;
-            }
-            LinearLayout outer = column();
+            if (row.title == null) return bindAppRow(row, recycled);
+            LinearLayout outer = recycled instanceof LinearLayout existing && existing.getTag() == Boolean.TRUE
+                    ? existing : column();
+            if (outer == recycled) outer.removeAllViews();
+            else outer.setTag(Boolean.TRUE);
+
             boolean group = mode == Mode.GLOBAL_SEARCH && !row.section.isEmpty();
             boolean last = position + 1 == rows.size() || rows.get(position + 1).heading;
             outer.setPadding(0, dp(row.heading ? 8 : group ? 0 : 3), 0, dp(group ? (last ? 4 : 0) : 3));
@@ -768,13 +743,112 @@ public final class NativeSearchPage extends FrameLayout {
         }
     }
 
+    private View bindAppRow(Row row, View recycled) {
+        int columns = row.grouped ? 3 : 4;
+        LinearLayout grid = recycled instanceof LinearLayout existing && Integer.valueOf(columns).equals(existing.getTag())
+                ? existing : newAppRow(row.grouped, columns);
+        int offset = row.grouped ? 1 : 0;
+        if (row.grouped) {
+            TextView section = (TextView) grid.getChildAt(0);
+            section.setText(row.section);
+            section.setVisibility(row.section == null || row.section.isEmpty() ? INVISIBLE : VISIBLE);
+        }
+        for (int i = 0; i < columns; i++) {
+            LinearLayout cell = (LinearLayout) grid.getChildAt(offset + i);
+            if (i < row.apps.size()) bindAppCell(cell, row.apps.get(i));
+            else {
+                cell.setVisibility(INVISIBLE);
+                cell.setOnClickListener(null);
+                cell.setOnLongClickListener(null);
+                cell.setContentDescription(null);
+            }
+        }
+        return grid;
+    }
+
+    private LinearLayout newAppRow(boolean grouped, int columns) {
+        LinearLayout grid = line();
+        grid.setGravity(Gravity.TOP);
+        grid.setTag(columns);
+        if (grouped) {
+            TextView section = text("", 16, colors.ink);
+            section.setPadding(0, dp(12), 0, 0);
+            section.setAccessibilityHeading(true);
+            grid.addView(section, new LinearLayout.LayoutParams(dp(24), -2));
+        }
+        for (int i = 0; i < columns; i++) {
+            LinearLayout cell = column();
+            cell.setGravity(Gravity.CENTER);
+            cell.setPadding(dp(2), dp(8), dp(2), dp(10));
+            cell.setFocusable(true);
+            ImageView icon = new ImageView(activity);
+            icon.setScaleType(ImageView.ScaleType.FIT_CENTER);
+            icon.setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_NO);
+            cell.addView(icon, new LinearLayout.LayoutParams(dp(52), dp(52)));
+            TextView label = text("", 13, colors.ink);
+            label.setGravity(Gravity.CENTER);
+            label.setMaxLines(1);
+            label.setEllipsize(android.text.TextUtils.TruncateAt.END);
+            label.setPadding(0, dp(7), 0, 0);
+            cell.addView(label, new LinearLayout.LayoutParams(-1, -2));
+            grid.addView(cell, new LinearLayout.LayoutParams(0, -2, 1));
+        }
+        return grid;
+    }
+
+    private void bindAppCell(LinearLayout cell, LauncherSearchIndex.App app) {
+        cell.setVisibility(VISIBLE);
+        bindIcon((ImageView) cell.getChildAt(0), app);
+        ((TextView) cell.getChildAt(1)).setText(app.label());
+        cell.setContentDescription(app.label() + "，长按拖到桌面");
+        cell.setOnClickListener(v -> launch(app));
+        cell.setOnLongClickListener(v -> {
+            startDrag(v, new DragItem(app.component(), null, app.userSerial(), app.label()));
+            return true;
+        });
+        cell.setAccessibilityDelegate(new View.AccessibilityDelegate() {
+            @Override public void onInitializeAccessibilityNodeInfo(View host, android.view.accessibility.AccessibilityNodeInfo info) {
+                super.onInitializeAccessibilityNodeInfo(host, info);
+                info.addAction(new android.view.accessibility.AccessibilityNodeInfo.AccessibilityAction(android.R.id.edit, "编辑搜索别名"));
+            }
+            @Override public boolean performAccessibilityAction(View host, int action, android.os.Bundle args) {
+                if (action == android.R.id.edit) { editAlias(app); return true; }
+                return super.performAccessibilityAction(host, action, args);
+            }
+        });
+    }
+
     private ImageView icon(LauncherSearchIndex.App app) {
         ImageView icon = new ImageView(activity);
-        try { icon.setImageDrawable(app.info().loadIcon(activity.getPackageManager())); }
-        catch (RuntimeException ignored) { icon.setImageDrawable(activity.getPackageManager().getDefaultActivityIcon()); }
         icon.setScaleType(ImageView.ScaleType.FIT_CENTER);
         icon.setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_NO);
+        bindIcon(icon, app);
         return icon;
+    }
+
+    private void bindIcon(ImageView view, LauncherSearchIndex.App app) {
+        String key = app.component().flattenToString();
+        view.setTag(key);
+        Drawable cached = icons.get(key);
+        if (cached != null) {
+            view.setImageDrawable(cached);
+            return;
+        }
+        view.setImageDrawable(activity.getPackageManager().getDefaultActivityIcon());
+        try {
+            worker.execute(() -> {
+                if (disposed) return;
+                Drawable icon;
+                try { icon = app.info().loadIcon(activity.getPackageManager()); }
+                catch (RuntimeException ignored) { icon = activity.getPackageManager().getDefaultActivityIcon(); }
+                icons.put(key, icon);
+                Drawable shown = icon;
+                main.post(() -> {
+                    if (disposed || !key.equals(view.getTag())) return;
+                    view.setImageDrawable(shown);
+                });
+            });
+        } catch (java.util.concurrent.RejectedExecutionException ignored) { }
     }
 
     private static final class Row {

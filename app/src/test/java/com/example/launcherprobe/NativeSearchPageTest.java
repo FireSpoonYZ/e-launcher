@@ -2,6 +2,7 @@ package com.example.launcherprobe;
 
 import static org.junit.Assert.*;
 
+import android.content.pm.ResolveInfo;
 import android.graphics.Rect;
 import android.view.MotionEvent;
 import android.view.View;
@@ -126,6 +127,45 @@ public class NativeSearchPageTest {
             assertEquals(0, scene.host.closed);
             assertTrue(scene.scrollMark() > before);
         }
+    }
+
+    @Test public void appLibraryGridRowsReuseConvertView() throws Exception {
+        try (var controller = Robolectric.buildActivity(ComponentActivity.class).setup()) {
+            Scene scene = new Scene(controller.get(), NativeSearchPage.Mode.APP_LIBRARY, 720);
+            ReflectionHelpers.callInstanceMethod(scene.page, "cancelSearch");
+            ArrayList<Object> rows = ReflectionHelpers.getField(scene.page, "rows");
+            rows.clear();
+            Class<?> row = Class.forName("com.example.launcherprobe.NativeSearchPage$Row");
+            var ctor = row.getDeclaredConstructor(String.class, List.class, Runnable.class, boolean.class);
+            ctor.setAccessible(true);
+            LauncherSearchIndex.App app = sampleApp(controller.get());
+            Object first = ctor.newInstance(null, List.of(app, app, app), null, false);
+            Object second = ctor.newInstance(null, List.of(app, app), null, false);
+            ReflectionHelpers.setField(first, "grouped", true);
+            ReflectionHelpers.setField(first, "section", "Q");
+            ReflectionHelpers.setField(second, "grouped", true);
+            ReflectionHelpers.setField(second, "section", "T");
+            rows.add(first);
+            rows.add(second);
+            ReflectionHelpers.callInstanceMethod(scene.page, "notifyRows");
+            scene.layout();
+            View a = scene.list.getAdapter().getView(0, null, scene.list);
+            View b = scene.list.getAdapter().getView(1, a, scene.list);
+            assertSame(a, b);
+            assertEquals(4, ((ViewGroup) b).getChildCount());
+        }
+    }
+
+    private static LauncherSearchIndex.App sampleApp(ComponentActivity activity) {
+        ResolveInfo info = new ResolveInfo();
+        info.activityInfo = new android.content.pm.ActivityInfo();
+        info.activityInfo.packageName = activity.getPackageName();
+        info.activityInfo.name = "TestApp";
+        info.activityInfo.applicationInfo = new android.content.pm.ApplicationInfo(activity.getApplicationInfo());
+        info.nonLocalizedLabel = "QQ";
+        return new LauncherSearchIndex.App(info,
+                new android.content.ComponentName(info.activityInfo.packageName, info.activityInfo.name),
+                "QQ", new SearchName("QQ"), new SearchName(""), 0, 0, 0);
     }
 
     private static final class HostStub implements NativeSearchPage.Host {

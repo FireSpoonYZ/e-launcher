@@ -351,8 +351,9 @@ public final class DesktopSettingsActivity extends androidx.activity.ComponentAc
     private void gestures() {
         String[] labels = {"应用库", "本地搜索", "不操作"}, values = {"library", "search", "none"};
         choice("上滑", "swipeUp", prefs.swipeUp(), labels, values);
-        choice("下滑", "swipeDown", prefs.swipeDown(), labels, values);
-        note("应用库默认不弹键盘；本地搜索自动聚焦。");
+        choice("下滑", "swipeDown", prefs.swipeDown(),
+                new String[]{"应用库", "不操作"}, new String[]{"library", "none"});
+        note("应用库默认不弹键盘；本地搜索仅用于上滑。");
         note("无障碍授权支持固定导航，并允许助手按工具调用读取当前界面结构、点击、输入非密码文字和滚动；密码字段会隐藏。");
         gestureState = text(GestureService.status(this), 13, colors.ink);
         gestureState.setPadding(dp(12), dp(14), dp(12), dp(14));
