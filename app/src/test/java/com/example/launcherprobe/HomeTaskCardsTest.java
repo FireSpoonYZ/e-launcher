@@ -18,6 +18,9 @@ import org.robolectric.RuntimeEnvironment;
 import org.robolectric.annotation.Config;
 import org.robolectric.util.ReflectionHelpers;
 
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
+
 @RunWith(RobolectricTestRunner.class)
 @Config(sdk = 35)
 public class HomeTaskCardsTest {
@@ -121,6 +124,58 @@ public class HomeTaskCardsTest {
         assertEquals("b", cards.selectedId());
     }
 
+    @Test public void idleCardArchivesWithoutConfirmationAndBusyCardStops() throws Exception {
+        android.content.Context context = RuntimeEnvironment.getApplication();
+        PagerRoot pager = new PagerRoot(context, new View(context), PagerState.Page.HOME, page -> {});
+        AtomicReference<String> archived = new AtomicReference<>();
+        AtomicReference<String> stopped = new AtomicReference<>();
+        AtomicBoolean listed = new AtomicBoolean();
+        HomeTaskCards cards = new HomeTaskCards(context, pager, new View(context),
+                id -> {}, stopped::set, archived::set, () -> listed.set(true));
+        pager.setHome(cards);
+        JSONArray data = new JSONArray("[{\"conversationId\":\"a\",\"title\":\"A\",\"modelState\":\"idle\"}]");
+        cards.update(data);
+        pager.measure(View.MeasureSpec.makeMeasureSpec(600, View.MeasureSpec.EXACTLY),
+                View.MeasureSpec.makeMeasureSpec(800, View.MeasureSpec.EXACTLY));
+        pager.layout(0, 0, 600, 800);
+        TextView archive = firstExact(cards, "Archive", "归档");
+        assertNotNull(archive);
+        assertNull(firstExact(cards, "Delete", "删除"));
+        archive.performClick();
+        assertEquals("a", archived.get());
+        assertNull(stopped.get());
+        View archivedEntry = findDescription(cards, "Archived chats", "已归档对话");
+        assertNotNull(archivedEntry);
+        archivedEntry.performClick();
+        assertTrue(listed.get());
+
+        archived.set(null);
+        data.getJSONObject(0).put("modelState", "working");
+        cards.update(data);
+        TextView stop = firstExact(cards, "Stop", "停止");
+        assertNotNull(stop);
+        stop.performClick();
+        assertEquals("a", stopped.get());
+        assertNull(archived.get());
+    }
+
+    @Test public void emptyCardExposesArchivedList() throws Exception {
+        android.content.Context context = RuntimeEnvironment.getApplication();
+        PagerRoot pager = new PagerRoot(context, new View(context), PagerState.Page.HOME, page -> {});
+        AtomicBoolean listed = new AtomicBoolean();
+        HomeTaskCards cards = new HomeTaskCards(context, pager, new View(context),
+                id -> {}, id -> {}, id -> {}, () -> listed.set(true));
+        pager.setHome(cards);
+        cards.update(new JSONArray());
+        pager.measure(View.MeasureSpec.makeMeasureSpec(600, View.MeasureSpec.EXACTLY),
+                View.MeasureSpec.makeMeasureSpec(800, View.MeasureSpec.EXACTLY));
+        pager.layout(0, 0, 600, 800);
+        TextView entry = firstExact(cards, "Archived chats", "已归档对话");
+        assertNotNull(entry);
+        entry.performClick();
+        assertTrue(listed.get());
+    }
+
     private static void stopFling(ScrollView scroll) {
         // ACTION_UP may start OverScroller; ScrollView.scrollTo does not abort it.
         // A live fling DOWN calls requestDisallowInterceptTouchEvent, so the parent
@@ -135,6 +190,38 @@ public class HomeTaskCardsTest {
         ScrollView scroll = first(root, ScrollView.class);
         View panel = scroll == null ? null : scroll.getChildAt(0);
         return panel instanceof ViewGroup group ? group.getChildAt(0) : null;
+    }
+
+    private static TextView firstExact(View view, String... texts) {
+        if (view instanceof TextView text) {
+            CharSequence value = text.getText();
+            if (value != null) {
+                String shown = value.toString();
+                for (String expected : texts) if (shown.equals(expected)) return text;
+            }
+        }
+        if (view instanceof ViewGroup group) {
+            for (int i = 0; i < group.getChildCount(); i++) {
+                TextView found = firstExact(group.getChildAt(i), texts);
+                if (found != null) return found;
+            }
+        }
+        return null;
+    }
+
+    private static View findDescription(View view, String... texts) {
+        CharSequence description = view.getContentDescription();
+        if (description != null) {
+            String shown = description.toString();
+            for (String expected : texts) if (shown.equals(expected)) return view;
+        }
+        if (view instanceof ViewGroup group) {
+            for (int i = 0; i < group.getChildCount(); i++) {
+                View found = findDescription(group.getChildAt(i), texts);
+                if (found != null) return found;
+            }
+        }
+        return null;
     }
 
     private static TextView firstText(View view, String... texts) {

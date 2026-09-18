@@ -38,6 +38,7 @@ final class HomeTaskCards extends LinearLayout {
     private final AppAppearance colors;
     private final View wallpaper;
     private final Consumer<String> open, stop, dismiss;
+    private final Runnable archived;
     private JSONArray cards = new JSONArray();
     private String selected = "";
     private String rendered = "";
@@ -61,17 +62,23 @@ final class HomeTaskCards extends LinearLayout {
 
     HomeTaskCards(Context context, PagerRoot pager, Consumer<String> open,
             Consumer<String> stop, Consumer<String> dismiss) {
-        this(context, pager, AppAppearance.readDesktop(context).wallpaper(context), open, stop, dismiss);
+        this(context, pager, AppAppearance.readDesktop(context).wallpaper(context), open, stop, dismiss, null);
     }
 
     HomeTaskCards(Context context, PagerRoot pager, View wallpaper, Consumer<String> open,
             Consumer<String> stop, Consumer<String> dismiss) {
+        this(context, pager, wallpaper, open, stop, dismiss, null);
+    }
+
+    HomeTaskCards(Context context, PagerRoot pager, View wallpaper, Consumer<String> open,
+            Consumer<String> stop, Consumer<String> dismiss, Runnable archived) {
         super(context);
         this.pager = pager;
         this.wallpaper = wallpaper;
         this.open = open;
         this.stop = stop;
         this.dismiss = dismiss;
+        this.archived = archived;
         colors = AppAppearance.readDesktop(context);
         setOrientation(VERTICAL);
         setPadding(0, 0, 0, 0);
@@ -181,6 +188,13 @@ final class HomeTaskCards extends LinearLayout {
             LayoutParams startParams = new LayoutParams(-1, dp(48));
             startParams.setMargins(dp(32), dp(8), dp(32), dp(4));
             panel.addView(start, startParams);
+            if (archived != null) {
+                TextView archivedButton = button(text("已归档对话", "Archived chats"), archived);
+                archivedButton.setGravity(Gravity.CENTER); archivedButton.setTextColor(colors.accent);
+                LayoutParams archivedParams = new LayoutParams(-1, dp(48));
+                archivedParams.setMargins(dp(32), 0, dp(32), dp(4));
+                panel.addView(archivedButton, archivedParams);
+            }
             present(glass); return;
         }
         selected = card.optString("conversationId");
@@ -202,6 +216,8 @@ final class HomeTaskCards extends LinearLayout {
         LayoutParams stateParams = new LayoutParams(-2, -2); stateParams.setMarginStart(dp(8));
         heading.addView(state, stateParams);
         View space = new View(getContext()); heading.addView(space, new LayoutParams(0, 1, 1));
+        if (archived != null) heading.addView(iconButton("folder",
+                text("已归档对话", "Archived chats"), archived), new LayoutParams(dp(48), dp(48)));
         TextView position = label(text("对话 ", "Chat ") + (index + 1) + "/" + cards.length(), 11);
         position.setTextColor(colors.muted); heading.addView(position);
         if (cards.length() > 1) heading.addView(new ConversationSwitch(), new LayoutParams(dp(48), dp(48)));
@@ -228,7 +244,7 @@ final class HomeTaskCards extends LinearLayout {
         LinearLayout actions = new LinearLayout(getContext());
         boolean busy = !"idle".equals(model);
         TextView left = button(busy ? text("stopping".equals(model) ? "正在停止…" : "停止", "Stop")
-                : text("删除", "Delete"), () -> { if (busy) stop.accept(id); else dismiss.accept(id); });
+                : text("归档", "Archive"), () -> { if (busy) stop.accept(id); else dismiss.accept(id); });
         left.setTextColor(colors.error); left.setGravity(Gravity.CENTER);
         left.setEnabled(!"stopping".equals(model));
         left.setBackground(fill(colors.dark ? 0xff4a303c : 0xfff4dfe4, 16));

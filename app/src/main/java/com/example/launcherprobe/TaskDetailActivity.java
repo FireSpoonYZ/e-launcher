@@ -24,6 +24,7 @@ import java.util.List;
 public final class TaskDetailActivity extends Activity {
     public static final String EXTRA_CONVERSATION_ID = "task_conversation_id";
     public static final String EXTRA_OPEN_CHAT = "task_open_chat";
+    public static final String EXTRA_ARCHIVED_ID = "task_archived_id";
     private ChatCoordinator coordinator;
     private AppAppearance colors;
     private String id, signature = "";
@@ -62,6 +63,15 @@ public final class TaskDetailActivity extends Activity {
         super.onSaveInstanceState(state); state.putBoolean("reply_expanded", replyExpanded);
     }
     @Override protected void onStart() { super.onStart(); coordinator.addListener(listener); refresh(); }
+    @Override protected void onResume() {
+        super.onResume();
+        new Thread(() -> {
+            try { coordinator.purgeExpiredArchives(); }
+            catch (RuntimeException ignored) { }
+            if (isFinishing()) return;
+            runOnUiThread(() -> { if (!isFinishing()) refresh(); });
+        }, "archive-purge").start();
+    }
     @Override protected void onStop() { coordinator.removeListener(listener); super.onStop(); }
 
     private void refresh() {
@@ -134,30 +144,72 @@ public final class TaskDetailActivity extends Activity {
         }
         LinearLayout actions = row();
         boolean busy = !"idle".equals(model);
-        TextView left = button("stopping".equals(model) ? "正在停止…" : busy ? "停止" : "删除", colors.error);
+        TextView left = button("stopping".equals(model) ? "正在停止…" : busy ? "停止" : "归档", colors.error);
         GradientDrawable warning = shape(colors.dark ? 0xff432d38 : 0xfffff1f3, 14);
         warning.setStroke(dp(1), colors.dark ? colors.error : 0xffffb1b8); left.setBackground(warning);
         left.setEnabled(!"stopping".equals(model)); left.setOnClickListener(v -> {
             if (busy) { coordinator.cancel(id); refresh(); }
-            else new AlertDialog.Builder(this).setTitle("删除对话？")
-                    .setMessage("同时删除聊天历史与工作区；移除桌面小组件不会删除历史。")
-                    .setNegativeButton("取消", null).setPositiveButton("删除", (dialog, which) -> {
-                        try { coordinator.deleteConversation(id); finish(); }
-                        catch (RuntimeException e) { Toast.makeText(this, e.getMessage(), Toast.LENGTH_LONG).show(); refresh(); }
-                    }).show();
+            else archive();
         });
         actions.addView(left, new LinearLayout.LayoutParams(0, dp(48), 1));
         TextView chat = button("查看对话", 0xffffffff); chat.setBackground(shape(colors.accent, 14));
-        chat.setOnClickListener(v -> {
-            startActivity(new Intent(this, MainActivity.class).putExtra(EXTRA_OPEN_CHAT, id)
-                    .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP)); finish();
-        });
+        chat.setOnClickListener(v -> openChat(id));
         LinearLayout.LayoutParams chatParams = new LinearLayout.LayoutParams(0, dp(48), 1); chatParams.leftMargin = dp(10);
         actions.addView(chat, chatParams); footer.addView(actions);
+        if (busy) {
+            TextView archive = button("归档", colors.accent); archive.setTextSize(14);
+            archive.setOnClickListener(v -> archive());
+            footer.addView(archive, new LinearLayout.LayoutParams(-1, dp(48)));
+        }
+        TextView remove = button("永久删除", colors.error); remove.setTextSize(14);
+        remove.setOnClickListener(v -> confirmPermanentDelete());
+        footer.addView(remove, new LinearLayout.LayoutParams(-1, dp(48)));
+        TextView archived = button("已归档对话", colors.accent); archived.setTextSize(14);
+        archived.setOnClickListener(v -> ConversationArchiveUi.showList(this, coordinator,
+                archivedId -> {
+                    try { coordinator.restoreConversation(archivedId); }
+                    catch (RuntimeException e) { ConversationArchiveUi.toast(this, e); }
+                },
+                archivedId -> {
+                    try {
+                        coordinator.deleteConversation(archivedId);
+                        if (archivedId.equals(id)) finish();
+                    } catch (RuntimeException e) { ConversationArchiveUi.toast(this, e); }
+                },
+                this::openChat));
+        footer.addView(archived, new LinearLayout.LayoutParams(-1, dp(48)));
         TextView home = button("回到桌面", colors.accent); home.setTextSize(14); home.setOnClickListener(v -> {
             startActivity(new Intent(this, MainActivity.class).setAction(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME)
                     .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP)); finish();
         }); footer.addView(home, new LinearLayout.LayoutParams(-1, dp(48)));
+    }
+    private void archive() {
+        try {
+            coordinator.archiveConversation(id);
+            startActivity(new Intent(this, MainActivity.class).putExtra(EXTRA_ARCHIVED_ID, id)
+                    .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP));
+            finish();
+        } catch (RuntimeException e) {
+            Toast.makeText(this, e.getMessage(), Toast.LENGTH_LONG).show();
+            refresh();
+        }
+    }
+    private void confirmPermanentDelete() {
+        if (currentCard != null && !"idle".equals(currentCard.optString("modelState"))) {
+            Toast.makeText(this, "此会话正在运行，请先停止后再删除", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        new AlertDialog.Builder(this).setTitle("删除对话？")
+                .setMessage("同时删除聊天历史与工作区；移除桌面小组件不会删除历史。")
+                .setNegativeButton("取消", null).setPositiveButton("删除", (dialog, which) -> {
+                    try { coordinator.deleteConversation(id); finish(); }
+                    catch (RuntimeException e) { Toast.makeText(this, e.getMessage(), Toast.LENGTH_LONG).show(); refresh(); }
+                }).show();
+    }
+    private void openChat(String conversationId) {
+        startActivity(new Intent(this, MainActivity.class).putExtra(EXTRA_OPEN_CHAT, conversationId)
+                .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP));
+        finish();
     }
     private void info(String key, String value) {
         LinearLayout row = row(); row.setMinimumHeight(dp(36));

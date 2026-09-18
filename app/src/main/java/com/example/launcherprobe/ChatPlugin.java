@@ -58,6 +58,26 @@ public final class ChatPlugin extends Plugin {
         } catch (Exception exception) { reject(call, exception); }
     }
 
+    @PluginMethod public void archiveConversation(PluginCall call) {
+        try {
+            coordinator.archiveConversation(required(call, "conversationId"));
+            resolve(call, coordinator.snapshot());
+        } catch (Exception exception) { reject(call, exception); }
+    }
+
+    @PluginMethod public void restoreConversation(PluginCall call) {
+        try {
+            coordinator.restoreConversation(required(call, "conversationId"));
+            resolve(call, coordinator.snapshot());
+        } catch (Exception exception) { reject(call, exception); }
+    }
+
+    @PluginMethod public void listArchivedConversations(PluginCall call) {
+        try { resolve(call, new JSONObject().put("conversations", NativeJson.conversations(
+                coordinator.store().archivedConversations(call.getString("query"))))); }
+        catch (Exception exception) { reject(call, exception); }
+    }
+
     @PluginMethod public void saveDraft(PluginCall call) {
         try {
             String id = required(call, "conversationId");

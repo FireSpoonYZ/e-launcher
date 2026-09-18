@@ -14,6 +14,7 @@ import java.util.Locale;
 /** App-private conversation trees and provider settings. Backups are disabled in the manifest. */
 public final class ChatStore {
     private static final int MAX_TOOL_ARGUMENTS = 50_000;
+    static final long ARCHIVE_TTL_MS = 14L * 24 * 60 * 60 * 1000;
     private static final String TASK_CARDS = "task_cards";
     private static final Object STORE_LOCK = new Object();
     private final Context context;
@@ -161,6 +162,7 @@ public final class ChatStore {
                     .put("updated", System.currentTimeMillis())
                     .put("created", previous == null ? System.currentTimeMillis() : previous.optLong("created"));
             if (previous == null || previous.optBoolean("draft_only")) item.put("draft_only", true);
+            copyArchivedAt(previous, item);
             index.put(conversationId, item);
             edit.putString("conversations", index.toString());
         } catch (org.json.JSONException exception) {
@@ -176,13 +178,19 @@ public final class ChatStore {
         public final String title;
         public final long updated;
         public final String snippet;
+        /** Unix epoch millis; 0 if the conversation is not archived. */
+        public final long archivedAt;
 
-        Conversation(String id, String title, long updated) { this(id, title, updated, null); }
+        Conversation(String id, String title, long updated) { this(id, title, updated, null, 0); }
         Conversation(String id, String title, long updated, String snippet) {
+            this(id, title, updated, snippet, 0);
+        }
+        Conversation(String id, String title, long updated, String snippet, long archivedAt) {
             this.id = id;
             this.title = title;
             this.updated = updated;
             this.snippet = snippet;
+            this.archivedAt = archivedAt;
         }
     }
 
@@ -191,23 +199,43 @@ public final class ChatStore {
         return item == null ? 0 : item.optLong("created");
     }
 
-    public List<Conversation> conversations() {
+    long archivedAt(String id) {
+        JSONObject item = conversationIndex().optJSONObject(id);
+        return item == null ? 0 : item.optLong("archivedAt", 0);
+    }
+
+    public boolean isArchived(String id) { return archivedAt(id) != 0; }
+
+    public List<Conversation> conversations() { return listed(false); }
+
+    public List<Conversation> archivedConversations() { return listed(true); }
+
+    List<Conversation> conversations(String query) { return matching(conversations(), query); }
+
+    List<Conversation> archivedConversations(String query) {
+        return matching(archivedConversations(), query);
+    }
+
+    private List<Conversation> listed(boolean archived) {
         List<Conversation> result = new ArrayList<>();
         JSONObject index = conversationIndex();
         java.util.Iterator<String> ids = index.keys();
         while (ids.hasNext()) {
             String id = ids.next();
             JSONObject item = index.optJSONObject(id);
-            if (item != null) result.add(new Conversation(id, item.optString("title", "新对话"),
-                    item.optLong("updated")));
+            if (item == null) continue;
+            long archivedAt = item.optLong("archivedAt", 0);
+            if (archived != (archivedAt != 0)) continue;
+            result.add(new Conversation(id, item.optString("title", "新对话"),
+                    item.optLong("updated"), null, archivedAt));
         }
-        result.sort((left, right) -> Long.compare(right.updated, left.updated));
+        if (archived) result.sort((left, right) -> Long.compare(right.archivedAt, left.archivedAt));
+        else result.sort((left, right) -> Long.compare(right.updated, left.updated));
         return result;
     }
 
-    List<Conversation> conversations(String query) {
+    private List<Conversation> matching(List<Conversation> all, String query) {
         String needle = query == null ? "" : query.trim().toLowerCase(Locale.ROOT);
-        List<Conversation> all = conversations();
         if (needle.isEmpty()) return all;
         List<Conversation> matches = new ArrayList<>();
         for (Conversation conversation : all) {
@@ -223,7 +251,7 @@ public final class ChatStore {
                 break;
             }
             if (matched) matches.add(new Conversation(conversation.id, conversation.title,
-                    conversation.updated, snippet));
+                    conversation.updated, snippet, conversation.archivedAt));
         }
         return matches;
     }
@@ -293,6 +321,34 @@ public final class ChatStore {
     public void selectConversation(String id) {
         if (!conversationIndex().has(id)) throw new IllegalArgumentException("会话不存在");
         preferences.edit().putString("active_chat", id).apply();
+    }
+
+    void archive(String conversationId) {
+        synchronized (STORE_LOCK) {
+            JSONObject index = conversationIndex();
+            JSONObject item = index.optJSONObject(conversationId);
+            if (item == null) throw new IllegalArgumentException("会话不存在");
+            try { item.put("archivedAt", System.currentTimeMillis()); }
+            catch (org.json.JSONException exception) {
+                throw new IllegalStateException("无法归档会话", exception);
+            }
+            SharedPreferences.Editor edit = preferences.edit().putString("conversations", index.toString());
+            if (conversationId.equals(preferences.getString("home_draft", null))) edit.remove("home_draft");
+            if (conversationId.equals(activeId())) {
+                edit.putString("active_chat", java.util.UUID.randomUUID().toString());
+            }
+            edit.apply();
+        }
+    }
+
+    void restore(String conversationId) {
+        synchronized (STORE_LOCK) {
+            JSONObject index = conversationIndex();
+            JSONObject item = index.optJSONObject(conversationId);
+            if (item == null) throw new IllegalArgumentException("会话不存在");
+            item.remove("archivedAt");
+            preferences.edit().putString("conversations", index.toString()).apply();
+        }
     }
 
     public String baseUrl() { return preferences.getString("base_url", "https://api.openai.com/v1"); }
@@ -439,8 +495,10 @@ public final class ChatStore {
             if (previous != null && !previous.optBoolean("draft_only")
                     && !"新对话".equals(previous.optString("title")))
                 title = previous.optString("title", title);
-            index.put(conversation, new JSONObject().put("title", title).put("updated", System.currentTimeMillis())
-                    .put("created", previous == null ? System.currentTimeMillis() : previous.optLong("created")));
+            JSONObject next = new JSONObject().put("title", title).put("updated", System.currentTimeMillis())
+                    .put("created", previous == null ? System.currentTimeMillis() : previous.optLong("created"));
+            copyArchivedAt(previous, next);
+            index.put(conversation, next);
             preferences.edit().putString(historyKey(conversation), encodeTree(tree).toString())
                     .putString("conversations", index.toString()).apply();
         } catch (Exception exception) {
@@ -649,6 +707,11 @@ public final class ChatStore {
             if (object.has("id") && object.has("path") && object.has("mimeType")) used.add(object.getString("id"));
             java.util.Iterator<String> keys = object.keys(); while (keys.hasNext()) collectAttachmentIds(object.get(keys.next()), used);
         } else if (value instanceof JSONArray) for (int i = 0; i < ((JSONArray) value).length(); i++) collectAttachmentIds(((JSONArray) value).get(i), used);
+    }
+
+    private static void copyArchivedAt(JSONObject previous, JSONObject target) throws org.json.JSONException {
+        long archivedAt = previous == null ? 0 : previous.optLong("archivedAt", 0);
+        if (archivedAt != 0) target.put("archivedAt", archivedAt);
     }
 
     private static String truncateArguments(String value) {

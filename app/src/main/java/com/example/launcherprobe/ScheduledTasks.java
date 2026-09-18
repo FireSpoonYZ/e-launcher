@@ -57,6 +57,7 @@ final class ScheduledTasks {
         if (recoverRuns(state)) write(state);
         Set<String> conversations = new HashSet<>();
         for (ChatStore.Conversation conversation : coordinator.store().conversations()) conversations.add(conversation.id);
+        for (ChatStore.Conversation conversation : coordinator.store().archivedConversations()) conversations.add(conversation.id);
         JSONArray history = new JSONArray();
         JSONArray runs = state.getJSONArray("runs");
         for (int i = runs.length() - 1; i >= 0; i--) {
