@@ -11,7 +11,8 @@ keystore.properties
 /design/
 evidence/
 *.hprof
-/NUL
+nul
+NUL
 pi-runtime/node_modules/
 node_modules/
 web/dist/
