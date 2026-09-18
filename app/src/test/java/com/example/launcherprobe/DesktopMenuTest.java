@@ -135,6 +135,8 @@ public class DesktopMenuTest {
             assertNotNull("First back must keep the folder open", scene.folderLayer());
             assertFalse("Menu is already closed", scene.desktop.dismissMenu());
             scene.activity.getOnBackPressedDispatcher().onBackPressed();
+            // closeFolder() animates for Motion.PAGE; teardownFolder runs on the end action.
+            Shadows.shadowOf(Looper.getMainLooper()).idleFor(java.time.Duration.ofMillis(Motion.PAGE));
             assertNull(scene.folderLayer());
         }
     }

@@ -185,11 +185,8 @@ public class HomeTaskCardsTest {
     }
 
     private static View headingOf(View root) {
-        TextView title = firstText(root, "✦  AI 助手", "✦  AI assistant");
-        if (title != null && title.getParent() instanceof View) return (View) title.getParent();
-        ScrollView scroll = first(root, ScrollView.class);
-        View panel = scroll == null ? null : scroll.getChildAt(0);
-        return panel instanceof ViewGroup group ? group.getChildAt(0) : null;
+        // Product switch surface is tagged; brand text no longer includes "✦".
+        return root.findViewWithTag("card-switch");
     }
 
     private static TextView firstExact(View view, String... texts) {
@@ -218,23 +215,6 @@ public class HomeTaskCardsTest {
         if (view instanceof ViewGroup group) {
             for (int i = 0; i < group.getChildCount(); i++) {
                 View found = findDescription(group.getChildAt(i), texts);
-                if (found != null) return found;
-            }
-        }
-        return null;
-    }
-
-    private static TextView firstText(View view, String... texts) {
-        if (view instanceof TextView text) {
-            CharSequence value = text.getText();
-            if (value != null) {
-                String shown = value.toString();
-                for (String expected : texts) if (shown.contains(expected)) return text;
-            }
-        }
-        if (view instanceof ViewGroup group) {
-            for (int i = 0; i < group.getChildCount(); i++) {
-                TextView found = firstText(group.getChildAt(i), texts);
                 if (found != null) return found;
             }
         }
