@@ -3,7 +3,7 @@ Set-StrictMode -Version Latest
 $root = Split-Path $PSScriptRoot -Parent
 $version = '24.18.0-0'
 $expected = 'ceb86b0b8130006195a60cd37393ebe0fd665b644ce8d5674dfba1da65d3be28'
-$archive = Join-Path $env:TEMP "nodejs-mobile-android-$version.zip"
+$archive = Join-Path ([IO.Path]::GetTempPath()) "nodejs-mobile-android-$version.zip"
 $url = "https://github.com/gmaclennan/nodejs-mobile/releases/download/v$version/nodejs-mobile-android-$version.zip"
 if (-not (Test-Path $archive)) { Invoke-WebRequest $url -OutFile $archive }
 if ((Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expected) {
