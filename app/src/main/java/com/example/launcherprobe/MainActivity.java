@@ -1,8 +1,6 @@
 package com.example.launcherprobe;
 
 import android.app.Activity;
-import android.app.Dialog;
-import android.app.role.RoleManager;
 import android.content.ActivityNotFoundException;
 import android.content.BroadcastReceiver;
 import android.content.Context;
@@ -18,16 +16,13 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
-import android.provider.Settings;
 import android.text.Editable;
 import android.text.TextWatcher;
 import android.view.Gravity;
 import android.view.inputmethod.InputMethodManager;
 import android.view.View;
-import android.view.Window;
 import android.view.WindowInsets;
 import android.view.WindowManager;
-import android.widget.Button;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
@@ -69,15 +64,6 @@ public class MainActivity extends BridgeActivity {
             clockHandler.postDelayed(this, 60_000 - System.currentTimeMillis() % 60_000);
         }
     };
-    private final Runnable refreshGestures = () -> {
-        if (MainActivity.this.gestureState != null) {
-            MainActivity.this.gestureState.setText(GestureService.status(this));
-            MainActivity.this.gestureState.setAccessibilityLiveRegion(
-                    View.ACCESSIBILITY_LIVE_REGION_POLITE);
-        }
-    };
-
-    private RoleManager roles;
     private ShizukuRepair shizukuRepair;
     private LauncherShortcuts launcherShortcuts;
     private HomeLayout homeLayout;
@@ -119,11 +105,9 @@ public class MainActivity extends BridgeActivity {
     private boolean closingHomeInput;
     private boolean drawerClosing;
     private TextView state;
-    private TextView gestureState;
     private TextView clock;
     private TextView date;
     private EditText search;
-    private Dialog controls;
     private final ExecutorService queryExecutor = Executors.newSingleThreadExecutor();
     private List<AgentLoop.Message> history = Collections.emptyList();
     private ChatStore chatStore;
@@ -195,8 +179,7 @@ public class MainActivity extends BridgeActivity {
         appearance.apply(this);
         suppressHomeEnterTransition(getIntent());
         activityEpoch = ACTIVITY_EPOCH.acquire();
-        roles = getSystemService(RoleManager.class);
-        shizukuRepair = new ShizukuRepair(this, refreshGestures);
+        shizukuRepair = new ShizukuRepair(this, () -> { });
         shizukuRepair.register();
         chatCoordinator = ChatCoordinator.get(this);
         chatStore = chatCoordinator.store();
@@ -285,7 +268,6 @@ public class MainActivity extends BridgeActivity {
         // BridgeActivity.load delivers the initial intent before installPager().
         if (pager != null && (isHomeIntent(intent) || isPinIntent(intent))) {
             suppressHomeEnterTransition(intent);
-            if (controls != null && controls.isShowing()) controls.dismiss();
             showHome(false);
             handlePinIntent(intent);
         }
@@ -339,10 +321,8 @@ public class MainActivity extends BridgeActivity {
         agentRunning = chatCoordinator.running(chatStore.activeId());
         activePiRequestId = chatCoordinator.requestId();
         if (!agentRunning && !appearanceRevision.equals(AppAppearance.revision(this))) { recreate(); return; }
-        GestureService.statusListener = refreshGestures;
         GestureService.recover(this);
         shizukuRepair.resume();
-        refreshGestures.run();
         clockHandler.removeCallbacks(clockTick);
         clockTick.run();
         refreshTaskCards();
@@ -367,7 +347,6 @@ public class MainActivity extends BridgeActivity {
         if (homeInputOverlay != null) homeInputOverlay.clearInput();
         savePiPreview();
         shizukuRepair.pause();
-        if (GestureService.statusListener == refreshGestures) GestureService.statusListener = null;
         clockHandler.removeCallbacks(clockTick);
         super.onPause();
     }
@@ -427,6 +406,7 @@ public class MainActivity extends BridgeActivity {
             }
         });
         pager = new PagerRoot(this, chatWebView, PagerState.Page.HOME, changed -> {
+            if (changed != PagerState.Page.HOME) leaveDesktopEdit();
             if (changed == PagerState.Page.HOME && "search".equals(page)) {
                 // Settings/history are temporary routes, never the desktop's adjacent page.
                 initialWebRoute = "/chat/" + chatStore.activeId();
@@ -676,7 +656,6 @@ public class MainActivity extends BridgeActivity {
         messageList = null;
         newerMessages = null;
         search = null;
-        gestureState = null;
         state = null;
 
         FrameLayout homeContent = new FrameLayout(this);
@@ -790,6 +769,7 @@ public class MainActivity extends BridgeActivity {
         applySearchProgress(progress);
     }
     private void settleNativeSearch(boolean search, boolean open, float velocity) {
+        if (open) leaveDesktopEdit();
         NativeSearchPage.Mode mode = search ? NativeSearchPage.Mode.GLOBAL_SEARCH : NativeSearchPage.Mode.APP_LIBRARY;
         if (nativeSearchPage == null) {
             if (open) showNativeSearch(mode, "");
@@ -837,13 +817,21 @@ public class MainActivity extends BridgeActivity {
         launchWeb("/chat/" + conversationId, null, null);
     }
     public void openTaskDetail(String conversationId) {
+        leaveDesktopEdit();
         startActivity(new Intent(this, TaskDetailActivity.class)
                 .putExtra(TaskDetailActivity.EXTRA_CONVERSATION_ID, conversationId));
     }
     public void openDesktopSettings() {
+        leaveDesktopEdit();
         startActivity(new Intent(this, DesktopSettingsActivity.class));
     }
-    public void openAssistantSettings() { startActivity(new Intent(this, PiSettingsActivity.class)); }
+    public void openAssistantSettings() {
+        leaveDesktopEdit();
+        startActivity(new Intent(this, PiSettingsActivity.class));
+    }
+    private void leaveDesktopEdit() {
+        if (homeDesktop != null) homeDesktop.exitEdit();
+    }
     void beginDesktopDrag(View source, HomeLayout.Item item) {
         homeDesktop.beginExternalDrag(source, item); showDesktop();
     }
@@ -874,6 +862,7 @@ public class MainActivity extends BridgeActivity {
 
     private void launchWeb(String route, String prompt, String submissionId) {
         if (route == null || !route.startsWith("/")) throw new IllegalArgumentException("route must be local");
+        leaveDesktopEdit();
         if (homeInputOverlay != null) closeHomeInput(false);
         closeNativeSearch();
         initialWebRoute = route;
@@ -891,7 +880,6 @@ public class MainActivity extends BridgeActivity {
 
     private void showSearchNative() {
         page = "search";
-        gestureState = null;
         clock = null;
         date = null;
         search = null;
@@ -1190,12 +1178,6 @@ public class MainActivity extends BridgeActivity {
 
     private void animateExpansion(LinearLayout parent) {
         Motion.expand(parent);
-    }
-
-    private void dialogMotion(Dialog dialog, boolean bottomSheet) {
-        Window window = dialog.getWindow();
-        if (window != null) window.setWindowAnimations(bottomSheet
-                ? android.R.style.Animation_InputMethod : android.R.style.Animation_Dialog);
     }
 
     private TextView chatIcon(String icon, String description, View.OnClickListener listener) {
@@ -1534,10 +1516,10 @@ public class MainActivity extends BridgeActivity {
         drawer.addView(drawerAction("settings", t("设置"), view -> {
             closeChatDrawer();
             new android.app.AlertDialog.Builder(this).setTitle(t("设置"))
-                    .setItems(new String[]{t("模型与搜索服务"), t("桌面与手势"), t("删除当前对话")},
+                    .setItems(new String[]{t("模型与搜索服务"), t("桌面设置"), t("删除当前对话")},
                             (dialog, which) -> {
                                 if (which == 0) showProviderSettings();
-                                else if (which == 1) showControls();
+                                else if (which == 1) openDesktopSettings();
                                 else confirmDeleteConversation();
                             }).show();
         }));
@@ -1995,99 +1977,6 @@ public class MainActivity extends BridgeActivity {
         launchWeb("/settings", null, null);
     }
 
-    private void showControls() {
-        controls = new Dialog(this);
-        LinearLayout sheet = column();
-        sheet.setPadding(dp(24), dp(20), dp(24), dp(24));
-        sheet.setBackground(shape(appearance.surface, 28, 0, 0));
-        TextView handle = label("—", 28, Color.LTGRAY);
-        handle.setGravity(Gravity.CENTER);
-        sheet.addView(handle);
-        TextView title = label(t("桌面与手势"), 26, CHARCOAL);
-        title.setTypeface(null, android.graphics.Typeface.BOLD);
-        sheet.addView(title);
-        TextView boundary = label(t("无障碍授权支持固定导航，并允许助手按工具调用读取当前界面结构、点击、输入非密码文字和滚动；密码字段会隐藏。"), 15, MUTED);
-        boundary.setPadding(0, dp(8), 0, dp(16));
-        sheet.addView(boundary);
-        gestureState = roundedText(GestureService.status(this), 15, CHARCOAL, IVORY, 18);
-        gestureState.setPadding(dp(16), dp(14), dp(16), dp(14));
-        gestureState.setTextIsSelectable(true);
-        gestureState.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
-        sheet.addView(gestureState, new LinearLayout.LayoutParams(-1, -2));
-        button(sheet, t("使用 Shizuku 修复授权与无障碍"),
-                view -> shizukuRepair.repairFromButton());
-
-        button(sheet, t("使用 Shizuku 设为默认桌面"), view -> requestHome());
-        button(sheet, t("默认桌面设置 / 恢复系统桌面"),
-                view -> launch(new Intent(Settings.ACTION_HOME_SETTINGS)));
-        button(sheet, t("打开系统设置"), view -> launch(new Intent(Settings.ACTION_SETTINGS)));
-        button(sheet, t("打开无障碍授权设置"),
-                view -> launch(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)));
-        button(sheet, t("启用固定导航手势"), view -> GestureService.enable(this));
-        Button stop = button(sheet, t("停止手势并恢复三键"), view -> GestureService.disable(this));
-        stop.setTextColor(appearance.dark ? appearance.surface : Color.WHITE);
-        stop.setBackground(shape(CHARCOAL, 14, 0, 0));
-
-        TextView details = label(t("展开安全说明"), 16, TEAL);
-        details.setGravity(Gravity.CENTER_VERTICAL);
-        details.setMinHeight(dp(48));
-        details.setClickable(true);
-        details.setFocusable(true);
-        sheet.addView(details);
-        TextView safety = label(t("可使用 Shizuku 修复写设置授权和本应用的无障碍服务；也可通过电脑 ADB 手动授权：\n")
-                + GestureService.GRANT_COMMAND + t("\n\n左右内滑返回；底边上滑回桌面；上滑停留打开最近任务。")
-                + t("启用会改变 HyperOS 导航设置。停用后请目视确认三键已恢复，再撤权或卸载。")
-                + t("\n\nPi 的 Operit Shower 工具也使用同一 Shizuku 授权，仅按工具调用创建和操作虚拟屏；不会操作手机主屏。"), 14, MUTED);
-        safety.setTextIsSelectable(true);
-        safety.setVisibility(View.GONE);
-        sheet.addView(safety);
-        details.setOnClickListener(view -> {
-            boolean expand = safety.getVisibility() != View.VISIBLE;
-            animateExpansion(sheet);
-            safety.setVisibility(expand ? View.VISIBLE : View.GONE);
-            details.setText(expand ? t("收起安全说明") : t("展开安全说明"));
-        });
-
-        ScrollView scroll = new ScrollView(this);
-        scroll.addView(sheet);
-        controls.setContentView(scroll);
-        Window window = controls.getWindow();
-        if (window != null) {
-            window.setBackgroundDrawableResource(android.R.color.transparent);
-            window.setDimAmount(0.28f);
-            window.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);
-            window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
-        }
-        Dialog shownControls = controls;
-        controls.setOnDismissListener(dialog -> {
-            gestureState = null;
-            if (controls == shownControls) controls = null;
-        });
-        dialogMotion(controls, true);
-        controls.show();
-        window = controls.getWindow();
-        if (window != null) {
-            WindowManager.LayoutParams params = window.getAttributes();
-            params.width = WindowManager.LayoutParams.MATCH_PARENT;
-            params.height = WindowManager.LayoutParams.WRAP_CONTENT;
-            params.gravity = Gravity.BOTTOM;
-            window.setAttributes(params);
-            window.setNavigationBarColor(IVORY);
-        }
-    }
-
-    private void requestHome() {
-        if (roles == null || !roles.isRoleAvailable(RoleManager.ROLE_HOME)) {
-            failure(t("系统未提供 HOME 角色请求，请使用默认桌面设置入口。"));
-            return;
-        }
-        if (roles.isRoleHeld(RoleManager.ROLE_HOME)) {
-            failure(t("已经是默认桌面。"));
-            return;
-        }
-        shizukuRepair.requestHomeFromButton();
-    }
-
     private void launch(Intent intent) {
         try {
             startActivity(intent);
@@ -2147,19 +2036,6 @@ public class MainActivity extends BridgeActivity {
         TextView view = label(value, size, color);
         view.setBackground(shape(background, radius, 0, 0));
         return view;
-    }
-
-    private Button button(LinearLayout parent, String label, View.OnClickListener listener) {
-        Button button = new Button(this);
-        button.setText(label);
-        button.setTextSize(15);
-        button.setAllCaps(false);
-        button.setMinHeight(dp(52));
-        button.setOnClickListener(listener);
-        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, -2);
-        params.topMargin = dp(7);
-        parent.addView(button, params);
-        return button;
     }
 
     private GradientDrawable shape(int color, int radiusDp, int strokeDp, int strokeColor) {

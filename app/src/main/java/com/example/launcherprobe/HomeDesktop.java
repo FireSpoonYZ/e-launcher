@@ -169,7 +169,7 @@ final class HomeDesktop extends FrameLayout {
                 (dialog, which) -> { if (which == 0) undo(); else settingsAction.run(); }).show());
         tools.addView(more, new LinearLayout.LayoutParams(dp(48), dp(48)));
         TextView done = compact("完成", () -> {
-            editing = false; render();
+            exitEdit();
             new Thread(() -> {
                 try { new DesktopBackup(activity).snapshot(); }
                 catch (Exception e) { activity.runOnUiThread(() -> message("桌面已保存，但历史快照失败：" + e.getMessage())); }
@@ -196,8 +196,19 @@ final class HomeDesktop extends FrameLayout {
     }
 
     void setNavigation(Runnable library, Runnable search, Runnable assistant, Runnable settings, Overlay overlay) {
-        libraryAction = library; searchAction = search; assistantAction = assistant; settingsAction = settings;
-        this.overlay = overlay;
+        libraryAction = exitEditThen(library);
+        searchAction = exitEditThen(search);
+        assistantAction = exitEditThen(assistant);
+        settingsAction = exitEditThen(settings);
+        this.overlay = overlay == null ? null : new Overlay() {
+            @Override public void pull(boolean search, float progress) {
+                overlay.pull(search, progress);
+            }
+            @Override public void settle(boolean search, boolean open, float velocity) {
+                if (open) exitEdit();
+                overlay.settle(search, open, velocity);
+            }
+        };
     }
     void setAiWidget(View view) { aiWidget = view; render(); }
     void startListening() { widgets.start(); }
@@ -219,6 +230,15 @@ final class HomeDesktop extends FrameLayout {
         if (android.os.SystemClock.uptimeMillis() < ignoreEditUntil) return;
         if (locked()) { message("桌面布局已锁定"); return; }
         editing = true; render();
+    }
+    void exitEdit() {
+        if (!editing) return;
+        editing = false;
+        render();
+    }
+    boolean editing() { return editing; }
+    private Runnable exitEditThen(Runnable action) {
+        return () -> { exitEdit(); action.run(); };
     }
     void undo() {
         if (locked()) return;
@@ -1875,6 +1895,7 @@ final class HomeDesktop extends FrameLayout {
             shortcuts.start(shortcut, bounds);
             AppLaunchHistory.record(activity, shortcut.getActivity());
             dismissMenu();
+            exitEdit();
         } catch (RuntimeException failure) {
             message(tr("无法启动快捷功能：", "Could not start shortcut: ") + failure.getMessage());
         }
@@ -1981,6 +2002,7 @@ final class HomeDesktop extends FrameLayout {
             activity.startActivity(intent);
             if (intent.hasCategory(Intent.CATEGORY_LAUNCHER))
                 AppLaunchHistory.record(activity, intent.getComponent());
+            exitEdit();
         } catch (ActivityNotFoundException | SecurityException failure) {
             message(tr("无法打开：", "Could not open: ") + failure.getClass().getSimpleName());
         }

@@ -2,8 +2,11 @@ package com.example.launcherprobe;
 
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.app.role.RoleManager;
+import android.content.ActivityNotFoundException;
 import android.content.Intent;
 import android.os.Bundle;
+import android.provider.Settings;
 import android.view.View;
 import android.view.Gravity;
 import android.graphics.Typeface;
@@ -35,11 +38,20 @@ public final class DesktopSettingsActivity extends androidx.activity.ComponentAc
     private final java.util.concurrent.ExecutorService io = java.util.concurrent.Executors.newSingleThreadExecutor();
     private boolean busy;
     private boolean settingsSnapshotSaved;
+    private ShizukuRepair shizukuRepair;
+    private TextView gestureState;
+    private final Runnable refreshGestures = () -> {
+        if (isDestroyed() || gestureState == null) return;
+        gestureState.setText(GestureService.status(this));
+        gestureState.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
+    };
 
     @Override public void onCreate(Bundle state) {
         colors = AppAppearance.readDesktop(this); colors.apply(this);
         super.onCreate(state);
         prefs = new DesktopPreferences(this); backup = new DesktopBackup(this);
+        shizukuRepair = new ShizukuRepair(this, refreshGestures);
+        shizukuRepair.register();
         if (state != null) page = state.getString("page", "设置");
         else {
             String destination = getIntent().getStringExtra("desktop_destination");
@@ -61,8 +73,24 @@ public final class DesktopSettingsActivity extends androidx.activity.ComponentAc
         render();
     }
     @Override public void onSaveInstanceState(Bundle state) { super.onSaveInstanceState(state); state.putString("page", page); }
+    @Override protected void onResume() {
+        super.onResume();
+        GestureService.statusListener = refreshGestures;
+        GestureService.recover(this);
+        shizukuRepair.resume();
+        refreshGestures.run();
+    }
+    @Override protected void onPause() {
+        shizukuRepair.pause();
+        if (GestureService.statusListener == refreshGestures) GestureService.statusListener = null;
+        super.onPause();
+    }
     private void back() { if (page.equals("设置")) finish(); else show("设置"); }
-    @Override protected void onDestroy() { io.shutdown(); super.onDestroy(); }
+    @Override protected void onDestroy() {
+        io.shutdown();
+        if (shizukuRepair != null) shizukuRepair.destroy();
+        super.onDestroy();
+    }
     private int dp(int n) { return Math.round(n * getResources().getDisplayMetrics().density); }
     private void show(String name) { page = name; render(); }
     private void render() {
@@ -82,6 +110,7 @@ public final class DesktopSettingsActivity extends androidx.activity.ComponentAc
             view.setPadding(bars.left, bars.top, bars.right, bars.bottom); return insets;
         });
         setContentView(root); root.requestApplyInsets();
+        gestureState = null;
         FrameLayout header = new FrameLayout(this);
         TextView title = text(page, page.equals("设置") ? 25 : 19, colors.ink);
         title.setTypeface(null, Typeface.BOLD);
@@ -125,12 +154,7 @@ public final class DesktopSettingsActivity extends androidx.activity.ComponentAc
                 row("移动、调整尺寸与移除", "返回桌面长按小组件操作", () -> desktop("edit_widgets"));
                 note("第三方内容和外观由提供方决定。移除 AI 小组件不会删除聊天历史。");
             }
-            case "手势" -> {
-                String[] labels = {"应用库", "本地搜索", "不操作"}, values = {"library", "search", "none"};
-                choice("上滑", "swipeUp", prefs.swipeUp(), labels, values);
-                choice("下滑", "swipeDown", prefs.swipeDown(), labels, values);
-                note("应用库默认不弹键盘；本地搜索自动聚焦。系统导航手势仍由既有无障碍服务管理。");
-            }
+            case "手势" -> gestures();
             case "外观" -> {
                 choice("颜色模式", "theme", prefs.theme(), new String[]{"跟随系统", "浅色", "深色"}, new String[]{"system", "light", "dark"});
                 choice("壁纸", "wallpaper", prefs.wallpaper(), new String[]{"浅青渐变", "系统壁纸"}, new String[]{"mint", "system"});
@@ -159,7 +183,7 @@ public final class DesktopSettingsActivity extends androidx.activity.ComponentAc
         shortcuts.addView(shortcut("sparkles", "助手设置", "模型、工具与扩展", () -> startActivity(new Intent(this, PiSettingsActivity.class))), assistantParams);
         addBlock(shortcuts, -2, 12);
         String[] names = {"桌面", "Dock 栏", "搜索", "文件夹", "小组件", "手势", "外观", "备份与恢复"};
-        String[] descriptions = {"网格、图标大小、锁定布局", "仅在桌面显示", "本地搜索与 AI 入口", "排序与批量添加", "第三方组件与 AI 组件", "上滑应用库，下滑搜索", "壁纸、图标包、深浅模式", "桌面布局与设置"};
+        String[] descriptions = {"网格、图标大小、锁定布局", "仅在桌面显示", "本地搜索与 AI 入口", "排序与批量添加", "第三方组件与 AI 组件", "上滑应用库，固定导航与三键", "壁纸、图标包、深浅模式", "桌面布局与设置"};
         String[] icons = {"desktop", "dock", "search", "folder", "grid", "gesture", "palette", "cloud"};
         LinearLayout group = group(); List<View> rows = new ArrayList<>(); List<View> dividers = new ArrayList<>();
         for (int i = 0; i < names.length; i++) {
@@ -323,6 +347,75 @@ public final class DesktopSettingsActivity extends androidx.activity.ComponentAc
         List<String> ids = new ArrayList<>(); ids.add(""); ids.addAll(packs.keySet());
         List<String> labels = new ArrayList<>(); labels.add("系统图标"); labels.addAll(packs.values());
         choice("图标包", "iconPack", prefs.iconPack(), labels.toArray(new String[0]), ids.toArray(new String[0]), true);
+    }
+    private void gestures() {
+        String[] labels = {"应用库", "本地搜索", "不操作"}, values = {"library", "search", "none"};
+        choice("上滑", "swipeUp", prefs.swipeUp(), labels, values);
+        choice("下滑", "swipeDown", prefs.swipeDown(), labels, values);
+        note("应用库默认不弹键盘；本地搜索自动聚焦。");
+        note("无障碍授权支持固定导航，并允许助手按工具调用读取当前界面结构、点击、输入非密码文字和滚动；密码字段会隐藏。");
+        gestureState = text(GestureService.status(this), 13, colors.ink);
+        gestureState.setPadding(dp(12), dp(14), dp(12), dp(14));
+        gestureState.setBackground(shape(surface(), 14));
+        gestureState.setTextIsSelectable(true);
+        gestureState.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
+        addBlock(gestureState, -2, 8);
+        LinearLayout nav = group();
+        nav.addView(settingRow(null, "使用 Shizuku 修复授权与无障碍", "", () -> shizukuRepair.repairFromButton()));
+        divider(nav, 0);
+        nav.addView(settingRow(null, "打开无障碍授权设置", "", () -> launch(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))));
+        divider(nav, 0);
+        nav.addView(settingRow(null, "启用固定导航手势", "", () -> GestureService.enable(this)));
+        divider(nav, 0);
+        nav.addView(settingRow(null, "停止手势并恢复三键", "", () -> GestureService.disable(this)));
+        addBlock(nav, -2, 8);
+        LinearLayout launcher = group();
+        launcher.addView(settingRow(null, "使用 Shizuku 设为默认桌面", "", this::requestHome));
+        divider(launcher, 0);
+        launcher.addView(settingRow(null, "默认桌面设置 / 恢复系统桌面", "", () -> launch(new Intent(Settings.ACTION_HOME_SETTINGS))));
+        divider(launcher, 0);
+        launcher.addView(settingRow(null, "打开系统设置", "", () -> launch(new Intent(Settings.ACTION_SETTINGS))));
+        addBlock(launcher, -2, 8);
+        LinearLayout safetyBox = group();
+        TextView safety = text("可使用 Shizuku 修复写设置授权和本应用的无障碍服务；也可通过电脑 ADB 手动授权：\n"
+                + GestureService.GRANT_COMMAND
+                + "\n\n左右内滑返回；底边上滑回桌面；上滑停留打开最近任务。"
+                + "启用会改变 HyperOS 导航设置。停用后请目视确认三键已恢复，再撤权或卸载。"
+                + "\n\nPi 的 Operit Shower 工具也使用同一 Shizuku 授权，仅按工具调用创建和操作虚拟屏；不会操作手机主屏。", 12, colors.muted);
+        safety.setPadding(0, dp(8), 0, dp(8));
+        safety.setTextIsSelectable(true);
+        safety.setVisibility(View.GONE);
+        TextView details = text("展开安全说明", 15, colors.accent);
+        details.setPadding(0, dp(12), 0, dp(12));
+        details.setMinHeight(dp(48));
+        details.setGravity(Gravity.CENTER_VERTICAL);
+        details.setFocusable(true);
+        details.setOnClickListener(v -> {
+            boolean expand = safety.getVisibility() != View.VISIBLE;
+            safety.setVisibility(expand ? View.VISIBLE : View.GONE);
+            details.setText(expand ? "收起安全说明" : "展开安全说明");
+        });
+        safetyBox.addView(details);
+        safetyBox.addView(safety);
+        addBlock(safetyBox, -2, 8);
+    }
+    private void requestHome() {
+        RoleManager roles = getSystemService(RoleManager.class);
+        if (roles == null || !roles.isRoleAvailable(RoleManager.ROLE_HOME)) {
+            Toast.makeText(this, "系统未提供 HOME 角色请求，请使用默认桌面设置入口。", Toast.LENGTH_LONG).show();
+            return;
+        }
+        if (roles.isRoleHeld(RoleManager.ROLE_HOME)) {
+            Toast.makeText(this, "已经是默认桌面。", Toast.LENGTH_LONG).show();
+            return;
+        }
+        shizukuRepair.requestHomeFromButton();
+    }
+    private void launch(Intent intent) {
+        try { startActivity(intent); }
+        catch (ActivityNotFoundException | SecurityException e) {
+            Toast.makeText(this, "无法打开：" + e.getClass().getSimpleName() + "。请从系统设置手动操作；应用也可能已被卸载或禁用。", Toast.LENGTH_LONG).show();
+        }
     }
     private void desktop(String action) {
         startActivity(new Intent(this, MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP).putExtra(EXTRA_ACTION, action)); finish();
