@@ -41,10 +41,14 @@ function installFixture() {
     Device: {state: () => device, keyboardState: () => ({visible: false}), hideKeyboard: () => ({}), close: () => ({})},
     Settings: {settings: () => ({settings: {defaultModel: '测试模型'}})},
     Chat: {
-      snapshot: () => ({sequence: 0, running: false, requestId: null, conversationId, conversation: {id: conversationId, leaf: null, nodes: [], draft: '', draftAttachments: [], piSelection: {}}, activeRuns: [], extensionUi: {}}),
+      snapshot: () => ({sequence: 0, running: false, requestId: null, conversationId, conversation: {id: conversationId, leaf: null, nodes: [], draft: '', draftAttachments: [], piSelection: {}, archivedAt: 0}, activeRuns: [], extensionUi: {}}),
       listConversations: () => ({conversations}),
+      listArchivedConversations: () => ({conversations: []}),
       selectConversation: ({conversationId: id}) => { conversationId = id; return methods.Chat.snapshot(); },
       newConversation: () => { conversationId = 'new-chat'; return methods.Chat.snapshot(); },
+      archiveConversation: ({conversationId: id}) => { conversationId = id === conversationId ? 'new-chat' : conversationId; return methods.Chat.snapshot(); },
+      restoreConversation: ({conversationId: id}) => { conversationId = id; return methods.Chat.snapshot(); },
+      deleteConversation: ({conversationId: id}) => { conversationId = id === conversationId ? 'new-chat' : conversationId; return methods.Chat.snapshot(); },
     },
     ScheduledTasks: {
       snapshot: () => state,

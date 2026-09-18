@@ -4,7 +4,7 @@ import { App as CapacitorApp } from '@capacitor/app';
 import { HashRouter, Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import { Device, type DeviceState } from './native';
 import { Environment, useBack } from './ui';
-import { ChatPage, HistoryPage } from './Chat';
+import { ArchivedPage, ChatPage, HistoryPage } from './Chat';
 import { SettingsHome, GeneralPage, AppearancePage, DevicePage, AboutPage } from './Settings';
 import { ProvidersPage, ResourcesPage } from './Resources';
 import { AdvancedPage, EditorPage } from './Editor';
@@ -97,6 +97,7 @@ function Shell({initialDevice}: {initialDevice: DeviceState}) {
   return <Environment.Provider value={{device, refresh}}><Navigation/><Routes>
     <Route path="/chat/:conversationId?" element={<ChatPage/>}/>
     <Route path="/history/:conversationId" element={<HistoryPage/>}/>
+    <Route path="/archived" element={<ArchivedPage/>}/>
     <Route path="/schedules" element={<SchedulesPage/>}/>
     <Route path="/schedules/history" element={<ScheduleHistoryPage/>}/>
     <Route path="/settings" element={<SettingsHome/>}/>

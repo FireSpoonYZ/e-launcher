@@ -18,10 +18,13 @@ final class NativeJson {
         JSONArray nodes = new JSONArray();
         for (ConversationTree.Node node : tree.nodes()) nodes.put(object("id", node.id,
                 "parentId", node.parentId == null ? JSONObject.NULL : node.parentId, "message", message(node.message)));
-        return object("id", conversationId, "leaf", tree.leaf() == null ? JSONObject.NULL : tree.leaf(),
+        JSONObject result = object("id", conversationId, "leaf", tree.leaf() == null ? JSONObject.NULL : tree.leaf(),
                 "nodes", nodes, "draft", store.draft(conversationId),
                 "draftAttachments", AttachmentStore.json(store.draftAttachments(conversationId)),
                 "piSelection", object(store.piSelection(conversationId)));
+        long archivedAt = store.archivedAt(conversationId);
+        if (archivedAt != 0) put(result, "archivedAt", archivedAt);
+        return result;
     }
 
     static JSONObject message(AgentLoop.Message message) {
@@ -57,6 +60,7 @@ final class NativeJson {
         for (ChatStore.Conversation value : values) {
             JSONObject item = object("id", value.id, "title", value.title, "updated", value.updated);
             if (value.snippet != null) put(item, "snippet", value.snippet);
+            if (value.archivedAt != 0) put(item, "archivedAt", value.archivedAt);
             result.put(item);
         }
         return result;

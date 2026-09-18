@@ -216,7 +216,9 @@ public class MainActivity extends BridgeActivity {
             updateAgentControls();
             String type = event.optString("type");
             if ("runStatus".equals(type) || "snapshot".equals(type) || "extensionUi".equals(type)
-                    || "end".equals(type) || "error".equals(type)) refreshTaskCards();
+                    || "end".equals(type) || "error".equals(type)
+                    || "conversationArchived".equals(type) || "conversationRestored".equals(type)
+                    || "conversationDeleted".equals(type)) refreshTaskCards();
         };
         chatCoordinator.addListener(coordinatorListener);
         markdown = ResponseMarkdown.create(this, uri -> launch(new Intent(Intent.ACTION_VIEW, uri)));
@@ -347,13 +349,18 @@ public class MainActivity extends BridgeActivity {
         clockTick.run();
         refreshTaskCards();
         if (homeTaskCards != null && pager.page() == PagerState.Page.HOME) homeTaskCards.showLatest();
-        String taskChat = getIntent().getStringExtra(TaskDetailActivity.EXTRA_OPEN_CHAT);
-        if (taskChat != null) {
-            getIntent().removeExtra(TaskDetailActivity.EXTRA_OPEN_CHAT);
-            if (chatCoordinator.taskCard(taskChat) != null) {
-                chatStore.selectConversation(taskChat); launchWeb("/chat/" + taskChat, null, null);
-            }
-        }
+        consumeOpenChatExtra();
+        consumeArchiveUndoExtra();
+        final long owner = activityEpoch;
+        queryExecutor.execute(() -> {
+            try { chatCoordinator.purgeExpiredArchives(); }
+            catch (RuntimeException ignored) { }
+            if (!ACTIVITY_EPOCH.owns(owner)) return;
+            runOnUiThread(() -> {
+                if (!ACTIVITY_EPOCH.owns(owner) || isFinishing()) return;
+                refreshTaskCards();
+            });
+        });
         refreshHomeComposer();
         if (nativeSearchPage != null) nativeSearchPage.refresh();
         if (homeDesktop != null) {
@@ -585,19 +592,8 @@ public class MainActivity extends BridgeActivity {
         pageShell.addView(contentStage, new LinearLayout.LayoutParams(-1, 0, 1));
         taskCardHost = new FrameLayout(this);
         taskCardHost.setVisibility(View.GONE);
-        homeTaskCards = new HomeTaskCards(this, pager, homeWallpaper, id -> {
-            if (id.isEmpty()) { chatStore.newConversation(); launchWeb("/chat/" + chatStore.activeId(), null, null); return; }
-            chatStore.selectConversation(id);
-            launchWeb("/chat/" + id, null, null);
-        }, id -> chatCoordinator.cancel(id), id -> {
-            new android.app.AlertDialog.Builder(this).setTitle("删除此对话？")
-                    .setMessage("此操作将删除对话历史与工作区，无法撤销。")
-                    .setNegativeButton("取消", null).setPositiveButton("删除", (dialog, which) -> {
-                        try { chatCoordinator.deleteConversation(id); }
-                        catch (RuntimeException e) { Toast.makeText(this, e.getMessage(), Toast.LENGTH_LONG).show(); }
-                        refreshTaskCards();
-                    }).show();
-        });
+        homeTaskCards = new HomeTaskCards(this, pager, homeWallpaper, this::openConversation,
+                id -> chatCoordinator.cancel(id), this::archiveConversation, this::showArchivedList);
         refreshTaskCards();
         createComposer();
         pageShell.addView(composerDock, new LinearLayout.LayoutParams(-1, -2));
@@ -833,8 +829,57 @@ public class MainActivity extends BridgeActivity {
         if (homeDesktop != null) homeDesktop.ignoreEdit(600);
     }
     public void openChat(String conversationId) {
+        openConversation(conversationId);
+    }
+
+    private void consumeOpenChatExtra() {
+        String taskChat = getIntent().getStringExtra(TaskDetailActivity.EXTRA_OPEN_CHAT);
+        if (taskChat == null) return;
+        getIntent().removeExtra(TaskDetailActivity.EXTRA_OPEN_CHAT);
+        openConversation(taskChat);
+    }
+
+    private void consumeArchiveUndoExtra() {
+        String archived = getIntent().getStringExtra(TaskDetailActivity.EXTRA_ARCHIVED_ID);
+        if (archived == null) return;
+        getIntent().removeExtra(TaskDetailActivity.EXTRA_ARCHIVED_ID);
+        showArchiveUndo(archived);
+    }
+
+    private void openConversation(String conversationId) {
+        if (conversationId == null || conversationId.isEmpty()) {
+            chatStore.newConversation();
+            launchWeb("/chat/" + chatStore.activeId(), null, null);
+            return;
+        }
+        try {
+            if (chatStore.isArchived(conversationId)) {
+                ConversationArchiveUi.promptArchived(this, archivedAt(conversationId),
+                        () -> restoreThenOpen(conversationId),
+                        () -> selectAndOpen(conversationId));
+                return;
+            }
+            selectAndOpen(conversationId);
+        } catch (RuntimeException exception) { failure(exception.getMessage()); }
+    }
+
+    private void restoreThenOpen(String conversationId) {
+        try {
+            chatCoordinator.restoreConversation(conversationId);
+            refreshTaskCards();
+            selectAndOpen(conversationId);
+        } catch (RuntimeException exception) { failure(exception.getMessage()); }
+    }
+
+    private void selectAndOpen(String conversationId) {
         chatStore.selectConversation(conversationId);
         launchWeb("/chat/" + conversationId, null, null);
+    }
+
+    private long archivedAt(String conversationId) {
+        for (ChatStore.Conversation conversation : chatStore.archivedConversations())
+            if (conversation.id.equals(conversationId)) return conversation.archivedAt;
+        return 0;
     }
     public void openTaskDetail(String conversationId) {
         startActivity(new Intent(this, TaskDetailActivity.class)
@@ -1530,14 +1575,19 @@ public class MainActivity extends BridgeActivity {
         View divider = new View(this);
         divider.setBackgroundColor(appearance.border);
         drawer.addView(divider, new LinearLayout.LayoutParams(-1, dp(1)));
+        drawer.addView(drawerAction("folder", t("已归档对话"), view -> {
+            closeChatDrawer();
+            showArchivedList();
+        }));
         drawer.addView(drawerAction("home", t("返回桌面"), view -> showHome()));
         drawer.addView(drawerAction("settings", t("设置"), view -> {
             closeChatDrawer();
             new android.app.AlertDialog.Builder(this).setTitle(t("设置"))
-                    .setItems(new String[]{t("模型与搜索服务"), t("桌面与手势"), t("删除当前对话")},
+                    .setItems(new String[]{t("模型与搜索服务"), t("桌面与手势"), t("已归档对话"), t("永久删除当前对话")},
                             (dialog, which) -> {
                                 if (which == 0) showProviderSettings();
                                 else if (which == 1) showControls();
+                                else if (which == 2) showArchivedList();
                                 else confirmDeleteConversation();
                             }).show();
         }));
@@ -1601,7 +1651,7 @@ public class MainActivity extends BridgeActivity {
                 changeConversation();
             });
             item.addView(title, new LinearLayout.LayoutParams(0, dp(52), 1));
-            if (selected) item.addView(chatIcon("more", t("当前对话操作"), view -> confirmDeleteConversation()));
+            item.addView(chatIcon("more", t("对话操作"), view -> showConversationActions(conversation)));
             entries.addView(item);
         }
         if (entries.getChildCount() == 0) {
@@ -1611,16 +1661,93 @@ public class MainActivity extends BridgeActivity {
         }
     }
 
+    private void showConversationActions(ChatStore.Conversation conversation) {
+        new android.app.AlertDialog.Builder(this).setTitle(conversation.title)
+                .setItems(new String[]{t("归档"), t("永久删除")}, (dialog, which) -> {
+                    if (which == 0) archiveConversation(conversation.id);
+                    else confirmDeleteConversation(conversation.id);
+                }).show();
+    }
+
     private void confirmDeleteConversation() {
-        if (chatCoordinator.running(chatStore.activeId())) {
+        confirmDeleteConversation(chatStore.activeId());
+    }
+
+    private void confirmDeleteConversation(String conversationId) {
+        if (chatCoordinator.running(conversationId)) {
             Toast.makeText(this, t("此会话正在运行，请先停止后再删除"), Toast.LENGTH_SHORT).show();
             return;
         }
-        new android.app.AlertDialog.Builder(this).setTitle(t("删除当前对话？"))
-                .setMessage(t("删除后无法恢复。其他对话不会受影响。"))
-                .setNegativeButton(t("取消"), null).setPositiveButton(t("删除"), (dialog, which) -> {
-                    if (clearHistory()) changeConversation();
-                }).show();
+        ConversationArchiveUi.confirmPermanentDelete(this, () -> {
+            boolean current = conversationId.equals(chatStore.activeId());
+            if (current) {
+                if (clearHistory()) changeConversation();
+            } else {
+                try { chatCoordinator.deleteConversation(conversationId); }
+                catch (Exception exception) { failure(exception.getMessage()); return; }
+                closeChatDrawer(false);
+                refreshTaskCards();
+            }
+        });
+    }
+
+    private void archiveConversation(String conversationId) {
+        if (conversationId == null || conversationId.isEmpty()) return;
+        boolean current = conversationId.equals(chatStore.activeId());
+        try { chatCoordinator.archiveConversation(conversationId); }
+        catch (RuntimeException exception) { failure(exception.getMessage()); return; }
+        closeChatDrawer(false);
+        refreshTaskCards();
+        if (current) {
+            if (conversationId.equals(chatStore.activeId())) chatStore.newConversation();
+            syncWebToActive();
+            if (pager != null && pager.page() == PagerState.Page.CHAT) {
+                agentRunning = chatCoordinator.running(chatStore.activeId());
+                activePiRequestId = chatCoordinator.requestId();
+                history = immutable(chatStore.load());
+                expandedTools.clear();
+                savedDraft = chatStore.draft();
+                if (composerInput != null) {
+                    composerInput.setText(savedDraft);
+                    composerInput.setSelection(composerInput.length());
+                }
+            }
+        }
+        showArchiveUndo(conversationId);
+    }
+
+    private void syncWebToActive() {
+        String route = "/chat/" + chatStore.activeId();
+        initialWebRoute = route;
+        if (chatWebView != null) chatWebView.evaluateJavascript("location.hash=" + JSONObject.quote("#" + route)
+                + ";window.dispatchEvent(new Event('native-navigation'))", null);
+    }
+
+    private void showArchivedList() {
+        ConversationArchiveUi.showList(this, chatCoordinator,
+                id -> {
+                    try { chatCoordinator.restoreConversation(id); refreshTaskCards(); }
+                    catch (RuntimeException exception) { failure(exception.getMessage()); }
+                },
+                id -> {
+                    try {
+                        boolean current = id.equals(chatStore.activeId());
+                        chatCoordinator.deleteConversation(id);
+                        refreshTaskCards();
+                        if (current) changeConversation();
+                    } catch (RuntimeException exception) { failure(exception.getMessage()); }
+                },
+                this::openConversation);
+    }
+
+    private void showArchiveUndo(String conversationId) {
+        if (root == null) return;
+        ConversationArchiveUi.showUndo(root, t("对话已归档"), () -> {
+            try {
+                chatCoordinator.restoreConversation(conversationId);
+                refreshTaskCards();
+            } catch (RuntimeException exception) { failure(exception.getMessage()); }
+        }, this);
     }
 
     private void sendMessage() {
@@ -1628,6 +1755,18 @@ public class MainActivity extends BridgeActivity {
         String draftId = "home".equals(page) ? chatStore.homeDraftId() : chatStore.activeId();
         boolean hasAttachments = draftId != null && !chatStore.draftAttachments(draftId).isEmpty();
         if (text.trim().isEmpty() && !hasAttachments) return;
+        if (!"home".equals(page) && chatStore.isArchived(chatStore.activeId())) {
+            String archivedId = chatStore.activeId();
+            ConversationArchiveUi.promptArchived(this, archivedAt(archivedId),
+                    () -> {
+                        try {
+                            chatCoordinator.restoreConversation(archivedId);
+                            refreshTaskCards();
+                            sendMessage();
+                        } catch (RuntimeException exception) { failure(exception.getMessage()); }
+                    }, null);
+            return;
+        }
         if ("home".equals(page)) {
             if (nativeAttachmentBusy || (homeInputOverlay != null && !homeInputOverlay.canSend())) return;
             try {

@@ -4,8 +4,8 @@ export type ToolCall = { id: string; name: string; arguments: string };
 export type Attachment = { id: string; name: string; mimeType: string; kind: 'image'|'file'; size: number; path: string };
 export type Message = { id: string; role: 'system'|'user'|'assistant'|'tool'; content: string|null; toolCallId: string|null; toolCalls: ToolCall[]; attachments: Attachment[]; incomplete: boolean };
 export type ConversationNode = { id: string; parentId: string|null; message: Message };
-export type Conversation = { id: string; leaf: string|null; nodes: ConversationNode[]; draft: string; draftAttachments: Attachment[]; piSelection: Record<string, unknown> };
-export type ConversationSummary = { id: string; title: string; updated: number; snippet?: string };
+export type Conversation = { id: string; leaf: string|null; nodes: ConversationNode[]; draft: string; draftAttachments: Attachment[]; piSelection: Record<string, unknown>; archivedAt?: number };
+export type ConversationSummary = { id: string; title: string; updated: number; snippet?: string; archivedAt?: number };
 export type ActiveRun = { conversationId: string; requestId: string; status: string; message: string };
 export type ExtensionWidget = { key: string; placement: 'aboveEditor'|'belowEditor'; lines: string[] };
 export type ExtensionStatus = { key: string; text: string };
@@ -40,8 +40,11 @@ export interface ChatPlugin {
   snapshot(): Promise<ChatSnapshot>;
   getConversation(): Promise<Conversation>;
   listConversations(options?: {query?: string}): Promise<{conversations: ConversationSummary[]}>;
+  listArchivedConversations(options?: {query?: string}): Promise<{conversations: ConversationSummary[]}>;
   newConversation(): Promise<ChatSnapshot>;
   selectConversation(options: {conversationId: string}): Promise<ChatSnapshot>;
+  archiveConversation(options: {conversationId: string}): Promise<ChatSnapshot>;
+  restoreConversation(options: {conversationId: string}): Promise<ChatSnapshot>;
   deleteConversation(options: {conversationId: string}): Promise<ChatSnapshot>;
   saveDraft(options: {conversationId: string; text: string}): Promise<void>;
   /** UI node taps only preview locally. Call this only for explicit continue/edit. User edit selects its parent and copies text to draft. */

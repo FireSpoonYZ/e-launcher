@@ -47,6 +47,7 @@ final class ChatCoordinator {
     private ChatCoordinator(Context context) {
         this.context = context;
         store = new ChatStore(context);
+        ArchiveCleanupScheduler.schedule(context);
     }
 
     ChatStore store() { return store; }
@@ -111,6 +112,7 @@ final class ChatCoordinator {
         SessionRun run = new SessionRun(conversationId, UUID.randomUUID().toString());
         run.extensionUi = parseObject(store.extensionUi(conversationId, store.load(conversationId)));
         synchronized (runLock) {
+            if (store.isArchived(conversationId)) throw new IllegalStateException("请先恢复此会话再发送");
             if (!background && !conversationId.equals(store.activeId())) throw new IllegalStateException("会话已切换");
             if (activeRuns.containsKey(conversationId)) throw new IllegalStateException("此会话已有一轮正在运行，请先停止");
             if (terminatingRuns.containsKey(conversationId)) throw new IllegalStateException("此会话的后台任务正在结束，请稍后重试");
@@ -140,11 +142,53 @@ final class ChatCoordinator {
             if (activeRuns.containsKey(conversationId) || terminatingRuns.containsKey(conversationId)) {
                 throw new IllegalStateException("此会话正在运行或结束中，请稍后再删除");
             }
-            store.clear(conversationId);
-            PiAgentBridge.forgetConversation(conversationId);
-            recentResults.remove(conversationId);
+            forgetConversationLocked(conversationId);
         }
         emit(conversationId, null, "conversationDeleted", null, new JSONObject());
+    }
+
+    public void archiveConversation(String id) {
+        synchronized (runLock) {
+            store.archive(id);
+        }
+        emit(id, null, "conversationArchived", null, new JSONObject());
+    }
+
+    public void restoreConversation(String id) {
+        boolean restored;
+        synchronized (runLock) {
+            restored = store.isArchived(id);
+            store.restore(id);
+        }
+        if (restored) emit(id, null, "conversationRestored", null, new JSONObject());
+    }
+
+    public void purgeExpiredArchives() {
+        List<String> expired = new ArrayList<>();
+        long now = System.currentTimeMillis();
+        for (ChatStore.Conversation conversation : store.archivedConversations()) {
+            if (now - conversation.archivedAt >= ChatStore.ARCHIVE_TTL_MS) expired.add(conversation.id);
+        }
+        for (String id : expired) {
+            boolean deleted;
+            synchronized (runLock) {
+                long archivedAt = store.archivedAt(id);
+                if (archivedAt == 0 || System.currentTimeMillis() - archivedAt < ChatStore.ARCHIVE_TTL_MS
+                        || activeRuns.containsKey(id) || terminatingRuns.containsKey(id)) {
+                    deleted = false;
+                } else {
+                    forgetConversationLocked(id);
+                    deleted = true;
+                }
+            }
+            if (deleted) emit(id, null, "conversationDeleted", null, new JSONObject());
+        }
+    }
+
+    private void forgetConversationLocked(String conversationId) {
+        store.clear(conversationId);
+        PiAgentBridge.forgetConversation(conversationId);
+        recentResults.remove(conversationId);
     }
 
     void cancel(String conversationId) {
@@ -420,6 +464,7 @@ final class ChatCoordinator {
             run.terminationAcknowledged = true;
             if (run.timeoutFinalized) terminatingRuns.remove(run.conversationId, run);
         }
+        maybePurgeExpiredArchives(run.conversationId);
     }
 
     void onPiEvent(JSONObject event, SessionRun run) {
@@ -521,6 +566,11 @@ final class ChatCoordinator {
         }
         if (error != null && !error.isEmpty()) emit(run, "error", null, json("message", error));
         emit(run, "end", null, json("status", status, "finishedRequestId", run.requestId));
+        maybePurgeExpiredArchives(run.conversationId);
+    }
+
+    private void maybePurgeExpiredArchives(String conversationId) {
+        if (store.isArchived(conversationId)) executor.execute(this::purgeExpiredArchives);
     }
 
     JSONObject snapshot() {

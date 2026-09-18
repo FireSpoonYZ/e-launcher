@@ -246,7 +246,21 @@ small, .secondary { font-size: .85rem; color: var(--muted); }
 .conversation-list { overflow-y: auto; flex: 1; padding-top: 10px; }.conversation-row { display: flex; border-radius: 10px; }
 .conversation-row.selected { background: var(--selection); }.conversation-row > button:first-child { flex: 1; min-width: 0; text-align: left; padding: 12px; }
 .conversation-row span { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }.conversation-row small { display: block; margin-top: 3px; }.conversation-row .icon-button { align-self: center; color: var(--muted); }
+.drawer-archived { color: var(--accent); }
+.drawer-archived > span:first-of-type { color: var(--text); }
 .drawer-settings { margin-top: auto; border-top: 1px solid var(--line); border-bottom: 0; }
+.archive-ttl { color: var(--muted); font-size: .875rem; margin: 0 0 16px; }
+.archived-page { display: flex; flex-direction: column; overflow: hidden; }
+.archived-page .page-header { flex: none; }
+.archived-list { flex: 1; min-height: 0; overflow-y: auto; }
+.archive-banner { margin: 0 20px 12px; padding: 14px 16px; border-radius: 14px; background: var(--surface); }
+.archive-banner p { margin: 0 0 6px; }
+.archive-banner small { display: block; color: var(--muted); }
+.archive-banner-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.archive-banner-actions .button, .archive-banner-actions .quiet-button { min-height: 44px; }
+.archive-undo { position: fixed; z-index: 60; left: 50%; bottom: calc(16px + var(--bottom)); transform: translateX(-50%); width: min(520px, calc(100% - 32px)); display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 14px; border-radius: 12px; background: var(--text); color: var(--bg); font-size: .9rem; }
+.archive-undo button { display: inline-flex; align-items: center; gap: 6px; color: inherit; font-weight: 600; min-height: 44px; }
+.archive-undo svg { width: 18px; height: 18px; }
 .model-list { max-height: 40dvh; overflow: auto; }.model-group { margin-bottom: 16px; }.model-group h3 { font-weight: 400; color: var(--muted); font-size: .85rem; margin: 12px 0 4px; }
 .model-row { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 58px; border-bottom: 1px solid var(--line); text-align: left; }.model-row span { flex: 1; min-width: 0; overflow-wrap: anywhere; }.model-row small { display: block; font-size: .72rem; }.selected-check { background: var(--accent); color: var(--bg); border-radius: 50%; padding: 4px; width: 27px; height: 27px; }
 .thinking-section { padding: 14px 0; border-top: 1px solid var(--line); }.thinking-section h3 { color: var(--muted); font-weight: 400; margin-bottom: 10px; }
