@@ -40,10 +40,12 @@ public class ChatArchiveTest {
         ReflectionHelpers.setStaticField(ChatExecutionService.class, "generation", 0L);
         ReflectionHelpers.setStaticField(ChatExecutionService.class, "activeCount", 0);
         ReflectionHelpers.setStaticField(ChatExecutionService.class, "foreground", false);
+        ReflectionHelpers.setStaticField(BotManager.class, "instance", null);
         ReflectionHelpers.setStaticField(ChatCoordinator.class, "instance", null);
     }
 
     @After public void tearDown() {
+        ReflectionHelpers.setStaticField(BotManager.class, "instance", null);
         ReflectionHelpers.setStaticField(ChatCoordinator.class, "instance", null);
         ChatExecutionService.setActiveCount(application, 0);
     }
@@ -118,7 +120,7 @@ public class ChatArchiveTest {
         }
     }
 
-    @Test public void purgeExpiredArchivesUsesFourteenDayThreshold() throws Exception {
+    @Test public void archivedBotsNeverExpireAutomatically() throws Exception {
         ChatCoordinator coordinator = ChatCoordinator.get(application);
         ChatStore store = coordinator.store();
         store.save(Collections.singletonList(message("expired-user", "user", "Expired chat")));
@@ -135,8 +137,8 @@ public class ChatArchiveTest {
         assertTrue(store.isArchived(expired));
         coordinator.purgeExpiredArchives();
         idleMain();
-        assertFalse(store.isArchived(expired));
-        assertFalse(new JSONObject(application.getSharedPreferences("chat", Context.MODE_PRIVATE)
+        assertTrue(store.isArchived(expired));
+        assertTrue(new JSONObject(application.getSharedPreferences("chat", Context.MODE_PRIVATE)
                 .getString("conversations", "{}")).has(expired));
         assertTrue(store.isArchived(kept));
         assertEquals("Still archived", store.load(kept).get(0).content);
@@ -186,7 +188,7 @@ public class ChatArchiveTest {
         idleMain();
         coordinator.purgeExpiredArchives();
         idleMain();
-        assertFalse(new JSONObject(application.getSharedPreferences("chat", Context.MODE_PRIVATE)
+        assertTrue(new JSONObject(application.getSharedPreferences("chat", Context.MODE_PRIVATE)
                 .getString("conversations", "{}")).has(id));
     }
 

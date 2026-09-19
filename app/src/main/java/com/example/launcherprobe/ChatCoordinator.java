@@ -47,12 +47,23 @@ final class ChatCoordinator {
     private ChatCoordinator(Context context) {
         this.context = context;
         store = new ChatStore(context);
-        ArchiveCleanupScheduler.schedule(context);
+        // Persistent bots are never deleted merely because an archive expires.
+        main.post(() -> BotManager.start(context));
     }
 
     ChatStore store() { return store; }
     boolean running() { return !activeRuns.isEmpty(); }
     boolean running(String conversationId) { return activeRuns.containsKey(conversationId); }
+    boolean botBusy(String id) { return activeRuns.containsKey(id) || terminatingRuns.containsKey(id); }
+    boolean acceptsBotCall(String id, String requestId) {
+        SessionRun run = id == null ? null : activeRuns.get(id);
+        return run != null && run.requestId.equals(requestId) && !run.cancellation.cancelled();
+    }
+    void botChanged(String id) { emit(id, null, "botChanged", null, new JSONObject()); }
+    String sendBotInput(String id, String text, JSONObject origin, String requestId) throws Exception {
+        if (!store.hasConversation(id)) throw new IllegalArgumentException("目标 Bot 已删除");
+        return send(id, text, Collections.emptyList(), null, true, origin, requestId);
+    }
     String requestId() {
         SessionRun run = activeRuns.get(store.activeId());
         return run == null ? null : run.requestId;
@@ -98,12 +109,18 @@ final class ChatCoordinator {
 
     private String send(String conversationId, String text, List<ChatAttachment> attachments,
             String submissionId, boolean background) throws Exception {
+        return send(conversationId, text, attachments, submissionId, background, null, UUID.randomUUID().toString());
+    }
+
+    private String send(String conversationId, String text, List<ChatAttachment> attachments,
+            String submissionId, boolean background, JSONObject origin, String plannedRequestId) throws Exception {
         String prompt = text == null ? "" : text.trim();
         if (prompt.isEmpty() && attachments.isEmpty()) throw new IllegalArgumentException("消息不能为空");
         AttachmentStore attachmentStore = new AttachmentStore(context);
         for (ChatAttachment attachment : attachments) attachmentStore.requireFile(attachment);
-        SessionRun run = registerRun(conversationId, submissionId, background);
+        SessionRun run = registerRun(conversationId, submissionId, background, plannedRequestId);
         if (run == null) return null;
+        run.origin = origin;
         try {
             emit(run, "runStatus", null, json("status", "running", "message", run.message));
             startPi(run, prompt, new ArrayList<>(attachments));
@@ -124,7 +141,12 @@ final class ChatCoordinator {
     }
 
     private SessionRun registerRun(String conversationId, String submissionId, boolean background) {
-        SessionRun run = new SessionRun(conversationId, UUID.randomUUID().toString());
+        return registerRun(conversationId, submissionId, background, UUID.randomUUID().toString());
+    }
+
+    private SessionRun registerRun(String conversationId, String submissionId, boolean background, String requestId) {
+        SessionRun run = new SessionRun(conversationId, requestId);
+        run.background = background;
         run.extensionUi = parseObject(store.extensionUi(conversationId, store.load(conversationId)));
         // Questions belong to one live request, unlike durable todo snapshots.
         run.extensionUi.remove("askUser");
@@ -159,6 +181,8 @@ final class ChatCoordinator {
             if (activeRuns.containsKey(conversationId) || terminatingRuns.containsKey(conversationId)) {
                 throw new IllegalStateException("此会话正在运行或结束中，请稍后再删除");
             }
+            try { BotManager.get(context).beforeDelete(conversationId); }
+            catch (Exception error) { throw new IllegalStateException("无法取消此 Bot 的任务", error); }
             forgetConversationLocked(conversationId);
         }
         emit(conversationId, null, "conversationDeleted", null, new JSONObject());
@@ -181,25 +205,7 @@ final class ChatCoordinator {
     }
 
     public void purgeExpiredArchives() {
-        List<String> expired = new ArrayList<>();
-        long now = System.currentTimeMillis();
-        for (ChatStore.Conversation conversation : store.archivedConversations()) {
-            if (now - conversation.archivedAt >= ChatStore.ARCHIVE_TTL_MS) expired.add(conversation.id);
-        }
-        for (String id : expired) {
-            boolean deleted;
-            synchronized (runLock) {
-                long archivedAt = store.archivedAt(id);
-                if (archivedAt == 0 || System.currentTimeMillis() - archivedAt < ChatStore.ARCHIVE_TTL_MS
-                        || activeRuns.containsKey(id) || terminatingRuns.containsKey(id)) {
-                    deleted = false;
-                } else {
-                    forgetConversationLocked(id);
-                    deleted = true;
-                }
-            }
-            if (deleted) emit(id, null, "conversationDeleted", null, new JSONObject());
-        }
+        // Persistent bot identities never expire. Deletion is a manual user action.
     }
 
     private void forgetConversationLocked(String conversationId) {
@@ -392,21 +398,27 @@ final class ChatCoordinator {
     void dismissTaskCard(String conversationId) { store.dismissTaskCard(conversationId); }
 
     private void startPi(SessionRun run, String text, List<ChatAttachment> attachments) throws Exception {
+        store.ensureBotSession(run.conversationId);
         PiConfigStore configStore = new PiConfigStore(context, run.conversationId);
         configStore.initialize(context.getSharedPreferences("chat", Context.MODE_PRIVATE));
         String config = new JSONObject(configStore.snapshot())
+                .put("botProfile", store.botProfile(run.conversationId))
                 .put("selection", new JSONObject(store.piSelection(run.conversationId)))
                 .put("chatAttachmentRoot", new java.io.File(context.getFilesDir(), "chat-attachments").getAbsolutePath())
                 .toString();
         List<AgentLoop.Message> full = new ArrayList<>(store.load(run.conversationId));
         String sdkHistory = store.piResume(run.conversationId, full);
         List<AgentLoop.Message> prior = new ArrayList<>(full);
-        AgentLoop.Message user = new AgentLoop.Message(UUID.randomUUID().toString(), "user", text, null,
+        String inputId = run.origin == null ? UUID.randomUUID().toString() : run.origin.getString("id");
+        if (run.origin != null) store.saveBotOrigin(run.conversationId, inputId, run.origin);
+        AgentLoop.Message user = new AgentLoop.Message(inputId, "user", text, null,
                 Collections.emptyList(), false, attachments);
         full.add(user);
         store.save(run.conversationId, full);
-        store.saveDraft(run.conversationId, "");
-        store.saveDraftAttachments(run.conversationId, Collections.emptyList());
+        if (!run.background) {
+            store.saveDraft(run.conversationId, "");
+            store.saveDraftAttachments(run.conversationId, Collections.emptyList());
+        }
         run.assistantId = UUID.randomUUID().toString();
         List<AgentLoop.Message> work = new ArrayList<>(prior);
         work.add(user);
@@ -488,6 +500,7 @@ final class ChatCoordinator {
             run.terminationAcknowledged = true;
             if (run.timeoutFinalized) terminatingRuns.remove(run.conversationId, run);
         }
+        BotManager.start(context);
         maybePurgeExpiredArchives(run.conversationId);
     }
 
@@ -656,6 +669,8 @@ final class ChatCoordinator {
         volatile long lastDeltaFlush;
         volatile String questionnaireReplyPending;
         volatile String questionnaireError = "";
+        boolean background;
+        JSONObject origin;
         boolean nodeRegistered;
         boolean terminationAcknowledged;
         boolean timeoutFinalized;

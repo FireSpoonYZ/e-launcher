@@ -17,13 +17,19 @@ final class NativeJson {
         ConversationTree tree = store.tree(conversationId);
         JSONArray nodes = new JSONArray();
         for (ConversationTree.Node node : tree.nodes()) nodes.put(object("id", node.id,
-                "parentId", node.parentId == null ? JSONObject.NULL : node.parentId, "message", message(node.message)));
+                "parentId", node.parentId == null ? JSONObject.NULL : node.parentId, "message", messageWithOrigin(store, conversationId, node.message)));
         JSONObject result = object("id", conversationId, "leaf", tree.leaf() == null ? JSONObject.NULL : tree.leaf(),
                 "nodes", nodes, "draft", store.draft(conversationId),
                 "draftAttachments", AttachmentStore.json(store.draftAttachments(conversationId)),
                 "piSelection", object(store.piSelection(conversationId)));
         long archivedAt = store.archivedAt(conversationId);
         if (archivedAt != 0) put(result, "archivedAt", archivedAt);
+        return result;
+    }
+
+    private static JSONObject messageWithOrigin(ChatStore store, String id, AgentLoop.Message value) {
+        JSONObject result = message(value), origin = store.botOrigin(id, value.id);
+        if (origin != null) put(result, "origin", origin);
         return result;
     }
 

@@ -1,0 +1,43 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { validateSnapshot, pairMessages, collaborations, conversationRows, persona, stateOf, pairKey, deliveryLabel, newMessageId, visibleTo } from '../../src/bots/model.mjs';
+import { previewSnapshot, PreviewAdapter } from './preview-adapter.mjs';
+import { installSources } from '../../../scripts/install-bots-ui.mjs';
+const sample = () => validateSnapshot(previewSnapshot());
+test('origin metadata, never body prefix or sender name, drives classification', () => { const s = previewSnapshot(); s.messages[0].body = '[agent] 发件人：研究员'; s.bots[1].name = '用户'; const v = validateSnapshot(s); assert.equal(v.messages[0].source.kind, 'user'); assert.equal(pairMessages(v, 'jarvis', 'research').length, 2); assert.equal(pairMessages(v, 'jarvis', 'research')[1].source.kind, 'bot'); });
+test('unknown source fails closed', () => { const s = previewSnapshot(); s.messages[0].source = { kind: 'admin' }; assert.throws(() => validateSnapshot(s), /未知消息来源/); });
+test('missing source never becomes user', () => { const s = previewSnapshot(); delete s.messages[0].source; assert.throws(() => validateSnapshot(s)); });
+test('assistant output cannot impersonate peer traffic', () => { const s = previewSnapshot(); s.messages[1].source.sessionId = 'research'; assert.throws(() => validateSnapshot(s), /不可冒充/); });
+test('all peer messages use exact stable IDs', () => { const s = previewSnapshot(); s.bots[2].name = s.bots[1].name; const v = validateSnapshot(s); assert.deepEqual(pairMessages(v, 'jarvis', 'research').map(m => m.id), ['m-to-research', 'm-from-research']); });
+test('pair view excludes user, routine, assistant and third-party messages', () => { const v = sample(), ids = pairMessages(v, 'jarvis', 'research').map(m => m.id); for (const id of ['m-user', 'm-answer', 'm-private', 'm-third', 'm-routine'])
+    assert(!ids.includes(id)); });
+test('pair direction is symmetric', () => { const v = sample(); assert.deepEqual(pairMessages(v, 'jarvis', 'research'), pairMessages(v, 'research', 'jarvis')); });
+test('chain filter does not leak another chain', () => { const v = sample(); v.messages.push({ ...v.messages[2], id: 'other', chainId: 'c-other' }); assert.equal(pairMessages(v, 'jarvis', 'research', 'c-research').length, 2); assert.equal(pairMessages(v, 'jarvis', 'research').length, 3); });
+test('malformed IDs are rejected before any route or selector', () => { for (const id of ['<img>', 'a/b', '', 'x'.repeat(129)])
+    assert.throws(() => pairKey(id, 'research')); });
+test('self pair rejected', () => assert.throws(() => pairKey('jarvis', 'jarvis')));
+test('duplicate IDs fail instead of rendering duplicate messages', () => { const s = previewSnapshot(); s.messages.push(s.messages[0]); assert.throws(() => validateSnapshot(s), /消息重复/); });
+test('duplicate bot IDs fail', () => { const s = previewSnapshot(); s.bots.push(s.bots[0]); assert.throws(() => validateSnapshot(s), /重复的 bot/); });
+test('deterministic persona survives rename', () => { assert.deepEqual(persona({ id: 'one', name: 'A' }), persona({ id: 'one', name: 'B' })); });
+test('invalid palette input cannot inject CSS', () => { const p = persona({ id: 'one', avatar: { shape: '<script>', color: 'url(x)' } }); assert(!JSON.stringify(p).includes('script')); assert(!JSON.stringify(p).includes('url')); });
+test('archived beats stale running activity', () => assert.equal(stateOf({ archived: true, activity: 'working' }), 'sleeping'));
+test('user attention overrides regular activity', () => assert.equal(stateOf({ needsUser: true, activity: 'thinking' }), 'needsUser'));
+test('unknown activity is never made to look running', () => assert.equal(stateOf({ activity: 'bogus' }), 'idle'));
+test('completed delivery does not assert a reply happened', () => assert.equal(deliveryLabel({ status: 'completed' }), '已处理'));
+test('core aborted maps to stopped status', () => assert.equal(deliveryLabel({ status: 'aborted' }), '已中止'));
+test('projection drops unrelated capability keys and credentials', () => { const s = previewSnapshot(); s.token = 'secret'; s.runs = { a: { token: 'secret' } }; s.bots[0].apiKey = 'secret'; s.messages[0].source.token = 'secret'; assert(!JSON.stringify(validateSnapshot(s)).includes('secret')); });
+test('collaborations are built from exchanged messages, not role mentions', () => { const v = sample(); assert.equal(collaborations(v, 'jarvis').length, 2); v.bots[0].rolePrompt = 'reading'; assert.equal(collaborations(v, 'jarvis').length, 2); });
+test('card grouping preserves user interjections', () => { const v = sample(); const insert = { ...v.messages[0], id: 'interrupt', createdAt: v.messages[2].createdAt + 100 }; v.messages.splice(3, 0, insert); const rows = conversationRows(v, 'jarvis'); assert.equal(rows.filter(r => r.kind === 'peer' && r.peerId === 'research').length, 2); });
+test('viewing messages never mutates host snapshot', () => { const v = sample(), before = JSON.stringify(v); pairMessages(v, 'jarvis', 'research'); collaborations(v, 'jarvis'); conversationRows(v, 'jarvis'); assert.equal(JSON.stringify(v), before); });
+test('private user messages invisible to other bots', () => assert.equal(visibleTo(sample().messages.find(m => m.id === 'm-private'), 'jarvis'), false));
+test('new message IDs are unique valid IDs', () => { const ids = new Set(Array.from({ length: 128 }, newMessageId)); assert.equal(ids.size, 128); for (const id of ids)
+    assert.match(id, /^[a-f0-9-]{36}$/); });
+test('preview send is queued and never invents assistant reply', async () => { const a = new PreviewAdapter(), before = a.value.messages.length; const input = { toSessionId: 'jarvis', body: 'test', submissionId: 'once' }; await a.send(input); await a.send(input); assert.equal(a.value.messages.length, before + 1); assert.equal(a.value.messages.at(-1).source.kind, 'user'); assert.equal(a.value.messages.at(-1).status, 'queued'); });
+test('preview subscriptions can be disposed', () => { const a = new PreviewAdapter(); let calls = 0; const off = a.subscribe(() => calls++); a.changed(); off(); a.changed(); assert.equal(calls, 1); });
+test('preview saving routine is not running it', async () => { const a = new PreviewAdapter(), before = a.value.messages.length; await a.saveRoutine({ ownerSessionId: 'jarvis', title: 'new', prompt: 'do', schedule: { kind: 'daily', hour: 9, minute: 0, timeZone: 'UTC' } }); assert.equal(a.value.messages.length, before); });
+test('editing existing routine keeps weekly schedule', async () => { const a = new PreviewAdapter(); await a.saveRoutine({ ownerSessionId: 'research', id: 'r-week', revision: 1, title: 'new', prompt: 'new' }); assert.equal(a.value.routines[1].schedule.kind, 'weekly'); });
+test('stale form revision is not silently saved', async () => { const a = new PreviewAdapter(); await assert.rejects(() => a.updateBot({ id: 'jarvis', revision: 0 }), /已被修改/); });
+const app = "import { SchedulesPage, ScheduleHistoryPage } from './Schedules';\n<Routes>\n    <Route path=\"/chat/:conversationId?\" element={<ChatPage/>}/>\n</Routes>";
+const settings = "import { Grid2X2 } from 'lucide-react';\n</Section><Section title={t('AI 与工具','AI & tools')}>\nold";
+test('route installer is additive and idempotent', () => { const out = installSources(app, settings); assert(out.app.includes('/bots/:sessionId?')); assert(out.settings.includes("nav('/bots')")); assert.deepEqual(installSources(out.app, out.settings), out); assert(out.app.includes('/chat/:conversationId?')); });
+test('route installer stops on unknown upstream instead of replacing files', () => assert.throws(() => installSources('different', settings), /Upstream changed/));

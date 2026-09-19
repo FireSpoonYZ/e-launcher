@@ -55,10 +55,12 @@ public class ChatExecutionServiceTest {
         ReflectionHelpers.setStaticField(ChatExecutionService.class, "generation", 0L);
         ReflectionHelpers.setStaticField(ChatExecutionService.class, "activeCount", 0);
         ReflectionHelpers.setStaticField(ChatExecutionService.class, "foreground", false);
+        ReflectionHelpers.setStaticField(BotManager.class, "instance", null);
         ReflectionHelpers.setStaticField(ChatCoordinator.class, "instance", null);
     }
 
     @After public void tearDown() {
+        ReflectionHelpers.setStaticField(BotManager.class, "instance", null);
         ReflectionHelpers.setStaticField(ChatCoordinator.class, "instance", null);
         ChatExecutionService.setActiveCount(application, 0);
     }

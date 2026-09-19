@@ -120,8 +120,9 @@ public class VoicePresentationTest {
         assertEquals("fallback must not keep pink/purple overlays", 0, pink);
         assertTrue(blue > 20);
         assertTrue(bright > 5);
-        try (FileOutputStream out = new FileOutputStream(
-                "D:/tmp/codex-voice-research-20260919/voice-e-fallback-preview.png")) {
+        java.io.File preview = new java.io.File("build/reports/voice-e-fallback-preview.png");
+        java.nio.file.Files.createDirectories(preview.toPath().getParent());
+        try (FileOutputStream out = new FileOutputStream(preview)) {
             bitmap.compress(Bitmap.CompressFormat.PNG, 100, out);
         }
     }

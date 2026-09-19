@@ -35,6 +35,10 @@ final class PiAgentBridge {
     private final ExecutorService nativeWorker = Executors.newFixedThreadPool(4);
     private final ShowerToolBridge showerTools;
     private final AppCatalog appCatalog;
+    private final Context botContext;
+    private final android.os.Handler botMain = new android.os.Handler(android.os.Looper.getMainLooper());
+    private final java.util.Set<String> botPending = new java.util.HashSet<>();
+    private final Map<String, JSONObject> botResponses = new HashMap<>();
     private boolean closed;
 
     static synchronized PiAgentBridge get(Context context) throws Exception {
@@ -57,6 +61,7 @@ final class PiAgentBridge {
     }
 
     private PiAgentBridge(Context context) throws Exception {
+        botContext = context;
         showerTools = new ShowerToolBridge(context);
         appCatalog = new AppCatalog(context);
         System.loadLibrary("node");
@@ -262,6 +267,10 @@ final class PiAgentBridge {
                     cancelShowerCall(event.optString("callId"));
                     continue;
                 }
+                if ("bots_request".equals(type)) {
+                    handleBotsRequest(event);
+                    continue;
+                }
                 if ("apps_request".equals(type)) {
                     handleAppsRequest(event);
                     continue;
@@ -295,6 +304,7 @@ final class PiAgentBridge {
                     }
                     if ("end".equals(type)) {
                         requests.remove(id);
+                        botResponses.keySet().removeIf(key -> key.startsWith(id + ":"));
                         cancelShowerCalls(id);
                     }
                     current.event(event);
@@ -336,6 +346,39 @@ final class PiAgentBridge {
         call.task = task;
         showerCalls.put(callId, call);
         nativeWorker.execute(task);
+    }
+
+    private synchronized void handleBotsRequest(JSONObject event) {
+        String id = event.optString("id"), callId = event.optString("callId");
+        Request request = requests.get(id);
+        if (closed || request == null || request.conversationId == null || callId.length() > 300
+                || !callId.startsWith("bots:") || callId.length() <= 5) return;
+        String key = id + ":" + callId;
+        if (botResponses.containsKey(key)) {
+            try { write(botResponses.get(key)); } catch (Exception error) { fail("Bot 操作结果发送失败"); }
+            return;
+        }
+        if (!botPending.add(key)) return;
+        botMain.post(() -> {
+            synchronized (PiAgentBridge.this) {
+                if (closed || requests.get(id) != request) { botPending.remove(key); return; }
+            }
+            JSONObject response = new JSONObject();
+            try {
+                response.put("type", "bots_response").put("id", id).put("callId", callId);
+                response.put("result", BotManager.get(botContext).execute(request.conversationId, id, callId,
+                        event.optJSONObject("arguments")));
+            } catch (Exception error) {
+                try { response.put("error", error.getMessage() == null ? error.getClass().getSimpleName() : error.getMessage()); }
+                catch (Exception ignored) { }
+            }
+            synchronized (PiAgentBridge.this) {
+                botPending.remove(key);
+                if (closed || requests.get(id) != request) return;
+                botResponses.put(key, response);
+                try { write(response); } catch (Exception error) { fail("Bot 操作结果发送失败"); }
+            }
+        });
     }
 
     private synchronized void handleAppsRequest(JSONObject event) {

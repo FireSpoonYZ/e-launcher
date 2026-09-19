@@ -28,14 +28,7 @@ final class ConversationArchiveUi {
     }
 
     static String remainingLabel(Context context, long archivedAt, long now) {
-        long left = remainingMs(archivedAt, now);
-        if (left <= 0) return UiText.get(context, "即将清理");
-        long day = 24L * 60 * 60 * 1000;
-        long hour = 60L * 60 * 1000;
-        long minute = 60L * 1000;
-        if (left >= day) return UiText.get(context, "剩余 ") + (left / day) + UiText.get(context, " 天");
-        if (left >= hour) return UiText.get(context, "剩余 ") + (left / hour) + UiText.get(context, " 小时");
-        return UiText.get(context, "剩余 ") + Math.max(1, left / minute) + UiText.get(context, " 分钟");
+        return UiText.isEnglish(context) ? "Kept until manually deleted" : "保留至用户手动删除";
     }
 
     static String archivedAtLabel(Context context, long archivedAt) {
@@ -46,7 +39,8 @@ final class ConversationArchiveUi {
     }
 
     static String retentionNotice(Context context) {
-        return UiText.get(context, "归档对话会保留 14 天，到期后自动永久删除。再次归档会重新计时。");
+        return UiText.isEnglish(context) ? "Archived bots do not expire. Automatic delivery is paused."
+                : "归档 Bot 不会自动删除；自动投递已暂停。";
     }
 
     static void showList(Activity activity, ChatCoordinator coordinator, Consumer<String> restore,

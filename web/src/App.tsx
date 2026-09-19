@@ -9,6 +9,7 @@ import { SettingsHome, GeneralPage, AppearancePage, DevicePage, AboutPage, Voice
 import { ProvidersPage, ResourcesPage } from './Resources';
 import { AdvancedPage, EditorPage } from './Editor';
 import { SchedulesPage, ScheduleHistoryPage } from './Schedules';
+import { BotWorkspacePage } from './bots/BotWorkspacePage';
 
 declare global {
   interface Window { PagerGesture?: {gestureId(): number; setBlocked(id: number, blocked: boolean): void}; }
@@ -95,6 +96,7 @@ function Shell({initialDevice}: {initialDevice: DeviceState}) {
     return () => window.visualViewport?.removeEventListener('resize', resize);
   }, []);
   return <Environment.Provider value={{device, refresh}}><Navigation/><Routes>
+    <Route path="/bots/:sessionId?" element={<BotWorkspacePage/>}/>
     <Route path="/chat/:conversationId?" element={<ChatPage/>}/>
     <Route path="/history/:conversationId" element={<HistoryPage/>}/>
     <Route path="/archived" element={<ArchivedPage/>}/>

@@ -32,10 +32,12 @@ public class TaskDetailActivityTest {
     @Before public void setUp() {
         application = RuntimeEnvironment.getApplication();
         application.getSharedPreferences("chat", Context.MODE_PRIVATE).edit().clear().commit();
+        ReflectionHelpers.setStaticField(BotManager.class, "instance", null);
         ReflectionHelpers.setStaticField(ChatCoordinator.class, "instance", null);
     }
 
     @After public void tearDown() {
+        ReflectionHelpers.setStaticField(BotManager.class, "instance", null);
         ReflectionHelpers.setStaticField(ChatCoordinator.class, "instance", null);
     }
 

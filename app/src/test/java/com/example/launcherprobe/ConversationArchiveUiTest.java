@@ -37,21 +37,21 @@ public class ConversationArchiveUiTest {
         }
     }
 
-    @Test public void remainingLabelCoversDaysHoursMinutesAndExpiry() {
+    @Test public void remainingLabelNeverPromisesAutomaticDeletion() {
         Context context = RuntimeEnvironment.getApplication();
         context.getSharedPreferences("ui", 0).edit().putString("language", "en").commit();
         long now = 1_700_000_000_000L;
         long day = 24L * 60 * 60 * 1000;
         assertEquals(ConversationArchiveUi.RETENTION_MS, 14 * day);
-        assertEquals("Remaining 13 days",
+        assertEquals("Kept until manually deleted",
                 ConversationArchiveUi.remainingLabel(context, now - day, now));
-        assertEquals("Remaining 5 hours",
+        assertEquals("Kept until manually deleted",
                 ConversationArchiveUi.remainingLabel(context, now - ConversationArchiveUi.RETENTION_MS + 5 * 60 * 60 * 1000, now));
-        assertEquals("Remaining 20 minutes",
+        assertEquals("Kept until manually deleted",
                 ConversationArchiveUi.remainingLabel(context, now - ConversationArchiveUi.RETENTION_MS + 20 * 60 * 1000, now));
-        assertEquals("Expiring soon",
+        assertEquals("Kept until manually deleted",
                 ConversationArchiveUi.remainingLabel(context, now - ConversationArchiveUi.RETENTION_MS, now));
-        assertTrue(ConversationArchiveUi.retentionNotice(context).contains("14"));
+        assertTrue(ConversationArchiveUi.retentionNotice(context).contains("do not expire"));
         assertTrue(ConversationArchiveUi.archivedAtLabel(context, now).contains("Archived"));
         assertEquals(0, ConversationArchiveUi.remainingMs(0, now));
     }

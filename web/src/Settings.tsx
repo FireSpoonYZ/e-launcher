@@ -15,6 +15,7 @@ export function SettingsHome() {
     <Row icon={<Palette/>} title={t('外观','Appearance')} detail={t('主题与背景','Theme & background')} onClick={() => nav('/settings/appearance')}/>
     <Row icon={<Hand/>} title={t('桌面与手势','Home & gestures')} detail={t('默认桌面与系统权限','Default home & permissions')} onClick={() => nav('/settings/device')}/>
   </Section><Section title={t('AI 与工具','AI & tools')}>
+    <Row icon={<Grid2X2/>} title={t('机器人','Bots')} detail={t('角色、协作与定时任务','Roles, collaboration & routines')} onClick={() => nav('/bots')}/>
     <Row icon={<FileText/>} title={t('全局 AGENTS.md','Global AGENTS.md')} detail={t('编辑与保存全局 Agent 指令','Edit and save global agent instructions')} onClick={() => nav('/settings/editor?project=false&file=AGENTS.md')}/>
     <Row icon={<Database/>} title={t('服务商与模型','Providers & models')} onClick={() => nav('/settings/providers')}/>
     <Row icon={<Mic/>} title={t('语音','Voice')} detail={t('识别、朗读与语音唤醒','Speech, read-aloud & wake word')} onClick={() => nav('/settings/voice')}/>

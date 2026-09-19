@@ -45,6 +45,7 @@ public class VoiceQuestionnaireTest {
 
     @Before public void setUp() {
         Context context = RuntimeEnvironment.getApplication();
+        ReflectionHelpers.setStaticField(BotManager.class, "instance", null);
         ReflectionHelpers.setStaticField(ChatCoordinator.class, "instance", null);
         coordinator = ChatCoordinator.get(context);
         AgentLoop.Message user = new AgentLoop.Message("user", "Help me choose");
@@ -74,6 +75,7 @@ public class VoiceQuestionnaireTest {
         session.close();
         output.shutdown();
         coordinator.finish(run, "aborted", "");
+        ReflectionHelpers.setStaticField(BotManager.class, "instance", null);
         ReflectionHelpers.setStaticField(ChatCoordinator.class, "instance", null);
     }
 

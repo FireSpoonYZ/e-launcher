@@ -1,8 +1,8 @@
 import { memo, useEffect, useRef, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { Archive, ArchiveRestore, ArrowDown, ArrowUp, AudioLines, Camera, Check, ChevronDown, ChevronRight, Clock3, Copy, GitBranch, Image, LoaderCircle, Menu, Mic, Paperclip, Plus, RotateCcw, Search, Settings, Share2, Square, SquarePen, Trash2, Undo2, Volume2 } from 'lucide-react';
+import { Archive, ArchiveRestore, ArrowDown, ArrowUp, AudioLines, Bot, Camera, Check, ChevronDown, ChevronRight, Clock3, Copy, GitBranch, Image, LoaderCircle, Menu, Mic, Paperclip, Plus, RotateCcw, Search, Settings, Share2, Square, SquarePen, Trash2, Undo2, Volume2 } from 'lucide-react';
 import { Chat, Device, NativeSettings, ScheduledTasks, type ChatSnapshot, type Conversation, type ConversationNode, type ConversationSummary, type ExtensionUiState, type NativeEvent } from './native';
-import { archiveRemainingParts, isArchived } from './archive';
+import { isArchived } from './archive';
 import { AttachmentList } from './AttachmentList';
 import { LatestRequest } from './latestRequest';
 import { pairToolResults, toolCallKey } from './toolResults';
@@ -13,6 +13,7 @@ import { ComposerPopover } from './ComposerPopover';
 import { useKeyboardVisible } from './useKeyboardVisible';
 import { ExtensionDock } from './ExtensionDock';
 import { Markdown } from './Markdown';
+import { BotPanel, BotOrigin } from './BotPanel';
 import { Questionnaire, type QuestionnaireReplyEvent } from './Questionnaire';
 import { Empty, ErrorNotice, Header, Loading, SearchField, errorText, query, useAction, useText } from './ui';
 
@@ -86,12 +87,8 @@ export function lineage(conversation: Conversation) {
   for (let id = conversation.leaf; id;) { const node = nodes.get(id); if (!node) break; path.unshift(node); id = node.parentId; }
   return path;
 }
-function remainingLabel(archivedAt: number, t: (zh: string, en: string) => string, now = Date.now()) {
-  const {ms, days, hours} = archiveRemainingParts(archivedAt, now);
-  if (ms <= 0) return t('即将删除', 'Expiring soon');
-  if (days > 0) return t(`剩余 ${days} 天 ${hours} 小时`, `${days}d ${hours}h left`);
-  if (hours > 0) return t(`剩余 ${hours} 小时`, `${hours}h left`);
-  return t('剩余不足 1 小时', 'Less than 1h left');
+function remainingLabel(_archivedAt: number, t: (zh: string, en: string) => string, _now = Date.now()) {
+  return t('保留至用户手动删除', 'Kept until manually deleted');
 }
 function archiveTimeLabel(archivedAt: number, t: (zh: string, en: string) => string) {
   return t('归档于 ', 'Archived ') + new Date(archivedAt).toLocaleString();
@@ -101,9 +98,11 @@ const MessageView = memo(function MessageView({node, toolResults, pending}: {nod
   const t = useText(); const action = useAction(); const [copied, setCopied] = useState(false); const message = node.message;
   if (message.role === 'system') return null;
   if (message.role === 'tool') return <ToolCallView results={[node]}/>;
-  return <article className={`message ${message.role}`}>
+  const originMessage = message as typeof message & { origin?: Parameters<typeof BotOrigin>[0]['message']['origin'] };
+  return <article className={`message ${originMessage.origin && originMessage.origin.kind !== "user" ? "bot-input" : message.role}`}>
+    <BotOrigin message={originMessage}/>
     {!!message.attachments?.length && <AttachmentList attachments={message.attachments} sent/>}
-    {message.content && <Markdown text={message.content}/>}
+    {message.content && <Markdown text={originMessage.origin?.body ?? message.content}/>}
     {message.toolCalls.map((tool, index) => <ToolCallView key={toolCallKey(node.id, index)} tool={tool} results={toolResults.get(toolCallKey(node.id, index)) ?? []} pending={pending}/>)}
     {message.incomplete && <small className="secondary">{t('尚未完成','Not completed')}</small>}
     {message.content && message.role === 'assistant' && <div className="message-actions"><button className="icon-button" aria-label={t('复制','Copy')} onClick={() => action.run(async () => { await navigator.clipboard.writeText(message.content!); setCopied(true); })}>{copied ? <Check/> : <Copy/>}</button><button className="icon-button" aria-label={t('分享','Share')} onClick={() => action.run(() => Device.share({text:message.content!,title:'Pi'}))}><Share2/></button><button className="icon-button" aria-label={t('朗读','Read aloud')} onClick={() => action.run(() => Device.speak({text:message.content!}))}><Volume2/></button></div>}
@@ -127,12 +126,13 @@ function useConversationDefaults(conversation?: Conversation) {
 }
 
 export function ChatPage() {
-  const chat = useChat(); const action = useAction(); const t = useText();
+  const chat = useChat(); const action = useAction(); const t = useText(); const nav = useNavigate();
   const [params] = useSearchParams(); const keyboardVisible = useKeyboardVisible();
   const [panel, setPanel] = useState<'conversations'|'models'|null>(params.get('panel') === 'models' ? 'models' : null);
   const [following, setFollowing] = useState(true);
   const [undo, setUndo] = useState<{id: string; title: string; reopen: boolean}|null>(null);
   const [removeCurrent, setRemoveCurrent] = useState(false);
+  const [botSettings, setBotSettings] = useState(false);
   const conversation = chat.snapshot?.conversation;
   const configured = useConversationDefaults(conversation);
   const scroll = useRef<HTMLDivElement>(null);
@@ -158,7 +158,8 @@ export function ChatPage() {
   const selection = {model: configured.defaults.defaultModel, thinkingLevel: configured.defaults.defaultThinkingLevel, ...conversation.piSelection};
   const path = lineage(conversation); const paired = pairToolResults(path);
   const activeMessage = path.filter(node => node.message.role !== 'tool').at(-1);
-  return <main className="chat-page"><header className="chat-header"><button className="icon-button" aria-label={t('会话列表','Conversations')} onClick={() => setPanel('conversations')}><Menu/></button><button className="model-title" onClick={() => setPanel('models')}><strong>Pi</strong><span>{String(selection.model || t('选择模型','Choose model'))}<ChevronDown/></span></button><button className="icon-button" aria-label={t('新会话','New conversation')} disabled={action.busy} onClick={() => action.run(async () => { await Chat.newConversation(); await chat.refresh(); })}><SquarePen/></button></header>
+  return <main className="chat-page"><header className="chat-header"><button className="icon-button" aria-label={t('会话列表','Conversations')} onClick={() => setPanel('conversations')}><Menu/></button><button className="model-title" onClick={() => setPanel('models')}><strong>Pi</strong><span>{String(selection.model || t('选择模型','Choose model'))}<ChevronDown/></span></button><button className="icon-button" aria-label={t('新会话','New conversation')} disabled={action.busy} onClick={() => action.run(async () => { await Chat.newConversation(); await chat.refresh(); })}><SquarePen/></button><button className="icon-button" aria-label={t('机器人工作台', 'Bot workspace')} onClick={() => nav(`/bots/${encodeURIComponent(conversation.id)}`)}><Bot/></button><button className="icon-button" aria-label={t('Bot 设置', 'Bot settings')} onClick={() => setBotSettings(true)}><Settings/></button></header>
+    {botSettings && <BotPanel key={conversation.id} conversationId={conversation.id} close={() => setBotSettings(false)} changed={chat.refresh}/>}
     <section className="messages" ref={scroll} onClick={e => {
       if (keyboardVisible && !document.querySelector('.composer-popover[role="dialog"],.attachment-popover') && !(e.target as HTMLElement).closest('button,a,input,textarea,summary,pre')) {
         document.querySelector<HTMLTextAreaElement>('.composer textarea')?.blur(); void Device.hideKeyboard();
@@ -181,7 +182,7 @@ export function ChatPage() {
 }
 function ArchiveNotice({archivedAt, restoring, onRestore, onDelete}: {archivedAt: number; restoring: boolean; onRestore(): void; onDelete(): void}) {
   const t = useText();
-  return <div className="archive-banner" role="status"><p>{t('此会话已归档，可查看记录。发送前须先恢复。','This conversation is archived. You can read it, but restore it before sending.')}</p><small>{archiveTimeLabel(archivedAt, t)} · {remainingLabel(archivedAt, t)} · {t('14 天后自动删除','Deleted automatically after 14 days')}</small><div className="archive-banner-actions"><button className="button" disabled={restoring} onClick={onRestore}><ArchiveRestore/>{t('恢复会话','Restore')}</button><button className="quiet-button danger" disabled={restoring} onClick={onDelete}><Trash2/>{t('永久删除','Delete forever')}</button></div></div>;
+  return <div className="archive-banner" role="status"><p>{t('此会话已归档，可查看记录。发送前须先恢复。','This conversation is archived. You can read it, but restore it before sending.')}</p><small>{archiveTimeLabel(archivedAt, t)} · {remainingLabel(archivedAt, t)} · {t('自动投递已暂停','Automatic delivery is paused')}</small><div className="archive-banner-actions"><button className="button" disabled={restoring} onClick={onRestore}><ArchiveRestore/>{t('恢复会话','Restore')}</button><button className="quiet-button danger" disabled={restoring} onClick={onDelete}><Trash2/>{t('永久删除','Delete forever')}</button></div></div>;
 }
 
 type ConversationComposerProps = {

@@ -176,6 +176,7 @@ public class MainActivity extends BridgeActivity {
             initialWebRoute = savedInstanceState.getString("web_route", initialWebRoute);
         }
         registerPlugin(ChatPlugin.class);
+        registerPlugin(BotPlugin.class);
         registerPlugin(ScheduledTasksPlugin.class);
         registerPlugin(SettingsPlugin.class);
         registerPlugin(DevicePlugin.class);

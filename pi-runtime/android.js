@@ -5,6 +5,8 @@ import { createSdkRuntime, sdkQuery } from "./sdk.js";
 import { createEventBus } from "@earendil-works/pi-coding-agent";
 import phoneControl from "./extensions/phone-control/index.js";
 import conversationTitle from "./extensions/conversation-title/index.js";
+import sessionBots from "./extensions/session-bots/index.js";
+import { requestBots } from "./extensions/session-bots/protocol.js";
 
 // cross-spawn otherwise changes the process cwd temporarily while resolving cwd-bound commands.
 // That is unsafe when independent session runtimes execute concurrently in this process.
@@ -130,7 +132,7 @@ async function handle(command) {
     }
     return;
   }
-  if (command.type === "shower_response" || command.type === "apps_response") {
+  if (command.type === "shower_response" || command.type === "apps_response" || command.type === "bots_response") {
     const operation = operations.get(command.id);
     const pending = operation?.nativeCalls.get(command.callId);
     if (pending) pending.finish(command.error ? new Error(command.error) : undefined, command.result);
@@ -181,6 +183,12 @@ async function handle(command) {
           command.config?.settings?.conversationTitle, controller.signal) },
       ],
     };
+    if (command.type === "prompt") resourceLoaderOptions.extensionFactories.push({
+      name: "session-bots", factory: (pi) => sessionBots(pi, {
+        profile: command.config?.botProfile,
+        request: (args, signal, toolCallId) => requestBots(send, operation, args, signal, toolCallId),
+      }),
+    });
     if (command.type !== "prompt") {
       const result = await sdkQuery(command, controller.signal, sendEvent,
         (prompt) => requestAuth(prompt, operation), resourceLoaderOptions);
@@ -204,6 +212,7 @@ async function handle(command) {
       sendEvent({ type: "end", status: controller.signal.aborted ? "aborted" : "error" });
     }
   } finally {
+    for (const pending of [...operation.nativeCalls.values()]) pending.finish(new Error("Pi 请求已结束"));
     if (operations.get(id) === operation) operations.delete(id);
     if (conversationId && sessions.get(conversationId) === operation) sessions.delete(conversationId);
   }

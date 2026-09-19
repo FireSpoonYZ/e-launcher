@@ -1,0 +1,14 @@
+.bot-panel .dialog-body { display: grid; gap: 1.5rem; }
+.bot-panel section { display: grid; gap: .75rem; }
+.bot-form { display: grid; gap: .75rem; border: 0; padding: 0; min-width: 0; }
+.bot-form label { display: grid; gap: .35rem; min-width: 0; }
+.bot-form input:not([type=checkbox]), .bot-form textarea, .bot-form select { width: 100%; box-sizing: border-box; font: inherit; color: inherit; background: transparent; border: 1px solid currentColor; border-radius: .6rem; padding: .6rem; }
+.bot-form textarea { resize: vertical; }
+.bot-form-row, .bot-actions { display: flex; flex-wrap: wrap; gap: .65rem; align-items: center; }
+.bot-form-row > label { flex: 1 1 7rem; }
+.bot-item { border: 1px solid currentColor; border-radius: .75rem; padding: .8rem; margin: .4rem 0; overflow-wrap: anywhere; }
+.bot-item pre { white-space: pre-wrap; max-height: 12rem; overflow: auto; }
+.bot-item p { margin: .4rem 0; }
+.bot-item button { padding: .45rem; }
+.bot-origin { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; border-bottom: 1px solid currentColor; padding-bottom: .35rem; margin-bottom: .5rem; font-size: .8rem; }
+.message.bot-input { align-self: stretch; border-inline-start: 3px solid currentColor; }

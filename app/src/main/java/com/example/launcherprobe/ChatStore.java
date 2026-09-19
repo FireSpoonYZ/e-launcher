@@ -34,6 +34,99 @@ public final class ChatStore {
         PiConfigStore.registerExistingSessions(this.context);
     }
 
+    boolean hasConversation(String id) {
+        synchronized (STORE_LOCK) { return id != null && conversationIndex().has(id); }
+    }
+
+    void ensureBotSession(String id) throws org.json.JSONException {
+        synchronized (STORE_LOCK) {
+            if (hasConversation(id)) return;
+            if (id == null || !(id.equals(activeId()) || id.equals(homeDraftId())))
+                throw new IllegalArgumentException("Bot 不存在");
+            createBackgroundConversation(id, "新对话");
+        }
+    }
+
+    JSONObject botProfile(String id) throws org.json.JSONException {
+        synchronized (STORE_LOCK) {
+            JSONObject index = conversationIndex().optJSONObject(id);
+            if (index == null) throw new IllegalArgumentException("Bot 不存在");
+            JSONObject result = new JSONObject(preferences.getString("bot_profile_" + id, "{}"));
+            result.put("id", id).put("name", result.optString("name", index.optString("title", "新对话")))
+                    .put("rolePrompt", result.optString("rolePrompt", "")).put("revision", result.optInt("revision", 0));
+            if (!result.has("history")) result.put("history", new JSONArray());
+            return result;
+        }
+    }
+
+    JSONObject saveBotProfile(String id, String name, String role, int revision, String source)
+            throws org.json.JSONException {
+        return saveBotProfile(id, name, role, revision, source, null);
+    }
+
+    JSONObject saveBotProfile(String id, String name, String role, int revision, String source, JSONObject appearance)
+            throws org.json.JSONException {
+        synchronized (STORE_LOCK) {
+            ensureBotSession(id);
+            if (appearance != null) BotWorkspace.validateAppearance(appearance);
+            JSONObject previous = botProfile(id);
+            if (previous.getInt("revision") != revision) throw new IllegalStateException("角色说明已变更，请刷新后重试");
+            String nextName = name == null ? previous.getString("name") : name.trim();
+            BotMailbox.requireText(nextName, "名称", 80); BotPolicy.role(role);
+            JSONArray history = previous.getJSONArray("history");
+            history.put(new JSONObject().put("name", previous.getString("name")).put("rolePrompt", previous.getString("rolePrompt"))
+                    .put("revision", revision).put("changedAt", System.currentTimeMillis()).put("source", source));
+            while (history.length() > 20) history.remove(0);
+            JSONObject next = new JSONObject(previous.toString()).put("name", nextName).put("rolePrompt", role)
+                    .put("revision", revision + 1).put("history", history);
+            next.remove("id");
+            if (appearance != null) {
+                JSONObject avatar = appearance.getJSONObject("avatar");
+                next.put("avatar", new JSONObject().put("shape", avatar.getString("shape")).put("color", avatar.getString("color")))
+                        .put("description", appearance.getString("description"));
+            }
+            JSONObject index = conversationIndex(); index.getJSONObject(id).put("title", nextName);
+            if (!preferences.edit().putString("bot_profile_" + id, next.toString())
+                    .putString("conversations", index.toString()).commit()) throw new IllegalStateException("无法保存角色说明");
+            return botProfile(id);
+        }
+    }
+
+    void createBotSession(String id, String name, String role, String selection) throws org.json.JSONException {
+        synchronized (STORE_LOCK) {
+            BotMailbox.requireText(name, "名称", 80); BotPolicy.role(role);
+            JSONObject index = conversationIndex();
+            if (index.has(id)) throw new IllegalArgumentException("Bot 已存在");
+            long now = System.currentTimeMillis();
+            index.put(id, new JSONObject().put("title", name).put("created", now).put("updated", now));
+            JSONObject profile = new JSONObject().put("name", name).put("rolePrompt", role)
+                    .put("revision", 1).put("history", new JSONArray());
+            if (!preferences.edit().putString("conversations", index.toString())
+                    .putString("bot_profile_" + id, profile.toString()).putString("pi_selection_" + id, selection).commit())
+                throw new IllegalStateException("无法创建 Bot");
+        }
+    }
+
+    void saveBotOrigin(String id, String nodeId, JSONObject origin) throws org.json.JSONException {
+        synchronized (STORE_LOCK) {
+            JSONObject origins = new JSONObject(preferences.getString("bot_origins_" + id, "{}"));
+            origins.put(nodeId, origin);
+            if (!preferences.edit().putString("bot_origins_" + id, origins.toString()).commit())
+                throw new IllegalStateException("无法保存消息来源");
+        }
+    }
+
+    JSONObject botMessageTimes(String id) throws org.json.JSONException {
+        synchronized (STORE_LOCK) { return new JSONObject(preferences.getString("bot_message_times_" + id, "{}")); }
+    }
+
+    JSONObject botOrigin(String id, String nodeId) {
+        synchronized (STORE_LOCK) {
+            try { return new JSONObject(preferences.getString("bot_origins_" + id, "{}")).optJSONObject(nodeId); }
+            catch (org.json.JSONException error) { throw new IllegalStateException("消息来源记录损坏", error); }
+        }
+    }
+
     public String activeId() { return preferences.getString("active_chat", "legacy"); }
 
     String piSelection() { return piSelection(activeId()); }
@@ -464,7 +557,7 @@ public final class ChatStore {
                     JSONObject entry = entries.optJSONObject(i);
                     if (entry == null || !"session_info".equals(entry.optString("type"))) continue;
                     String title = entry.optString("name", "").trim();
-                    if (!title.isEmpty()) {
+                    if (!title.isEmpty() && !preferences.contains("bot_profile_" + conversation)) {
                         try {
                             JSONObject index = conversationIndex();
                             index.getJSONObject(conversation).put("title", title);
@@ -499,7 +592,15 @@ public final class ChatStore {
                     .put("created", previous == null ? System.currentTimeMillis() : previous.optLong("created"));
             copyArchivedAt(previous, next);
             index.put(conversation, next);
+            JSONObject times = new JSONObject(preferences.getString("bot_message_times_" + conversation, "{}"));
+            java.util.Set<String> previousNodes = new java.util.HashSet<>();
+            for (ConversationTree.Node node : tree(conversation).nodes()) previousNodes.add(node.id);
+            long nextTime = System.currentTimeMillis();
+            for (java.util.Iterator<String> keys = times.keys(); keys.hasNext();) nextTime = Math.max(nextTime, times.getLong(keys.next()) + 1);
+            for (ConversationTree.Node node : tree.nodes()) if (!times.has(node.id) && !previousNodes.contains(node.id))
+                times.put(node.id, nextTime++);
             preferences.edit().putString(historyKey(conversation), encodeTree(tree).toString())
+                    .putString("bot_message_times_" + conversation, times.toString())
                     .putString("conversations", index.toString()).apply();
         } catch (Exception exception) {
             throw new IllegalStateException("无法保存聊天记录", exception);
@@ -674,7 +775,9 @@ public final class ChatStore {
             index.remove(conversationId);
             List<String> taskCards = taskCardIds();
             taskCards.remove(conversationId);
-            SharedPreferences.Editor edit = preferences.edit().remove(historyKey(conversationId))
+            SharedPreferences.Editor edit = preferences.edit().remove("bot_profile_" + conversationId)
+                    .remove("bot_origins_" + conversationId).remove("bot_message_times_" + conversationId)
+                    .remove(historyKey(conversationId))
                     .remove("draft_" + conversationId).remove("draft_attachments_" + conversationId)
                     .remove("pi_selection_" + conversationId).remove("run_status_" + conversationId)
                     .remove("run_error_" + conversationId).putString("conversations", index.toString())

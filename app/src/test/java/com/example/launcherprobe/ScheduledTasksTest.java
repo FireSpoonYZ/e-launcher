@@ -44,6 +44,7 @@ public class ScheduledTasksTest {
         TimeZone.setDefault(TimeZone.getTimeZone("UTC"));
         application.getSharedPreferences("scheduled_tasks", Context.MODE_PRIVATE).edit().clear().commit();
         application.getSharedPreferences("chat", Context.MODE_PRIVATE).edit().clear().commit();
+        ReflectionHelpers.setStaticField(BotManager.class, "instance", null);
         ReflectionHelpers.setStaticField(ChatCoordinator.class, "instance", null);
         ReflectionHelpers.setStaticField(ScheduledTasks.class, "instance", null);
         ReflectionHelpers.setStaticField(ChatExecutionService.class, "activeCount", 0);
@@ -55,6 +56,7 @@ public class ScheduledTasksTest {
 
     @After public void cleanup() {
         ChatExecutionService.setActiveCount(application, 0);
+        ReflectionHelpers.setStaticField(BotManager.class, "instance", null);
         ReflectionHelpers.setStaticField(ChatCoordinator.class, "instance", null);
         ReflectionHelpers.setStaticField(ScheduledTasks.class, "instance", null);
         TimeZone.setDefault(previousZone);
@@ -153,6 +155,7 @@ public class ScheduledTasksTest {
         state.getJSONArray("tasks").getJSONObject(0).put("nextRunAt", System.currentTimeMillis() - 1000);
         persist(state);
         tasks.onAlarm();
+        Shadows.shadowOf(Looper.getMainLooper()).idle();
         JSONObject record = tasks.snapshot().getJSONArray("records").getJSONObject(0);
         assertEquals("error", record.getString("status"));
         assertTrue(record.getString("message").contains("fixture foreground start denied"));
@@ -160,10 +163,11 @@ public class ScheduledTasksTest {
         assertTrue(record.getBoolean("conversationAvailable"));
         assertEquals(active, chat.activeId());
         assertEquals("unsent draft", chat.draft());
-        assertEquals(2, chat.conversations().size());
+        assertEquals(1, chat.conversations().size());
+        assertEquals(active, record.getString("conversationId"));
         tasks.onAlarm();
         assertEquals(1, tasks.snapshot().getJSONArray("records").length());
-        assertEquals(2, chat.conversations().size());
+        assertEquals(1, chat.conversations().size());
     }
 
     @Test public void runningOccurrenceIsNotOverlappedAndFinalEventSurvivesDefinitionDeletion() throws Exception {
