@@ -61,7 +61,7 @@ final class AppSwitcherView extends FrameLayout {
     private final View wallpaper, scrim;
     private final LinearLayout content;
     private final FrameLayout stage;
-    private final TextView counter, hint, clear;
+    private final TextView counter, clear;
     private Carousel carousel;
     private ValueAnimator transition;
     private View expandingCover;
@@ -103,9 +103,7 @@ final class AppSwitcherView extends FrameLayout {
         content.addView(stage, new LinearLayout.LayoutParams(-1, 0, 1));
         counter = text("", 14, MUTED); counter.setGravity(Gravity.CENTER);
         counter.setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_NO);
-        content.addView(counter, new LinearLayout.LayoutParams(-1, dp(34)));
-        hint = text("左右滑动浏览 · 上滑移除 · 点击打开", 13, MUTED); hint.setGravity(Gravity.CENTER);
-        content.addView(hint, new LinearLayout.LayoutParams(-1, dp(26)));
+        content.addView(counter, new LinearLayout.LayoutParams(-1, dp(46)));
         clear = text("清除全部", 15, INK); clear.setGravity(Gravity.CENTER);
         clear.setPadding(dp(24), 0, dp(24), 0); clear.setBackground(pill());
         clear.setFocusable(true); clear.setContentDescription("清除全部应用");
@@ -134,7 +132,7 @@ final class AppSwitcherView extends FrameLayout {
             empty("还没有最近打开的应用", "从桌面打开应用后，会显示在这里");
             return;
         }
-        hint.setVisibility(VISIBLE); clear.setVisibility(VISIBLE);
+        clear.setVisibility(VISIBLE);
         carousel = new Carousel(apps, selected);
         stage.addView(carousel, new LayoutParams(-1, -1));
         carousel.post(carousel::enter);
@@ -160,7 +158,7 @@ final class AppSwitcherView extends FrameLayout {
         }
         stage.addView(box, new LayoutParams(-1, -1));
         Motion.enter(box, dp(24));
-        counter.setText(""); hint.setVisibility(INVISIBLE); clear.setVisibility(INVISIBLE);
+        counter.setText(""); clear.setVisibility(INVISIBLE);
     }
 
     String selectedComponent() {
