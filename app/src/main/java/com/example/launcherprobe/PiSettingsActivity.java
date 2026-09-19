@@ -36,7 +36,7 @@ import java.util.Map;
 public final class PiSettingsActivity extends Activity {
     private int IVORY, INK, TEAL, MUTED;
     private AppAppearance appearance;
-    private static final String[] CATEGORIES = {"通用", "外观", "服务商", "技能", "MCP", "扩展", "关于", "高级配置"};
+    private static final String[] CATEGORIES = {"通用", "外观", "语音", "服务商", "技能", "MCP", "扩展", "关于", "高级配置"};
     private static final String[] ADVANCED = {"模型与思考", "模型专家配置", "上下文与会话", "请求与消息", "工具与 Shell",
             "网络与连接", "资源与包", "作用域与信任", "环境与凭据", "配置文件", "隐私与诊断", "终端与渲染"};
     private PiConfigStore store;
@@ -233,7 +233,8 @@ public final class PiSettingsActivity extends Activity {
                         }).setNegativeButton(t("取消"), null).show());
                 action(t("Android 应用权限"), () -> startActivity(new Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
                         android.net.Uri.parse("package:" + getPackageName()))));
-            } else if (page.equals("服务商")) providers();
+            } else if (page.equals("语音")) voiceSettings();
+            else if (page.equals("服务商")) providers();
             else if (page.equals("配置文件")) {
                 scope();
                 for (String name : store.files(project)) link(name, name.equals("auth.json") ? t("凭据文件，打开后可能包含密钥") : "", () -> openFile(name));
@@ -276,6 +277,170 @@ public final class PiSettingsActivity extends Activity {
             } else if (page.equals("扩展社区")) community();
             else fieldGroup(page);
         } catch (Exception exception) { note(t("无法读取：") + exception.getMessage()); }
+    }
+
+    private void voiceSettings() {
+        VoiceManager voice = VoiceManager.get(this);
+        VoiceSettings settings = voice.settings();
+        String[] engines = {VoiceSettings.SYSTEM, VoiceSettings.REMOTE};
+        String[] engineLabels = {t("系统内置"), t("远程模型（OpenAI 兼容）")};
+        note(t("语音识别"));
+        link(t("识别引擎"), engineLabels[engineIndex(settings.sttEngine())], () -> choose(t("识别引擎"), engineLabels,
+                engineIndex(settings.sttEngine()), which -> settings.setEngine(VoiceSettings.STT, engines[which])));
+        link(t("远程识别模型"), remoteSummary(settings.remote(VoiceSettings.STT)), () -> editRemoteVoice(VoiceSettings.STT));
+        action(t("测试语音识别"), () -> voice.listen(this, null, new VoiceManager.Callback() {
+            @Override public void onText(String text) { toast(t("识别结果：") + text); }
+            @Override public void onError(String message) { toast(message); }
+        }));
+        note(t("语音朗读"));
+        link(t("朗读引擎"), engineLabels[engineIndex(settings.ttsEngine())], () -> choose(t("朗读引擎"), engineLabels,
+                engineIndex(settings.ttsEngine()), which -> settings.setEngine(VoiceSettings.TTS, engines[which])));
+        link(t("远程朗读模型"), remoteSummary(settings.remote(VoiceSettings.TTS)), () -> editRemoteVoice(VoiceSettings.TTS));
+        String[] modes = {VoiceSettings.SPEAK_OFF, VoiceSettings.SPEAK_AFTER_VOICE, VoiceSettings.SPEAK_ALWAYS};
+        String[] modeLabels = {t("关闭"), t("语音输入后朗读"), t("总是朗读当前会话")};
+        int mode = java.util.Arrays.asList(modes).indexOf(settings.speakMode());
+        link(t("自动朗读回复"), modeLabels[mode], () -> choose(t("自动朗读回复"), modeLabels, mode, which -> settings.setSpeakMode(modes[which])));
+        float[] rates = {.75f, 1f, 1.25f, 1.5f, 2f};
+        String[] rateLabels = {"0.75×", "1.0×", "1.25×", "1.5×", "2.0×"};
+        int rate = rateIndex(rates, settings.speechRate());
+        link(t("语速"), rateLabels[rate], () -> choose(t("语速"), rateLabels, rate, which -> settings.setSpeechRate(rates[which])));
+        action(t("试听朗读"), () -> voice.speak(t("你好，我是你的桌面助手。这是一段朗读测试。")));
+        action(t("停止朗读"), voice::stopSpeaking);
+        action(t("系统朗读引擎设置"), () -> {
+            try { startActivity(new Intent("com.android.settings.TTS_SETTINGS")); }
+            catch (android.content.ActivityNotFoundException missing) { toast(t("系统未提供朗读引擎设置")); }
+        });
+        note(t("语音唤醒"));
+        boolean wakeOn = settings.wakeEnabled();
+        String wakeStatus = WakeWordService.status();
+        link(t("语音唤醒"), !wakeOn ? t("已关闭") : !wakeStatus.isEmpty() ? wakeStatus
+                : WakeWordService.isRunning() ? t("正在监听") : t("已开启，回到桌面后开始监听"), () -> {
+            if (wakeOn) { settings.setWakeEnabled(false); WakeWordService.sync(this); render(); return; }
+            java.util.List<String> needed = new java.util.ArrayList<>();
+            needed.add(android.Manifest.permission.RECORD_AUDIO);
+            if (android.os.Build.VERSION.SDK_INT >= 33) needed.add(android.Manifest.permission.POST_NOTIFICATIONS);
+            requestPermissions(needed.toArray(new String[0]), REQUEST_WAKE);
+        });
+        link(t("唤醒词"), wakeSummary(settings.wakeWords()), this::editWakeWords);
+        String[] sensitivities = {VoiceSettings.WAKE_LOW, VoiceSettings.WAKE_MEDIUM, VoiceSettings.WAKE_HIGH};
+        String[] sensitivityLabels = {t("低（更少误唤醒）"), t("中"), t("高（更容易唤醒）")};
+        int sensitivity = java.util.Arrays.asList(sensitivities).indexOf(settings.wakeSensitivity());
+        link(t("唤醒灵敏度"), sensitivityLabels[sensitivity], () -> choose(t("唤醒灵敏度"), sensitivityLabels, sensitivity, which -> {
+            settings.setWakeSensitivity(sensitivities[which]);
+            WakeWordService.sync(this, true);
+        }));
+        note(t("唤醒在本机离线识别，不上传音频。第三方应用无法使用系统的低功耗唤醒芯片，开启后会常驻通知、麦克风指示灯常亮，并增加耗电；通话或其他应用录音时暂时无法唤醒。唤醒后说出请求，停顿后自动发送给助手，回复会按“自动朗读回复”设置朗读。"));
+        note(t("通用"));
+        String language = settings.language();
+        link(t("识别与朗读语言"), language.isEmpty() ? t("跟随系统") : language, () -> {
+            EditText input = new EditText(this); input.setHint("zh-CN / en-US"); input.setText(settings.language());
+            new AlertDialog.Builder(this).setTitle(t("识别与朗读语言")).setMessage(t("填写 BCP-47 语言代码，留空跟随系统。")).setView(input)
+                    .setPositiveButton(t("保存"), (dialog, which) -> {
+                        try { settings.setLanguage(input.getText().toString()); render(); } catch (Exception exception) { toast(exception.getMessage()); }
+                    }).setNegativeButton(t("取消"), null).show();
+        });
+        note(t("远程模型使用 OpenAI 兼容接口：识别调用 {地址}/audio/transcriptions，朗读调用 {地址}/audio/speech。地址须为 https，例如 https://api.openai.com/v1。API Key 仅保存在本机，不会显示或导出。"));
+    }
+
+    private static final int REQUEST_WAKE = 44;
+
+    private String wakeSummary(String words) {
+        try {
+            StringBuilder out = new StringBuilder();
+            for (String word : WakeWords.split(words)) {
+                if (out.length() > 0) out.append('\n');
+                out.append(word).append("  ·  ").append(WakeWords.tokens(word, WakeWordEngine.vocabulary(this)));
+            }
+            return out.toString();
+        } catch (Exception exception) { return words + "\n" + exception.getMessage(); }
+    }
+
+    private void editWakeWords() {
+        VoiceSettings settings = VoiceManager.get(this).settings();
+        EditText input = new EditText(this); input.setText(settings.wakeWords()); input.setContentDescription(t("唤醒词"));
+        AlertDialog dialog = new AlertDialog.Builder(this).setTitle(t("唤醒词"))
+                .setMessage(t("填写 2–8 个汉字，多个唤醒词用逗号分隔。多音字读错时可直接填拼音记号，例如：n ǐ h ǎo x iǎo y ì。四个字左右、音节差异大的词误唤醒更少。"))
+                .setView(input).setPositiveButton(t("保存"), null).setNeutralButton(t("恢复默认"), null).setNegativeButton(t("取消"), null).create();
+        dialog.setOnShowListener(shown -> {
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(view -> {
+                try {
+                    java.util.List<String> words = WakeWords.split(input.getText().toString());
+                    WakeWords.keywordsFile(words, WakeWordEngine.vocabulary(this));
+                    settings.setWakeWords(input.getText().toString());
+                    WakeWordService.sync(this, true);
+                    dialog.dismiss(); render();
+                } catch (Exception exception) { toast(exception.getMessage()); }
+            });
+            dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener(view -> input.setText(VoiceSettings.DEFAULT_WAKE_WORDS));
+        });
+        dialog.show();
+    }
+
+    private interface Choice { void chosen(int which) throws Exception; }
+
+    private void choose(String title, String[] labels, int selected, Choice choice) {
+        new AlertDialog.Builder(this).setTitle(title).setSingleChoiceItems(labels, selected, (dialog, which) -> {
+            dialog.dismiss();
+            try { choice.chosen(which); render(); } catch (Exception exception) { toast(exception.getMessage()); }
+        }).setNegativeButton(t("取消"), null).show();
+    }
+
+    private static int engineIndex(String engine) { return VoiceSettings.REMOTE.equals(engine) ? 1 : 0; }
+    private static int rateIndex(float[] rates, float rate) {
+        for (int i = 0; i < rates.length; i++) if (Math.abs(rates[i] - rate) < .01f) return i;
+        return 1;
+    }
+
+    private String remoteSummary(VoiceSettings.Remote remote) {
+        if (remote.baseUrl.isEmpty()) return t("未配置");
+        return remote.model + " · " + remote.baseUrl + (remote.apiKey.isEmpty() ? "" : " · " + t("已保存 API Key"));
+    }
+
+    private void editRemoteVoice(String kind) {
+        VoiceSettings settings = VoiceManager.get(this).settings();
+        VoiceSettings.Remote remote = settings.remote(kind);
+        boolean speech = VoiceSettings.TTS.equals(kind);
+        LinearLayout form = column(); form.setPadding(dp(20), dp(8), dp(20), 0);
+        EditText url = new EditText(this); url.setHint(t("接口地址，如 https://api.openai.com/v1")); url.setText(remote.baseUrl);
+        url.setInputType(android.text.InputType.TYPE_CLASS_TEXT | android.text.InputType.TYPE_TEXT_VARIATION_URI);
+        EditText key = new EditText(this); key.setHint(remote.apiKey.isEmpty() ? t("API Key（可选）") : t("已保存，留空保持不变"));
+        key.setInputType(android.text.InputType.TYPE_CLASS_TEXT | android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        EditText model = new EditText(this); model.setHint(t("模型")); model.setText(remote.model);
+        EditText voiceName = new EditText(this); voiceName.setHint(t("音色（voice）")); voiceName.setText(remote.voice);
+        for (EditText field : new EditText[]{url, key, model}) { field.setContentDescription(field.getHint()); form.addView(field); }
+        if (speech) { voiceName.setContentDescription(voiceName.getHint()); form.addView(voiceName); }
+        AlertDialog dialog = new AlertDialog.Builder(this).setTitle(t(speech ? "远程朗读模型" : "远程识别模型")).setView(form)
+                .setPositiveButton(t("保存"), null).setNeutralButton(t("清除 API Key"), null).setNegativeButton(t("取消"), null).create();
+        dialog.setOnShowListener(shown -> {
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(view -> {
+                try {
+                    String typedKey = key.getText().toString();
+                    settings.setRemote(kind, url.getText().toString(), model.getText().toString(),
+                            speech ? voiceName.getText().toString() : remote.voice, typedKey.trim().isEmpty() ? null : typedKey);
+                    dialog.dismiss(); render();
+                } catch (Exception exception) { toast(exception.getMessage()); }
+            });
+            dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener(view -> {
+                try {
+                    settings.setRemote(kind, remote.baseUrl, remote.model, remote.voice, "");
+                    dialog.dismiss(); render(); toast(t("已清除 API Key"));
+                } catch (Exception exception) { toast(exception.getMessage()); }
+            });
+        });
+        dialog.show();
+    }
+
+    @Override public void onRequestPermissionsResult(int request, String[] permissions, int[] results) {
+        super.onRequestPermissionsResult(request, permissions, results);
+        if (request == REQUEST_WAKE) {
+            if (checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                VoiceManager.get(this).settings().setWakeEnabled(true);
+                WakeWordService.sync(this, true);
+            } else toast(t("需要麦克风权限才能开启语音唤醒"));
+            if ("语音".equals(page)) render();
+            return;
+        }
+        VoiceManager.get(this).onRequestPermissionsResult(this, request, results);
     }
 
     private void appearanceSettings() {
@@ -1185,6 +1350,7 @@ public final class PiSettingsActivity extends Activity {
 
     @Override protected void onActivityResult(int request, int result, Intent data) {
         super.onActivityResult(request, result, data);
+        if (VoiceManager.get(this).onActivityResult(request, result, data)) return;
         if (result != RESULT_OK || data == null || data.getData() == null) return;
         if (request == 3) { importBackgroundImage(data.getData()); return; }
         if (editor == null) return;

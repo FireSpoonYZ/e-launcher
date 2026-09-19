@@ -103,6 +103,9 @@ export interface DevicePlugin {
   apps(): Promise<{apps: Array<{label: string; packageName: string; className: string; icon: string}>}>;
   launchApp(options: {packageName: string; className: string}): Promise<void>;
   voice(): Promise<{text: string}>;
+  /** Reads Markdown aloud with the configured engine; replaces any reading in progress. */
+  speak(options: {text: string}): Promise<void>;
+  stopSpeaking(): Promise<void>;
   chooseAttachment(options: {conversationId: string; kind: 'camera'|'image'|'file'}): Promise<{attachments: Attachment[]}>;
   removeAttachment(options: {conversationId: string; attachmentId: string}): Promise<void>;
   openAttachment(options: {attachmentId: string}): Promise<void>;

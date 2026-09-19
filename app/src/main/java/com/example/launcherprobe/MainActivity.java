@@ -56,6 +56,10 @@ public class MainActivity extends BridgeActivity {
     private static final String CHAT_SCROLL_KEY = "chat_scroll";
     private static final String EXPANDED_TOOLS_KEY = "expanded_tools";
     private static final RunEpoch ACTIVITY_EPOCH = new RunEpoch();
+    private static java.lang.ref.WeakReference<MainActivity> resumedActivity = new java.lang.ref.WeakReference<>(null);
+
+    /** The visible launcher, if any; the wake word flow shows its listening panel here. */
+    static MainActivity resumed() { return resumedActivity.get(); }
 
     private final Handler clockHandler = new Handler(Looper.getMainLooper());
     private final Runnable clockTick = new Runnable() {
@@ -177,6 +181,8 @@ public class MainActivity extends BridgeActivity {
         registerPlugin(DevicePlugin.class);
         super.onCreate(savedInstanceState);
         appearance.apply(this);
+        // Registers read-aloud for finished replies even before the first dictation.
+        VoiceManager.get(this);
         suppressHomeEnterTransition(getIntent());
         activityEpoch = ACTIVITY_EPOCH.acquire();
         shizukuRepair = new ShizukuRepair(this, () -> { });
@@ -320,6 +326,9 @@ public class MainActivity extends BridgeActivity {
     @Override
     public void onResume() {
         super.onResume();
+        resumedActivity = new java.lang.ref.WeakReference<>(this);
+        // Microphone services can only start while the app is visible; the launcher resumes often.
+        WakeWordService.sync(this);
         if (desktopRevision != new DesktopPreferences(this).revision()) { recreate(); return; }
         agentRunning = chatCoordinator.running(chatStore.activeId());
         activePiRequestId = chatCoordinator.requestId();
@@ -352,6 +361,7 @@ public class MainActivity extends BridgeActivity {
 
     @Override
     public void onPause() {
+        if (resumedActivity.get() == this) resumedActivity = new java.lang.ref.WeakReference<>(null);
         if (homeInputOverlay != null) homeInputOverlay.clearInput();
         savePiPreview();
         shizukuRepair.pause();
@@ -380,6 +390,7 @@ public class MainActivity extends BridgeActivity {
             if (queryBridge != null) queryBridge.abort(thinkingLevelRequestId);
         }
         closeNativeSearch();
+        VoiceManager.get(this).cancelListening();
         if (homeInputOverlay != null) homeInputOverlay.dispose();
         if (homeDesktop != null) homeDesktop.dispose();
         if (packageReceiverRegistered) {
@@ -1408,14 +1419,24 @@ public class MainActivity extends BridgeActivity {
             homeInputOverlay.select(2);
             voiceConversation = homeInputOverlay.draftId();
         } else voiceConversation = chatStore.activeId();
-        Intent intent = new Intent(android.speech.RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
-                .putExtra(android.speech.RecognizerIntent.EXTRA_LANGUAGE_MODEL,
-                        android.speech.RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                .putExtra(android.speech.RecognizerIntent.EXTRA_PROMPT, "说出你的消息");
-        try { startActivityForResult(intent, 41); }
-        catch (ActivityNotFoundException exception) {
-            failure(t("系统未提供语音输入，请使用键盘麦克风"));
-        }
+        String conversation = voiceConversation;
+        VoiceManager.get(this).listen(this, conversation, new VoiceManager.Callback() {
+            @Override public void onText(String text) { applyVoice(conversation, text); }
+            @Override public void onError(String message) { failure(message); }
+        });
+    }
+
+    private void applyVoice(String id, String words) {
+        if (id == null) return;
+        try {
+            if (homeInputOverlay != null && id.equals(homeInputOverlay.draftId())) homeInputOverlay.appendVoice(words);
+            else { chatStore.saveDraft(id, chatStore.draft(id) + words); refreshHomeComposer(); }
+        } catch (Exception exception) { failure(exception.getMessage()); }
+    }
+
+    @Override public void onRequestPermissionsResult(int request, String[] permissions, int[] results) {
+        super.onRequestPermissionsResult(request, permissions, results);
+        VoiceManager.get(this).onRequestPermissionsResult(this, request, results);
     }
 
     @Override protected void onActivityResult(int request, int result, Intent data) {
@@ -1429,19 +1450,7 @@ public class MainActivity extends BridgeActivity {
                 if (chatModelTitle != null) chatModelTitle.setText(currentModelLabel());
             } catch (Exception exception) { Toast.makeText(this, exception.getMessage(), Toast.LENGTH_LONG).show(); }
         }
-        if (request == 41 && result == RESULT_OK && data != null) {
-            ArrayList<String> words = data.getStringArrayListExtra(
-                    android.speech.RecognizerIntent.EXTRA_RESULTS);
-            if (words != null && !words.isEmpty()) {
-                String id = voiceConversation;
-                if (id != null) {
-                    try {
-                        if (homeInputOverlay != null && id.equals(homeInputOverlay.draftId())) homeInputOverlay.appendVoice(words.get(0));
-                        else { chatStore.saveDraft(id, chatStore.draft(id) + words.get(0)); refreshHomeComposer(); }
-                    } catch (Exception exception) { failure(exception.getMessage()); }
-                }
-            }
-        }
+        if (request == VoiceManager.REQUEST_RECOGNIZER) VoiceManager.get(this).onActivityResult(request, result, data);
     }
 
     private boolean canChangeConversation() {

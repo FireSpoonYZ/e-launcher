@@ -131,7 +131,54 @@ tasks.matching { it.name in ['mergeDebugAssets', 'mergeReleaseAssets']
         || it.name.toLowerCase().contains('lint') }
         .configureEach { dependsOn syncShowerServer }
 
+// sherpa-onnx wake word engine and model: downloaded once into the ignored root build/ cache and pinned by SHA-256.
+def sherpaVersion = '1.13.8'
+def sherpaCache = rootProject.file('build/downloads/sherpa-onnx')
+def sherpaAar = new File(sherpaCache, "sherpa-onnx-static-link-onnxruntime-${sherpaVersion}.aar")
+def kwsModelName = 'sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20'
+def kwsArchive = new File(sherpaCache, "${kwsModelName}.tar.bz2")
+def downloadPinned = { String url, File target, String sha256 ->
+    def digest = { File file ->
+        def md = java.security.MessageDigest.getInstance('SHA-256')
+        file.withInputStream { input -> byte[] buffer = new byte[1 << 16]; int n; while ((n = input.read(buffer)) > 0) md.update(buffer, 0, n) }
+        md.digest().encodeHex().toString()
+    }
+    if (target.isFile() && digest(target) == sha256) return
+    target.parentFile.mkdirs()
+    def partial = new File(target.path + '.part')
+    // Uses the systemProp.https.proxy* settings from the user-level gradle.properties.
+    new URL(url).withInputStream { input -> partial.withOutputStream { output -> output << input } }
+    def actual = digest(partial)
+    if (actual != sha256) { partial.delete(); throw new GradleException("Checksum mismatch for $url: $actual") }
+    target.delete(); if (!partial.renameTo(target)) throw new GradleException("Cannot move $partial")
+}
+def downloadSherpaOnnx = tasks.register('downloadSherpaOnnx') {
+    outputs.files sherpaAar, kwsArchive
+    doLast {
+        downloadPinned("https://github.com/k2-fsa/sherpa-onnx/releases/download/v${sherpaVersion}/${sherpaAar.name}",
+                sherpaAar, 'b22c3fc1b6a45666d28892bb2f7694beeb77a8362d7ebd77c1a5431ec9435471')
+        downloadPinned("https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/${kwsArchive.name}",
+                kwsArchive, '68447f4fbc67e70eee3a93961f36e81e98f47aef73ce7e7ca00885c6cd3616a6')
+    }
+}
+def syncKwsModel = tasks.register('syncKwsModel', Sync) {
+    dependsOn downloadSherpaOnnx
+    from({ tarTree(resources.bzip2(kwsArchive)) }) {
+        include "${kwsModelName}/encoder-epoch-13-avg-2-chunk-16-left-64.int8.onnx"
+        include "${kwsModelName}/decoder-epoch-13-avg-2-chunk-16-left-64.onnx"
+        include "${kwsModelName}/joiner-epoch-13-avg-2-chunk-16-left-64.int8.onnx"
+        include "${kwsModelName}/tokens.txt"
+        eachFile { it.path = "kws/${it.name}" }
+        includeEmptyDirs = false
+    }
+    into "$buildDir/generated/kwsAssets"
+}
+android.sourceSets.main.assets.srcDir "$buildDir/generated/kwsAssets"
+tasks.named('preBuild') { dependsOn syncKwsModel }
+tasks.matching { it.name.toLowerCase().contains('lint') }.configureEach { dependsOn syncKwsModel }
+
 dependencies {
+    implementation files(sherpaAar).builtBy(downloadSherpaOnnx)
     implementation project(':capacitor-android')
     implementation 'androidx.appcompat:appcompat:1.7.1'
     implementation 'androidx.activity:activity:1.11.0'

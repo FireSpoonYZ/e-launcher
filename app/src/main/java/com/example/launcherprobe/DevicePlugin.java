@@ -5,7 +5,6 @@ import android.app.role.RoleManager;
 import android.content.Intent;
 import android.net.Uri;
 import android.provider.Settings;
-import android.speech.RecognizerIntent;
 
 import com.getcapacitor.JSObject;
 import com.getcapacitor.Plugin;
@@ -16,7 +15,6 @@ import com.getcapacitor.PluginMethod;
 
 import org.json.JSONObject;
 
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -67,19 +65,26 @@ public final class DevicePlugin extends Plugin {
         catch (Exception exception) { reject(call, exception); }
     }
     @PluginMethod public void voice(PluginCall call) {
-        Intent intent = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
-                .putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                .putExtra(RecognizerIntent.EXTRA_PROMPT, "说出你的消息");
-        startActivityForResult(call, intent, "voiceResult");
+        getActivity().runOnUiThread(() -> {
+            ChatStore store = ChatCoordinator.get(getContext()).store();
+            VoiceManager.get(getContext()).listen(getActivity(), store.activeId(), new VoiceManager.Callback() {
+                @Override public void onText(String words) {
+                    try { String text = store.draft() + words; store.saveDraft(text); call.resolve(object("text", text)); }
+                    catch (Exception exception) { reject(call, exception); }
+                }
+                @Override public void onError(String message) { call.reject(message); }
+                @Override public void onCancel() { call.reject("语音输入已取消"); }
+            });
+        });
     }
-    @ActivityCallback private void voiceResult(PluginCall call, androidx.activity.result.ActivityResult result) {
-        if (call == null) return;
-        if (result.getResultCode() != Activity.RESULT_OK || result.getData() == null) { call.reject("语音输入已取消"); return; }
-        ArrayList<String> words = result.getData().getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS);
-        if (words == null || words.isEmpty()) { call.reject("未识别到语音"); return; }
-        ChatStore store = ChatCoordinator.get(getContext()).store();
-        String text = store.draft() + words.get(0); store.saveDraft(text);
-        call.resolve(object("text", text));
+    @PluginMethod public void speak(PluginCall call) {
+        try {
+            String text = required(call, "text");
+            getActivity().runOnUiThread(() -> { VoiceManager.get(getContext()).speak(text); call.resolve(); });
+        } catch (Exception exception) { reject(call, exception); }
+    }
+    @PluginMethod public void stopSpeaking(PluginCall call) {
+        getActivity().runOnUiThread(() -> { VoiceManager.get(getContext()).stopSpeaking(); call.resolve(); });
     }
 
     @PluginMethod public void chooseAttachment(PluginCall call) {

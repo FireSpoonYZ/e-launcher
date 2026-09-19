@@ -71,6 +71,11 @@ final class ChatCoordinator {
         return send(conversationId, text, store.draftAttachments(conversationId), submissionId);
     }
 
+    /** A spoken request: never picks up the typed draft's attachments. */
+    String sendVoice(String conversationId, String text) throws Exception {
+        return send(conversationId, text, Collections.emptyList(), null, false);
+    }
+
     String sendScheduled(String conversationId, String title, String prompt) throws Exception {
         store.createBackgroundConversation(conversationId, title);
         return send(conversationId, prompt, Collections.emptyList(), null, true);
