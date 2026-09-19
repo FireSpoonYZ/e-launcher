@@ -40,7 +40,7 @@ final class SwipeDetector {
     private final List<Sample> samples = new ArrayList<>(64);
     private float startX, startY, anchorX, anchorY;
     private long startTime;
-    private boolean tracking, crossed, longFired, replayable;
+    private boolean tracking, crossed, longFired, replayable, sideClaimed;
     private final Runnable hold = this::fireHold;
 
     SwipeDetector(Zone zone, float density, Scheduler scheduler, Runnable shortSwipe,
@@ -78,15 +78,20 @@ final class SwipeDetector {
         if (!tracking) return;
         float dx = x - startX;
         float dy = y - startY;
+        float distance = zone == Zone.BOTTOM ? -dy : zone == Zone.LEFT ? dx : -dx;
+        // Once the side animation extends inward, never replay this touch as a scroll.
+        if (zone != Zone.BOTTOM && distance > 0) {
+            sideClaimed = true;
+            replayable = false;
+        }
         if (!crossed) {
-            if (time - startTime > 1000) {
+            if (!sideClaimed && time - startTime > 1000) {
                 tracking = false;
                 hideFeedback();
                 return;
             }
-            boolean triggered = zone == Zone.BOTTOM ? -dy >= minDistance && Math.abs(dx) <= -dy
-                    : zone == Zone.LEFT ? dx >= minDistance && Math.abs(dy) <= dx
-                    : -dx >= minDistance && Math.abs(dy) <= -dx;
+            boolean triggered = distance >= minDistance
+                    && (zone != Zone.BOTTOM || Math.abs(dx) <= -dy);
             if (triggered) {
                 crossed = true;
                 if (longSwipe != null) arm(x, y);
@@ -95,7 +100,6 @@ final class SwipeDetector {
                 && (Math.abs(x - anchorX) > stillness || Math.abs(y - anchorY) > stillness)) {
             arm(x, y);
         }
-        float distance = zone == Zone.BOTTOM ? -dy : zone == Zone.LEFT ? dx : -dx;
         showFeedback(x, y, Math.max(0, Math.min(1, distance / minDistance)));
     }
 
@@ -126,6 +130,7 @@ final class SwipeDetector {
         crossed = false;
         longFired = false;
         replayable = false;
+        sideClaimed = false;
         samples.clear();
     }
 

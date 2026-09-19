@@ -106,7 +106,7 @@ public final class GestureChecks {
             side.move(100 - dx, 200, 20);
             side.up(100 - dx, 200, 30);
             side.down(100, 200, 0);
-            side.move(100 + dx, 230, 20); // Too diagonal.
+            side.move(100 + dx, 230, 20); // Vertical drift cannot veto side BACK.
             side.up(100 + dx, 230, 30);
             side.down(100, 200, 0);
             side.move(100 + dx, 200, 20);
@@ -117,8 +117,45 @@ public final class GestureChecks {
             side.up(100 + dx * 2, 200, 1120);
             assert !sideFeedback.visible;
         }
-        assert actions.toString().equals("[replay, replay, back, replay, replay, back]");
+        assert actions.toString().equals("[replay, back, back, replay, back, back]") : actions;
         actions.clear();
+
+        for (SwipeDetector.Zone zone : new SwipeDetector.Zone[]{
+                SwipeDetector.Zone.LEFT, SwipeDetector.Zone.RIGHT}) {
+            for (int vertical : new int[]{-200, 200}) {
+                FeedbackRecorder sideFeedback = new FeedbackRecorder();
+                SwipeDetector side = new SwipeDetector(zone, 1, clock,
+                        () -> actions.add("back"), null, samples -> actions.add("replay"),
+                        sideFeedback);
+                int inward = zone == SwipeDetector.Zone.LEFT ? 1 : -1;
+                side.down(100, 300, 0);
+                side.move(100 + inward * 23, 300 + vertical, 20);
+                assert sideFeedback.visible && !sideFeedback.crossed;
+                side.move(100, 300 + vertical, 1100); // Retract after animation: no scroll replay.
+                side.up(100, 300 + vertical, 1120);
+                assert actions.isEmpty() : actions;
+                assert !sideFeedback.visible;
+
+                side.down(100, 300, 0);
+                side.move(100 + inward, 300 + vertical, 20);
+                side.move(100 + inward * 24, 300 + vertical, 1100);
+                assert sideFeedback.visible && sideFeedback.crossed;
+                side.up(100 + inward * 24, 300 + vertical, 1120);
+                assert actions.toString().equals("[back]") : actions;
+                actions.clear();
+
+                side.down(100, 300, 0);
+                side.move(100 + inward * 24, 300 + vertical, 20);
+                side.cancel();
+                side.up(100 + inward * 24, 300 + vertical, 40);
+                assert actions.isEmpty() : actions;
+                // A fresh edge tap still passes through after cancellation.
+                side.down(100, 300, 50);
+                side.up(100, 300, 60);
+                assert actions.toString().equals("[replay]") : actions;
+                actions.clear();
+            }
+        }
 
         Clock slowClock = new Clock();
         SwipeDetector slowBottom = new SwipeDetector(SwipeDetector.Zone.BOTTOM, 1, slowClock,
