@@ -61,21 +61,45 @@ public final class GestureChecks {
         assert actions.toString().equals("[home]") : actions;
         assert !feedback.visible;
         actions.clear();
-        bottom.down(100, 200, 100);
-        bottom.move(100, 180, 120);
-        clock.advance(150);
-        bottom.move(100, 160, 270); // Continued travel restarts the hold.
-        clock.advance(150);
-        bottom.move(102, 158, 420); // Small drift must not restart the hold.
-        clock.advance(49);
+        bottom.down(100, 200, clock.now);
+        long pressedAt = clock.now;
+        clock.advance(50);
+        bottom.move(100, 180, clock.now);
+        clock.advance(50);
+        bottom.move(100, 160, clock.now); // Continued travel does not restart the timer.
         assert actions.isEmpty();
-        clock.advance(1); // Exactly 200 ms after the last deliberate movement, before UP.
+        clock.advance(1); // More than 100 ms since DOWN, without waiting for UP.
         assert !feedback.visible;
-        bottom.move(100, 140, 680);
+        bottom.move(100, 140, pressedAt + 120);
         assert !feedback.visible;
-        bottom.up(100, 140, 700);
-        assert !feedback.visible;
+        bottom.up(100, 140, pressedAt + 140);
         assert actions.toString().equals("[recents]") : actions;
+        actions.clear();
+
+        bottom.down(100, 200, clock.now);
+        clock.advance(100);
+        assert actions.isEmpty();
+        bottom.up(100, 190, clock.now); // Inclusive 100 ms boundary; no MOVE event.
+        clock.advance(1);
+        assert actions.toString().equals("[home]") : actions;
+        actions.clear();
+
+        bottom.down(100, 200, clock.now);
+        clock.advance(101); // No movement or distance gate for a hold.
+        assert actions.toString().equals("[recents]") : actions;
+        bottom.up(100, 200, clock.now);
+        assert actions.toString().equals("[recents]") : actions;
+        actions.clear();
+
+        bottom.down(100, 200, 0);
+        bottom.up(100, 190, 101); // Delayed Handler: event time still selects recents.
+        clock.advance(200);
+        assert actions.toString().equals("[recents]") : actions;
+        actions.clear();
+
+        bottom.down(100, 200, 0);
+        bottom.up(120, 190, 99); // A mostly horizontal quick swipe is not HOME.
+        assert actions.toString().equals("[replay]") : actions;
         actions.clear();
         for (int i = 0; i < 3; i++) {
             bottom.down(100, 200, 0);
@@ -93,7 +117,7 @@ public final class GestureChecks {
         bottom.move(100, 180, 1001);
         assert !feedback.visible;
         bottom.up(100, 180, 1100);
-        assert actions.toString().equals("[replay]");
+        assert actions.toString().equals("[recents]");
         actions.clear();
         for (SwipeDetector.Zone zone : new SwipeDetector.Zone[]{
                 SwipeDetector.Zone.LEFT, SwipeDetector.Zone.RIGHT}) {
@@ -170,7 +194,7 @@ public final class GestureChecks {
         slowBottom.up(100, 20, 1230);
         slowClock.advance(400);
         assert !feedback.visible;
-        assert actions.toString().equals("[home]") : actions;
+        assert actions.toString().equals("[recents]") : actions;
     }
 
     private static void pager() {

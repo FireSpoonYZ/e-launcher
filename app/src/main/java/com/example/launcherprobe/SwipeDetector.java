@@ -1,6 +1,6 @@
 /* Derived from Ogesture SwipeDetector.kt and data/Models.kt (AGPL-3.0).
  * Upstream: 404fb0a27a5e3122b153a4a97a150f31c3c04804. See THIRD_PARTY_NOTICES.md.
- * Java adaptation: platform-independent scheduling; hold increased 100 -> 200 ms;
+ * Java adaptation: platform-independent scheduling; bottom hold measured from DOWN (over 100 ms);
  * explicit cancellation also used by service teardown/rotation.
  */
 package com.example.launcherprobe;
@@ -31,14 +31,14 @@ final class SwipeDetector {
 
     private final Zone zone;
     private final float minDistance;
-    private final float stillness;
+    private static final long QUICK_SWIPE_MS = 100;
     private final Scheduler scheduler;
     private final Runnable shortSwipe;
     private final Runnable longSwipe;
     private final Consumer<List<Sample>> unusedTouch;
     private final Feedback feedback;
     private final List<Sample> samples = new ArrayList<>(64);
-    private float startX, startY, anchorX, anchorY;
+    private float startX, startY;
     private long startTime;
     private boolean tracking, crossed, longFired, replayable, sideClaimed;
     private final Runnable hold = this::fireHold;
@@ -47,7 +47,6 @@ final class SwipeDetector {
             Runnable longSwipe, Consumer<List<Sample>> unusedTouch, Feedback feedback) {
         this.zone = zone;
         minDistance = (zone == Zone.BOTTOM ? 10 : 24) * density;
-        stillness = 12 * density;
         this.scheduler = scheduler;
         this.shortSwipe = shortSwipe;
         this.longSwipe = longSwipe;
@@ -56,7 +55,7 @@ final class SwipeDetector {
     }
 
     private void fireHold() {
-        if (!tracking || !crossed || longFired) return;
+        if (!tracking || zone != Zone.BOTTOM || longSwipe == null || longFired) return;
         longFired = true;
         hideFeedback();
         longSwipe.run();
@@ -71,11 +70,16 @@ final class SwipeDetector {
         replayable = unusedTouch != null;
         sample(x, y, time);
         showFeedback(x, y, 0);
+        if (zone == Zone.BOTTOM && longSwipe != null) {
+            // A release at exactly 100 ms still belongs to the quick-swipe window.
+            scheduler.post(hold, QUICK_SWIPE_MS + 1);
+        }
     }
 
     void move(float x, float y, long time) {
         sample(x, y, time);
         if (!tracking) return;
+        if (time - startTime > QUICK_SWIPE_MS) fireHold();
         float dx = x - startX;
         float dy = y - startY;
         float distance = zone == Zone.BOTTOM ? -dy : zone == Zone.LEFT ? dx : -dx;
@@ -85,35 +89,25 @@ final class SwipeDetector {
             replayable = false;
         }
         if (!crossed) {
-            if (!sideClaimed && time - startTime > 1000) {
+            if (zone != Zone.BOTTOM && !sideClaimed && time - startTime > 1000) {
                 tracking = false;
                 hideFeedback();
                 return;
             }
             boolean triggered = distance >= minDistance
                     && (zone != Zone.BOTTOM || Math.abs(dx) <= -dy);
-            if (triggered) {
-                crossed = true;
-                if (longSwipe != null) arm(x, y);
-            }
-        } else if (!longFired && longSwipe != null
-                && (Math.abs(x - anchorX) > stillness || Math.abs(y - anchorY) > stillness)) {
-            arm(x, y);
+            if (triggered) crossed = true;
         }
         showFeedback(x, y, Math.max(0, Math.min(1, distance / minDistance)));
     }
 
-    private void arm(float x, float y) {
-        anchorX = x;
-        anchorY = y;
-        scheduler.cancel(hold);
-        scheduler.post(hold, 200);
-    }
-
     void up(float x, float y, long time) {
-        sample(x, y, time);
+        // UP may contain the only sample that reaches the distance threshold.
+        if (zone == Zone.BOTTOM) move(x, y, time);
+        else sample(x, y, time);
         scheduler.cancel(hold);
-        boolean fires = tracking && crossed && !longFired;
+        boolean fires = tracking && crossed && !longFired
+                && (zone != Zone.BOTTOM || time - startTime <= QUICK_SWIPE_MS);
         tracking = false;
         hideFeedback();
         if (fires) shortSwipe.run();
