@@ -61,6 +61,8 @@ public class AppSwitcherTest {
             scene.touch(MotionEvent.ACTION_DOWN, 500);
             scene.touch(MotionEvent.ACTION_MOVE, 500 - stride * .2f);
             scene.touch(MotionEvent.ACTION_MOVE, 500 - stride * .7f);
+            scene.time += 300;
+            scene.touch(MotionEvent.ACTION_MOVE, 500 - stride * .7f);
             scene.touch(MotionEvent.ACTION_UP, 500 - stride * .7f);
             scene.finishSpring();
             assertEquals(key("app.1"), scene.page.selectedComponent());
@@ -93,6 +95,64 @@ public class AppSwitcherTest {
             scene.finishSpring();
             float stride = ReflectionHelpers.getField(scene.carousel, "stride");
             assertEquals(stride, (float) ReflectionHelpers.getField(scene.carousel, "track"), .001f);
+            assertTrue(scene.opened.isEmpty());
+        }
+    }
+
+    @Test public void oneContinuousDragCanCrossSeveralStackedCards() {
+        try (var controller = Robolectric.buildActivity(ComponentActivity.class).setup()) {
+            Scene scene = new Scene(controller.get(), 8, 0);
+            float stride = ReflectionHelpers.getField(scene.carousel, "stride");
+            scene.touch(MotionEvent.ACTION_DOWN, 900);
+            scene.touch(MotionEvent.ACTION_MOVE, 900 - stride);
+            scene.touch(MotionEvent.ACTION_MOVE, 900 - stride * 3.1f);
+            scene.time += 300; // Release after holding: test distance, not fling speed.
+            scene.touch(MotionEvent.ACTION_MOVE, 900 - stride * 3.1f);
+            scene.touch(MotionEvent.ACTION_UP, 900 - stride * 3.1f);
+            scene.finishSpring();
+            assertEquals(key("app.3"), scene.page.selectedComponent());
+            View front = scene.carousel.getChildAt(3), behind = scene.carousel.getChildAt(4);
+            assertEquals(1f, front.getScaleX(), .001f);
+            assertTrue(behind.getScaleX() < front.getScaleX());
+            assertTrue(behind.getTranslationZ() < front.getTranslationZ());
+            assertTrue(behind.getTranslationX() - front.getTranslationX() < front.getWidth() / 2f);
+            assertTrue(scene.opened.isEmpty());
+        }
+    }
+
+    @Test public void fastFlickCrossesMultipleCardsInBothDirectionsAndClampsAtEnds() {
+        try (var controller = Robolectric.buildActivity(ComponentActivity.class).setup()) {
+            Scene scene = new Scene(controller.get(), 12, 5);
+            float stride = ReflectionHelpers.getField(scene.carousel, "stride");
+            scene.flick(800, -stride * .8f);
+            int forward = ReflectionHelpers.getField(scene.carousel, "selected");
+            assertTrue("A short fast flick must skip more than one card", forward >= 7);
+            scene.finishSpring();
+            scene.flick(200, stride * .8f);
+            int backward = ReflectionHelpers.getField(scene.carousel, "selected");
+            assertTrue(backward <= forward - 2);
+            scene.finishSpring();
+            scene.flick(200, stride * 20);
+            scene.finishSpring();
+            assertEquals(key("app.0"), scene.page.selectedComponent());
+            assertEquals(0f, (float) ReflectionHelpers.getField(scene.carousel, "track"), .001f);
+            assertTrue(scene.opened.isEmpty());
+        }
+    }
+
+    @Test public void catchingLongThrowSelectsVisibleCardRatherThanOldDestination() {
+        try (var controller = Robolectric.buildActivity(ComponentActivity.class).setup()) {
+            Scene scene = new Scene(controller.get(), 12, 0);
+            float stride = ReflectionHelpers.getField(scene.carousel, "stride");
+            scene.flick(800, -stride * .8f);
+            int destination = ReflectionHelpers.getField(scene.carousel, "selected");
+            float caught = ReflectionHelpers.getField(scene.carousel, "track");
+            assertTrue(destination > Math.round(caught / stride));
+            scene.touch(MotionEvent.ACTION_DOWN, 500);
+            assertEquals(caught, (float) ReflectionHelpers.getField(scene.carousel, "track"), .001f);
+            scene.touch(MotionEvent.ACTION_CANCEL, 500);
+            scene.finishSpring();
+            assertEquals(Math.round(caught / stride), (int) ReflectionHelpers.getField(scene.carousel, "selected"));
             assertTrue(scene.opened.isEmpty());
         }
     }
@@ -234,6 +294,14 @@ public class AppSwitcherTest {
             if (animation == null) return;
             for (long frame = 16; animation.isRunning() && frame <= 4000; frame += 16) animation.doAnimationFrame(frame);
             assertFalse(animation.isRunning());
+        }
+
+        void flick(float x, float distance) {
+            touch(MotionEvent.ACTION_DOWN, x);
+            for (int i = 1; i <= 4; i++) {
+                time -= 20; // 12 ms samples, including UP, exercise the real VelocityTracker.
+                touch(i == 4 ? MotionEvent.ACTION_UP : MotionEvent.ACTION_MOVE, x + distance * i / 4);
+            }
         }
 
         void touch(int action, float x) {

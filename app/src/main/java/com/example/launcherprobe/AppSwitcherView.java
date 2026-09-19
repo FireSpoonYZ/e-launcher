@@ -89,7 +89,7 @@ final class AppSwitcherView extends FrameLayout {
         counter = text("", 14, MUTED); counter.setGravity(Gravity.CENTER);
         counter.setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_NO);
         content.addView(counter, new LinearLayout.LayoutParams(-1, dp(40)));
-        hint = text("左右滑动切换 · 点击打开", 13, MUTED); hint.setGravity(Gravity.CENTER);
+        hint = text("左右滑动浏览 · 轻甩连续切换 · 点击打开", 13, MUTED); hint.setGravity(Gravity.CENTER);
         hint.setPadding(dp(16), 0, dp(16), dp(8));
         content.addView(hint, new LinearLayout.LayoutParams(-1, dp(56)));
         empty("正在载入应用…", null, home);
@@ -260,7 +260,8 @@ final class AppSwitcherView extends FrameLayout {
             setCameraDistance(dp(1800));
             body = new LinearLayout(getContext()); body.setOrientation(LinearLayout.VERTICAL);
             body.setClipChildren(false); body.setClipToPadding(false);
-            LinearLayout label = new LinearLayout(getContext()); label.setGravity(Gravity.CENTER);
+            LinearLayout label = new LinearLayout(getContext()); label.setGravity(Gravity.CENTER_VERTICAL);
+            label.setPadding(dp(12), 0, dp(12), 0);
             ImageView icon = new ImageView(getContext()); icon.setImageBitmap(app.icon());
             label.addView(icon, new LinearLayout.LayoutParams(dp(24), dp(24)));
             TextView name = text(app.label(), 16, INK); name.setMaxLines(1); name.setEllipsize(TextUtils.TruncateAt.END);
@@ -323,7 +324,7 @@ final class AppSwitcherView extends FrameLayout {
         @Override protected void onMeasure(int widthSpec, int heightSpec) {
             int width = MeasureSpec.getSize(widthSpec), height = MeasureSpec.getSize(heightSpec);
             setMeasuredDimension(width, height);
-            int cardWidth = Math.min(dp(440), Math.round(width * .66f));
+            int cardWidth = Math.min(dp(440), Math.round(width * .72f));
             int cardHeight = Math.max(1, Math.round(height * .9f));
             for (Card card : cards) card.measure(MeasureSpec.makeMeasureSpec(cardWidth, MeasureSpec.EXACTLY),
                     MeasureSpec.makeMeasureSpec(cardHeight, MeasureSpec.EXACTLY));
@@ -335,7 +336,8 @@ final class AppSwitcherView extends FrameLayout {
                 int y = (getHeight() - card.getMeasuredHeight()) / 2;
                 card.layout(x, y, x + card.getMeasuredWidth(), y + card.getMeasuredHeight());
             }
-            float nextStride = cards.get(0).getMeasuredWidth() + dp(14);
+            // A screen-wide drag traverses several cards, independently of cover width.
+            float nextStride = cards.get(0).getMeasuredWidth() * .42f;
             if (stride != nextStride) {
                 stop(); stride = nextStride; track = selected * stride;
             }
@@ -361,13 +363,22 @@ final class AppSwitcherView extends FrameLayout {
             for (int i = 0; i < cards.size(); i++) {
                 Card card = cards.get(i);
                 float relative = (i * stride - track) / stride;
-                float distance = Math.min(1.5f, Math.abs(relative));
-                card.setVisibility(Math.abs(relative) > 1.8f ? INVISIBLE : VISIBLE);
-                card.setTranslationX(i * stride - track);
-                card.setTranslationY(dp(14) * distance);
-                card.setScaleX(1 - .1f * distance); card.setScaleY(1 - .1f * distance);
-                card.setRotationY(-5 * Math.max(-1, Math.min(1, relative)));
-                card.setAlpha(1 - .25f * distance);
+                // Older covers nest behind the foreground; passed covers slide off to the left.
+                float depth = Math.max(0, relative);
+                float passed = Math.max(0, -relative);
+                float width = card.getWidth();
+                float offset = relative >= 0 ? width * .24f * depth / (1 + .45f * depth)
+                        : -width * .95f * passed;
+                float scale = 1 - .065f * Math.min(depth, 4) - .025f * Math.min(passed, 2);
+                float alpha = Math.max(0, 1 - Math.max(0, depth - 3))
+                        * Math.max(0, 1 - Math.max(0, passed - .6f) / .4f);
+                card.setVisibility(alpha == 0 ? INVISIBLE : VISIBLE);
+                card.setTranslationX(offset - width * .04f);
+                card.setTranslationY(dp(10) * Math.min(depth, 4));
+                card.setScaleX(scale); card.setScaleY(scale);
+                card.setTranslationZ(dp(20) - relative * dp(2));
+                card.setAlpha(alpha);
+                card.body.getChildAt(0).setAlpha(Math.max(0, 1 - Math.abs(relative)));
                 card.setContentDescription((i == selected ? "打开 " : "切换到 ") + card.app.label());
                 card.setSelected(i == selected);
             }
@@ -383,6 +394,8 @@ final class AppSwitcherView extends FrameLayout {
             int action = event.getActionMasked();
             if (action == MotionEvent.ACTION_DOWN) {
                 stop(); touched = true; dragging = rejected = false;
+                // Catch an in-flight stack at the visible card, not its old destination.
+                if (stride > 0) selected = Math.max(0, Math.min(apps.size() - 1, Math.round(track / stride)));
                 downX = event.getX(); downY = event.getY(); startTrack = track; startSelected = selected;
                 velocity = VelocityTracker.obtain();
             }
@@ -428,6 +441,8 @@ final class AppSwitcherView extends FrameLayout {
         @Override public boolean onTouchEvent(MotionEvent event) {
             switch (event.getActionMasked()) {
                 case MotionEvent.ACTION_MOVE:
+                    // Gestures can also start in the space around the stack.
+                    if (!dragging && !rejected) onInterceptTouchEvent(event);
                     if (dragging && !rejected) drag(event.getX() - downX);
                     return true;
                 case MotionEvent.ACTION_UP:
@@ -437,9 +452,10 @@ final class AppSwitcherView extends FrameLayout {
                     if (velocity != null) { velocity.computeCurrentVelocity(1000, maxVelocity); speed = -velocity.getXVelocity(); }
                     int target = startSelected;
                     if (!rejected && event.getActionMasked() != MotionEvent.ACTION_CANCEL && stride > 0) {
+                        drag(event.getX() - downX);
                         target = Math.round(track / stride);
                         if (Math.abs(speed) >= minVelocity)
-                            target = speed > 0 ? (int) Math.floor(track / stride) + 1 : (int) Math.ceil(track / stride) - 1;
+                            target = Math.round((track + speed * .22f) / stride);
                     }
                     settle(target, rejected || event.getActionMasked() == MotionEvent.ACTION_CANCEL ? 0 : speed);
                     return true;
@@ -459,7 +475,11 @@ final class AppSwitcherView extends FrameLayout {
                     (animation, cancelled, value, v) -> {
                         if (!cancelled) { spring = null; apply(end); }
                     });
-            spring.getSpring().setDampingRatio(.84f).setStiffness(420f);
+            // Long throws retain momentum; short corrections settle more firmly.
+            spring.getSpring().setDampingRatio(1f)
+                    .setStiffness(Math.abs(speed) >= minVelocity ? 110f : 420f);
+            spring.setMinValue(-stride * .22f);
+            spring.setMaxValue((apps.size() - 1.0f + .22f) * stride);
         }
 
         @Override public boolean dispatchKeyEvent(KeyEvent event) {
