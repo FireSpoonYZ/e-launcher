@@ -16,7 +16,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import rikka.shizuku.Shizuku;
 
-/** Event-driven Shizuku authorization and one-shot repair of this app's accessibility service. */
+/** Event-driven Shizuku authorization, one-shot repair of this app's accessibility service and role requests. */
 final class ShizukuRepair {
     private static final int REQUEST_CODE = 7319;
     private static final String PREFS = "shizuku_repair";
@@ -30,9 +30,11 @@ final class ShizukuRepair {
     private final Shizuku.UserServiceArgs serviceArgs;
     private boolean foreground;
     private boolean destroyed;
-    private boolean homeRequested;
+    private static final String ROLE_HOME = "home", ROLE_ASSISTANT = "assistant";
+    /** Role to claim on the next grant service connection, or null to repair permissions. */
+    private String roleRequested;
     private final Runnable grantTimeout = () -> {
-        homeRequested = false;
+        roleRequested = null;
         unbind();
         setStatus("Shizuku 授权服务超时；点击修复授权重试");
     };
@@ -47,7 +49,7 @@ final class ShizukuRepair {
         bound = false;
         binding = false;
         cancelRepair();
-        homeRequested = false;
+        roleRequested = null;
         setStatus("Shizuku：未运行或连接已断开");
     });
     private final Shizuku.OnRequestPermissionResultListener permissionResult = (code, result) -> {
@@ -58,7 +60,7 @@ final class ShizukuRepair {
                 if (foreground) start(false);
             }
             else {
-                homeRequested = false;
+                roleRequested = null;
                 setStatus("Shizuku：授权被拒绝；请在 Shizuku 管理器中允许后重试");
             }
         });
@@ -70,18 +72,22 @@ final class ShizukuRepair {
             binding = false;
             bound = true;
             IOwnPermissionService remote = IOwnPermissionService.Stub.asInterface(binder);
-            boolean setHome = homeRequested;
-            homeRequested = false;
-            setStatus(setHome ? "Shizuku：正在设置默认桌面…" : "Shizuku：正在授予写设置权限…");
+            String role = roleRequested;
+            roleRequested = null;
+            setStatus(ROLE_HOME.equals(role) ? "Shizuku：正在设置默认桌面…"
+                    : ROLE_ASSISTANT.equals(role) ? "Shizuku：正在设置默认助手…" : "Shizuku：正在授予写设置权限…");
             worker.execute(() -> {
                 String error;
-                try { error = setHome ? remote.setOwnDefaultHome() : remote.grantOwnWriteSecureSettings(); }
+                try {
+                    error = ROLE_HOME.equals(role) ? remote.setOwnDefaultHome()
+                            : ROLE_ASSISTANT.equals(role) ? remote.setOwnDefaultAssistant() : remote.grantOwnWriteSecureSettings();
+                }
                 catch (Exception exception) {
                     error = exception.getClass().getSimpleName() + ": " + exception.getMessage();
                 }
                 String result = error;
                 main.post(() -> {
-                    if (!destroyed && generation == repairGeneration) finishCommand(result, setHome);
+                    if (!destroyed && generation == repairGeneration) finishCommand(result, role);
                 });
             });
         }
@@ -107,7 +113,7 @@ final class ShizukuRepair {
                 .daemon(false)
                 .debuggable((context.getApplicationInfo().flags
                         & android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0)
-                .version(2);
+                .version(3);
     }
 
     void register() {
@@ -129,17 +135,21 @@ final class ShizukuRepair {
 
     void repairFromButton() {
         if (binding || bound) return;
-        homeRequested = false;
+        roleRequested = null;
         foreground = true;
         start(true);
     }
 
-    void requestHomeFromButton() {
+    void requestHomeFromButton() { requestRole(ROLE_HOME, "Shizuku：正在执行操作，请完成后再设置默认桌面"); }
+
+    void requestAssistantFromButton() { requestRole(ROLE_ASSISTANT, "Shizuku：正在执行操作，请完成后再设置默认助手"); }
+
+    private void requestRole(String role, String busy) {
         if (binding || bound) {
-            setStatus("Shizuku：正在执行操作，请完成后再设置默认桌面");
+            setStatus(busy);
             return;
         }
-        homeRequested = true;
+        roleRequested = role;
         foreground = true;
         start(true);
     }
@@ -162,7 +172,7 @@ final class ShizukuRepair {
         cancelRepair();
         try {
             if (!Shizuku.pingBinder()) {
-                homeRequested = false;
+                roleRequested = null;
                 setStatus("Shizuku：未运行；请先启动官方 Shizuku");
                 return;
             }
@@ -170,7 +180,7 @@ final class ShizukuRepair {
                 boolean requested = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
                         .getBoolean(REQUESTED, false);
                 if (Shizuku.shouldShowRequestPermissionRationale()) {
-                    homeRequested = false;
+                    roleRequested = null;
                     setStatus("Shizuku：授权被拒绝；请在 Shizuku 管理器中允许后重试");
                 } else if (explicit || !requested) {
                     context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
@@ -182,7 +192,7 @@ final class ShizukuRepair {
                 }
                 return;
             }
-            if (homeRequested) {
+            if (roleRequested != null) {
                 bindGrantService();
             } else if (GestureService.canWrite(context)) {
                 repairAccessibility();
@@ -190,7 +200,7 @@ final class ShizukuRepair {
                 bindGrantService();
             }
         } catch (RuntimeException exception) {
-            homeRequested = false;
+            roleRequested = null;
             setStatus("Shizuku API 失败：" + detail(exception));
         }
     }
@@ -204,21 +214,25 @@ final class ShizukuRepair {
             main.postDelayed(grantTimeout, 15000);
         } catch (RuntimeException exception) {
             binding = false;
-            homeRequested = false;
+            roleRequested = null;
             setStatus("Shizuku 授权服务失败：" + detail(exception));
         }
     }
 
-    private void finishCommand(String error, boolean setHome) {
+    private void finishCommand(String error, String role) {
         unbind();
         if (!foreground) return;
         if (!error.isEmpty()) {
             setStatus("Shizuku 命令失败：" + error);
-        } else if (setHome) {
+        } else if (ROLE_HOME.equals(role)) {
             RoleManager roles = context.getSystemService(RoleManager.class);
             setStatus(roles != null && roles.isRoleHeld(RoleManager.ROLE_HOME)
                     ? "Shizuku：已确认本应用是默认桌面"
                     : "Shizuku 命令已完成，但默认桌面未生效；请重试或打开默认桌面设置");
+        } else if (ROLE_ASSISTANT.equals(role)) {
+            setStatus(LauncherVoiceInteractionService.isDefaultAssistant(context)
+                    ? "Shizuku：已确认本应用是默认助手"
+                    : "Shizuku 命令已完成，但默认助手未生效；请在系统“默认数字助理”中选择本应用");
         } else if (!GestureService.canWrite(context)) {
             setStatus("Shizuku 命令已完成，但写设置权限未生效");
         } else {

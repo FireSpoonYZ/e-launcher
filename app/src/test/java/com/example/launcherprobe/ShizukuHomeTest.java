@@ -26,6 +26,7 @@ public class ShizukuHomeTest {
         OwnPermissionService service = new OwnPermissionService(context);
         assertThrows(SecurityException.class, service::setOwnDefaultHome);
         assertThrows(SecurityException.class, service::grantOwnWriteSecureSettings);
+        assertThrows(SecurityException.class, service::setOwnDefaultAssistant);
     }
 
     @Test public void intentionalDisconnectDoesNotOverwriteOperationResult() {
@@ -48,9 +49,12 @@ public class ShizukuHomeTest {
         try {
             repair.requestHomeFromButton();
             assertTrue(ShizukuRepair.statusText().contains("未运行"));
-            assertFalse(ReflectionHelpers.<Boolean>getField(repair, "homeRequested"));
+            assertNull(ReflectionHelpers.getField(repair, "roleRequested"));
             repair.resume();
-            assertFalse(ReflectionHelpers.<Boolean>getField(repair, "homeRequested"));
+            assertNull(ReflectionHelpers.getField(repair, "roleRequested"));
+            repair.requestAssistantFromButton();
+            assertTrue(ShizukuRepair.statusText().contains("未运行"));
+            assertNull(ReflectionHelpers.getField(repair, "roleRequested"));
         } finally {
             repair.destroy();
         }

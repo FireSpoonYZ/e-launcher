@@ -53,6 +53,46 @@ abstract class SpeechInput {
     /** Called on the main thread; drops every callback still queued. */
     protected final void silence() { finished = true; }
 
+    /**
+     * The recognizer SystemInput should bind, or null for the system default. As the default assistant this app's
+     * LauncherRecognitionService becomes the default, which only forwards, so another recognizer is used directly.
+     */
+    static android.content.ComponentName systemRecognizer(Context context) {
+        String current = android.provider.Settings.Secure.getString(context.getContentResolver(), "voice_recognition_service");
+        android.content.ComponentName component = current == null || current.isEmpty() ? null : android.content.ComponentName.unflattenFromString(current);
+        if (component != null && !context.getPackageName().equals(component.getPackageName())) {
+            context.getSharedPreferences("voice", Context.MODE_PRIVATE).edit().putString("previousRecognizer", current).apply();
+            return null;
+        }
+        return fallbackRecognizer(context);
+    }
+
+    /** Whether SystemInput can run at all. */
+    static boolean systemAvailable(Context context) {
+        return SpeechRecognizer.isRecognitionAvailable(context) && (systemRecognizer(context) != null
+                || !ownsDefaultRecognizer(context));
+    }
+
+    /** Another app's recognition service: the one in use before this app became default, else any installed one. */
+    static android.content.ComponentName fallbackRecognizer(Context context) {
+        java.util.List<android.content.pm.ResolveInfo> services = context.getPackageManager().queryIntentServices(
+                new Intent(android.speech.RecognitionService.SERVICE_INTERFACE), 0);
+        String previous = context.getSharedPreferences("voice", Context.MODE_PRIVATE).getString("previousRecognizer", "");
+        android.content.ComponentName first = null;
+        for (android.content.pm.ResolveInfo info : services) {
+            if (info.serviceInfo == null || context.getPackageName().equals(info.serviceInfo.packageName)) continue;
+            android.content.ComponentName component = new android.content.ComponentName(info.serviceInfo.packageName, info.serviceInfo.name);
+            if (component.flattenToString().equals(previous)) return component;
+            if (first == null) first = component;
+        }
+        return first;
+    }
+
+    private static boolean ownsDefaultRecognizer(Context context) {
+        String current = android.provider.Settings.Secure.getString(context.getContentResolver(), "voice_recognition_service");
+        return current != null && current.startsWith(context.getPackageName() + "/");
+    }
+
     static Intent recognizerIntent(String language) {
         Intent intent = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
                 .putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
@@ -71,7 +111,9 @@ abstract class SpeechInput {
         SystemInput(Context context, String language) { this.context = context; this.language = language; }
 
         @Override protected void begin() {
-            recognizer = SpeechRecognizer.createSpeechRecognizer(context);
+            android.content.ComponentName component = systemRecognizer(context);
+            recognizer = component == null ? SpeechRecognizer.createSpeechRecognizer(context)
+                    : SpeechRecognizer.createSpeechRecognizer(context, component);
             recognizer.setRecognitionListener(new RecognitionListener() {
                 @Override public void onReadyForSpeech(Bundle params) { }
                 @Override public void onBeginningOfSpeech() { }

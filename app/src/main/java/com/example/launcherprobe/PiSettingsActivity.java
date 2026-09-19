@@ -116,12 +116,23 @@ public final class PiSettingsActivity extends Activity {
         super.onSaveInstanceState(out);
     }
 
+    @Override protected void onResume() {
+        super.onResume();
+        if ("语音".equals(page) && fields != null) {
+            WakeWordService.sync(this);
+            render();
+        }
+    }
+
     @Override protected void onPause() {
+        // Only an explicit button press may run Shizuku commands.
+        if (assistantRepair != null) assistantRepair.pause();
         retainDraft();
         super.onPause();
     }
 
     @Override protected void onDestroy() {
+        if (assistantRepair != null) assistantRepair.destroy();
         closeAuthDialogs();
         if (queryProgress != null) queryProgress.dismiss();
         if (queryBridge != null) queryBridge.abort(queryRequestId);
@@ -313,8 +324,11 @@ public final class PiSettingsActivity extends Activity {
         note(t("语音唤醒"));
         boolean wakeOn = settings.wakeEnabled();
         String wakeStatus = WakeWordService.status();
+        boolean assistant = LauncherVoiceInteractionService.isDefaultAssistant(this);
+        boolean listening = assistant ? LauncherVoiceInteractionService.isListening() : WakeWordService.isRunning();
         link(t("语音唤醒"), !wakeOn ? t("已关闭") : !wakeStatus.isEmpty() ? wakeStatus
-                : WakeWordService.isRunning() ? t("正在监听") : t("已开启，回到桌面后开始监听"), () -> {
+                : listening ? t(assistant ? "正在监听（默认助手，由系统保持运行）" : "正在监听（前台服务）")
+                : t("已开启，回到桌面后开始监听"), () -> {
             if (wakeOn) { settings.setWakeEnabled(false); WakeWordService.sync(this); render(); return; }
             java.util.List<String> needed = new java.util.ArrayList<>();
             needed.add(android.Manifest.permission.RECORD_AUDIO);
@@ -329,7 +343,9 @@ public final class PiSettingsActivity extends Activity {
             settings.setWakeSensitivity(sensitivities[which]);
             WakeWordService.sync(this, true);
         }));
-        note(t("唤醒在本机离线识别，不上传音频。第三方应用无法使用系统的低功耗唤醒芯片，开启后会常驻通知、麦克风指示灯常亮，并增加耗电；通话或其他应用录音时暂时无法唤醒。唤醒后说出请求，停顿后自动发送给助手，回复会按“自动朗读回复”设置朗读。"));
+        link(t("默认数字助理"), assistant ? t("已是默认助手：无常驻通知，可在任意界面唤醒，长按电源键或主屏幕键也会呼出")
+                : t("未设置：唤醒依靠带常驻通知的前台服务，重启后需回到桌面才开始监听"), this::assistantOptions);
+        note(t("唤醒在本机离线识别，不上传音频。第三方应用无法使用系统的低功耗唤醒芯片，开启后麦克风指示灯常亮并增加耗电；通话或其他应用录音时暂时无法唤醒。唤醒后说出请求，停顿后自动发送给助手，回复会按“自动朗读回复”设置朗读。"));
         note(t("通用"));
         String language = settings.language();
         link(t("识别与朗读语言"), language.isEmpty() ? t("跟随系统") : language, () -> {
@@ -343,6 +359,30 @@ public final class PiSettingsActivity extends Activity {
     }
 
     private static final int REQUEST_WAKE = 44;
+    private ShizukuRepair assistantRepair;
+
+    private void assistantOptions() {
+        String[] labels = {t("通过 Shizuku 设为默认助手"), t("打开系统默认应用设置")};
+        new AlertDialog.Builder(this).setTitle(t("默认数字助理"))
+                .setMessage(t("设为默认助手会替换当前的助手（如 Google 助理或小爱同学），系统语音识别会经由本应用转发给原识别服务。"))
+                .setItems(labels, (dialog, which) -> {
+                    if (which == 0) {
+                        if (assistantRepair == null) {
+                            assistantRepair = new ShizukuRepair(this, () -> runOnUiThread(() -> {
+                                toast(ShizukuRepair.statusText());
+                                if ("语音".equals(page)) render();
+                            }));
+                            assistantRepair.register();
+                        }
+                        assistantRepair.requestAssistantFromButton();
+                    } else {
+                        try { startActivity(new Intent(android.provider.Settings.ACTION_MANAGE_DEFAULT_APPS_SETTINGS)); }
+                        catch (android.content.ActivityNotFoundException missing) {
+                            startActivity(new Intent(android.provider.Settings.ACTION_VOICE_INPUT_SETTINGS));
+                        }
+                    }
+                }).setNegativeButton(t("取消"), null).show();
+    }
 
     private String wakeSummary(String words) {
         try {
