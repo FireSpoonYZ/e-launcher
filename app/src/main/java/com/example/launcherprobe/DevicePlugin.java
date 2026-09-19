@@ -345,7 +345,7 @@ public final class DevicePlugin extends Plugin {
         android.content.SharedPreferences ui = getContext().getSharedPreferences("ui", android.content.Context.MODE_PRIVATE);
         RoleManager roles = getContext().getSystemService(RoleManager.class);
         String route = getActivity() instanceof MainActivity ? ((MainActivity) getActivity()).launchRoute() : null;
-        return object("launchRoute", route == null ? "/chat" : route,
+        return object("launchRoute", route == null ? "/bots" : route,
                 "language", ui.getString("language", "system"), "theme", ui.getString("theme", "system"),
                 "background", ui.getString("background", "circles"), "backgroundMask", AppAppearance.maskStrength(getContext()),
                 "backgroundPath", new java.io.File(getContext().getFilesDir(), "appearance/background.png").isFile()

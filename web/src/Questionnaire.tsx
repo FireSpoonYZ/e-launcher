@@ -11,18 +11,20 @@ export type QuestionnaireReplyEvent = QuestionnaireReply & {
   sequence?: number;
 };
 
-export function Questionnaire({conversationId, requestId, questionnaire, reply}: {
+export function Questionnaire({conversationId, requestId, questionnaire, reply, initiallyPending = false, initialError = ''}: {
   conversationId: string;
   requestId: string;
   questionnaire: AskUserQuestionnaire;
   reply?: QuestionnaireReplyEvent;
+  initiallyPending?: boolean;
+  initialError?: string;
 }) {
   const t = useText();
   const [current, setCurrent] = useState(0);
   const [drafts, setDrafts] = useState<Partial<Record<number, QuestionDraft>>>({});
   const [preview, setPreview] = useState<{label: string; markdown: string}>();
-  const [pending, setPending] = useState(false);
-  const [error, setError] = useState('');
+  const [pending, setPending] = useState(initiallyPending);
+  const [error, setError] = useState(initialError);
   const customInput = useRef<HTMLTextAreaElement>(null);
   const questions = questionnaire.questions;
   const question = questions[current];

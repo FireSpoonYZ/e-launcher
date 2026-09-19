@@ -137,9 +137,9 @@ export interface DevicePlugin {
 }
 
 export type ScheduleRule = { repeat: 'daily'|'weekly'|'monthly'; time: string; weekday: number; monthDay: number };
-export type ScheduledTaskInput = ScheduleRule & { id?: string; revision?: number; title: string; prompt: string };
+export type ScheduledTaskInput = ScheduleRule & { id?: string; revision?: number; title: string; prompt: string; conversationId?: string };
 export type ScheduledTask = ScheduledTaskInput & { id: string; revision: number; enabled: boolean; createdAt: number; nextRunAt: number };
-export type ScheduleRecord = { id: string; taskId: string; title: string; scheduledAt: number; startedAt: number; finishedAt: number; status: 'running'|'completed'|'error'|'aborted'|'skipped'; reason: string; message: string; conversationId: string|null; conversationAvailable: boolean };
+export type ScheduleRecord = { id: string; taskId: string; title: string; scheduledAt: number; startedAt: number; finishedAt: number; status: 'queued'|'running'|'completed'|'error'|'aborted'|'interrupted'|'cancelled'|'skipped'; reason: string; message: string; conversationId: string|null; conversationAvailable: boolean };
 export type ScheduleSnapshot = { tasks: ScheduledTask[]; records: ScheduleRecord[]; exactAlarmGranted: boolean; schedulingError: string; timeZone: string };
 export type SchedulePreview = { nextRunAt: number; timeZone: string };
 export interface ScheduledTasksPlugin {

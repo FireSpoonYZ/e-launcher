@@ -1,4 +1,11 @@
-export type Capability = 'send'|'stop'|'create'|'profile'|'routines'|'restore'|'archive'|'delete';
+import type { AskUserQuestionnaire, Conversation } from '../native';
+export type Capability = 'send'|'stop'|'create'|'profile'|'routines'|'restore'|'archive'|'delete'|'selectModel';
+export interface WorkspaceBot {
+  id: string; name: string; archived: boolean; running: boolean;
+  piSelection: Conversation['piSelection'];
+  requestId: string|null; askUser: AskUserQuestionnaire|null;
+  questionnairePending: boolean; questionnaireError: string;
+}
 export interface BotUiAdapter {
   capabilities: Partial<Record<Capability, boolean>>;
   read(): Promise<unknown>;
@@ -18,7 +25,9 @@ export interface WorkspaceOptions {
   initialSessionId?: string;
   onExit?: () => void;
   onOpenChat?: (id: string) => void|Promise<void>;
+  onBotChange?: (bot: WorkspaceBot|undefined) => void;
+  onOpenModel?: () => void;
   preview?: boolean;
 }
-export class BotWorkspace { constructor(root: HTMLElement, adapter: BotUiAdapter, options?: WorkspaceOptions); dispose():void; select(id: string):void; refresh():Promise<void>; }
+export class BotWorkspace { constructor(root: HTMLElement, adapter: BotUiAdapter, options?: WorkspaceOptions); dispose():void; select(id: string):void; applySession(id?: string):void; refresh():Promise<void>; questionnaireHost: HTMLElement; }
 export function mountBotWorkspace(root: HTMLElement, adapter: BotUiAdapter, options?: WorkspaceOptions): BotWorkspace;

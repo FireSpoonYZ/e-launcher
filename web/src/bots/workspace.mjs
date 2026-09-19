@@ -12,10 +12,10 @@ function statusLabel(bot) { const s = stateOf(bot), span = el('span', 'eb-status
 function badge(t) { return el('span', 'eb-badge', t); }
 /** Actual UI. The same renderer is used by the demo and by the React route; no fake native fallback. */
 export class BotWorkspace {
-    constructor(root, adapter, { initialSessionId, onExit, onOpenChat, preview = false } = {}) {
+    constructor(root, adapter, { initialSessionId, onExit, onOpenChat, onBotChange, onOpenModel, preview = false } = {}) {
         this.root = root;
         this.adapter = adapter;
-        this.options = { onExit, onOpenChat, preview };
+        this.options = { onExit, onOpenChat, onBotChange, onOpenModel, preview };
         this.current = initialSessionId;
         this.view = EMPTY;
         this.tab = 'chat';
@@ -71,7 +71,10 @@ export class BotWorkspace {
         box.append(this.input, this.stopButton, this.sendButton);
         this.composer.append(box, this.composerHint);
         this.composer.addEventListener('submit', e => { e.preventDefault(); void this.sendUser(); });
-        this.main.append(this.header, this.tabs, this.content, this.jump, this.composer);
+        this.modelButton = textButton('选择模型', () => this.options.onOpenModel?.(), 'eb-model-button');
+        this.questionnaireHost = el('div', 'eb-questionnaire-host');
+        this.questionnaireHost.hidden = true;
+        this.main.append(this.header, this.modelButton, this.tabs, this.content, this.jump, this.composer, this.questionnaireHost);
         this.detail = el('aside', 'eb-detail');
         this.detail.setAttribute('aria-label', '机器人详情');
         this.layout.append(this.sidebar, this.main, this.detail);
@@ -173,11 +176,19 @@ export class BotWorkspace {
         this.closeDialog();
         return;
     } this.current = id; this.shown = 120; this.followLatest = true; this.tab = 'chat'; this.closeDialog(); this.render(); this.content.scrollTop = this.content.scrollHeight; }
+    /** Native hash navigation names the store session; roster clicks stay local until then. */
+    applySession(id) { if (this.dead || !id)
+        return; this.select(id); }
     setTab(tab) { this.tab = tab; this.followLatest = true; this.render(); this.content.scrollTop = tab === 'chat' ? this.content.scrollHeight : 0; }
     render() {
         if (this.dead)
             return;
         const bot = byId(this.view, this.current);
+        this.options.onBotChange?.(this.failure ? undefined : bot);
+        this.questionnaireHost.hidden = !!this.failure || !bot?.askUser || !bot?.requestId;
+        this.modelButton.hidden = !!this.failure || !bot || !this.options.onOpenModel || !this.cap('selectModel');
+        this.modelButton.textContent = bot ? `模型：${bot.modelLabel} · 更换` : '选择模型';
+        this.modelButton.disabled = !!bot?.archived;
         const top = this.content.scrollTop;
         const active = document.activeElement;
         const focusKey = active?.getAttribute?.('data-focus-key');
@@ -229,7 +240,7 @@ export class BotWorkspace {
             this.renderCollaborations(bot);
         else
             this.renderRoutines(bot);
-        this.composer.hidden = this.tab !== 'chat';
+        this.composer.hidden = this.tab !== 'chat' || !!bot.askUser;
         this.composerHint.textContent = this.options.preview ? '以用户身份加入演示队列 · 不调用模型' : `${bot.modelLabel} · 以你的身份发送`;
         this.input.value = this.drafts.get(this.current) ?? '';
         this.input.placeholder = `给 ${bot.name} 发消息…`;
@@ -249,7 +260,7 @@ export class BotWorkspace {
         const brand = el('div', 'eb-brand');
         brand.append(el('span', 'eb-wordmark', 'e-launcher'), badge('BOTS'));
         if (this.options.onExit)
-            brand.append(iconButton('back', '回到聊天', () => { this.closeDialog(); this.options.onExit(); }));
+            brand.append(iconButton('back', '返回', () => { this.closeDialog(); this.options.onExit(); }));
         target.append(brand);
         const head = el('div', 'eb-section-heading');
         head.append(el('h2', '', '我的机器人'), iconButton('plus', '创建机器人', () => this.editBot(null)));

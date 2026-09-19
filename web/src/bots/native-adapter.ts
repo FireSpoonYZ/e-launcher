@@ -1,5 +1,6 @@
 import { Capacitor, registerPlugin, type PluginListenerHandle } from '@capacitor/core';
 import type { BotUiAdapter, Capability } from './workspace.mjs';
+import type { Chat } from '../native';
 /** The registered Android Bots plugin is the single authoritative data source. */
 interface SessionBotsPlugin {
     workspace(): Promise<{
@@ -13,7 +14,7 @@ interface SessionBotsPlugin {
     }): Promise<unknown>;
 }
 const plugin = registerPlugin<SessionBotsPlugin>('Bots');
-const capabilities: Capability[] = ['send', 'stop', 'create', 'profile', 'routines', 'restore', 'archive', 'delete'];
+const capabilities: Capability[] = ['send', 'stop', 'create', 'profile', 'routines', 'restore', 'archive', 'delete', 'selectModel'];
 export class NativeBotUiAdapter implements BotUiAdapter {
     capabilities: Partial<Record<Capability, boolean>> = {};
     private requireNative(): void {
@@ -43,6 +44,10 @@ export class NativeBotUiAdapter implements BotUiAdapter {
         submissionId: string;
     }) { return this.action('sendUserMessage', input); }
     stop(id: string) { return this.action('stop', { id }); }
+    selectModel(input: Parameters<typeof Chat.selectModel>[0]) {
+        const { conversationId, ...selection } = input;
+        return this.action('selectModel', { id: conversationId, ...selection }) as ReturnType<typeof Chat.selectModel>;
+    }
     async createBot(input: Record<string, unknown>): Promise<{
         id: string;
     }> {

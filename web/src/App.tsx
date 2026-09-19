@@ -10,6 +10,7 @@ import { ProvidersPage, ResourcesPage } from './Resources';
 import { AdvancedPage, EditorPage } from './Editor';
 import { SchedulesPage, ScheduleHistoryPage } from './Schedules';
 import { BotWorkspacePage } from './bots/BotWorkspacePage';
+import { isAiPagerHash } from './bots/routes.mjs';
 
 declare global {
   interface Window { PagerGesture?: {gestureId(): number; setBlocked(id: number, blocked: boolean): void}; }
@@ -28,7 +29,7 @@ function Navigation() {
       bridge.setBlocked(bridge.gestureId(), event.touches.length !== 1
         || !!target?.closest(gestureTarget) || scrollsHorizontally || !!window.getSelection()?.toString()
         || !!document.querySelector('[role="dialog"],.attachment-popover')
-        || !window.location.hash.startsWith('#/chat'));
+        || !isAiPagerHash(window.location.hash));
     };
     const selectionChanged = () => {
       const bridge = window.PagerGesture;
@@ -112,7 +113,7 @@ function Shell({initialDevice}: {initialDevice: DeviceState}) {
     <Route path="/settings/advanced" element={<AdvancedPage/>}/>
     <Route path="/settings/editor" element={<EditorPage/>}/>
     <Route path="/settings/about" element={<AboutPage/>}/>
-    <Route path="*" element={<Navigate to="/chat" replace/>}/>
+    <Route path="*" element={<Navigate to="/bots" replace/>}/>
   </Routes></Environment.Provider>;
 }
 export default function App({initialDevice}: {initialDevice: DeviceState}) { return <HashRouter><Shell initialDevice={initialDevice}/></HashRouter>; }

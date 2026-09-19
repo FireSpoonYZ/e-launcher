@@ -110,7 +110,8 @@ public final class BotMailbox {
     }
     /** On process restart, report uncertainty rather than repeat possibly side-effectful work. */
     public synchronized int recover() throws IOException {
-        List<Delivery> running = deliveries.stream().filter(d -> d.status().equals("running")).toList();
+        List<Delivery> running = deliveries.stream().filter(d -> d.status().equals("running"))
+                .collect(java.util.stream.Collectors.toList());
         for (Delivery d : running) finish(d.requestId(), "interrupted", "应用进程中断，执行结果不确定；未自动重试", System.currentTimeMillis());
         return running.size();
     }

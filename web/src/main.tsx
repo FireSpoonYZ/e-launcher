@@ -7,7 +7,7 @@ const root = createRoot(document.getElementById('root')!);
 // Resolve the Android entry before mounting the router; its fallback must not win this race.
 Device.state().then(device => {
   if (!location.hash || location.hash === '#/') {
-    history.replaceState(null, '', `${location.pathname}#${device.launchRoute || '/chat'}`);
+    history.replaceState(null, '', `${location.pathname}#${device.launchRoute || '/bots'}`);
   }
   root.render(<App initialDevice={device}/>);
 }).catch(error => {

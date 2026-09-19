@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { Check, ChevronRight, CircleAlert, Clock3, FileText, LoaderCircle, MoreHorizontal, Pencil, Plus, Trash2 } from 'lucide-react';
-import { Chat, ScheduledTasks, type SchedulePreview, type ScheduleRecord, type ScheduleRule, type ScheduleSnapshot, type ScheduledTask, type ScheduledTaskInput } from './native';
+import { Chat, ScheduledTasks, type SchedulePreview, type ScheduleRecord, type ScheduleRule, type ScheduleSnapshot, type ScheduledTask, type ScheduledTaskInput, type ConversationSummary } from './native';
 import { Dialog } from './components/ui/dialog';
 import { Toggle } from './Settings';
 import { LatestRequest } from './latestRequest';
@@ -129,9 +129,16 @@ function useNextRun(rule: ScheduleRule) {
 function TaskEditor({task, onClose, onSaved}: {task?: ScheduledTask; onClose(): void; onSaved(value: ScheduleSnapshot): void}) {
   const t = useText(); const action = useAction();
   const initial = useRef<ScheduledTaskInput>(task
-    ? {id: task.id, revision: task.revision, title: task.title, prompt: task.prompt, ...ruleOf(task)}
+    ? {id: task.id, revision: task.revision, title: task.title, prompt: task.prompt, conversationId: task.conversationId, ...ruleOf(task)}
     : {title: '', prompt: '', repeat: 'daily', time: '08:00', weekday: 1, monthDay: 1}).current;
   const [draft, setDraft] = useState(initial);
+  const [owners, setOwners] = useState<ConversationSummary[]>([]);
+  useEffect(() => {
+    let live = true;
+    void Chat.listConversations().then(value => { if (live) setOwners(value.conversations); })
+      .catch(error => { if (live) action.setError(errorText(error)); });
+    return () => { live = false; };
+  }, []);
   const [cycle, setCycle] = useState<ScheduleRule>();
   const [discard, setDiscard] = useState(false);
   const activeRule = cycle ?? draft;
@@ -146,6 +153,7 @@ function TaskEditor({task, onClose, onSaved}: {task?: ScheduledTask; onClose(): 
     event.preventDefault();
     if (action.busy || !preview.value) return;
     if (cycle) { setDraft({...draft, ...cycle}); setCycle(undefined); return; }
+    if (!draft.conversationId) { action.setError(t('请选择执行任务的 Bot / 会话。', 'Choose the bot / conversation that will run this task.')); return; }
     if (!draft.title.trim() || !draft.prompt.trim()) { action.setError(t('请填写任务名称和内容。', 'Enter a task name and instructions.')); return; }
     void action.run(async () => onSaved(await ScheduledTasks.save(draft)));
   };
@@ -165,7 +173,14 @@ function TaskEditor({task, onClose, onSaved}: {task?: ScheduledTask; onClose(): 
             <label className="schedule-field"><span>{t('任务名称', 'Task name')}</span><input required maxLength={80} placeholder={t('例如：早间简报', 'e.g. Morning briefing')} value={draft.title} disabled={action.busy} onChange={e => setDraft({...draft, title: e.target.value})}/></label>
             <label className="schedule-field"><span>{t('任务内容', 'Instructions')}</span><textarea required maxLength={8000} rows={3} placeholder={t('告诉 Pi，这个时间要做什么…', 'Tell Pi what to do at this time…')} value={draft.prompt} disabled={action.busy} onChange={e => setDraft({...draft, prompt: e.target.value})}/></label>
             <div className="schedule-field"><span>{t('执行周期', 'Repeat schedule')}</span><button type="button" className="schedule-cycle-link" disabled={action.busy} onClick={() => setCycle(ruleOf(draft))}><Clock3/><span>{ruleLabel(draft, t)}</span><ChevronRight/></button></div>
-            <div className="schedule-destination"><div><span>{t('结果发送到', 'Results')}</span><span className="secondary">{t('新会话', 'New conversation')}</span></div><p className="secondary">{t('每次执行会新建会话，使用全局默认模型。', 'Each run creates a conversation using the global default model.')}</p></div>
+            <label className="schedule-field"><span>{t('所属 Bot / 会话', 'Owner bot / conversation')}</span>
+              <select required aria-label={t('所属 Bot / 会话', 'Owner bot / conversation')} disabled={!!task || action.busy} value={draft.conversationId ?? ''} onChange={event => setDraft({...draft, conversationId: event.target.value})}>
+                <option value="">{t('选择执行任务的会话', 'Choose a conversation')}</option>
+                {owners.map(owner => <option key={owner.id} value={owner.id}>{owner.title || owner.id}</option>)}
+                {draft.conversationId && !owners.some(owner => owner.id === draft.conversationId) && <option value={draft.conversationId}>{draft.conversationId}</option>}
+              </select>
+            </label>
+            <div className="schedule-destination"><p className="secondary">{t('每次执行会继续所属 Bot 的原会话，使用该 Bot 的模型和上下文。Bot 忙碌或等待回答时，任务会排队。', 'Each run continues the owner bot’s conversation with its model and context. Tasks queue while the bot is busy or waiting for an answer.')}</p></div>
           </>}
           <ErrorNotice error={action.error}/><FetchError error={preview.error} retry={preview.retry}/>
         </div>
@@ -178,21 +193,21 @@ function TaskEditor({task, onClose, onSaved}: {task?: ScheduledTask; onClose(): 
 }
 
 function recordStatus(status: ScheduleRecord['status'], t: Text) {
-  return {running: t('执行中', 'Running'), completed: t('已完成', 'Completed'), error: t('失败', 'Failed'), aborted: t('已中断', 'Interrupted'), skipped: t('已跳过', 'Skipped')}[status];
+  return {queued: t('已排队', 'Queued'), interrupted: t('已中断', 'Interrupted'), cancelled: t('已取消', 'Cancelled'), running: t('执行中', 'Running'), completed: t('已完成', 'Completed'), error: t('失败', 'Failed'), aborted: t('已中断', 'Interrupted'), skipped: t('已跳过', 'Skipped')}[status];
 }
 function recordMessage(record: ScheduleRecord, t: Text) {
   if (record.message) return record.message;
   if (record.reason === 'missed') return t('已跳过过期任务，将按下一次计划执行。', 'Missed run skipped. The next occurrence remains scheduled.');
   if (record.reason === 'overlap') return t('上一次任务仍在执行，已跳过本次。', 'The previous run is still active; this occurrence was skipped.');
   if (record.reason === 'interrupted') return t('应用进程已结束，本次执行已中断。', 'The app process ended before this run completed.');
-  return {running: t('Pi 正在执行，可打开会话查看进度。', 'Pi is working. Open the conversation to follow progress.'), completed: t('任务已完成', 'Task completed'), error: t('执行失败，请查看会话。', 'Run failed. See the conversation for details.'), aborted: t('本次执行已停止', 'This run was stopped'), skipped: t('本次执行已跳过', 'This occurrence was skipped')}[record.status];
+  return {queued: t('等待所属 Bot 空闲后执行。', 'Waiting for the owner bot to become available.'), interrupted: t('执行已中断，未自动重试。', 'Run interrupted; it was not automatically retried.'), cancelled: t('本次投递已取消。', 'This delivery was cancelled.'), running: t('Pi 正在执行，可打开会话查看进度。', 'Pi is working. Open the conversation to follow progress.'), completed: t('任务已完成', 'Task completed'), error: t('执行失败，请查看会话。', 'Run failed. See the conversation for details.'), aborted: t('本次执行已停止', 'This run was stopped'), skipped: t('本次执行已跳过', 'This occurrence was skipped')}[record.status];
 }
 export function ScheduleHistoryPage() {
   const t = useText(); const nav = useNavigate(); const [params] = useSearchParams();
   const state = useSchedules(); const action = useAction(); const [filter, setFilter] = useState<'all'|'completed'|'error'>('all');
   const taskId = params.get('taskId');
   const records = (state.data?.records ?? []).filter(record => !taskId || record.taskId === taskId);
-  const visible = records.filter(record => filter === 'all' || (filter === 'completed' ? record.status === 'completed' : ['error', 'aborted', 'skipped'].includes(record.status)));
+  const visible = records.filter(record => filter === 'all' || (filter === 'completed' ? record.status === 'completed' : ['error', 'aborted', 'interrupted', 'cancelled', 'skipped'].includes(record.status)));
   const title = state.data?.tasks.find(task => task.id === taskId)?.title ?? records[0]?.title;
   return <main className="page schedules-page">
     <Header title={t('执行记录', 'Execution history')}/>

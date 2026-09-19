@@ -41,7 +41,12 @@ final class BotWorkspace {
                     .put("rolePrompt", profile.getString("rolePrompt")).put("revision", profile.getInt("revision"))
                     .put("description", profile.optString("description")).put("avatar", profile.optJSONObject("avatar"))
                     .put("archived", c.archivedAt != 0).put("needsUser", needsUser).put("activity", activity)
-                    .put("modelLabel", selection.optString("model", "默认模型"));
+                    .put("modelLabel", selection.optString("model", "默认模型"))
+                    .put("piSelection", selection).put("running", coordinator.botBusy(c.id))
+                    .put("askUser", needsUser ? card.get("askUser") : JSONObject.NULL)
+                    .put("requestId", needsUser ? card.get("requestId") : JSONObject.NULL)
+                    .put("questionnairePending", needsUser && card.optBoolean("questionnairePending"))
+                    .put("questionnaireError", needsUser ? card.optString("questionnaireError") : "");
             bots.put(bot);
             JSONObject times = store.botMessageTimes(c.id);
             long order = store.createdAt(c.id);
@@ -92,7 +97,7 @@ final class BotWorkspace {
         JSONObject view = new JSONObject().put("version", 1).put("revision", revision).put("bots", bots)
                 .put("messages", messages).put("routines", routines).put("notice", notice.trim());
         JSONObject capabilities = new JSONObject();
-        for (String key : List.of("send", "stop", "create", "profile", "routines", "restore", "archive", "delete")) capabilities.put(key, true);
+        for (String key : List.of("send", "stop", "create", "profile", "routines", "restore", "archive", "delete", "selectModel")) capabilities.put(key, true);
         return new JSONObject().put("snapshot", view).put("capabilities", capabilities);
     }
 
@@ -133,6 +138,19 @@ final class BotWorkspace {
         switch (action) {
             case "sendUserMessage": return manager.enqueueUser(input.getString("toSessionId"), input.getString("body"), input.getString("submissionId"));
             case "stop": manager.stop(input.getString("id")); break;
+            case "selectModel": {
+                String id = existing(store, input);
+                if (store.isArchived(id)) throw new IllegalStateException("请先恢复此 bot");
+                if (coordinator.botBusy(id)) throw new IllegalStateException("请先停止此 bot 的当前生成");
+                JSONObject selection = new JSONObject(store.piSelection(id));
+                if (!new JSONObject(input.getString("expectedSelection")).toString().equals(selection.toString()))
+                    throw new IllegalStateException("模型或思考强度已更改，请重新选择");
+                String provider = BotMailbox.requireText(input.getString("providerId"), "服务商", 256);
+                String model = BotMailbox.requireText(input.getString("modelId"), "模型", 512);
+                String thinking = input.optString("thinkingLevel", "");
+                store.setPiSelection(id, provider, model, thinking.isEmpty() ? null : thinking);
+                coordinator.botChanged(id); return NativeJson.conversation(store, id);
+            }
             case "createBot": {
                 validateAppearance(input);
                 String name = BotMailbox.requireText(input.getString("name").trim(), "名称", 80);

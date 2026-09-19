@@ -180,6 +180,80 @@ public class BotSessionsTest {
                 .put("schedule", new JSONObject().put("kind", "weekly").put("hour", 9).put("minute", 0).put("weekday", 1.5));
         assertThrows(IllegalArgumentException.class, () -> BotWorkspace.action(app, "saveRoutine", invalid));
     }
+    private ChatCoordinator.SessionRun backgroundRun(String id) {
+        return ReflectionHelpers.callInstanceMethod(coordinator, "registerRun",
+                ReflectionHelpers.ClassParameter.from(String.class, id),
+                ReflectionHelpers.ClassParameter.from(String.class, null),
+                ReflectionHelpers.ClassParameter.from(boolean.class, true));
+    }
+    @Test public void routineQueuesInItsOwnerConversationWhileWaitingForUser() throws Exception {
+        String active = store.activeId();
+        store.createBotSession("routine-owner", "Owner", "", "{}");
+        ChatCoordinator.SessionRun run = backgroundRun("routine-owner");
+        run.extensionUi = new JSONObject().put("askUser", new JSONObject().put("id", "pending-question").put("questions", new JSONArray()));
+        ScheduledTasks schedules = ScheduledTasks.get(app);
+        try {
+            JSONObject task = schedules.save(task().put("conversationId", "routine-owner")).getJSONArray("tasks").getJSONObject(0);
+            schedules.runNow(task.getString("id"), task.getInt("revision"), "while-waiting");
+            JSONObject record = schedules.snapshot().getJSONArray("records").getJSONObject(0);
+            assertEquals("routine-owner", record.getString("conversationId"));
+            assertEquals("queued", record.getString("status"));
+            assertEquals(2, store.conversations().size());
+            assertEquals(active, store.activeId());
+            assertEquals("pending-question", coordinator.taskCard("routine-owner").getJSONObject("askUser").getString("id"));
+            schedules.setEnabled(task.getString("id"), task.getInt("revision"), false);
+        } finally { coordinator.finish(run, "completed", ""); }
+    }
+    @Test public void workspaceModelSelectionTargetsIdleBotWithoutSwitchingActiveChat() throws Exception {
+        String active = store.activeId();
+        store.setPiSelection(active, "primary", "original", "low");
+        store.saveDraft("keep my draft");
+        store.createBotSession("other", "Other", "", "{}");
+        ChatCoordinator.SessionRun activeRun = coordinator.registerRun(active, null);
+        JSONObject input = new JSONObject().put("id", "other").put("providerId", "secondary")
+                .put("modelId", "chosen").put("thinkingLevel", "high").put("expectedSelection", "{}");
+        try {
+            BotWorkspace.action(app, "selectModel", input);
+            assertEquals("chosen", new JSONObject(new ChatStore(app).piSelection("other")).getString("model"));
+            assertEquals("high", new JSONObject(store.piSelection("other")).getString("thinkingLevel"));
+            assertEquals("original", new JSONObject(store.piSelection(active)).getString("model"));
+            assertEquals(active, store.activeId());
+            assertEquals("keep my draft", store.draft(active));
+            assertThrows(IllegalStateException.class, () -> BotWorkspace.action(app, "selectModel", input));
+            ChatCoordinator.SessionRun otherRun = backgroundRun("other");
+            otherRun.extensionUi = new JSONObject().put("askUser", new JSONObject().put("id", "question")
+                    .put("questions", new JSONArray()));
+            input.put("expectedSelection", store.piSelection("other"));
+            try {
+                assertThrows(IllegalStateException.class, () -> BotWorkspace.action(app, "selectModel", input));
+            } finally { coordinator.finish(otherRun, "completed", ""); }
+        } finally { coordinator.finish(activeRun, "completed", ""); }
+    }
+    @Test public void workspaceQuestionnaireUsesTheOwnerLiveRunAndNeverRevivesAfterFinish() throws Exception {
+        String active = store.activeId();
+        store.createBotSession("other", "Other", "", "{}");
+        ChatCoordinator.SessionRun run = backgroundRun("other");
+        JSONObject question = new JSONObject().put("id", "question-other").put("questions", new JSONArray()
+                .put(new JSONObject().put("questionIndex", 0).put("header", "Choose").put("question", "Which?")
+                        .put("multiSelect", false).put("options", new JSONArray()
+                                .put(new JSONObject().put("label", "A").put("description", "First"))
+                                .put(new JSONObject().put("label", "B").put("description", "Second")))));
+        run.extensionUi = new JSONObject().put("askUser", question);
+        run.questionnaireReplyPending = "question-other";
+        try {
+            JSONObject snapshot = bots.workspace().getJSONObject("snapshot");
+            JSONObject other = find(snapshot.getJSONArray("bots"), "id", "other");
+            assertEquals(run.requestId, other.getString("requestId"));
+            assertEquals(question.toString(), other.getJSONObject("askUser").toString());
+            assertTrue(other.getBoolean("questionnairePending"));
+            assertTrue(find(snapshot.getJSONArray("bots"), "id", active).isNull("askUser"));
+            assertEquals(active, store.activeId());
+        } finally { coordinator.finish(run, "completed", ""); }
+        JSONObject ended = find(bots.workspace().getJSONObject("snapshot").getJSONArray("bots"), "id", "other");
+        assertTrue(ended.isNull("askUser"));
+        assertTrue(ended.isNull("requestId"));
+        assertFalse(ended.getBoolean("running"));
+    }
     @Test public void invalidInitialRoutineCreatesNothingAndManualDeleteChecksProfileRevision() throws Exception {
         int count = store.conversations().size();
         JSONObject bad = appearance("Bad").put("routines", new JSONArray().put(new JSONObject().put("title", "x").put("prompt", "x")

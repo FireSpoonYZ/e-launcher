@@ -50,6 +50,14 @@ test('production adapter forwards UI commands without inventing sender or owner 
         'updateBot', 'deleteBot', 'saveRoutine', 'setRoutineEnabled', 'runRoutine']);
 });
 
+test('model selection preserves the explicit bot and compare-and-set selection', async () => {
+    const calls = [];
+    const a = await adapter({uiAction: async call => { calls.push(call); return {id: call.input.id}; }});
+    const selection = {providerId: 'provider', modelId: 'model', thinkingLevel: 'high', expectedSelection: '{}'};
+    await a.selectModel({conversationId: 'bot-b', ...selection});
+    assert.deepEqual(calls, [{action: 'selectModel', input: {id: 'bot-b', ...selection}}]);
+});
+
 test('production adapter subscribes and disposes, and never falls back to demo data', async () => {
     let removed = false;
     const listener = () => {};

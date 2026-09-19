@@ -60,6 +60,12 @@ export function validateSnapshot(value) {
         return { id: b.id, name: b.name, rolePrompt: b.rolePrompt, description: typeof b.description === 'string' ? b.description : '',
             revision: Number.isSafeInteger(b.revision) ? b.revision : 0, archived: !!b.archived, needsUser: !!b.needsUser,
             activity: own(STATES, b.activity) ? b.activity : 'idle', modelLabel: typeof b.modelLabel === 'string' ? b.modelLabel : '默认模型',
+            running: !!b.running,
+            piSelection: Object.fromEntries(['provider', 'model', 'thinkingLevel'].filter(key => typeof b.piSelection?.[key] === 'string').map(key => [key, b.piSelection[key]])),
+            requestId: b.running && typeof b.requestId === 'string' ? b.requestId : null,
+            askUser: b.running && typeof b.requestId === 'string' && b.askUser ? b.askUser : null,
+            questionnairePending: !!b.questionnairePending,
+            questionnaireError: typeof b.questionnaireError === 'string' ? b.questionnaireError : '',
             avatar: persona(b), unread: Number.isSafeInteger(b.unread) && b.unread > 0 ? b.unread : 0 };
     });
     const seen = new Set();

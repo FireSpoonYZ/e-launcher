@@ -15,9 +15,11 @@
 
 插件名为 `Bots`。`workspace()` 返回 `{ snapshot, capabilities }`；快照格式为 `{version:1, revision, bots, messages, routines, notice}`。旧设置面板继续使用 `snapshot({conversationId})`，两个方法不要混用。
 
-`uiAction({action,input})` 支持 `sendUserMessage`、`stop`、`createBot`、`updateBot`、`archive`、`restore`、`deleteBot`、`saveRoutine`、`setRoutineEnabled`、`runRoutine`。这是用户界面协议，不是模型工具协议。
+`uiAction({action,input})` 支持 `sendUserMessage`、`stop`、`createBot`、`updateBot`、`archive`、`restore`、`deleteBot`、`saveRoutine`、`setRoutineEnabled`、`runRoutine`、`selectModel`。这是用户界面协议，不是模型工具协议。
 
 Android 的 `BotWorkspace.java` 从持久化状态生成公开投影，不返回认证信息、运行 token、私有 SDK 历史或内部工具参数。`source.kind` 为 user / bot / assistant / routine；普通助手输出明确标为 assistant，只有显式跨 bot 消息属于 bot。`completed` 表示已处理，不代表已经回复。
+
+Bot 投影包含本会话的 `piSelection`、`running`，以及仅存活问卷的 `askUser`、`requestId`、提交状态。React 容器复用 `ModelSheet` 和 `Questionnaire`，通过用户 UI 的 `selectModel` 操作及原 `Chat.submitQuestionnaire/cancelQuestionnaire` API 操作指定 Bot，不依赖当前原生活动会话。
 
 观察协作不执行操作。双人面板只是用户视图过滤，并非不同 bot 之间的安全沙箱。模型输入由当前会话及宿主来源信息构造，不能将整个 UI 快照发送给模型。
 

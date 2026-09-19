@@ -171,7 +171,7 @@ public class MainActivity extends BridgeActivity {
         desktopRevision = new DesktopPreferences(this).revision();
         IVORY = appearance.background; CHARCOAL = appearance.ink; TEAL = appearance.accent; MUTED = appearance.muted;
         appearanceRevision = AppAppearance.revision(this);
-        initialWebRoute = "/chat/" + ChatCoordinator.get(this).store().activeId();
+        initialWebRoute = "/bots/" + ChatCoordinator.get(this).store().activeId();
         if (savedInstanceState != null && "search".equals(savedInstanceState.getString(PAGE_KEY))) {
             initialWebRoute = savedInstanceState.getString("web_route", initialWebRoute);
         }
@@ -430,9 +430,9 @@ public class MainActivity extends BridgeActivity {
         pager = new PagerRoot(this, chatWebView, PagerState.Page.HOME, changed -> {
             if (changed != PagerState.Page.HOME) leaveDesktopEdit();
             if (changed == PagerState.Page.HOME && "search".equals(page)) {
-                // Settings/history are temporary routes, never the desktop's adjacent page.
-                initialWebRoute = "/chat/" + chatStore.activeId();
-                chatWebView.evaluateJavascript("if (!/^#\\/chat(?:\\/|$)/.test(location.hash)) location.replace("
+                // Settings/history are temporary; workspace and explicit full chat stay adjacent.
+                initialWebRoute = workspaceRoute();
+                chatWebView.evaluateJavascript("if (!/^#\\/(?:chat|bots)(?:\\/|$|\\?)/.test(location.hash)) location.replace("
                         + JSONObject.quote("#" + initialWebRoute) + ")", null);
             }
             page = changed == PagerState.Page.CHAT ? "search" : "home";
@@ -464,7 +464,11 @@ public class MainActivity extends BridgeActivity {
                 && expected.getAuthority().equals(actual.getAuthority());
     }
 
-    String launchRoute() { return initialWebRoute == null ? "/chat" : initialWebRoute; }
+    String launchRoute() { return initialWebRoute == null ? "/bots" : initialWebRoute; }
+
+    private String workspaceRoute() { return workspaceRoute(chatStore.activeId()); }
+
+    private static String workspaceRoute(String conversationId) { return "/bots/" + conversationId; }
 
     void showHomeFromWeb() { runOnUiThread(() -> showHome(true)); }
 
@@ -678,7 +682,7 @@ public class MainActivity extends BridgeActivity {
         homeDesktop = new HomeDesktop(this, pager, homeLayout, apps, launcherShortcuts, homeContent);
         homeContent.addView(homeDesktop, new FrameLayout.LayoutParams(-1, -1));
         homeDesktop.setNavigation(this::showAppLibrary, () -> showGlobalSearch(""),
-                () -> launchWeb("/chat/" + chatStore.activeId(), null, null), this::openDesktopSettings,
+                () -> launchWeb(workspaceRoute(), null, null), this::openDesktopSettings,
                 new HomeDesktop.Overlay() {
                     @Override public void pull(boolean search, float progress) {
                         pullNativeSearch(search, progress);
@@ -849,7 +853,7 @@ public class MainActivity extends BridgeActivity {
     private void openConversation(String conversationId) {
         if (conversationId == null || conversationId.isEmpty()) {
             chatStore.newConversation();
-            launchWeb("/chat/" + chatStore.activeId(), null, null);
+            launchWeb(workspaceRoute(), null, null);
             return;
         }
         try {
@@ -873,7 +877,7 @@ public class MainActivity extends BridgeActivity {
 
     private void selectAndOpen(String conversationId) {
         chatStore.selectConversation(conversationId);
-        launchWeb("/chat/" + conversationId, null, null);
+        launchWeb(workspaceRoute(conversationId), null, null);
     }
 
     private long archivedAt(String conversationId) {
@@ -907,7 +911,7 @@ public class MainActivity extends BridgeActivity {
     }
 
     private void showSearch() {
-        launchWeb("/chat/" + chatStore.activeId(), null, null);
+        launchWeb(workspaceRoute(), null, null);
     }
 
     /** Explicit local-search AI action: never reuse a draft or submit merely by typing. */
@@ -918,7 +922,7 @@ public class MainActivity extends BridgeActivity {
         chatStore.selectConversation(conversationId);
         try {
             String accepted = chatCoordinator.send(conversationId, prompt, java.util.UUID.randomUUID().toString());
-            if (accepted != null) launchWeb("/chat/" + conversationId, null, null);
+            if (accepted != null) launchWeb(workspaceRoute(conversationId), null, null);
         } catch (Exception exception) {
             failure(exception.getMessage());
         }
@@ -1019,7 +1023,7 @@ public class MainActivity extends BridgeActivity {
         pageShell.addView(composerPlaceholder, dockIndex, new LinearLayout.LayoutParams(-1, height));
         HomeInputOverlay overlay = new HomeInputOverlay(this, pager, chatStore, apps,
                 composerDock, composerInput, attachmentButton, voiceButton, sendButton,
-                id -> { chatStore.selectConversation(id); launchWeb("/chat/" + id, null, null); }, this::sendMessage);
+                id -> { chatStore.selectConversation(id); launchWeb(workspaceRoute(id), null, null); }, this::sendMessage);
         homeInputOverlay = overlay;
         expandHomeComposer(true);
         overlay.setPreparing(nativeAttachmentBusy);
@@ -1716,7 +1720,8 @@ public class MainActivity extends BridgeActivity {
     }
 
     private void syncWebToActive() {
-        String route = "/chat/" + chatStore.activeId();
+        String route = initialWebRoute != null && initialWebRoute.startsWith("/chat")
+                ? "/chat/" + chatStore.activeId() : workspaceRoute();
         initialWebRoute = route;
         if (chatWebView != null) chatWebView.evaluateJavascript("location.hash=" + JSONObject.quote("#" + route)
                 + ";window.dispatchEvent(new Event('native-navigation'))", null);
@@ -1773,7 +1778,7 @@ public class MainActivity extends BridgeActivity {
                 chatStore.saveDraft(text);
                 String id = chatStore.activeId();
                 String accepted = chatCoordinator.send(id, text, java.util.UUID.randomUUID().toString());
-                if (accepted != null) launchWeb("/chat/" + id, null, null);
+                if (accepted != null) launchWeb(workspaceRoute(id), null, null);
             } catch (Exception exception) { failure(exception.getMessage()); }
             return;
         }

@@ -31,3 +31,8 @@
 @media(prefers-reduced-motion:reduce){.eb-root *{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
 
 .eb-checkbox-field{flex-direction:row;align-items:center;gap:12px;justify-content:space-between}.eb-checkbox-field input{width:20px;height:20px;min-height:20px;accent-color:var(--eb-accent)}.eb-initial-routine{padding:18px;border:1px solid var(--eb-line);border-radius:12px;margin-bottom:16px}.eb-root [hidden]{display:none!important}.eb-root[data-overlay=true]>.eb-layout *{animation-play-state:paused!important}
+.eb-root .eb-model-button{display:block;flex:none;max-width:100%;padding:8px 20px;text-align:left;color:var(--eb-accent);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;border-bottom:1px solid var(--eb-line)}
+.eb-questionnaire-host{flex:0 1 auto;min-height:0;overflow:auto;padding:0 16px max(12px,env(safe-area-inset-bottom));--bg:var(--eb-bg);--ink:var(--eb-ink);--muted:var(--eb-muted);--line:var(--eb-line);--accent:var(--eb-accent)}
+.eb-questionnaire-host .questionnaire{margin:0;max-height:min(60dvh,600px)}
+.eb-questionnaire-host .button{background:var(--eb-accent);color:var(--eb-bg)}
+.eb-questionnaire-host .secondary-button{background:var(--eb-soft);color:var(--eb-ink)}

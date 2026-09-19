@@ -27,7 +27,7 @@ export function useBack() {
     if ((window.history.state?.idx ?? 0) > 0) navigate(-1);
     else if (location.pathname.startsWith('/settings/') && location.pathname !== '/settings') navigate('/settings', {replace: true});
     else if (location.pathname.startsWith('/schedules/')) navigate('/schedules', {replace: true});
-    else if (location.pathname.startsWith('/history/') || location.pathname === '/schedules' || location.pathname === '/archived') navigate('/chat', {replace: true});
+    else if (location.pathname.startsWith('/history/') || location.pathname === '/schedules' || location.pathname === '/archived') navigate('/bots', {replace: true});
     else void Device.close();
   };
 }
