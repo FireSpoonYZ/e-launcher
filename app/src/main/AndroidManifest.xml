@@ -64,6 +64,33 @@
             android:exported="false"
             android:foregroundServiceType="dataSync" />
         <service
+            android:name=".LauncherVoiceInteractionService"
+            android:exported="true"
+            android:label="E Launcher"
+            android:permission="android.permission.BIND_VOICE_INTERACTION">
+            <intent-filter>
+                <action android:name="android.service.voice.VoiceInteractionService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.voice_interaction"
+                android:resource="@xml/voice_interaction_service" />
+        </service>
+        <service
+            android:name=".LauncherVoiceSessionService"
+            android:exported="true"
+            android:permission="android.permission.BIND_VOICE_INTERACTION" />
+        <service
+            android:name=".LauncherRecognitionService"
+            android:exported="true"
+            android:label="E Launcher">
+            <intent-filter>
+                <action android:name="android.speech.RecognitionService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.speech"
+                android:resource="@xml/recognition_service" />
+        </service>
+        <service
             android:name=".WakeWordService"
             android:exported="false"
             android:foregroundServiceType="microphone" />

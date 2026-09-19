@@ -6,8 +6,10 @@ import android.content.ActivityNotFoundException;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.os.Handler;
+import android.os.Looper;
 import android.speech.RecognizerIntent;
-import android.speech.SpeechRecognizer;
+import android.widget.Toast;
 
 import org.json.JSONObject;
 
@@ -15,10 +17,16 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
-/** Process-wide voice entry point: dictation for the composers and read-aloud of finished replies. Main thread only. */
+/**
+ * Process-wide voice entry point: dictation for the composers, spoken requests after a wake word or the assist
+ * gesture, and read-aloud of finished replies. Main thread only unless noted.
+ */
 final class VoiceManager {
     static final int REQUEST_RECOGNIZER = 41, REQUEST_MICROPHONE = 43;
+    private static final long WAKE_HOLD_TIMEOUT_MS = 5_000;
 
     interface Callback {
         void onText(String text);
@@ -26,9 +34,19 @@ final class VoiceManager {
         default void onCancel() { }
     }
 
+    /** A listening UI (dialog, session panel or none) that can abandon its input. */
+    interface Presented { void cancelInput(); }
+
     private static volatile VoiceManager instance;
     /** Set by the wake word thread before it posts onWake, so it does not reopen the microphone meanwhile. */
     private static volatile boolean wakeHold;
+    private static final Handler MAIN = new Handler(Looper.getMainLooper());
+    // A session that never shows must not keep the detector off forever.
+    private static final Runnable STALE_HOLD = () -> {
+        VoiceManager manager = instance;
+        if (manager == null || manager.pending == null) wakeHold = false;
+    };
+
     static synchronized VoiceManager get(Context context) {
         if (instance == null) instance = new VoiceManager(context.getApplicationContext());
         return instance;
@@ -38,11 +56,9 @@ final class VoiceManager {
     private final VoiceSettings settings;
     private final SpeechOutput output;
     private final Set<String> voiceTurns = new HashSet<>();
+    private final ExecutorService sender = Executors.newSingleThreadExecutor();
     private volatile Pending pending;
-    private VoiceListeningDialog dialog;
-    private SpeechInput headless;
-    private final android.os.Handler main = new android.os.Handler(android.os.Looper.getMainLooper());
-    private final java.util.concurrent.ExecutorService sender = java.util.concurrent.Executors.newSingleThreadExecutor();
+    private Presented presented;
 
     private static final class Pending {
         final String conversationId;
@@ -58,6 +74,9 @@ final class VoiceManager {
     }
 
     VoiceSettings settings() { return settings; }
+    boolean speaking() { return output.speaking(); }
+    void speak(String markdown) { output.speak(markdown); }
+    void stopSpeaking() { output.stop(); }
 
     /** True while dictation, a wake hand-off or read-aloud needs the microphone quiet. Any thread. */
     static boolean busy() {
@@ -65,102 +84,71 @@ final class VoiceManager {
         return wakeHold || (manager != null && (manager.pending != null || manager.output.speaking()));
     }
 
-    static void holdForWake() { wakeHold = true; }
+    /** Any thread. */
+    static void holdForWake() {
+        wakeHold = true;
+        MAIN.removeCallbacks(STALE_HOLD);
+        MAIN.postDelayed(STALE_HOLD, WAKE_HOLD_TIMEOUT_MS);
+    }
 
-    /** Main thread. Listens for the request after the wake word, sends it to the assistant and reads the reply. */
+    static void releaseWakeHold() { wakeHold = false; }
+
+    /** Captures one utterance for a composer. conversationId, when set, marks the next finished reply for read-aloud. */
+    void listen(Activity activity, String conversationId, Callback callback) {
+        start(conversationId, callback);
+        if (VoiceSettings.SYSTEM.equals(settings.sttEngine()) && !SpeechInput.systemAvailable(context)) {
+            // Some ROMs expose only the recognizer activity; it handles the microphone itself.
+            try { activity.startActivityForResult(SpeechInput.recognizerIntent(settings.language()), REQUEST_RECOGNIZER); }
+            catch (ActivityNotFoundException missing) { fail(UiText.get(context, "系统未提供语音识别，请在设置中改用远程模型或使用键盘麦克风")); }
+            return;
+        }
+        if (!hasMicrophone()) {
+            activity.requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, REQUEST_MICROPHONE);
+            return;
+        }
+        presentInDialog(activity);
+    }
+
+    /** The assistant session was shown, by a wake word or the system assist gesture. */
+    void listenInSession(LauncherVoiceSessionService.Session session, boolean fromWake) {
+        output.stop();
+        String conversationId = ChatCoordinator.get(context).conversationId();
+        Callback spoken = spokenRequest(conversationId);
+        // The panel hides the session when it ends; failures before it appears must hide it too.
+        Callback callback = new Callback() {
+            @Override public void onText(String text) { spoken.onText(text); }
+            @Override public void onError(String message) { session.hide(); spoken.onError(message); }
+            @Override public void onCancel() { session.hide(); spoken.onCancel(); }
+        };
+        start(conversationId, callback);
+        if (!ready()) return;
+        if (fromWake) cue();
+        Pending request = pending;
+        // Let the cue finish so the recognizer does not hear it.
+        MAIN.postDelayed(() -> {
+            if (pending != request) return;
+            presented = session.present(createInput(session.getContext()), target(request), () -> dismissed(request));
+        }, fromWake ? 250 : 0);
+    }
+
+    /** Wake word while this app is not the assistant: the launcher's dialog if visible, otherwise no UI. */
     void onWake(String keyword) {
         if (pending != null) { wakeHold = false; return; }
         output.stop();
         String conversationId = ChatCoordinator.get(context).conversationId();
-        Callback callback = new Callback() {
-            @Override public void onText(String text) { wakeHold = false; sendSpoken(conversationId, text); }
-            @Override public void onError(String message) {
-                wakeHold = false;
-                WakeWordService.showProgress(null);
-                android.widget.Toast.makeText(context, message, android.widget.Toast.LENGTH_SHORT).show();
-            }
-            @Override public void onCancel() { wakeHold = false; WakeWordService.showProgress(null); }
-        };
+        Callback callback = spokenRequest(conversationId);
         cue();
-        // Let the cue finish so the recognizer does not hear it.
-        main.postDelayed(() -> {
+        MAIN.postDelayed(() -> {
             Activity visible = MainActivity.resumed();
             if (visible != null) listen(visible, conversationId, callback);
             else listenHeadless(conversationId, callback);
         }, 250);
     }
 
-    private void listenHeadless(String conversationId, Callback callback) {
-        if (pending != null) cancelListening();
-        pending = new Pending(conversationId, callback);
-        if (VoiceSettings.SYSTEM.equals(settings.sttEngine()) && !SpeechRecognizer.isRecognitionAvailable(context)) {
-            fail(UiText.get(context, "系统未提供语音识别，请在设置中改用远程模型或使用键盘麦克风"));
-            return;
-        }
-        Pending request = pending;
-        SpeechInput input = VoiceSettings.REMOTE.equals(settings.sttEngine())
-                ? new SpeechInput.RemoteInput(settings.remote(VoiceSettings.STT), settings.language())
-                : new SpeechInput.SystemInput(context, settings.language());
-        headless = input;
-        WakeWordService.showProgress(UiText.get(context, "正在聆听…"));
-        input.start(new SpeechInput.Listener() {
-            @Override public void onLevel(float level) { }
-            @Override public void onPartial(String text) { WakeWordService.showProgress(text); }
-            @Override public void onProcessing() { WakeWordService.showProgress(UiText.get(context, "正在识别…")); }
-            @Override public void onResult(String text) { if (pending == request) { headless = null; succeed(text); } }
-            @Override public void onError(String message) { if (pending == request) { headless = null; fail(UiText.get(context, message)); } }
-        });
-    }
-
-    private void sendSpoken(String conversationId, String text) {
-        WakeWordService.showProgress(UiText.get(context, "已发送：") + text);
-        sender.execute(() -> {
-            try { ChatCoordinator.get(context).sendVoice(conversationId, text); }
-            catch (Exception failure) {
-                String message = failure.getMessage() == null ? UiText.get(context, "发送失败") : failure.getMessage();
-                main.post(() -> {
-                    voiceTurns.remove(conversationId);
-                    WakeWordService.showProgress(null);
-                    output.speak(message);
-                });
-            }
-        });
-    }
-
-    private void cue() {
-        try {
-            android.media.ToneGenerator tone = new android.media.ToneGenerator(android.media.AudioManager.STREAM_MUSIC, 60);
-            tone.startTone(android.media.ToneGenerator.TONE_PROP_ACK, 150);
-            main.postDelayed(tone::release, 400);
-        } catch (RuntimeException unavailable) { }
-    }
-    boolean speaking() { return output.speaking(); }
-    void speak(String markdown) { output.speak(markdown); }
-    void stopSpeaking() { output.stop(); }
-
-    /** Captures one utterance. conversationId, when set, marks the next finished reply there for read-aloud. */
-    void listen(Activity activity, String conversationId, Callback callback) {
-        if (pending != null) cancelListening();
-        output.stop();
-        pending = new Pending(conversationId, callback);
-        boolean system = VoiceSettings.SYSTEM.equals(settings.sttEngine());
-        if (system && !SpeechRecognizer.isRecognitionAvailable(context)) {
-            // Some ROMs expose only the recognizer activity; it handles the microphone itself.
-            try { activity.startActivityForResult(SpeechInput.recognizerIntent(settings.language()), REQUEST_RECOGNIZER); }
-            catch (ActivityNotFoundException missing) { fail(UiText.get(context, "系统未提供语音识别，请在设置中改用远程模型或使用键盘麦克风")); }
-            return;
-        }
-        if (context.checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-            activity.requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, REQUEST_MICROPHONE);
-            return;
-        }
-        begin(activity);
-    }
-
     boolean onRequestPermissionsResult(Activity activity, int request, int[] results) {
         if (request != REQUEST_MICROPHONE) return false;
         if (pending == null) return true;
-        if (results.length > 0 && results[0] == PackageManager.PERMISSION_GRANTED) begin(activity);
+        if (results.length > 0 && results[0] == PackageManager.PERMISSION_GRANTED) presentInDialog(activity);
         else fail(UiText.get(context, "需要麦克风权限才能语音输入"));
         return true;
     }
@@ -178,46 +166,125 @@ final class VoiceManager {
     }
 
     void cancelListening() {
-        if (dialog != null) dialog.cancelInput();
-        else {
-            if (headless != null) { headless.cancel(); headless = null; }
-            cancelled();
+        if (presented != null) presented.cancelInput();
+        else cancelled();
+    }
+
+    private void start(String conversationId, Callback callback) {
+        if (pending != null) cancelListening();
+        output.stop();
+        pending = new Pending(conversationId, callback);
+    }
+
+    /** Checks what a UI-less or session capture needs; fails the pending request otherwise. */
+    private boolean ready() {
+        if (!hasMicrophone()) { fail(UiText.get(context, "需要麦克风权限才能语音输入")); return false; }
+        if (VoiceSettings.SYSTEM.equals(settings.sttEngine()) && !SpeechInput.systemAvailable(context)) {
+            fail(UiText.get(context, "系统未提供语音识别，请在设置中改用远程模型或使用键盘麦克风"));
+            return false;
         }
+        return true;
     }
 
-    private void cancelled() {
-        Pending request = pending;
-        pending = null; dialog = null;
-        if (request != null) request.callback.onCancel();
-    }
-
-    private void begin(Activity activity) {
+    private void presentInDialog(Activity activity) {
         if (activity.isFinishing() || activity.isDestroyed()) { cancelled(); return; }
-        SpeechInput input = VoiceSettings.REMOTE.equals(settings.sttEngine())
-                ? new SpeechInput.RemoteInput(settings.remote(VoiceSettings.STT), settings.language())
-                : new SpeechInput.SystemInput(activity, settings.language());
         Pending request = pending;
-        dialog = new VoiceListeningDialog(activity, input, new SpeechInput.Listener() {
+        VoiceListeningDialog dialog = new VoiceListeningDialog(activity, createInput(activity), target(request), () -> dismissed(request));
+        presented = dialog;
+        dialog.show();
+    }
+
+    private void listenHeadless(String conversationId, Callback callback) {
+        start(conversationId, callback);
+        if (!ready()) return;
+        Pending request = pending;
+        SpeechInput input = createInput(context);
+        presented = () -> { input.cancel(); dismissed(request); };
+        WakeWordService.showProgress(UiText.get(context, "正在聆听…"));
+        input.start(new SpeechInput.Listener() {
+            @Override public void onLevel(float level) { }
+            @Override public void onPartial(String text) { WakeWordService.showProgress(text); }
+            @Override public void onProcessing() { WakeWordService.showProgress(UiText.get(context, "正在识别…")); }
+            @Override public void onResult(String text) { target(request).onResult(text); }
+            @Override public void onError(String message) { target(request).onError(message); }
+        });
+    }
+
+    private SpeechInput createInput(Context ui) {
+        return VoiceSettings.REMOTE.equals(settings.sttEngine())
+                ? new SpeechInput.RemoteInput(settings.remote(VoiceSettings.STT), settings.language())
+                : new SpeechInput.SystemInput(ui, settings.language());
+    }
+
+    private SpeechInput.Listener target(Pending request) {
+        return new SpeechInput.Listener() {
             @Override public void onLevel(float level) { }
             @Override public void onPartial(String text) { }
             @Override public void onProcessing() { }
             @Override public void onResult(String text) { if (pending == request) succeed(text); }
             @Override public void onError(String message) { if (pending == request) fail(UiText.get(context, message)); }
-        }, () -> { if (pending == request) cancelled(); });
-        dialog.show();
+        };
     }
+
+    private void dismissed(Pending request) { if (pending == request) cancelled(); }
 
     private void succeed(String text) {
         Pending request = pending;
-        pending = null; dialog = null;
+        pending = null; presented = null;
         if (request.conversationId != null) voiceTurns.add(request.conversationId);
         request.callback.onText(text);
     }
 
     private void fail(String message) {
         Pending request = pending;
-        pending = null; dialog = null;
+        pending = null; presented = null;
         if (request != null) request.callback.onError(message);
+    }
+
+    private void cancelled() {
+        Pending request = pending;
+        pending = null; presented = null;
+        if (request != null) request.callback.onCancel();
+    }
+
+    /** Sends what was said to the assistant; the reply is read aloud through the voice-turn mark. */
+    private Callback spokenRequest(String conversationId) {
+        return new Callback() {
+            @Override public void onText(String text) { wakeHold = false; sendSpoken(conversationId, text); }
+            @Override public void onError(String message) {
+                wakeHold = false;
+                WakeWordService.showProgress(null);
+                Toast.makeText(context, message, Toast.LENGTH_SHORT).show();
+            }
+            @Override public void onCancel() { wakeHold = false; WakeWordService.showProgress(null); }
+        };
+    }
+
+    private void sendSpoken(String conversationId, String text) {
+        WakeWordService.showProgress(UiText.get(context, "已发送：") + text);
+        sender.execute(() -> {
+            try { ChatCoordinator.get(context).sendVoice(conversationId, text); }
+            catch (Exception failure) {
+                String message = failure.getMessage() == null ? UiText.get(context, "发送失败") : failure.getMessage();
+                MAIN.post(() -> {
+                    voiceTurns.remove(conversationId);
+                    WakeWordService.showProgress(null);
+                    output.speak(message);
+                });
+            }
+        });
+    }
+
+    private boolean hasMicrophone() {
+        return context.checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED;
+    }
+
+    private void cue() {
+        try {
+            android.media.ToneGenerator tone = new android.media.ToneGenerator(android.media.AudioManager.STREAM_MUSIC, 60);
+            tone.startTone(android.media.ToneGenerator.TONE_PROP_ACK, 150);
+            MAIN.postDelayed(tone::release, 400);
+        } catch (RuntimeException unavailable) { }
     }
 
     private void chatChanged(List<AgentLoop.Message> messages, JSONObject event) {

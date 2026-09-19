@@ -134,6 +134,32 @@ public class VoiceTest {
         assertEquals(.25f, WakeWordEngine.threshold(VoiceSettings.WAKE_MEDIUM), .001f);
     }
 
+    @Test public void systemInputSkipsOwnForwardingRecognizer() {
+        Context context = RuntimeEnvironment.getApplication();
+        android.content.pm.PackageManager packages = context.getPackageManager();
+        org.robolectric.shadows.ShadowPackageManager shadow = org.robolectric.Shadows.shadowOf(packages);
+        android.content.Intent intent = new android.content.Intent(android.speech.RecognitionService.SERVICE_INTERFACE);
+        for (String[] component : new String[][]{{context.getPackageName(), LauncherRecognitionService.class.getName()},
+                {"com.vendor.asr", "com.vendor.asr.Service"}, {"com.google.asr", "com.google.asr.Service"}}) {
+            android.content.pm.ResolveInfo info = new android.content.pm.ResolveInfo();
+            info.serviceInfo = new android.content.pm.ServiceInfo();
+            info.serviceInfo.packageName = component[0];
+            info.serviceInfo.name = component[1];
+            shadow.addResolveInfoForIntent(intent, info);
+        }
+        android.content.ContentResolver resolver = context.getContentResolver();
+        // Another app is the default: use the default and remember it.
+        android.provider.Settings.Secure.putString(resolver, "voice_recognition_service", "com.google.asr/com.google.asr.Service");
+        assertNull(SpeechInput.systemRecognizer(context));
+        // After becoming the assistant our forwarder is the default: bind the remembered one directly.
+        android.provider.Settings.Secure.putString(resolver, "voice_recognition_service",
+                context.getPackageName() + "/" + LauncherRecognitionService.class.getName());
+        assertEquals("com.google.asr/com.google.asr.Service", SpeechInput.systemRecognizer(context).flattenToString());
+        assertEquals("com.google.asr/com.google.asr.Service", SpeechInput.fallbackRecognizer(context).flattenToString());
+        context.getSharedPreferences("voice", Context.MODE_PRIVATE).edit().remove("previousRecognizer").commit();
+        assertEquals("com.vendor.asr/com.vendor.asr.Service", SpeechInput.fallbackRecognizer(context).flattenToString());
+    }
+
     private static short[] frame(int amplitude) {
         short[] samples = new short[RemoteVoiceApi.SAMPLE_RATE * SpeechEndpointer.FRAME_MS / 1000];
         for (int i = 0; i < samples.length; i++) samples[i] = (short) (i % 2 == 0 ? amplitude : -amplitude);
