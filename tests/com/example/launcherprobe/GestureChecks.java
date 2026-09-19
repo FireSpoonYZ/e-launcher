@@ -63,42 +63,42 @@ public final class GestureChecks {
         actions.clear();
         bottom.down(100, 200, clock.now);
         long pressedAt = clock.now;
-        clock.advance(50);
+        clock.advance(75);
         bottom.move(100, 180, clock.now);
-        clock.advance(50);
+        clock.advance(75);
         bottom.move(100, 160, clock.now); // Continued travel does not restart the timer.
         assert actions.isEmpty();
-        clock.advance(1); // More than 100 ms since DOWN, without waiting for UP.
+        clock.advance(1); // More than 150 ms since DOWN, without waiting for UP.
         assert !feedback.visible;
-        bottom.move(100, 140, pressedAt + 120);
+        bottom.move(100, 140, pressedAt + 170);
         assert !feedback.visible;
-        bottom.up(100, 140, pressedAt + 140);
+        bottom.up(100, 140, pressedAt + 190);
         assert actions.toString().equals("[recents]") : actions;
         actions.clear();
 
         bottom.down(100, 200, clock.now);
-        clock.advance(100);
+        clock.advance(150);
         assert actions.isEmpty();
-        bottom.up(100, 190, clock.now); // Inclusive 100 ms boundary; no MOVE event.
+        bottom.up(100, 190, clock.now); // Inclusive 150 ms boundary; no MOVE event.
         clock.advance(1);
         assert actions.toString().equals("[home]") : actions;
         actions.clear();
 
         bottom.down(100, 200, clock.now);
-        clock.advance(101); // No movement or distance gate for a hold.
+        clock.advance(151); // No movement or distance gate for a hold.
         assert actions.toString().equals("[recents]") : actions;
         bottom.up(100, 200, clock.now);
         assert actions.toString().equals("[recents]") : actions;
         actions.clear();
 
         bottom.down(100, 200, 0);
-        bottom.up(100, 190, 101); // Delayed Handler: event time still selects recents.
+        bottom.up(100, 190, 151); // Delayed Handler: event time still selects recents.
         clock.advance(200);
         assert actions.toString().equals("[recents]") : actions;
         actions.clear();
 
         bottom.down(100, 200, 0);
-        bottom.up(120, 190, 99); // A mostly horizontal quick swipe is not HOME.
+        bottom.up(120, 190, 149); // A mostly horizontal quick swipe is not HOME.
         assert actions.toString().equals("[replay]") : actions;
         actions.clear();
         for (int i = 0; i < 3; i++) {
