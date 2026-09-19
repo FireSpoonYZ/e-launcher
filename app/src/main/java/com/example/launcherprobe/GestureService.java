@@ -49,6 +49,8 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
 import org.json.JSONArray;
@@ -78,6 +80,8 @@ public final class GestureService extends AccessibilityService {
     private int observedWindowId = -1;
     private final ObservationRegistry<AccessibilityNodeInfo> observedNodes =
             new ObservationRegistry<>(200);
+    private ExecutorService captures;
+    private long lastCapture;
     private final DisplayManager.DisplayListener displays = new DisplayManager.DisplayListener() {
         public void onDisplayAdded(int id) { }
         public void onDisplayRemoved(int id) { }
@@ -460,6 +464,7 @@ public final class GestureService extends AccessibilityService {
             message = session.error();
         }
         detachWindows();
+        if (captures != null) { captures.shutdownNow(); captures = null; }
         getSystemService(DisplayManager.class).unregisterDisplayListener(displays);
         if (instance == this) instance = null;
         notifyStatus();
@@ -556,6 +561,7 @@ public final class GestureService extends AccessibilityService {
             switch (event.getActionMasked()) {
                 case MotionEvent.ACTION_DOWN:
                     held = true;
+                    if (zone == SwipeDetector.Zone.BOTTOM) captureForeground();
                     interactivity();
                     detector.down(x, y, time);
                     break;
@@ -575,6 +581,42 @@ public final class GestureService extends AccessibilityService {
             }
             return true;
         });
+    }
+
+    /** The bottom edge is where apps are left, so that is when their own screen is still on display. */
+    private void captureForeground() {
+        if (Build.VERSION.SDK_INT < 30) return;
+        long now = android.os.SystemClock.uptimeMillis();
+        if (now - lastCapture < 1200) return;
+        AccessibilityNodeInfo root = getRootInActiveWindow();
+        CharSequence owner = root == null ? null : root.getPackageName();
+        if (owner == null || owner.toString().equals(getPackageName())) return;
+        String packageName = owner.toString();
+        lastCapture = now;
+        if (captures == null) captures = Executors.newSingleThreadExecutor();
+        try {
+            takeScreenshot(Display.DEFAULT_DISPLAY, captures, new TakeScreenshotCallback() {
+                @Override public void onSuccess(ScreenshotResult result) {
+                    try (android.hardware.HardwareBuffer buffer = result.getHardwareBuffer()) {
+                        android.graphics.Bitmap shot = android.graphics.Bitmap.wrapHardwareBuffer(
+                                buffer, result.getColorSpace());
+                        if (shot == null) return;
+                        android.graphics.Bitmap copy = shot.copy(android.graphics.Bitmap.Config.RGB_565, false);
+                        shot.recycle();
+                        if (copy == null) return;
+                        AppSnapshots.save(GestureService.this, packageName, copy);
+                        copy.recycle();
+                    } catch (RuntimeException failure) {
+                        Log.w(TAG, "Screen capture could not be stored", failure);
+                    }
+                }
+                @Override public void onFailure(int errorCode) {
+                    Log.i(TAG, "Screen capture refused: " + errorCode);
+                }
+            });
+        } catch (RuntimeException failure) {
+            Log.w(TAG, "Screen capture unavailable", failure);
+        }
     }
 
     private void openSwitcher() {

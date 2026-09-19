@@ -264,23 +264,101 @@ public class AppSwitcherTest {
         }
     }
 
+    @Test public void flickingACardUpwardsForgetsOnlyThatAppAndClosesTheGap() {
+        try (var controller = Robolectric.buildActivity(ComponentActivity.class).setup()) {
+            Scene scene = new Scene(controller.get(), 3, 0);
+            float middle = scene.carousel.getWidth() / 2f, bottom = scene.carousel.getHeight() * .8f;
+            scene.touch(MotionEvent.ACTION_DOWN, middle, bottom);
+            scene.touch(MotionEvent.ACTION_MOVE, middle, bottom - 60);
+            scene.touch(MotionEvent.ACTION_MOVE, middle, bottom - 500);
+            scene.touch(MotionEvent.ACTION_UP, middle, bottom - 500);
+            assertEquals(List.of("app.0"), scene.forgotten);
+            scene.finishCollapse();
+            assertEquals(key("app.1"), scene.page.selectedComponent());
+            assertEquals(2, ((List<?>) ReflectionHelpers.getField(scene.carousel, "cards")).size());
+            assertEquals(0f, (float) ReflectionHelpers.getField(scene.carousel, "track"), .001f);
+            assertTrue(scene.opened.isEmpty());
+        }
+    }
+
+    @Test public void shortUpwardNudgeKeepsTheCardAndNeverForgetsIt() {
+        try (var controller = Robolectric.buildActivity(ComponentActivity.class).setup()) {
+            Scene scene = new Scene(controller.get(), 2, 0);
+            float middle = scene.carousel.getWidth() / 2f, bottom = scene.carousel.getHeight() * .8f;
+            scene.touch(MotionEvent.ACTION_DOWN, middle, bottom);
+            scene.touch(MotionEvent.ACTION_MOVE, middle, bottom - 60);
+            scene.time += 300; // Released slowly and well short of the removal distance.
+            scene.touch(MotionEvent.ACTION_MOVE, middle, bottom - 60);
+            scene.touch(MotionEvent.ACTION_UP, middle, bottom - 60);
+            assertTrue(scene.forgotten.isEmpty());
+            assertEquals(2, ((List<?>) ReflectionHelpers.getField(scene.carousel, "cards")).size());
+            assertTrue(scene.opened.isEmpty());
+        }
+    }
+
+    @Test public void clearingEverythingForgetsEveryAppAndLeavesNoStack() {
+        try (var controller = Robolectric.buildActivity(ComponentActivity.class).setup()) {
+            Scene scene = new Scene(controller.get(), 3, 1);
+            ReflectionHelpers.callInstanceMethod(scene.page, "clearAll");
+            assertEquals(List.of("app.0", "app.1", "app.2"), scene.forgotten);
+            ShadowLooper.idleMainLooper(1, java.util.concurrent.TimeUnit.SECONDS);
+            assertNull(scene.page.selectedComponent());
+            assertNull(ReflectionHelpers.getField(scene.page, "carousel"));
+            assertTrue(scene.opened.isEmpty());
+        }
+    }
+
+    @Test public void artLoadsOnlyAroundTheVisibleWindowAndIsCancelledBehindIt() {
+        try (var controller = Robolectric.buildActivity(ComponentActivity.class).setup()) {
+            Scene scene = new Scene(controller.get(), 40, 0);
+            assertEquals(List.of("app.0", "app.1", "app.2", "app.3", "app.4", "app.5"), scene.loaded);
+            assertTrue(scene.cancelled.isEmpty());
+            scene.loaded.clear();
+            float stride = ReflectionHelpers.getField(scene.carousel, "stride");
+            scene.flick(800, -stride * 4);
+            scene.finishSpring();
+            int selected = ReflectionHelpers.getField(scene.carousel, "selected");
+            assertTrue("The window must follow the selection", selected >= 4);
+            assertEquals(List.of("app." + (selected + 5)), scene.loaded.subList(scene.loaded.size() - 1, scene.loaded.size()));
+            assertTrue(scene.loaded.size() < 40);
+            // Cards left far behind release their bitmaps instead of holding the whole history.
+            List<?> cards = ReflectionHelpers.getField(scene.carousel, "cards");
+            assertNull(ReflectionHelpers.getField(cards.get(0), "art"));
+            assertNotNull(ReflectionHelpers.getField(cards.get(selected), "art"));
+            assertTrue(scene.opened.isEmpty());
+        }
+    }
+
     private static String key(String name) { return new ComponentName(name, name + ".Main").flattenToString(); }
 
-    private static final class Scene {
+    private static final class Scene implements AppSwitcherView.Host {
         final AppSwitcherView page;
         final ViewGroup carousel;
         final List<String> opened = new ArrayList<>();
+        final List<String> forgotten = new ArrayList<>();
+        final List<String> loaded = new ArrayList<>();
+        final List<String> cancelled = new ArrayList<>();
         int closed;
         long time, downTime;
 
+        @Override public void open(AppSwitcherView.App app) { opened.add(app.component().getPackageName()); }
+        @Override public void close() { closed++; }
+        @Override public void home() { closed++; }
+        @Override public void forget(AppSwitcherView.App app) { forgotten.add(app.component().getPackageName()); }
+        @Override public void cancel(AppSwitcherView.App app) { cancelled.add(app.component().getPackageName()); }
+        @Override public void load(AppSwitcherView.App app, java.util.function.Consumer<AppSwitcherView.Art> ready) {
+            loaded.add(app.component().getPackageName());
+            ready.accept(new AppSwitcherView.Art(
+                    Bitmap.createBitmap(16, 16, Bitmap.Config.ARGB_8888), 0xffd9eff0, null));
+        }
+
         Scene(ComponentActivity activity, int count, int selected) {
-            page = new AppSwitcherView(activity, app -> opened.add(app.component().getPackageName()), () -> closed++, () -> closed++);
+            page = new AppSwitcherView(activity, this);
             activity.setContentView(page);
             List<AppSwitcherView.App> apps = new ArrayList<>();
             for (int i = 0; i < count; i++) {
                 String name = "app." + i;
-                apps.add(new AppSwitcherView.App(new ComponentName(name, name + ".Main"), "应用 " + i,
-                        Bitmap.createBitmap(16, 16, Bitmap.Config.ARGB_8888), 0xffd9eff0));
+                apps.add(new AppSwitcherView.App(new ComponentName(name, name + ".Main"), "应用 " + i));
             }
             page.showApps(apps, key("app." + selected));
             page.measure(View.MeasureSpec.makeMeasureSpec(1000, View.MeasureSpec.EXACTLY),
@@ -304,11 +382,18 @@ public class AppSwitcherTest {
             }
         }
 
-        void touch(int action, float x) {
+        void touch(int action, float x) { touch(action, x, carousel.getHeight() / 2f); }
+
+        void touch(int action, float x, float y) {
             time += 32;
             if (action == MotionEvent.ACTION_DOWN) downTime = time;
-            MotionEvent event = MotionEvent.obtain(downTime, time, action, x, carousel.getHeight() / 2f, 0);
+            MotionEvent event = MotionEvent.obtain(downTime, time, action, x, y, 0);
             carousel.dispatchTouchEvent(event); event.recycle();
+        }
+
+        void finishCollapse() {
+            ValueAnimator animation = ReflectionHelpers.getField(carousel, "collapse");
+            if (animation != null) animation.end();
         }
     }
 }

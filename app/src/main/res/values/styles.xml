@@ -8,7 +8,8 @@
         <item name="android:windowSoftInputMode">adjustResize</item>
     </style>
     <style name="AppSwitcherTheme" parent="android:style/Theme.Material.NoActionBar">
-        <item name="android:windowBackground">#10272f</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowIsTranslucent">true</item>
         <item name="android:windowAnimationStyle">@null</item>
         <item name="android:windowLightStatusBar">false</item>
         <item name="android:windowLightNavigationBar">false</item>

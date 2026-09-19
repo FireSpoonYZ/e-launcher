@@ -13,6 +13,15 @@ public final class AppLaunchHistory {
         preferences(context).edit().putLong(component.flattenToString(), System.currentTimeMillis()).apply();
     }
 
+    /** Removing an entry only forgets this launcher's own record of the launch. */
+    static void forget(Context context, ComponentName component) {
+        preferences(context).edit().remove(component.flattenToString()).apply();
+    }
+
+    static void clear(Context context) {
+        preferences(context).edit().clear().apply();
+    }
+
     public static long lastLaunch(Context context, ComponentName component) {
         return preferences(context).getLong(component.flattenToString(), 0);
     }
