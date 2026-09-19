@@ -446,10 +446,29 @@ final class AppSwitcherView extends FrameLayout {
         @Override protected void onMeasure(int widthSpec, int heightSpec) {
             int width = MeasureSpec.getSize(widthSpec), height = MeasureSpec.getSize(heightSpec);
             setMeasuredDimension(width, height);
-            int cardWidth = Math.min(dp(440), Math.round(width * .72f));
-            int cardHeight = Math.max(1, Math.round(height * .9f));
+            // A cover is a scale model of the display, so captured screens keep their proportions.
+            float ratio = displayRatio();
+            int header = dp(48);
+            int coverWidth = Math.min(dp(440), Math.round(width * .72f));
+            int coverHeight = Math.round(coverWidth * ratio);
+            int room = Math.max(1, Math.round(height * .94f) - header);
+            if (coverHeight > room) {
+                coverHeight = room;
+                coverWidth = Math.max(1, Math.round(coverHeight / ratio));
+            }
+            int cardWidth = coverWidth, cardHeight = coverHeight + header;
             for (Card card : cards) card.measure(MeasureSpec.makeMeasureSpec(cardWidth, MeasureSpec.EXACTLY),
                     MeasureSpec.makeMeasureSpec(cardHeight, MeasureSpec.EXACTLY));
+        }
+
+        private float displayRatio() {
+            if (Build.VERSION.SDK_INT >= 30) {
+                android.graphics.Rect bounds = getContext().getSystemService(android.view.WindowManager.class)
+                        .getMaximumWindowMetrics().getBounds();
+                if (bounds.width() > 0 && bounds.height() > 0) return bounds.height() / (float) bounds.width();
+            }
+            android.util.DisplayMetrics metrics = getResources().getDisplayMetrics();
+            return metrics.widthPixels > 0 ? metrics.heightPixels / (float) metrics.widthPixels : 2f;
         }
 
         @Override protected void onLayout(boolean changed, int left, int top, int right, int bottom) {
