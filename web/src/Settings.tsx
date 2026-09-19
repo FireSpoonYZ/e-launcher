@@ -125,16 +125,17 @@ function RemoteVoiceForm({kind, remote, close, saved}: {kind: 'stt'|'tts'; remot
   const t = useText(); const action = useAction();
   const [url, setUrl] = useState(remote.baseUrl); const [model, setModel] = useState(remote.model);
   const [voice, setVoice] = useState(remote.voice); const [key, setKey] = useState('');
-  const save = (apiKey?: string) => action.run(async () => { saved(await Device.setVoiceRemote({kind, baseUrl: url, model, voice, apiKey})); close(); });
+  const save = (apiKey?: string) => action.run(async () => { saved(await Device.setVoiceRemote({kind, baseUrl: url, model, voice, apiKey: apiKey ?? (url !== remote.baseUrl ? '' : undefined)})); close(); });
   return <Dialog open title={kind === 'tts' ? t('远程朗读模型','Remote speech model') : t('远程识别模型','Remote recognition model')} onOpenChange={value => !value && close()}>
     <form className="form" onSubmit={e => { e.preventDefault(); void save(key.trim() ? key : undefined); }}>
       <p className="secondary">{kind === 'tts'
         ? t('OpenAI 兼容接口，朗读调用 {地址}/audio/speech。地址须为 https。API Key 仅保存在本机，不会显示或导出。','OpenAI-compatible endpoint: {base}/audio/speech. The base URL must be https; the API key stays on this device.')
         : t('OpenAI 兼容接口，识别调用 {地址}/audio/transcriptions。地址须为 https。API Key 仅保存在本机，不会显示或导出。','OpenAI-compatible endpoint: {base}/audio/transcriptions. The base URL must be https; the API key stays on this device.')}</p>
+      {kind === 'tts' && <button type="button" className="button secondary-button" onClick={() => { setUrl('https://kokoro.firespoon.cn:3000/v1'); setModel('kokoro'); setVoice('zf_xiaoxiao'); setKey(''); }}>{t('使用自部署 Kokoro（需填写独立 API Key）','Use self-hosted Kokoro (separate API key required)')}</button>}
       <label>{t('接口地址','Base URL')}<input inputMode="url" placeholder="https://api.openai.com/v1" value={url} onChange={e => setUrl(e.target.value)}/></label>
       <label>API Key<input type="password" autoComplete="new-password" value={key} onChange={e => setKey(e.target.value)} placeholder={remote.configured ? t('已保存，留空保持不变','Saved; leave blank to keep') : t('可选','Optional')}/></label>
       <label>{t('模型','Model')}<input value={model} onChange={e => setModel(e.target.value)}/></label>
-      {kind === 'tts' && <label>{t('音色（voice）','Voice')}<input value={voice} onChange={e => setVoice(e.target.value)}/></label>}
+      {kind === 'tts' && <label>{t('音色（voice）','Voice')}{model.toLowerCase() === 'kokoro' ? <select value={voice} onChange={e => setVoice(e.target.value)}>{!['zf_xiaobei','zf_xiaoni','zf_xiaoxiao','zf_xiaoyi','zm_yunjian','zm_yunxi','zm_yunxia','zm_yunyang'].includes(voice) && <option value={voice}>{voice || t('服务默认','Server default')}</option>}{['zf_xiaobei','zf_xiaoni','zf_xiaoxiao','zf_xiaoyi','zm_yunjian','zm_yunxi','zm_yunxia','zm_yunyang'].map(id => <option key={id} value={id}>{id}</option>)}</select> : <input value={voice} onChange={e => setVoice(e.target.value)}/>}</label>}
       <ErrorNotice error={action.error}/>
       <div className="dialog-actions"><button type="button" className="button secondary-button" disabled={action.busy || !remote.configured} onClick={() => void save('')}>{t('清除 API Key','Remove API key')}</button><button className="button" disabled={action.busy}>{t('保存','Save')}</button></div>
     </form>

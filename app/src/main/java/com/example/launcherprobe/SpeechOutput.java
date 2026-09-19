@@ -40,6 +40,7 @@ final class SpeechOutput {
     private boolean ttsReady, ttsFailed;
     private final List<Runnable> waitingForTts = new ArrayList<>();
     private volatile MediaPlayer player;
+    private volatile PcmSpeech pcm;
     private volatile okhttp3.Call remoteCall;
     private volatile boolean speaking;
     private java.util.concurrent.BlockingQueue<String> streamQueue = new java.util.concurrent.LinkedBlockingQueue<>();
@@ -93,7 +94,9 @@ final class SpeechOutput {
     void offer(String markdown) {
         String text = SpeechText.plain(markdown);
         if (text.isEmpty() || streamToken != generation.get()) return;
-        if (VoiceSettings.REMOTE.equals(settings.ttsEngine())) streamQueue.offer(text);
+        if (VoiceSettings.REMOTE.equals(settings.ttsEngine())) {
+            for (String chunk : SpeechText.chunks(text, REMOTE_CHUNK)) streamQueue.offer(chunk);
+        }
         else speakStreamChunk(streamToken, text);
     }
 
@@ -116,16 +119,23 @@ final class SpeechOutput {
         requestFocus();
         if (VoiceSettings.REMOTE.equals(settings.ttsEngine())) {
             VoiceSettings.Remote config = settings.remote(VoiceSettings.TTS);
-            remote.execute(() -> speakRemote(token, config, SpeechText.chunks(text, REMOTE_CHUNK), text));
+            if ("kokoro".equalsIgnoreCase(config.model)) {
+                java.util.concurrent.BlockingQueue<String> queue = new java.util.concurrent.LinkedBlockingQueue<>();
+                queue.addAll(SpeechText.chunks(text, REMOTE_CHUNK));
+                queue.add(STREAM_END);
+                remote.execute(() -> streamPcm(token, config, queue, false));
+            } else remote.execute(() -> speakRemote(token, config, SpeechText.chunks(text, REMOTE_CHUNK), text));
         } else speakSystem(token, text);
     }
 
-    void stop() {
+    synchronized void stop() {
         generation.incrementAndGet();
         streamQueue.clear();
         streamDrained = null;
         okhttp3.Call call = remoteCall;
         if (call != null) call.cancel();
+        PcmSpeech currentPcm = pcm;
+        if (currentPcm != null) currentPcm.stop();
         MediaPlayer current = player;
         if (current != null) main.post(() -> { try { current.stop(); } catch (IllegalStateException ignored) { } });
         if (Looper.myLooper() == Looper.getMainLooper()) {
@@ -214,8 +224,12 @@ final class SpeechOutput {
         if (--streamPending <= 0 && streamEnded) finishStream(token);
     }
 
-    /** Plays streamed sentences as they arrive, synthesizing the next one while the current plays. */
+    /** Kokoro sends PCM directly; other endpoints retain compressed-file compatibility. */
     private void streamRemote(int token, VoiceSettings.Remote config, java.util.concurrent.BlockingQueue<String> queue) {
+        if ("kokoro".equalsIgnoreCase(config.model)) {
+            streamPcm(token, config, queue, true);
+            return;
+        }
         File dir = new File(context.getCacheDir(), "voice");
         dir.mkdirs();
         int index = 0;
@@ -242,6 +256,61 @@ final class SpeechOutput {
                 if (token != generation.get()) return;
                 Toast.makeText(context, UiText.get(context, "远程朗读失败：") + message, Toast.LENGTH_LONG).show();
                 finishStream(token);
+            });
+        }
+    }
+
+    /** A single track spans the reply; subsequent requests start while buffered samples still play. */
+    private void streamPcm(int token, VoiceSettings.Remote config,
+            java.util.concurrent.BlockingQueue<String> queue, boolean streaming) {
+        PcmSpeech owned = null;
+        String problem = null;
+        try {
+            owned = new PcmSpeech(ATTRIBUTES);
+            synchronized (this) {
+                if (token != generation.get()) return;
+                pcm = owned;
+            }
+            boolean received = false;
+            while (token == generation.get()) {
+                String text = queue.poll(200, TimeUnit.MILLISECONDS);
+                if (text == null) continue;
+                if (STREAM_END.equals(text)) break;
+                okhttp3.Call call = RemoteVoiceApi.speechCall(config, text, settings.speechRate());
+                remoteCall = call;
+                if (token != generation.get()) { call.cancel(); break; }
+                try (okhttp3.Response response = RemoteVoiceApi.speechResponse(call)) {
+                    okhttp3.MediaType type = response.body().contentType();
+                    if (type == null || !"audio".equals(type.type()) || !"pcm".equals(type.subtype()))
+                        throw new java.io.IOException("Kokoro 必须返回 24 kHz 单声道 PCM 音频");
+                    if (!received) {
+                        int session = owned.sessionId();
+                        main.post(() -> { if (token == generation.get()) startMeter(token, session); });
+                    }
+                    received = true;
+                    owned.append(response.body().byteStream(), () -> token == generation.get());
+                } finally {
+                    if (remoteCall == call) remoteCall = null;
+                }
+            }
+            if (received) owned.drain(() -> token == generation.get());
+        } catch (InterruptedException stopped) {
+            Thread.currentThread().interrupt();
+        } catch (Exception failure) {
+            problem = failure.getMessage() == null ? failure.getClass().getSimpleName() : failure.getMessage();
+        } finally {
+            synchronized (this) {
+                if (pcm == owned) pcm = null;
+            }
+            if (owned != null) owned.close();
+            String message = problem;
+            main.post(() -> {
+                if (token != generation.get()) return;
+                stopMeter();
+                if (message != null) Toast.makeText(context, "远程朗读失败：" + message, Toast.LENGTH_LONG).show();
+                // Do not switch speakers or replay the reply when a partially played stream fails.
+                if (streaming) finishStream(token);
+                else done(token);
             });
         }
     }

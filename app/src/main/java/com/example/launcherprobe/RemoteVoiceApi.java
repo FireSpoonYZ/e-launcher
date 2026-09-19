@@ -49,12 +49,31 @@ final class RemoteVoiceApi {
     static Call speechCall(VoiceSettings.Remote remote, String text, float speed) {
         requireConfigured(remote);
         try {
-            JSONObject json = new JSONObject().put("model", remote.model).put("input", text).put("response_format", "mp3");
+            JSONObject json = new JSONObject().put("model", remote.model).put("input", text)
+                    .put("response_format", "kokoro".equalsIgnoreCase(remote.model) ? "pcm" : "mp3");
+            if ("kokoro".equalsIgnoreCase(remote.model)) json.put("stream", true);
             if (!remote.voice.isEmpty()) json.put("voice", remote.voice);
             if (Math.abs(speed - 1f) > .01f) json.put("speed", speed);
             return CLIENT.newCall(request(remote, "/audio/speech")
                     .post(RequestBody.create(MediaType.get("application/json"), json.toString())).build());
         } catch (org.json.JSONException impossible) { throw new IllegalStateException(impossible); }
+    }
+
+    /** Opens speech without buffering the body. The caller owns and closes the response. */
+    static Response speechResponse(Call call) throws IOException {
+        Response response = call.execute();
+        try {
+            if (!response.isSuccessful()) throw failure(response.code(), bodyText(response));
+            ResponseBody body = response.body();
+            MediaType type = body == null ? null : body.contentType();
+            if (body == null) throw new IOException("语音合成返回了空音频");
+            if (type != null && ("json".equals(type.subtype()) || "text".equals(type.type())))
+                throw failure(response.code(), bodyText(response));
+        } catch (IOException failure) {
+            response.close();
+            throw failure;
+        }
+        return response;
     }
 
     static byte[] audio(Call call) throws IOException {

@@ -186,6 +186,14 @@ ADB 救援（保持电脑授权和连接；若设备不接受命令，从通知�
 
 **真实手指测试、ADB 注入触摸、设置值读回分别记录。** `input keyevent` 仅证明按键动作路径，不能冒充手势验收；ADB swipe 也不能代替手指最终验收。
 
+## 自部署 Kokoro 朗读
+
+在设置 → 语音 → 远程朗读模型中选择“使用自部署 Kokoro”，填写该服务的独立 API Key，再把朗读引擎设为远程。预设使用 `model=kokoro`、`voice=zf_xiaoxiao`；音色下拉框提供 8 个固定中文音色。更换接口地址时不会沿用旧服务的密钥。
+
+Kokoro 路径请求流式 PCM（24 kHz、单声道、16 位小端），使用 AudioTrack 边接收边播放，一段回复复用音频输出；停止时取消请求并清空播放缓冲。流式失败会显示错误，不切换系统声音或从头重读。其他模型继续走原有压缩音频播放路径。仅填写模型名不会自动迁移已保存的服务地址或 API Key。
+
+当前自部署服务使用 Kokoro v1.0 权重；音色固定不代表韵律和发音已经通过试听。验收时应测试中文夹英文、数字、长回复、连续打断和网络中断，区分 HTTP 响应头时间、首个音频块时间与手机实际出声时间。
+
 ## 源码与许可证
 
 本项目包含 Ogesture 的 AGPLv3 派生源码，以及 Operit Shower 的 LGPL-3.0 派生源码。主项目完整许可证见 [LICENSE](LICENSE)，Operit 许可证副本见 [licenses/Operit-LGPL-3.0.txt](licenses/Operit-LGPL-3.0.txt)；固定上游版本、真实移植文件和修改见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。分发 APK 时须遵守对应源码与构建材料提供义务，仅给未修改上游链接不足以满足本修改版的义务。
