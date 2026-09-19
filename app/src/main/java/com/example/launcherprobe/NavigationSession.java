@@ -25,7 +25,6 @@ final class NavigationSession {
         if (running) return enabled;
         error = "";
         if (!ports.ready()) return fail("需要已连接的无障碍服务及 ADB 写设置授权。");
-        if (ports.pending() && !recover()) return false;
         try {
             ports.attach();
         } catch (RuntimeException exception) {
@@ -43,6 +42,13 @@ final class NavigationSession {
         }
         enabled = true;
         return true;
+    }
+
+    void suspend() {
+        if (!running) return;
+        enabled = false;
+        running = false;
+        ports.detach();
     }
 
     boolean failSafeStop() {
@@ -67,7 +73,9 @@ final class NavigationSession {
 
     boolean recover() {
         if (running) return true;
-        return stop();
+        if (!ports.pending()) return stop();
+        if (!ports.ready()) return true;
+        return start();
     }
 
     private boolean fail(String message) { error = message; return false; }

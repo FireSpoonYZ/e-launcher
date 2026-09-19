@@ -115,7 +115,7 @@ public final class GestureService extends AccessibilityService {
     static boolean isGestureHeld() { return instance != null && instance.held; }
 
     static boolean safeToRebind(Context context) {
-        return instance == null && !prefs(context).getBoolean("pending_restore", false);
+        return instance == null;
     }
 
     private static boolean writeNavigation(Context context, boolean hidden) {
@@ -428,7 +428,7 @@ public final class GestureService extends AccessibilityService {
         instance = this;
         session = coordinator(this, this);
         getSystemService(DisplayManager.class).registerDisplayListener(displays, handler);
-        recover(this); // Interrupted sessions restore buttons; only the user's button starts again.
+        recover(this); // Re-hide and resume if the user still wants gestures after an update.
     }
 
     @Override
@@ -456,10 +456,9 @@ public final class GestureService extends AccessibilityService {
         clearObservation();
         agentHandler.removeCallbacksAndMessages(null);
         if (session != null) {
-            session.stop();
+            session.suspend();
             message = session.error();
         }
-        // System unbinding cannot be refused, even if restoration failed. Marker stays durable.
         detachWindows();
         getSystemService(DisplayManager.class).unregisterDisplayListener(displays);
         if (instance == this) instance = null;

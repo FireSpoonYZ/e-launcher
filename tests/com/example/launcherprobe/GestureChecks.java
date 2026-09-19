@@ -298,18 +298,29 @@ public final class GestureChecks {
         assert !session.stop() && session.running() && p.pending && p.attached;
         p.failSave = false;
         assert session.stop();
-        p.pending = true; // Interrupted process: new coordinator, no live overlays.
+        p.failHide = false;
+        p.pending = true;
+        p.attached = false;
+        p.allowed = false;
         NavigationSession reconnected = new NavigationSession(p);
         p.calls.clear();
-        p.failShow = true;
-        assert !reconnected.recover() && p.pending;
-        assert !reconnected.start() && !p.calls.contains("attach");
-        p.failShow = false;
+        assert reconnected.recover() && p.pending && p.calls.isEmpty();
+        p.allowed = true;
         p.calls.clear();
-        assert reconnected.recover();
-        assert p.calls.toString().equals("[show, save:false, detach]");
-        p.failHide = false;
+        assert reconnected.recover() && reconnected.enabled();
+        assert p.calls.toString().equals("[attach, save:true, hide]") : p.calls;
+        p.calls.clear();
+        reconnected.suspend();
+        assert p.pending && !reconnected.running() && !p.attached;
+        assert p.calls.toString().equals("[detach]") : p.calls;
+        p.calls.clear();
+        assert reconnected.recover() && reconnected.enabled();
+        assert p.calls.toString().equals("[attach, save:true, hide]") : p.calls;
+        p.calls.clear();
+        assert reconnected.stop();
+        assert p.calls.toString().equals("[show, save:false, detach]") : p.calls;
         p.failSave = true;
+        p.calls.clear();
         assert !reconnected.start() && !reconnected.running() && !p.attached;
         assert !p.calls.contains("hide");
     }
