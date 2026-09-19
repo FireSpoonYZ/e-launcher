@@ -325,7 +325,7 @@ final class AppSwitcherView extends FrameLayout {
         final ImageView badge;
         Art art;
         boolean pending;
-        float slot, lift;
+        float slot, lift, blurRadius = -1;
 
         Card(App app, int index) {
             super(AppSwitcherView.this.getContext());
@@ -386,6 +386,16 @@ final class AppSwitcherView extends FrameLayout {
             TextView caption = (TextView) identity.getChildAt(2);
             caption.setText("正在载入…"); caption.setTextColor(MUTED);
             ((GradientDrawable) cover.getBackground()).setColors(plateColors(PLACEHOLDER));
+        }
+
+        /** Depth of field: only the card in front is sharp, so the stack reads as one subject. */
+        void blur(float radius) {
+            if (Build.VERSION.SDK_INT < 31) return;
+            float step = Math.round(radius);
+            if (step == blurRadius) return;
+            blurRadius = step;
+            cover.setRenderEffect(step <= 0 ? null : android.graphics.RenderEffect.createBlurEffect(
+                    step, step, android.graphics.Shader.TileMode.CLAMP));
         }
 
         @Override public void onInitializeAccessibilityNodeInfo(AccessibilityNodeInfo info) {
@@ -525,6 +535,7 @@ final class AppSwitcherView extends FrameLayout {
                 card.setScaleX(scale * (1 - .08f * raised)); card.setScaleY(scale * (1 - .08f * raised));
                 card.setTranslationZ(card.lift < 0 ? dp(40) : dp(20) - relative * dp(2));
                 card.setAlpha(alpha * (1 - .8f * raised));
+                card.blur(dp(5) * Math.min(Math.max(depth, passed * 2), 2));
                 card.body.getChildAt(0).setAlpha(Math.max(0, 1 - Math.abs(relative)));
                 card.setContentDescription((i == selected ? "打开 " : "切换到 ") + card.app.label());
                 card.setSelected(i == selected);
