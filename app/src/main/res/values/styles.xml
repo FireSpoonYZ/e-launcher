@@ -7,4 +7,11 @@
         <item name="android:navigationBarColor">@android:color/black</item>
         <item name="android:windowSoftInputMode">adjustResize</item>
     </style>
+    <style name="AppSwitcherTheme" parent="android:style/Theme.Material.NoActionBar">
+        <item name="android:windowBackground">#10272f</item>
+        <item name="android:windowAnimationStyle">@null</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
+        <item name="android:colorAccent">#70d4df</item>
+    </style>
 </resources>

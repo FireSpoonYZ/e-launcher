@@ -380,7 +380,7 @@ public final class DesktopSettingsActivity extends androidx.activity.ComponentAc
         LinearLayout safetyBox = group();
         TextView safety = text("可使用 Shizuku 修复写设置授权和本应用的无障碍服务；也可通过电脑 ADB 手动授权：\n"
                 + GestureService.GRANT_COMMAND
-                + "\n\n左右内滑返回；底边上滑回桌面；上滑停留打开最近任务。"
+                + "\n\n左右内滑返回；底边上滑回桌面；上滑短暂停留打开应用切换。"
                 + "启用会改变 HyperOS 导航设置。停用后请目视确认三键已恢复，再撤权或卸载。"
                 + "\n\nPi 的 Operit Shower 工具也使用同一 Shizuku 授权，仅按工具调用创建和操作虚拟屏；不会操作手机主屏。", 12, colors.muted);
         safety.setPadding(0, dp(8), 0, dp(8));

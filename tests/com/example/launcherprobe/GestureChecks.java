@@ -63,11 +63,13 @@ public final class GestureChecks {
         actions.clear();
         bottom.down(100, 200, 100);
         bottom.move(100, 180, 120);
-        clock.advance(250);
-        bottom.move(100, 160, 370);
-        clock.advance(250);
+        clock.advance(150);
+        bottom.move(100, 160, 270); // Continued travel restarts the hold.
+        clock.advance(150);
+        bottom.move(102, 158, 420); // Small drift must not restart the hold.
+        clock.advance(49);
         assert actions.isEmpty();
-        clock.advance(50);
+        clock.advance(1); // Exactly 200 ms after the last deliberate movement, before UP.
         assert !feedback.visible;
         bottom.move(100, 140, 680);
         assert !feedback.visible;
@@ -123,12 +125,12 @@ public final class GestureChecks {
                 () -> actions.add("home"), () -> actions.add("recents"),
                 samples -> actions.add("replay"), feedback);
         slowBottom.down(100, 200, 0);
-        for (int step = 1; step <= 4; step++) {
-            slowBottom.move(100, 200 - step * 20, 20 + (step - 1) * 250);
-            slowClock.advance(250);
+        for (int step = 1; step <= 12; step++) {
+            slowBottom.move(100, 200 - step * 14, 20 + (step - 1) * 100);
+            slowClock.advance(100);
         }
-        slowBottom.move(100, 100, 1020);
-        slowBottom.up(100, 100, 1030);
+        slowBottom.move(100, 20, 1220);
+        slowBottom.up(100, 20, 1230);
         slowClock.advance(400);
         assert !feedback.visible;
         assert actions.toString().equals("[home]") : actions;
