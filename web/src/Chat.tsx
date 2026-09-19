@@ -1,6 +1,6 @@
 import { memo, useEffect, useRef, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { Archive, ArchiveRestore, ArrowDown, ArrowUp, Camera, Check, ChevronDown, ChevronRight, Clock3, Copy, GitBranch, Image, LoaderCircle, Menu, Mic, Paperclip, Plus, RotateCcw, Search, Settings, Share2, Square, SquarePen, Trash2, Undo2 } from 'lucide-react';
+import { Archive, ArchiveRestore, ArrowDown, ArrowUp, Camera, Check, ChevronDown, ChevronRight, Clock3, Copy, GitBranch, Image, LoaderCircle, Menu, Mic, Paperclip, Plus, RotateCcw, Search, Settings, Share2, Square, SquarePen, Trash2, Undo2, Volume2 } from 'lucide-react';
 import { Chat, Device, NativeSettings, ScheduledTasks, type ChatSnapshot, type Conversation, type ConversationNode, type ConversationSummary, type ExtensionUiState, type NativeEvent } from './native';
 import { archiveRemainingParts, isArchived } from './archive';
 import { AttachmentList } from './AttachmentList';
@@ -106,7 +106,7 @@ const MessageView = memo(function MessageView({node, toolResults, pending}: {nod
     {message.content && <Markdown text={message.content}/>}
     {message.toolCalls.map((tool, index) => <ToolCallView key={toolCallKey(node.id, index)} tool={tool} results={toolResults.get(toolCallKey(node.id, index)) ?? []} pending={pending}/>)}
     {message.incomplete && <small className="secondary">{t('尚未完成','Not completed')}</small>}
-    {message.content && message.role === 'assistant' && <div className="message-actions"><button className="icon-button" aria-label={t('复制','Copy')} onClick={() => action.run(async () => { await navigator.clipboard.writeText(message.content!); setCopied(true); })}>{copied ? <Check/> : <Copy/>}</button><button className="icon-button" aria-label={t('分享','Share')} onClick={() => action.run(() => Device.share({text:message.content!,title:'Pi'}))}><Share2/></button></div>}
+    {message.content && message.role === 'assistant' && <div className="message-actions"><button className="icon-button" aria-label={t('复制','Copy')} onClick={() => action.run(async () => { await navigator.clipboard.writeText(message.content!); setCopied(true); })}>{copied ? <Check/> : <Copy/>}</button><button className="icon-button" aria-label={t('分享','Share')} onClick={() => action.run(() => Device.share({text:message.content!,title:'Pi'}))}><Share2/></button><button className="icon-button" aria-label={t('朗读','Read aloud')} onClick={() => action.run(() => Device.speak({text:message.content!}))}><Volume2/></button></div>}
     <ErrorNotice error={action.error}/>
   </article>;
 });
