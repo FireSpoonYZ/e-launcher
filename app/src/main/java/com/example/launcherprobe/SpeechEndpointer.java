@@ -12,10 +12,13 @@ final class SpeechEndpointer {
     private int elapsed, silence, voiced;
     private State state = State.WAITING;
     private float level;
+    private boolean speechActive;
 
     State state() { return state; }
     /** 0..1 loudness of the last frame, for the listening indicator. */
     float level() { return level; }
+    /** Current voiced frame after onset confirmation, excluding the trailing end-of-turn silence. */
+    boolean speechActive() { return speechActive; }
     boolean heardSpeech() { return state == State.SPEAKING || state == State.DONE || state == State.TOO_LONG; }
 
     State feed(short[] frame, int count) {
@@ -40,6 +43,7 @@ final class SpeechEndpointer {
             silence = speech ? 0 : silence + FRAME_MS;
             if (silence >= END_SILENCE_MS) state = State.DONE;
         }
+        speechActive = speech && state == State.SPEAKING;
         if (elapsed >= MAX_MS && (state == State.WAITING || state == State.SPEAKING))
             state = state == State.SPEAKING ? State.TOO_LONG : State.NO_SPEECH;
         return state;

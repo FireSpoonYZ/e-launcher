@@ -76,6 +76,16 @@ final class ChatCoordinator {
         return send(conversationId, text, Collections.emptyList(), null, false);
     }
 
+    /** Starts the fresh chat a spoken conversation gets, and tells every open UI to follow it. Any thread. */
+    String startVoiceConversation() {
+        store.newConversation();
+        store.saveDraft("");
+        store.saveDraftAttachments(Collections.emptyList());
+        String id = store.activeId();
+        emit(id, null, "conversationSwitched", null, new JSONObject());
+        return id;
+    }
+
     String sendScheduled(String conversationId, String title, String prompt) throws Exception {
         store.createBackgroundConversation(conversationId, title);
         return send(conversationId, prompt, Collections.emptyList(), null, true);

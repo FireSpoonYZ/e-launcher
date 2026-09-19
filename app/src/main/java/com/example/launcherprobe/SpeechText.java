@@ -21,6 +21,19 @@ final class SpeechText {
 
     private SpeechText() { }
 
+    /**
+     * Index just past the last sentence end in a reply that is still streaming, or 0 when none is complete yet.
+     * Text before it can be read aloud; the rest waits for more deltas.
+     */
+    static int lastBoundary(String text) {
+        for (int i = text.length() - 1; i >= 0; i--) {
+            char c = text.charAt(i);
+            if ("。！？!?；;\n".indexOf(c) >= 0) return i + 1;
+            if (c == '.' && i + 1 < text.length() && Character.isWhitespace(text.charAt(i + 1))) return i + 1;
+        }
+        return 0;
+    }
+
     static String plain(String markdown) {
         if (markdown == null) return "";
         String text = FENCE.matcher(markdown).replaceAll("\n代码略。\n");
@@ -46,8 +59,7 @@ final class SpeechText {
         return out.toString();
     }
 
-    /** Splits at sentence boundaries; a sentence longer than max is split at max. */
-    static List<String> chunks(String text, int max) {
+    /** Splits at sentence boundaries; a sentence longer than max is split at max. */    static List<String> chunks(String text, int max) {
         List<String> result = new ArrayList<>();
         StringBuilder current = new StringBuilder(), sentence = new StringBuilder();
         for (int i = 0; i < text.length(); i++) {

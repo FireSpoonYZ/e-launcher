@@ -50,6 +50,17 @@ The Android Pi runtime bundles `@earendil-works/pi-coding-agent`, `pi-agent-core
 
 The APK also includes the complete official **npm 11.6.2** distribution and its bundled dependencies, fetched from `https://registry.npmjs.org/npm/-/npm-11.6.2.tgz` with the exact SHA-512 integrity recorded in `pi-runtime/package-lock.json` and checked by `scripts/prepare-pi-runtime.ps1`. npm identifies its license as **Artistic License 2.0**; its `LICENSE` file and bundled dependency notices are retained inside the versioned npm payload. Source is available at https://github.com/npm/cli/tree/v11.6.2.
 
+## Codex Horizon reference material
+
+The voice appearance reference in `app/src/main/res/raw/voice_horizon.glsl` and
+`voice_watercolor.webp` comes from the installed OpenAI Codex desktop distribution
+26.908.9136.0, assets `app-initial-bcc2ff475eb6.js` (Horizon material) and
+`watercolor-7f01d7071d0b.webp`. Attribution: OpenAI. The desktop distribution is not
+the Apache-licensed Codex CLI repository. No open-source license or redistribution
+grant for these desktop assets was established during the visual-reference work.
+The Android adapter replaces the WebGL uniform block with individual GLES uniforms
+and composites the material through this application's lowercase e mask.
+
 ## Distribution
 
 When conveying this APK, satisfy AGPLv3's corresponding-source requirements, including these modifications and the material needed to build them. A link to the unmodified upstream repository alone is not corresponding source for this APK. Preserve this notice and the complete license; consult `LICENSE` for the applicable source-delivery options and the network-interaction provisions if functionality later changes. This project makes no warranty of compatibility with a particular ROM.

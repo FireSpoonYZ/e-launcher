@@ -16,7 +16,7 @@ final class VoiceSettings {
     static final List<String> SPEAK_MODES = Arrays.asList(SPEAK_OFF, SPEAK_AFTER_VOICE, SPEAK_ALWAYS);
     static final String WAKE_LOW = "low", WAKE_MEDIUM = "medium", WAKE_HIGH = "high";
     static final List<String> WAKE_SENSITIVITIES = Arrays.asList(WAKE_LOW, WAKE_MEDIUM, WAKE_HIGH);
-    static final String DEFAULT_WAKE_WORDS = "你好小易";
+    static final String DEFAULT_WAKE_WORDS = "小E小E";
 
     /** OpenAI-compatible endpoint settings for one direction (transcription or speech). */
     static final class Remote {

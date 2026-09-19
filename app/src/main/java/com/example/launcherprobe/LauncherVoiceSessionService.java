@@ -14,11 +14,19 @@ public final class LauncherVoiceSessionService extends VoiceInteractionSessionSe
     @Override public VoiceInteractionSession onNewSession(Bundle args) { return new Session(this); }
 
     /** Shows the listening panel over the current app and sends the request to the active conversation. */
-    static final class Session extends VoiceInteractionSession {
+    static final class Session extends VoiceInteractionSession implements VoiceSession.Host {
         private FrameLayout root;
         private VoiceManager.Presented presented;
+        private VoiceSession conversation;
 
         Session(Context context) { super(context); }
+
+        @Override public Context context() { return getContext(); }
+
+        @Override public void closed() {
+            conversation = null;
+            hide();
+        }
 
         @Override public View onCreateContentView() {
             root = new FrameLayout(getContext());
@@ -29,14 +37,28 @@ public final class LauncherVoiceSessionService extends VoiceInteractionSessionSe
 
         @Override public void onShow(Bundle args, int showFlags) {
             super.onShow(args, showFlags);
+            VoiceSession.applyGlass(getWindow().getWindow());
             boolean fromWake = args != null && args.getBoolean(LauncherVoiceInteractionService.EXTRA_WAKE);
+            if (VoiceSession.supported(getContext())) { startConversation(fromWake); return; }
             VoiceManager.get(getContext()).listenInSession(this, fromWake);
         }
 
         @Override public void onHide() {
+            if (conversation != null) { VoiceSession ending = conversation; conversation = null; ending.close(); }
             if (presented != null) presented.cancelInput();
             presented = null;
             super.onHide();
+        }
+
+        /** The continuous spoken conversation, filling the session window. */
+        private void startConversation(boolean fromWake) {
+            if (root == null) onCreateContentView();
+            conversation = VoiceManager.get(getContext()).openSession(this);
+            root.setBackgroundColor(Color.TRANSPARENT);
+            root.setOnClickListener(null);
+            root.removeAllViews();
+            root.addView(conversation.view(), new FrameLayout.LayoutParams(-1, -1));
+            conversation.start(fromWake);
         }
 
         /** Called by VoiceManager: places the panel at the bottom of the session window. */
@@ -56,7 +78,8 @@ public final class LauncherVoiceSessionService extends VoiceInteractionSessionSe
         }
 
         private void finishSession() {
-            if (presented != null) presented.cancelInput();
+            if (conversation != null) conversation.close();
+            else if (presented != null) presented.cancelInput();
             else hide();
         }
     }

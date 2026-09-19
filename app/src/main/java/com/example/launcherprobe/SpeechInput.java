@@ -19,6 +19,7 @@ import java.util.Arrays;
 abstract class SpeechInput {
     interface Listener {
         void onLevel(float level);
+        default void onSpeechActivity(boolean speaking) { }
         void onPartial(String text);
         void onProcessing();
         void onResult(String text);
@@ -116,10 +117,12 @@ abstract class SpeechInput {
                     : SpeechRecognizer.createSpeechRecognizer(context, component);
             recognizer.setRecognitionListener(new RecognitionListener() {
                 @Override public void onReadyForSpeech(Bundle params) { }
-                @Override public void onBeginningOfSpeech() { }
+                @Override public void onBeginningOfSpeech() { deliver(() -> listener.onSpeechActivity(true)); }
                 @Override public void onRmsChanged(float db) { deliver(() -> listener.onLevel(Math.max(0, Math.min(1, (db + 2) / 12)))); }
                 @Override public void onBufferReceived(byte[] buffer) { }
-                @Override public void onEndOfSpeech() { deliver(() -> listener.onProcessing()); }
+                @Override public void onEndOfSpeech() {
+                    deliver(() -> { listener.onSpeechActivity(false); listener.onProcessing(); });
+                }
                 @Override public void onError(int code) {
                     if (!partial.isEmpty() && (code == SpeechRecognizer.ERROR_NO_MATCH || code == SpeechRecognizer.ERROR_SPEECH_TIMEOUT)) result(partial);
                     else error(message(code));

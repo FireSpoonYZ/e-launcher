@@ -58,6 +58,7 @@ final class VoiceManager {
     private final Set<String> voiceTurns = new HashSet<>();
     private final ExecutorService sender = Executors.newSingleThreadExecutor();
     private volatile Pending pending;
+    private volatile VoiceSession session;
     private Presented presented;
 
     private static final class Pending {
@@ -74,14 +75,28 @@ final class VoiceManager {
     }
 
     VoiceSettings settings() { return settings; }
+    SpeechOutput output() { return output; }
     boolean speaking() { return output.speaking(); }
     void speak(String markdown) { output.speak(markdown); }
     void stopSpeaking() { output.stop(); }
 
-    /** True while dictation, a wake hand-off or read-aloud needs the microphone quiet. Any thread. */
+    /** Opens a continuous spoken conversation in the given window, replacing any session already running. */
+    VoiceSession openSession(VoiceSession.Host host) {
+        if (session != null) session.close();
+        cancelListening();
+        output.prewarm();
+        VoiceSession opened = new VoiceSession(host, output);
+        session = opened;
+        releaseWakeHold();
+        return opened;
+    }
+
+    void sessionClosed(VoiceSession closed) { if (session == closed) session = null; }
+
+    /** True while dictation, a wake hand-off, a spoken conversation or read-aloud needs the microphone quiet. Any thread. */
     static boolean busy() {
         VoiceManager manager = instance;
-        return wakeHold || (manager != null && (manager.pending != null || manager.output.speaking()));
+        return wakeHold || (manager != null && (manager.pending != null || manager.session != null || manager.output.speaking()));
     }
 
     /** Any thread. */
@@ -112,8 +127,7 @@ final class VoiceManager {
     /** The assistant session was shown, by a wake word or the system assist gesture. */
     void listenInSession(LauncherVoiceSessionService.Session session, boolean fromWake) {
         output.stop();
-        String conversationId = ChatCoordinator.get(context).conversationId();
-        Callback spoken = spokenRequest(conversationId);
+        String conversationId = ChatCoordinator.get(context).conversationId();        Callback spoken = spokenRequest(conversationId);
         // The panel hides the session when it ends; failures before it appears must hide it too.
         Callback callback = new Callback() {
             @Override public void onText(String text) { spoken.onText(text); }
@@ -131,16 +145,22 @@ final class VoiceManager {
         }, fromWake ? 250 : 0);
     }
 
-    /** Wake word while this app is not the assistant: the launcher's dialog if visible, otherwise no UI. */
+    /** Wake word while this app is not the assistant: the spoken conversation if the launcher is visible, else no UI. */
     void onWake(String keyword) {
-        if (pending != null) { wakeHold = false; return; }
+        if (pending != null || session != null) { wakeHold = false; return; }
         output.stop();
+        Activity visible = MainActivity.resumed();
+        if (visible != null && VoiceSession.supported(context)) {
+            // The hold stays until the session takes the microphone, so the detector does not grab it back meanwhile.
+            VoiceSessionActivity.open(visible, true);
+            return;
+        }
         String conversationId = ChatCoordinator.get(context).conversationId();
         Callback callback = spokenRequest(conversationId);
         cue();
         MAIN.postDelayed(() -> {
-            Activity visible = MainActivity.resumed();
-            if (visible != null) listen(visible, conversationId, callback);
+            Activity resumed = MainActivity.resumed();
+            if (resumed != null) listen(resumed, conversationId, callback);
             else listenHeadless(conversationId, callback);
         }, 250);
     }
@@ -288,6 +308,7 @@ final class VoiceManager {
     }
 
     private void chatChanged(List<AgentLoop.Message> messages, JSONObject event) {
+        if (session != null) return;
         if (!"end".equals(event.optString("type"))) return;
         String conversationId = event.optString("conversationId");
         WakeWordService.showProgress(null);

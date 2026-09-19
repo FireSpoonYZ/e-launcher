@@ -113,10 +113,13 @@ final class ChatIcon extends Drawable {
                 paint.setStyle(Paint.Style.FILL);
                 canvas.drawRoundRect(6, 6, 18, 18, 2, 2, paint);
                 paint.setStyle(Paint.Style.STROKE); break;
+            case "mic-off":
             case "mic":
                 canvas.drawRoundRect(9, 3, 15, 14, 3, 3, paint);
                 canvas.drawArc(6, 6, 18, 18, 0, 180, false, paint);
-                line(canvas, 12, 18, 12, 21); break;
+                line(canvas, 12, 18, 12, 21);
+                if ("mic-off".equals(name)) line(canvas, 4, 3, 20, 21);
+                break;
             case "gauge":
                 canvas.drawArc(3, 5, 21, 23, 180, 180, false, paint);
                 line(canvas, 12, 14, 17, 10);

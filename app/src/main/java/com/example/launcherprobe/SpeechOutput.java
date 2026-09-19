@@ -42,6 +42,14 @@ final class SpeechOutput {
     private volatile MediaPlayer player;
     private volatile okhttp3.Call remoteCall;
     private volatile boolean speaking;
+    private java.util.concurrent.BlockingQueue<String> streamQueue = new java.util.concurrent.LinkedBlockingQueue<>();
+    private volatile boolean streamEnded;
+    private int streamToken = -1, streamPending;
+    private Runnable streamDrained;
+    interface PlaybackListener { void onPlayback(boolean active, float level); }
+    private PlaybackListener playbackListener;
+    private android.media.audiofx.Visualizer meter;
+    private int ttsAudioSession;
 
     SpeechOutput(Context context, VoiceSettings settings) {
         this.context = context.getApplicationContext();
@@ -50,6 +58,54 @@ final class SpeechOutput {
     }
 
     boolean speaking() { return speaking; }
+
+    /** Optional voice-mode animation feedback. Call on the main thread. */
+    void setPlaybackListener(PlaybackListener listener) {
+        playbackListener = listener;
+        if (listener == null) stopMeter();
+    }
+
+    /** Loads the system engine ahead of time so the first utterance does not pay the cold start. */
+    void prewarm() { main.post(() -> withTts(() -> { })); }
+
+    /**
+     * Starts reading a reply that is still being generated. Sentences arrive through offer(); endStream() marks the
+     * last one and drained runs on the main thread once everything has played. stop() abandons the stream.
+     */
+    void beginStream(Runnable drained) {
+        stop();
+        streamQueue = new java.util.concurrent.LinkedBlockingQueue<>();
+        streamEnded = false;
+        streamPending = 0;
+        streamDrained = drained;
+        streamToken = generation.get();
+        speaking = true;
+        requestFocus();
+        if (VoiceSettings.REMOTE.equals(settings.ttsEngine())) {
+            int token = streamToken;
+            VoiceSettings.Remote config = settings.remote(VoiceSettings.TTS);
+            java.util.concurrent.BlockingQueue<String> queue = streamQueue;
+            remote.execute(() -> streamRemote(token, config, queue));
+        }
+    }
+
+    /** One more piece of the reply to read, in Markdown. Main thread. */
+    void offer(String markdown) {
+        String text = SpeechText.plain(markdown);
+        if (text.isEmpty() || streamToken != generation.get()) return;
+        if (VoiceSettings.REMOTE.equals(settings.ttsEngine())) streamQueue.offer(text);
+        else speakStreamChunk(streamToken, text);
+    }
+
+    /** No more sentences will be offered. Main thread. */
+    void endStream() {
+        if (streamToken != generation.get()) return;
+        streamEnded = true;
+        if (VoiceSettings.REMOTE.equals(settings.ttsEngine())) streamQueue.offer(STREAM_END);
+        else if (streamPending == 0) finishStream(streamToken);
+    }
+
+    private static final String STREAM_END = "\u0000end";
 
     void speak(String markdown) {
         String text = SpeechText.plain(markdown);
@@ -66,11 +122,16 @@ final class SpeechOutput {
 
     void stop() {
         generation.incrementAndGet();
+        streamQueue.clear();
+        streamDrained = null;
         okhttp3.Call call = remoteCall;
         if (call != null) call.cancel();
         MediaPlayer current = player;
         if (current != null) main.post(() -> { try { current.stop(); } catch (IllegalStateException ignored) { } });
-        main.post(() -> { if (tts != null && ttsReady) tts.stop(); });
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            stopMeter();
+            if (tts != null && ttsReady) tts.stop();
+        } else main.post(() -> { stopMeter(); if (tts != null && ttsReady) tts.stop(); });
         done(-1);
     }
 
@@ -91,6 +152,7 @@ final class SpeechOutput {
             for (int i = 0; i < chunks.size(); i++) {
                 android.os.Bundle params = new android.os.Bundle();
                 params.putInt(TextToSpeech.Engine.KEY_PARAM_STREAM, AudioManager.STREAM_MUSIC);
+                params.putInt(TextToSpeech.Engine.KEY_PARAM_SESSION_ID, ttsAudioSession);
                 String id = token + ":" + (i == chunks.size() - 1 ? "last" : String.valueOf(i));
                 tts.speak(chunks.get(i), i == 0 ? TextToSpeech.QUEUE_FLUSH : TextToSpeech.QUEUE_ADD, params, id);
             }
@@ -106,10 +168,21 @@ final class SpeechOutput {
             ttsFailed = !ttsReady;
             if (ttsReady) {
                 tts.setAudioAttributes(ATTRIBUTES);
+                ttsAudioSession = audio == null ? 0 : audio.generateAudioSessionId();
                 tts.setOnUtteranceProgressListener(new UtteranceProgressListener() {
-                    @Override public void onStart(String id) { }
-                    @Override public void onDone(String id) { if (id.endsWith(":last")) done(tokenOf(id)); }
-                    @Override public void onError(String id) { done(tokenOf(id)); }
+                    @Override public void onStart(String id) {
+                        main.post(() -> { if (tokenOf(id) == generation.get()) startMeter(tokenOf(id), ttsAudioSession); });
+                    }
+                    @Override public void onDone(String id) { finished(id); }
+                    @Override public void onError(String id) { finished(id); }
+                    private void finished(String id) {
+                        main.post(() -> {
+                            if (tokenOf(id) != generation.get()) return;
+                            stopMeter();
+                            if (id.endsWith(":stream")) streamChunkDone(tokenOf(id));
+                            else if (id.endsWith(":last")) done(tokenOf(id));
+                        });
+                    }
                 });
             }
             List<Runnable> pending = new ArrayList<>(waitingForTts);
@@ -117,6 +190,69 @@ final class SpeechOutput {
             for (Runnable run : pending) run.run();
             if (ttsFailed) tts = null;
         }));
+    }
+
+    /** Queues one streamed sentence on the system engine without flushing what is already playing. */
+    private void speakStreamChunk(int token, String text) {
+        streamPending++;
+        withTts(() -> {
+            if (token != generation.get()) return;
+            if (ttsFailed) { failed(token, "系统语音合成不可用，请在系统设置中安装或启用 TTS 引擎"); return; }
+            tts.setSpeechRate(settings.speechRate());
+            String language = settings.language();
+            if (!language.isEmpty()) tts.setLanguage(Locale.forLanguageTag(language));
+            android.os.Bundle params = new android.os.Bundle();
+            params.putInt(TextToSpeech.Engine.KEY_PARAM_STREAM, AudioManager.STREAM_MUSIC);
+            params.putInt(TextToSpeech.Engine.KEY_PARAM_SESSION_ID, ttsAudioSession);
+            if (tts.speak(text, TextToSpeech.QUEUE_ADD, params, token + ":stream") == TextToSpeech.ERROR)
+                streamChunkDone(token);
+        });
+    }
+
+    private void streamChunkDone(int token) {
+        if (token != streamToken || token != generation.get()) return;
+        if (--streamPending <= 0 && streamEnded) finishStream(token);
+    }
+
+    /** Plays streamed sentences as they arrive, synthesizing the next one while the current plays. */
+    private void streamRemote(int token, VoiceSettings.Remote config, java.util.concurrent.BlockingQueue<String> queue) {
+        File dir = new File(context.getCacheDir(), "voice");
+        dir.mkdirs();
+        int index = 0;
+        try {
+            while (token == generation.get()) {
+                String text = queue.poll(200, TimeUnit.MILLISECONDS);
+                if (text == null) continue;
+                if (STREAM_END.equals(text)) break;
+                File file = new File(dir, "tts-" + token + "-" + index++ + ".mp3");
+                try {
+                    synthesize(token, config, text, file).get(150, TimeUnit.SECONDS);
+                    if (token != generation.get()) return;
+                    play(token, file);
+                } finally { file.delete(); }
+            }
+            main.post(() -> finishStream(token));
+        } catch (InterruptedException stopped) {
+            Thread.currentThread().interrupt();
+        } catch (Exception failure) {
+            if (token != generation.get()) return;
+            Throwable cause = failure instanceof java.util.concurrent.ExecutionException && failure.getCause() != null ? failure.getCause() : failure;
+            String message = cause.getMessage() == null ? cause.getClass().getSimpleName() : cause.getMessage();
+            main.post(() -> {
+                if (token != generation.get()) return;
+                Toast.makeText(context, UiText.get(context, "远程朗读失败：") + message, Toast.LENGTH_LONG).show();
+                finishStream(token);
+            });
+        }
+    }
+
+    private void finishStream(int token) {
+        if (token != streamToken || token != generation.get()) return;
+        Runnable drained = streamDrained;
+        streamDrained = null;
+        streamToken = -1;
+        done(token);
+        if (drained != null) drained.run();
     }
 
     /** Synthesizes the next chunk while the current one plays. */
@@ -162,27 +298,71 @@ final class SpeechOutput {
     private void play(int token, File file) throws Exception {
         CountDownLatch finished = new CountDownLatch(1);
         String[] error = new String[1];
+        MediaPlayer[] owned = new MediaPlayer[1];
         main.post(() -> {
             if (token != generation.get()) { finished.countDown(); return; }
             MediaPlayer media = new MediaPlayer();
+            owned[0] = media;
             try {
                 media.setAudioAttributes(ATTRIBUTES);
                 media.setDataSource(file.getAbsolutePath());
-                media.setOnCompletionListener(done -> finished.countDown());
-                media.setOnErrorListener((failed, what, extra) -> { error[0] = "音频无法播放（" + what + "）"; finished.countDown(); return true; });
+                media.setOnCompletionListener(done -> {
+                    if (token == generation.get()) stopMeter();
+                    finished.countDown();
+                });
+                media.setOnErrorListener((failed, what, extra) -> {
+                    if (token == generation.get()) stopMeter();
+                    error[0] = "音频无法播放（" + what + "）"; finished.countDown(); return true;
+                });
                 media.prepare();
                 player = media;
                 media.start();
+                startMeter(token, media.getAudioSessionId());
             } catch (Exception failure) { error[0] = "音频无法播放"; finished.countDown(); }
         });
         while (!finished.await(200, TimeUnit.MILLISECONDS)) if (token != generation.get()) break;
-        main.post(() -> { MediaPlayer media = player; player = null; if (media != null) media.release(); });
+        main.post(() -> {
+            MediaPlayer media = owned[0];
+            if (player == media) player = null;
+            if (media != null) media.release();
+        });
         if (error[0] != null && token == generation.get()) throw new java.io.IOException(error[0]);
+    }
+
+    private void startMeter(int token, int sessionId) {
+        stopMeter();
+        if (playbackListener == null) return;
+        playbackListener.onPlayback(true, 0);
+        // Some devices/TTS engines do not expose a session meter. Keep the quiet flow in that case.
+        if (sessionId <= 0) return;
+        try {
+            meter = new android.media.audiofx.Visualizer(sessionId);
+            meter.setCaptureSize(android.media.audiofx.Visualizer.getCaptureSizeRange()[0]);
+            meter.setDataCaptureListener(new android.media.audiofx.Visualizer.OnDataCaptureListener() {
+                @Override public void onWaveFormDataCapture(android.media.audiofx.Visualizer source, byte[] wave, int rate) {
+                    double sum = 0;
+                    for (byte sample : wave) { double value = ((sample & 255) - 128) / 128.0; sum += value * value; }
+                    float level = wave.length == 0 ? 0 : (float) Math.min(1, Math.sqrt(sum / wave.length) * 3);
+                    main.post(() -> {
+                        if (token == generation.get() && source == meter && playbackListener != null)
+                            playbackListener.onPlayback(true, level);
+                    });
+                }
+                @Override public void onFftDataCapture(android.media.audiofx.Visualizer source, byte[] fft, int rate) { }
+            }, Math.min(20_000, android.media.audiofx.Visualizer.getMaxCaptureRate()), true, false);
+            meter.setEnabled(true);
+        } catch (RuntimeException unavailable) { stopMeter(); }
+    }
+
+    private void stopMeter() {
+        if (meter != null) { meter.release(); meter = null; }
+        if (playbackListener != null) playbackListener.onPlayback(false, 0);
     }
 
     private void failed(int token, String message) {
         Toast.makeText(context, UiText.get(context, message), Toast.LENGTH_LONG).show();
-        done(token);
+        if (token == streamToken) finishStream(token);
+        else done(token);
     }
 
     /** token -1 always ends; otherwise only the current generation ends. */

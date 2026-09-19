@@ -19,6 +19,26 @@ import static org.junit.Assert.*;
 @RunWith(RobolectricTestRunner.class)
 @Config(sdk = 34)
 public class VoiceTest {
+    @Test public void silenceDoesNotCloseVoiceModeOrCreateChat() {
+        Context context = RuntimeEnvironment.getApplication();
+        ChatCoordinator coordinator = ChatCoordinator.get(context);
+        String before = coordinator.conversationId();
+        boolean[] closed = {false};
+        SpeechOutput output = new SpeechOutput(context, new VoiceSettings(context));
+        VoiceSession session = new VoiceSession(new VoiceSession.Host() {
+            @Override public Context context() { return context; }
+            @Override public void closed() { closed[0] = true; }
+        }, output);
+        session.view();
+        session.onIdle();
+        assertFalse(closed[0]);
+        assertEquals(before, coordinator.conversationId());
+        session.close();
+        assertTrue(closed[0]);
+        assertEquals(before, coordinator.conversationId());
+        output.shutdown();
+    }
+
     @Test public void markdownBecomesReadableSpeech() {
         String spoken = SpeechText.plain("# 标题\n\n- **第一项** 见 [文档](https://example.com/a)\n- `code` 和 https://x.y/z\n\n```java\nint x = 1;\n```\n| a | b |\n|---|---|\n| 1 | 2 |");
         assertFalse(spoken.contains("#"));
@@ -31,6 +51,16 @@ public class VoiceTest {
         assertEquals("", SpeechText.plain(null));
         assertEquals("", SpeechText.plain("```\nonly code"
                 + "\n```").replace("代码略。", ""));
+    }
+
+    @Test public void streamingReadsOnlyCompletedSentences() {
+        assertEquals(0, SpeechText.lastBoundary("正在写一句还没"));
+        assertEquals(4, SpeechText.lastBoundary("写完了。还没"));
+        assertEquals(8, SpeechText.lastBoundary("第一句。第二句！"));
+        assertEquals(5, SpeechText.lastBoundary("Done. and more"));
+        // A trailing period with nothing after it may still be an abbreviation mid-sentence.
+        assertEquals(0, SpeechText.lastBoundary("Approx"));
+        assertEquals(7, SpeechText.lastBoundary("line 1\nline 2"));
     }
 
     @Test public void chunksRespectSentencesAndLimit() {
@@ -47,9 +77,15 @@ public class VoiceTest {
         SpeechEndpointer endpointer = new SpeechEndpointer();
         short[] quiet = frame(40), loud = frame(4000);
         for (int i = 0; i < 10; i++) assertEquals(SpeechEndpointer.State.WAITING, endpointer.feed(quiet, quiet.length));
-        for (int i = 0; i < 20; i++) endpointer.feed(loud, loud.length);
+        endpointer.feed(loud, loud.length);
+        assertFalse("One click is not speech", endpointer.speechActive());
+        for (int i = 0; i < 19; i++) endpointer.feed(loud, loud.length);
+        assertTrue(endpointer.speechActive());
         assertEquals(SpeechEndpointer.State.SPEAKING, endpointer.state());
         assertTrue(endpointer.level() > .5f);
+        endpointer.feed(quiet, quiet.length);
+        assertFalse("Animation should slow during pauses, before the turn finishes", endpointer.speechActive());
+        assertEquals(SpeechEndpointer.State.SPEAKING, endpointer.state());
         SpeechEndpointer.State state = SpeechEndpointer.State.SPEAKING;
         for (int i = 0; i < 40 && state == SpeechEndpointer.State.SPEAKING; i++) state = endpointer.feed(quiet, quiet.length);
         assertEquals(SpeechEndpointer.State.DONE, state);
@@ -129,7 +165,7 @@ public class VoiceTest {
     @Test public void defaultWakeWordFitsTheBundledModel() throws Exception {
         java.util.Set<String> vocabulary = WakeWordEngine.vocabulary(RuntimeEnvironment.getApplication());
         assertTrue(vocabulary.size() > 200);
-        assertEquals("n ǐ h ǎo x iǎo y ì", WakeWords.tokens(VoiceSettings.DEFAULT_WAKE_WORDS, vocabulary));
+        assertEquals("x iǎo y ī x iǎo y ī", WakeWords.tokens(VoiceSettings.DEFAULT_WAKE_WORDS, vocabulary));
         assertEquals("w én s ēn t è k ǎ s uǒ", WakeWords.tokens("文森特卡索", vocabulary));
         assertEquals(.25f, WakeWordEngine.threshold(VoiceSettings.WAKE_MEDIUM), .001f);
     }

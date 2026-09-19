@@ -48,7 +48,8 @@ final class WakeWords {
     }
 
     static String tokens(String word, Set<String> vocabulary) {
-        String value = word.trim();
+        // The assistant name mixes Chinese and the letter E, pronounced yi.
+        String value = word.trim().replace("小E", "小伊").replace("小e", "小伊");
         List<String> tokens = new ArrayList<>();
         int syllables = 0;
         if (value.codePoints().anyMatch(WakeWords::isHan)) {

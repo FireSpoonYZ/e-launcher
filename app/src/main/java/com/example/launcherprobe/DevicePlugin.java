@@ -83,6 +83,12 @@ public final class DevicePlugin extends Plugin {
             });
         });
     }
+    @PluginMethod public void openVoiceConversation(PluginCall call) {
+        getActivity().runOnUiThread(() -> {
+            try { VoiceSessionActivity.open(getActivity(), false); call.resolve(); }
+            catch (Exception exception) { reject(call, exception); }
+        });
+    }
     @PluginMethod public void speak(PluginCall call) {
         try {
             String text = required(call, "text");

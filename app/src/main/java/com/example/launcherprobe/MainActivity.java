@@ -204,6 +204,8 @@ public class MainActivity extends BridgeActivity {
             }
             updateAgentControls();
             String type = event.optString("type");
+            // A spoken conversation starts a new chat on its own; follow it here too.
+            if ("conversationSwitched".equals(type)) changeConversation();
             if ("runStatus".equals(type) || "snapshot".equals(type) || "extensionUi".equals(type)
                     || "end".equals(type) || "error".equals(type)
                     || "questionnairePending".equals(type) || "questionnaireReply".equals(type)

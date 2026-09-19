@@ -106,6 +106,7 @@ export interface DevicePlugin {
   apps(): Promise<{apps: Array<{label: string; packageName: string; className: string; icon: string}>}>;
   launchApp(options: {packageName: string; className: string}): Promise<void>;
   voice(): Promise<{text: string}>;
+  openVoiceConversation(): Promise<void>;
   /** Dictation for the settings test button; never touches a conversation draft. */
   listenOnce(): Promise<{text: string}>;
   /** Reads Markdown aloud with the configured engine; replaces any reading in progress. */
