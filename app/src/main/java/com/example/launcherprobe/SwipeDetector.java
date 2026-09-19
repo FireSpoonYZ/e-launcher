@@ -1,6 +1,6 @@
 /* Derived from Ogesture SwipeDetector.kt and data/Models.kt (AGPL-3.0).
  * Upstream: 404fb0a27a5e3122b153a4a97a150f31c3c04804. See THIRD_PARTY_NOTICES.md.
- * Java adaptation: platform-independent scheduling; bottom hold measured from DOWN (over 150 ms);
+ * Java adaptation: platform-independent scheduling; bottom hold measured from DOWN (over 200 ms);
  * explicit cancellation also used by service teardown/rotation.
  */
 package com.example.launcherprobe;
@@ -31,7 +31,7 @@ final class SwipeDetector {
 
     private final Zone zone;
     private final float minDistance;
-    private static final long QUICK_SWIPE_MS = 150;
+    private static final long QUICK_SWIPE_MS = 200;
     private final Scheduler scheduler;
     private final Runnable shortSwipe;
     private final Runnable longSwipe;
@@ -71,7 +71,7 @@ final class SwipeDetector {
         sample(x, y, time);
         showFeedback(x, y, 0);
         if (zone == Zone.BOTTOM && longSwipe != null) {
-            // A release at exactly 150 ms still belongs to the quick-swipe window.
+            // A release at exactly 200 ms still belongs to the quick-swipe window.
             scheduler.post(hold, QUICK_SWIPE_MS + 1);
         }
     }

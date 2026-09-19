@@ -495,7 +495,7 @@ public final class GestureService extends AccessibilityService {
     // These are physical display edges, independent of the language's reading direction.
     @SuppressLint("RtlHardcoded")
     private WindowManager.LayoutParams params(SwipeDetector.Zone zone) {
-        int thickness = Math.max(1, (int) ((zone == SwipeDetector.Zone.BOTTOM ? 12 : 16)
+        int thickness = Math.max(1, (int) ((zone == SwipeDetector.Zone.BOTTOM ? 12 : 24)
                 * getResources().getDisplayMetrics().density));
         int width = zone == SwipeDetector.Zone.BOTTOM ? geometry[0] * 80 / 100
                 : thickness + geometry[zone == SwipeDetector.Zone.LEFT ? 2 : 3];
