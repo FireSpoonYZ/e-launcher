@@ -325,7 +325,7 @@ final class AppSwitcherView extends FrameLayout {
         final ImageView badge;
         Art art;
         boolean pending;
-        float slot, lift, blurRadius = -1;
+        float slot, lift;
 
         Card(App app, int index) {
             super(AppSwitcherView.this.getContext());
@@ -347,6 +347,8 @@ final class AppSwitcherView extends FrameLayout {
             header.setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
             body.addView(header, new LinearLayout.LayoutParams(-1, dp(48)));
             cover = cover(app, null); cover.setElevation(dp(10));
+            if (Build.VERSION.SDK_INT >= 31) cover.setRenderEffect(android.graphics.RenderEffect.createBlurEffect(
+                    dp(3), dp(3), android.graphics.Shader.TileMode.CLAMP));
             cover.setOutlineAmbientShadowColor(0xff00121a); cover.setOutlineSpotShadowColor(0xff00121a);
             body.addView(cover, new LinearLayout.LayoutParams(-1, 0, 1));
             addView(body, new LayoutParams(-1, -1));
@@ -388,16 +390,7 @@ final class AppSwitcherView extends FrameLayout {
             ((GradientDrawable) cover.getBackground()).setColors(plateColors(PLACEHOLDER));
         }
 
-        /** Depth of field: only the card in front is sharp, so the stack reads as one subject. */
-        void blur(float radius) {
-            if (Build.VERSION.SDK_INT < 31) return;
-            float step = Math.round(radius);
-            if (step == blurRadius) return;
-            blurRadius = step;
-            cover.setRenderEffect(step <= 0 ? null : android.graphics.RenderEffect.createBlurEffect(
-                    step, step, android.graphics.Shader.TileMode.CLAMP));
-        }
-
+        /** Every cover sits behind the same frosted sheet, so the stack reads as one glass surface. */
         @Override public void onInitializeAccessibilityNodeInfo(AccessibilityNodeInfo info) {
             super.onInitializeAccessibilityNodeInfo(info);
             info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_DISMISS);
@@ -535,7 +528,6 @@ final class AppSwitcherView extends FrameLayout {
                 card.setScaleX(scale * (1 - .08f * raised)); card.setScaleY(scale * (1 - .08f * raised));
                 card.setTranslationZ(card.lift < 0 ? dp(40) : dp(20) - relative * dp(2));
                 card.setAlpha(alpha * (1 - .8f * raised));
-                card.blur(dp(5) * Math.min(Math.max(depth, passed * 2), 2));
                 card.body.getChildAt(0).setAlpha(Math.max(0, 1 - Math.abs(relative)));
                 card.setContentDescription((i == selected ? "打开 " : "切换到 ") + card.app.label());
                 card.setSelected(i == selected);
