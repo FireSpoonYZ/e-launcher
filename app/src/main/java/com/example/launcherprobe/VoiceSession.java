@@ -13,6 +13,7 @@ import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
 
+import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.util.List;
@@ -61,6 +62,21 @@ final class VoiceSession implements VoiceStream.Listener {
     private String pendingText;
     private int spoken;
     private boolean streaming, closed, interrupted;
+    private Questionnaire questionnaire;
+    private int inputGeneration;
+
+    private static final class Questionnaire {
+        final String requestId, id;
+        final JSONArray questions, answers = new JSONArray();
+        int index;
+        boolean pending;
+
+        Questionnaire(String requestId, JSONObject prompt) {
+            this.requestId = requestId;
+            id = prompt.optString("id");
+            questions = prompt.optJSONArray("questions");
+        }
+    }
 
     VoiceSession(Host host, SpeechOutput output) {
         this.host = host;
@@ -125,7 +141,8 @@ final class VoiceSession implements VoiceStream.Listener {
         closed = true;
         coordinator.removeListener(chatListener);
         stream.stop();
-        if (systemInput != null) { systemInput.cancel(); systemInput = null; }
+        pauseInput();
+        questionnaire = null;
         main.removeCallbacksAndMessages(null);
         output.setPlaybackListener(null);
         output.stop();
@@ -146,6 +163,16 @@ final class VoiceSession implements VoiceStream.Listener {
 
     @Override public void onSpeechStart() {
         if (closed || state == State.GREETING) return;
+        if (questionnaire != null) {
+            // The system recognizer's interrupt button may skip reading, but must keep the tool waiting.
+            if (!remoteInput && state == State.SPEAKING && !questionnaire.pending) {
+                pauseInput();
+                output.stop();
+                stream.setPlaying(false);
+                listen();
+            }
+            return;
+        }
         if (state == State.SPEAKING || state == State.THINKING) {
             interrupted = true;
             // Interrupting: silence the reply now and let the rest of this utterance become the next turn.
@@ -158,6 +185,9 @@ final class VoiceSession implements VoiceStream.Listener {
 
     @Override public void onUtterance(byte[] wav) {
         if (closed || state == State.GREETING || state == State.TRANSCRIBING) return;
+        if (questionnaire != null && (questionnaire.pending || state != State.LISTENING)) return;
+        int generation = inputGeneration;
+        if (questionnaire != null) stream.setMuted(true);
         setState(State.TRANSCRIBING, UiText.get(context, "正在识别…"));
         VoiceSettings.Remote remote = settings.remote(VoiceSettings.STT);
         String language = settings.language();
@@ -171,6 +201,7 @@ final class VoiceSession implements VoiceStream.Listener {
             String heard = text.trim();
             String problem = failure;
             post(() -> {
+                if (generation != inputGeneration) return;
                 if (!heard.isEmpty()) submit(heard);
                 else listen(problem);
             });
@@ -182,12 +213,18 @@ final class VoiceSession implements VoiceStream.Listener {
     }
 
     @Override public void onError(String message) {
-        setState(State.LISTENING, UiText.get(context, message));
+        if (closed) return;
+        if (questionnaire != null) statusLabel.setText(UiText.get(context, message));
+        else setState(State.LISTENING, UiText.get(context, message));
     }
 
     // Turn handling.
 
     private void submit(String text) {
+        if (questionnaire != null) {
+            answerQuestion(text);
+            return;
+        }
         transcriptLabel.setText(text);
         scrollTranscript();
         setState(State.THINKING, UiText.get(context, "正在思考…"));
@@ -223,18 +260,29 @@ final class VoiceSession implements VoiceStream.Listener {
         switch (event.optString("type")) {
             case "textDelta":
                 // Deltas from a turn the user already interrupted must not leak into the next answer.
-                if (interrupted || pendingText != null) break;
+                if (interrupted || pendingText != null || questionnaire != null) break;
                 reply.append(payload == null ? "" : payload.optString("delta"));
                 flushSpeech(false);
                 break;
             case "toolStart":
-                setState(State.THINKING, UiText.get(context, "正在使用工具…"));
+                if (questionnaire == null) setState(State.THINKING, UiText.get(context, "正在使用工具…"));
                 break;
             case "runStatus":
-                if (state == State.THINKING && payload != null && !payload.optString("message").isEmpty())
+                if (questionnaire == null && state == State.THINKING && payload != null && !payload.optString("message").isEmpty())
                     statusLabel.setText(payload.optString("message"));
                 break;
+            case "extensionUi":
+                updateQuestionnaire(event.optString("requestId"), payload == null ? null : payload.optJSONObject("askUser"));
+                break;
+            case "questionnairePending":
+                if (matchesQuestionnaire(event, payload)) waitForQuestionnaire();
+                break;
+            case "questionnaireReply":
+                if (matchesQuestionnaire(event, payload) && !payload.optBoolean("accepted"))
+                    retryQuestion(payload.optString("message", UiText.get(context, "回答未被接受，请重试")));
+                break;
             case "end":
+                clearQuestionnaire();
                 flushSpeech(true);
                 if (pendingText != null) { String next = pendingText; pendingText = null; send(next); }
                 else if (!streaming) listen();
@@ -247,6 +295,101 @@ final class VoiceSession implements VoiceStream.Listener {
             default:
                 break;
         }
+    }
+
+    // A questionnaire owns the microphone until the original tool receives its answers.
+
+    private void updateQuestionnaire(String requestId, JSONObject prompt) {
+        if (questionnaire != null && questionnaire.requestId.equals(requestId)
+                && prompt != null && questionnaire.id.equals(prompt.optString("id"))) return;
+        clearQuestionnaire();
+        if (prompt == null || interrupted || pendingText != null) return;
+        questionnaire = new Questionnaire(requestId, prompt);
+        reply.setLength(0);
+        spoken = 0;
+        readQuestion();
+    }
+
+    private boolean matchesQuestionnaire(JSONObject event, JSONObject payload) {
+        return questionnaire != null && payload != null
+                && questionnaire.requestId.equals(event.optString("requestId"))
+                && questionnaire.id.equals(payload.optString("questionnaireId"));
+    }
+
+    private void readQuestion() {
+        Questionnaire current = questionnaire;
+        pauseInput();
+        int generation = inputGeneration;
+        streaming = false;
+        JSONObject question = current.questions.optJSONObject(current.index);
+        StringBuilder text = new StringBuilder(question.optString("question"));
+        JSONArray options = question.optJSONArray("options");
+        for (int i = 0; i < options.length(); i++)
+            text.append('\n').append(i + 1).append("：").append(options.optJSONObject(i).optString("label")).append('。');
+        transcriptLabel.setText(SpeechText.plain(text.toString()));
+        scrollTranscript();
+        setState(State.SPEAKING, (current.index + 1) + " / " + current.questions.length()
+                + " · " + UiText.get(context, "正在提问…"));
+        // Muting while reading prevents the question itself from becoming an answer on speakerphone.
+        output.beginStream(() -> {
+            if (closed || generation != inputGeneration) return;
+            stream.setPlaying(false);
+            listen();
+        });
+        stream.setPlaying(true);
+        output.offer(text.toString());
+        output.endStream();
+    }
+
+    private void answerQuestion(String text) {
+        Questionnaire current = questionnaire;
+        if (current.pending) return;
+        transcriptLabel.setText(text);
+        scrollTranscript();
+        try {
+            current.answers.put(current.index, new JSONObject().put("questionIndex", current.index)
+                    .put("kind", "custom").put("answer", text));
+            if (++current.index < current.questions.length()) {
+                readQuestion();
+                return;
+            }
+            waitForQuestionnaire();
+            coordinator.submitQuestionnaire(conversationId, current.requestId, current.id, current.answers, null);
+        } catch (Exception failure) {
+            retryQuestion(failure.getMessage() == null ? UiText.get(context, "发送失败") : failure.getMessage());
+        }
+    }
+
+    private void waitForQuestionnaire() {
+        questionnaire.pending = true;
+        pauseInput();
+        output.stop();
+        stream.setPlaying(false);
+        setState(State.THINKING, UiText.get(context, "正在提交回答…"));
+    }
+
+    private void retryQuestion(String message) {
+        questionnaire.pending = false;
+        questionnaire.index = Math.min(questionnaire.index, questionnaire.questions.length() - 1);
+        readQuestion();
+        statusLabel.setText(message);
+    }
+
+    private void clearQuestionnaire() {
+        if (questionnaire == null) return;
+        questionnaire = null;
+        pauseInput();
+        output.stop();
+        stream.setPlaying(false);
+        stream.setMuted(false);
+        setState(State.THINKING, UiText.get(context, "正在思考…"));
+    }
+
+    /** Invalidates in-flight transcription and delayed system-recognizer retries when their question ends. */
+    private void pauseInput() {
+        inputGeneration++;
+        stream.setMuted(true);
+        if (systemInput != null) { systemInput.cancel(); systemInput = null; }
     }
 
     /** Hands whole sentences to the reader as they appear, so speaking starts long before the turn finishes. */
@@ -272,22 +415,29 @@ final class VoiceSession implements VoiceStream.Listener {
     private void listen() { listen(null); }
 
     private void listen(String problem) {
-        if (closed) return;
-        setState(State.LISTENING, problem != null ? problem : UiText.get(context, "正在聆听…"));
+        if (closed || (questionnaire != null && questionnaire.pending)) return;
+        stream.setMuted(false);
+        String status = UiText.get(context, "正在聆听…");
+        if (questionnaire != null) status = (questionnaire.index + 1) + " / " + questionnaire.questions.length() + " · " + status;
+        setState(State.LISTENING, problem != null ? problem : status);
         if (!remoteInput && systemInput == null) {
+            int generation = inputGeneration;
             systemInput = new SpeechInput.SystemInput(context, settings.language());
             systemInput.start(new SpeechInput.Listener() {
                 @Override public void onLevel(float level) { VoiceSession.this.onLevel(level); }
                 @Override public void onSpeechActivity(boolean speaking) { VoiceSession.this.onSpeechActivity(speaking); }
                 @Override public void onPartial(String text) { transcriptLabel.setText(text); }
-                @Override public void onProcessing() { setState(State.TRANSCRIBING, "正在识别…"); }
+                @Override public void onProcessing() { setState(State.TRANSCRIBING, UiText.get(context, "正在识别…")); }
                 @Override public void onResult(String text) {
+                    if (closed || generation != inputGeneration) return;
                     systemInput = null;
-                    if (!closed) submit(text);
+                    submit(text);
                 }
                 @Override public void onError(String error) {
                     systemInput = null;
-                    if (!closed) main.postDelayed(() -> listen(error), 1000);
+                    if (!closed) main.postDelayed(() -> {
+                        if (generation == inputGeneration) listen(error);
+                    }, 1000);
                 }
             });
         }
