@@ -112,6 +112,7 @@ public final class GestureService extends AccessibilityService {
     }
 
     static boolean isConnected() { return instance != null; }
+    static boolean isGestureHeld() { return instance != null && instance.held; }
 
     static boolean safeToRebind(Context context) {
         return instance == null && !prefs(context).getBoolean("pending_restore", false);
@@ -538,7 +539,10 @@ public final class GestureService extends AccessibilityService {
                     public void post(Runnable task, long delay) { handler.postDelayed(task, delay); }
                     public void cancel(Runnable task) { handler.removeCallbacks(task); }
                 }, () -> action(zone == SwipeDetector.Zone.BOTTOM ? GLOBAL_ACTION_HOME : GLOBAL_ACTION_BACK),
-                zone == SwipeDetector.Zone.BOTTOM ? () -> action(GLOBAL_ACTION_RECENTS) : null,
+                zone == SwipeDetector.Zone.BOTTOM ? () -> {
+                    view.performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS);
+                    openSwitcher();
+                } : null,
                 this::replay, new SwipeDetector.Feedback() {
                     public void show(SwipeDetector.Zone feedbackZone, float x, float y,
                             float progress, boolean crossed) {
@@ -572,6 +576,16 @@ public final class GestureService extends AccessibilityService {
             }
             return true;
         });
+    }
+
+    private void openSwitcher() {
+        if (instance != this || session == null || !session.running()) return;
+        try {
+            startActivity(new Intent(this, AppSwitcherActivity.class)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_NO_ANIMATION));
+        } catch (RuntimeException exception) {
+            problem("无法打开应用切换：" + exception.getClass().getSimpleName());
+        }
     }
 
     private void action(int action) {

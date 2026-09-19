@@ -50,7 +50,7 @@
   "搜索结果总数：": "Total search results: ",
   " · 页码：": " · Page: ",
   "本页没有符合关键词的包，可尝试下一页或更换查询。": "No matching keywords on this page. Try the next page or change your query.",
-  "\n\n左右内滑返回；底边上滑回桌面；上滑停留打开最近任务。": "\n\nSwipe inward from either side to go back; swipe up from the bottom to go Home; swipe up and hold to open recent apps.",
+  "\n\n左右内滑返回；底边上滑回桌面；上滑短暂停留打开应用切换。": "\n\nSwipe inward from either side to go back; swipe up from the bottom to go Home; swipe up and briefly hold to open the app switcher.",
   "\n\nPi 的 Operit Shower 工具也使用同一 Shizuku 授权，仅按工具调用创建和操作虚拟屏；不会操作手机主屏。": "\n\nPi's Operit Shower tool uses the same Shizuku authorization. It creates and controls a virtual display only when called and never operates the phone's primary display.",
   "\n\n结果\n": "\n\nResult\n",
   "\n…（详情显示已截断）": "\n… (details truncated)",

@@ -1,6 +1,6 @@
 /* Derived from Ogesture SwipeDetector.kt and data/Models.kt (AGPL-3.0).
  * Upstream: 404fb0a27a5e3122b153a4a97a150f31c3c04804. See THIRD_PARTY_NOTICES.md.
- * Java adaptation: platform-independent scheduling; hold increased 100 -> 300 ms;
+ * Java adaptation: platform-independent scheduling; hold increased 100 -> 200 ms;
  * explicit cancellation also used by service teardown/rotation.
  */
 package com.example.launcherprobe;
@@ -103,7 +103,7 @@ final class SwipeDetector {
         anchorX = x;
         anchorY = y;
         scheduler.cancel(hold);
-        scheduler.post(hold, 300);
+        scheduler.post(hold, 200);
     }
 
     void up(float x, float y, long time) {

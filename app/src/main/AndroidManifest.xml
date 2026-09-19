@@ -65,6 +65,14 @@
                 android:name="android.accessibilityservice"
                 android:resource="@xml/accessibility_service_config" />
         </service>
+        <activity
+            android:name=".AppSwitcherActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:launchMode="singleTask"
+            android:noHistory="true"
+            android:taskAffinity="${applicationId}.switcher"
+            android:theme="@style/AppSwitcherTheme" />
         <activity android:name=".TaskDetailActivity" android:exported="false" />
         <activity
             android:name=".DesktopSettingsActivity"
