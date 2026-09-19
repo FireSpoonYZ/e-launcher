@@ -54,7 +54,6 @@ final class VoiceSession implements VoiceStream.Listener {
     private TextView statusLabel, transcriptLabel;
     private ScrollView transcriptScroll;
 
-    private android.media.MediaPlayer greeting;
     private SpeechInput systemInput;
     private boolean remoteInput;
     private State state = State.GREETING;
@@ -112,15 +111,10 @@ final class VoiceSession implements VoiceStream.Listener {
         if (remoteInput) stream.start();
         if (!fromWake) { greetingFinished(); return; }
         setState(State.GREETING, UiText.get(context, "我在"));
-        greeting = android.media.MediaPlayer.create(context, R.raw.voice_greeting);
-        if (greeting == null) { greetingFinished(); return; }
-        greeting.setOnCompletionListener(player -> greetingFinished());
-        greeting.setOnErrorListener((player, what, extra) -> { greetingFinished(); return true; });
-        greeting.start();
+        output.speakGreeting(this::greetingFinished);
     }
 
     private void greetingFinished() {
-        if (greeting != null) { greeting.release(); greeting = null; }
         if (closed) return;
         stream.setMuted(false);
         listen();
@@ -129,7 +123,6 @@ final class VoiceSession implements VoiceStream.Listener {
     void close() {
         if (closed) return;
         closed = true;
-        if (greeting != null) { greeting.release(); greeting = null; }
         coordinator.removeListener(chatListener);
         stream.stop();
         if (systemInput != null) { systemInput.cancel(); systemInput = null; }

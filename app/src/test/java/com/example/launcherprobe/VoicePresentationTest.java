@@ -41,18 +41,17 @@ public class VoicePresentationTest {
 
     @Test public void wakeWaitsForGreetingBeforeOpeningRecognizer() {
         Context context = RuntimeEnvironment.getApplication();
-        MediaPlayer[] player = {null};
-        ShadowMediaPlayer.setCreateListener((created, shadow) -> player[0] = created);
-        ShadowMediaPlayer.setMediaInfoProvider(source -> new ShadowMediaPlayer.MediaInfo(1000, 0));
         SpeechOutput output = new SpeechOutput(context, new VoiceSettings(context));
         VoiceSession session = session(context, output);
         String before = ChatCoordinator.get(context).conversationId();
         try {
             session.start(true);
-            assertNotNull(player[0]);
-            assertTrue(player[0].isPlaying());
+            android.speech.tts.TextToSpeech tts = org.robolectric.shadows.ShadowTextToSpeech.getLastTextToSpeechInstance();
+            assertNotNull(tts);
             assertNull(ShadowSpeechRecognizer.getLatestSpeechRecognizer());
-            Shadows.shadowOf(player[0]).invokeCompletionListener();
+            Shadows.shadowOf(tts).getOnInitListener().onInit(android.speech.tts.TextToSpeech.SUCCESS);
+            Shadows.shadowOf(android.os.Looper.getMainLooper()).idle();
+            assertEquals("我在", Shadows.shadowOf(tts).getLastSpokenText());
             assertNotNull(ShadowSpeechRecognizer.getLatestSpeechRecognizer());
             assertEquals(before, ChatCoordinator.get(context).conversationId());
         } finally { session.close(); output.shutdown(); }

@@ -128,6 +128,76 @@ final class SpeechOutput {
         } else speakSystem(token, text);
     }
 
+    /** Wake acknowledgements use the selected voice; remote audio is generated once per configuration. */
+    void speakGreeting(Runnable drained) {
+        String text = UiText.get(context, "我在");
+        if (!VoiceSettings.REMOTE.equals(settings.ttsEngine())) {
+            beginStream(drained);
+            offer(text);
+            endStream();
+            return;
+        }
+        stop();
+        int token = generation.get();
+        streamToken = token;
+        streamDrained = drained;
+        speaking = true;
+        requestFocus();
+        VoiceSettings.Remote config = settings.remote(VoiceSettings.TTS);
+        float rate = settings.speechRate();
+        remote.execute(() -> {
+            PcmSpeech owned = null;
+            String problem = null;
+            try {
+                boolean rawPcm = "kokoro".equalsIgnoreCase(config.model);
+                File cached = GreetingAudioCache.file(new File(context.getCacheDir(), "voice-greetings"), config, rate, text);
+                GreetingAudioCache.get(cached, () -> {
+                    okhttp3.Call call = RemoteVoiceApi.speechCall(config, text, rate);
+                    synchronized (this) {
+                        if (token != generation.get()) throw new java.io.IOException("已取消");
+                        remoteCall = call;
+                    }
+                    // A failed service must not leave the microphone muted for its full read timeout.
+                    call.timeout().timeout(10, TimeUnit.SECONDS);
+                    try (okhttp3.Response response = RemoteVoiceApi.speechResponse(call)) {
+                        okhttp3.MediaType type = response.body().contentType();
+                        if (rawPcm && (type == null || !"audio".equals(type.type()) || !"pcm".equals(type.subtype())))
+                            throw new java.io.IOException("Kokoro 必须返回 PCM 音频");
+                        byte[] bytes = response.body().bytes();
+                        if (rawPcm && (bytes.length & 1) != 0) throw new java.io.IOException("PCM 音频不完整");
+                        if (token != generation.get()) throw new java.io.IOException("已取消");
+                        return bytes;
+                    } finally {
+                        if (remoteCall == call) remoteCall = null;
+                    }
+                });
+                if (token != generation.get()) return;
+                if (rawPcm) {
+                    owned = new PcmSpeech(ATTRIBUTES);
+                    synchronized (this) {
+                        if (token != generation.get()) return;
+                        pcm = owned;
+                    }
+                    try (java.io.FileInputStream input = new java.io.FileInputStream(cached)) {
+                        owned.append(input, () -> token == generation.get());
+                        owned.drain(() -> token == generation.get());
+                    }
+                } else play(token, cached);
+            } catch (Exception failure) {
+                problem = failure.getMessage();
+            } finally {
+                synchronized (this) { if (pcm == owned) pcm = null; }
+                if (owned != null) owned.close();
+                String message = problem;
+                main.post(() -> {
+                    if (token != generation.get()) return;
+                    if (message != null) Toast.makeText(context, "唤醒问候播放失败：" + message, Toast.LENGTH_SHORT).show();
+                    finishStream(token);
+                });
+            }
+        });
+    }
+
     synchronized void stop() {
         generation.incrementAndGet();
         streamQueue.clear();
