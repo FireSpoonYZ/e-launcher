@@ -58,6 +58,18 @@ public class DesktopSettingsGestureTest {
         }
     }
 
+    @Test public void assistantShortcutHandsOffToChatSettings() {
+        try (ActivityController<DesktopSettingsActivity> controller =
+                     Robolectric.buildActivity(DesktopSettingsActivity.class).setup()) {
+            DesktopSettingsActivity activity = controller.get();
+            clickLabeled(activity.getWindow().getDecorView(), "助手设置");
+            Intent started = Shadows.shadowOf(activity).getNextStartedActivity();
+            assertEquals(MainActivity.class.getName(), started.getComponent().getClassName());
+            assertEquals("assistant_settings", started.getStringExtra(DesktopSettingsActivity.EXTRA_ACTION));
+            assertTrue(activity.isFinishing());
+        }
+    }
+
     private static void clickLabeled(View root, String title) {
         TextView label = findText(root, title);
         assertNotNull(title, label);

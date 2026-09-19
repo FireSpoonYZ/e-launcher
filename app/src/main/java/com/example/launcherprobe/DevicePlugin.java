@@ -1,8 +1,10 @@
 package com.example.launcherprobe;
 
+import android.Manifest;
 import android.app.Activity;
 import android.app.role.RoleManager;
 import android.content.Intent;
+import android.content.pm.PackageManager;
 import android.net.Uri;
 import android.provider.Settings;
 
@@ -11,6 +13,8 @@ import com.getcapacitor.Plugin;
 import com.getcapacitor.PluginCall;
 import com.getcapacitor.annotation.ActivityCallback;
 import com.getcapacitor.annotation.CapacitorPlugin;
+import com.getcapacitor.annotation.Permission;
+import com.getcapacitor.annotation.PermissionCallback;
 import com.getcapacitor.PluginMethod;
 
 import org.json.JSONObject;
@@ -19,8 +23,10 @@ import java.util.Arrays;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
-@CapacitorPlugin(name = "Device")
+@CapacitorPlugin(name = "Device", permissions = {@Permission(alias = DevicePlugin.MICROPHONE,
+        strings = {Manifest.permission.RECORD_AUDIO})})
 public final class DevicePlugin extends Plugin {
+    static final String MICROPHONE = "microphone";
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private ShizukuRepair repair;
     private android.view.ViewTreeObserver.OnGlobalLayoutListener keyboardListener;
@@ -85,6 +91,113 @@ public final class DevicePlugin extends Plugin {
     }
     @PluginMethod public void stopSpeaking(PluginCall call) {
         getActivity().runOnUiThread(() -> { VoiceManager.get(getContext()).stopSpeaking(); call.resolve(); });
+    }
+
+    /** Dictation for the settings test button; unlike voice() it never touches a conversation draft. */
+    @PluginMethod public void listenOnce(PluginCall call) {
+        getActivity().runOnUiThread(() -> VoiceManager.get(getContext()).listen(getActivity(), null, new VoiceManager.Callback() {
+            @Override public void onText(String text) { call.resolve(object("text", text)); }
+            @Override public void onError(String message) { call.reject(message); }
+            @Override public void onCancel() { call.reject("语音输入已取消"); }
+        }));
+    }
+
+    @PluginMethod public void voiceSettings(PluginCall call) {
+        try { call.resolve(voiceObject()); } catch (Exception exception) { reject(call, exception); }
+    }
+
+    @PluginMethod public void setVoiceSettings(PluginCall call) {
+        try {
+            VoiceSettings settings = VoiceManager.get(getContext()).settings();
+            String stt = call.getString("sttEngine"); if (stt != null) settings.setEngine(VoiceSettings.STT, stt);
+            String tts = call.getString("ttsEngine"); if (tts != null) settings.setEngine(VoiceSettings.TTS, tts);
+            String mode = call.getString("speakMode"); if (mode != null) settings.setSpeakMode(mode);
+            String language = call.getString("language"); if (language != null) settings.setLanguage(language);
+            Double rate = call.getDouble("speechRate"); if (rate != null) settings.setSpeechRate(rate.floatValue());
+            String words = call.getString("wakeWords");
+            if (words != null) {
+                // Reject words the offline model cannot spell before they reach the detector.
+                WakeWords.keywordsFile(WakeWords.split(words), WakeWordEngine.vocabulary(getContext()));
+                settings.setWakeWords(words);
+                WakeWordService.sync(getContext(), true);
+            }
+            String sensitivity = call.getString("wakeSensitivity");
+            if (sensitivity != null) { settings.setWakeSensitivity(sensitivity); WakeWordService.sync(getContext(), true); }
+            call.resolve(voiceObject());
+        } catch (Exception exception) { reject(call, exception); }
+    }
+
+    /** A null apiKey keeps the stored credential; an empty one removes it. */
+    @PluginMethod public void setVoiceRemote(PluginCall call) {
+        try {
+            VoiceSettings settings = VoiceManager.get(getContext()).settings();
+            String kind = required(call, "kind");
+            settings.setRemote(kind, call.getString("baseUrl", ""), call.getString("model", ""),
+                    call.getString("voice", settings.remote(kind).voice), call.getString("apiKey"));
+            call.resolve(voiceObject());
+        } catch (Exception exception) { reject(call, exception); }
+    }
+
+    @PluginMethod public void setWakeEnabled(PluginCall call) {
+        try {
+            if (!Boolean.TRUE.equals(call.getBoolean("enabled"))) {
+                VoiceManager.get(getContext()).settings().setWakeEnabled(false);
+                WakeWordService.sync(getContext());
+                call.resolve(voiceObject());
+            } else if (microphoneGranted()) enableWake(call);
+            else requestPermissionForAlias(MICROPHONE, call, "wakePermission");
+        } catch (Exception exception) { reject(call, exception); }
+    }
+
+    @PermissionCallback private void wakePermission(PluginCall call) {
+        if (microphoneGranted()) enableWake(call);
+        else call.reject("需要麦克风权限才能开启语音唤醒");
+    }
+
+    private void enableWake(PluginCall call) {
+        try {
+            VoiceManager.get(getContext()).settings().setWakeEnabled(true);
+            WakeWordService.sync(getContext(), true);
+            call.resolve(voiceObject());
+        } catch (Exception exception) { reject(call, exception); }
+    }
+
+    /** Shizuku grants the assistant role; the system default-apps screen stays available from openSystemSettings. */
+    @PluginMethod public void requestAssistantRole(PluginCall call) {
+        repair.requestAssistantFromButton(); call.resolve();
+    }
+
+    private boolean microphoneGranted() {
+        return getContext().checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED;
+    }
+
+    private JSObject voiceObject() {
+        VoiceSettings settings = VoiceManager.get(getContext()).settings();
+        boolean assistant = LauncherVoiceInteractionService.isDefaultAssistant(getContext());
+        return object("sttEngine", settings.sttEngine(), "ttsEngine", settings.ttsEngine(),
+                "speakMode", settings.speakMode(), "language", settings.language(), "speechRate", (double) settings.speechRate(),
+                "stt", remoteObject(settings.remote(VoiceSettings.STT)), "tts", remoteObject(settings.remote(VoiceSettings.TTS)),
+                "wakeEnabled", settings.wakeEnabled(), "wakeWords", settings.wakeWords(),
+                "wakeWordsDetail", wakeDetail(settings.wakeWords()), "wakeSensitivity", settings.wakeSensitivity(),
+                "wakeStatus", WakeWordService.status(),
+                "wakeListening", assistant ? LauncherVoiceInteractionService.isListening() : WakeWordService.isRunning(),
+                "assistantDefault", assistant, "microphoneGranted", microphoneGranted());
+    }
+
+    private static JSObject remoteObject(VoiceSettings.Remote remote) {
+        return object("baseUrl", remote.baseUrl, "model", remote.model, "voice", remote.voice, "configured", !remote.apiKey.isEmpty());
+    }
+
+    /** Shows how the offline model spells each wake word, or why it cannot. */
+    private String wakeDetail(String words) {
+        try {
+            StringBuilder out = new StringBuilder();
+            for (String word : WakeWords.split(words)) {
+                if (out.length() > 0) out.append('\n');
+                out.append(word).append("  ·  ").append(WakeWords.tokens(word, WakeWordEngine.vocabulary(getContext())));
+            }
+            return out.toString();
+        } catch (Exception exception) { return words + "\n" + exception.getMessage(); }
     }
 
     @PluginMethod public void chooseAttachment(PluginCall call) {
@@ -171,8 +284,16 @@ public final class DevicePlugin extends Plugin {
             else if ("home".equals(target)) intent = new Intent(Settings.ACTION_HOME_SETTINGS);
             else if ("accessibility".equals(target)) intent = new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS);
             else if ("settings".equals(target)) intent = new Intent(Settings.ACTION_SETTINGS);
+            else if ("tts".equals(target)) intent = new Intent("com.android.settings.TTS_SETTINGS");
+            else if ("assistant".equals(target)) intent = new Intent(Settings.ACTION_MANAGE_DEFAULT_APPS_SETTINGS);
             else throw new IllegalArgumentException("target 无效");
-            getActivity().startActivity(intent); call.resolve();
+            try { getActivity().startActivity(intent); }
+            catch (android.content.ActivityNotFoundException missing) {
+                if ("assistant".equals(target)) getActivity().startActivity(new Intent(Settings.ACTION_VOICE_INPUT_SETTINGS));
+                else if ("tts".equals(target)) throw new IllegalStateException("系统未提供朗读引擎设置");
+                else throw missing;
+            }
+            call.resolve();
         } catch (Exception exception) { reject(call, exception); }
     }
     @PluginMethod public void repairPermissions(PluginCall call) { repair.repairFromButton(); call.resolve(); }

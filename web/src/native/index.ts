@@ -95,6 +95,9 @@ export interface SettingsPlugin {
 }
 
 export type DeviceState = { launchRoute: string; language: 'system'|'zh'|'en'; theme: 'system'|'light'|'dark'; background: 'circles'|'solid'|'image'; backgroundMask: number; backgroundPath?: string; homeRole: boolean; gestureStatus: string; canWriteSecureSettings: boolean; accessibilityConnected: boolean };
+export type VoiceEngine = 'system'|'remote';
+export type VoiceRemote = { baseUrl: string; model: string; voice: string; configured: boolean };
+export type VoiceState = { sttEngine: VoiceEngine; ttsEngine: VoiceEngine; speakMode: 'off'|'afterVoice'|'always'; language: string; speechRate: number; stt: VoiceRemote; tts: VoiceRemote; wakeEnabled: boolean; wakeWords: string; wakeWordsDetail: string; wakeSensitivity: 'low'|'medium'|'high'; wakeStatus: string; wakeListening: boolean; assistantDefault: boolean; microphoneGranted: boolean };
 export interface DevicePlugin {
   addListener(event: 'deviceEvent', listener: (state: DeviceState) => void): ListenerPromise;
   addListener(event: 'keyboardEvent', listener: (state: {visible:boolean}) => void): ListenerPromise;
@@ -103,16 +106,25 @@ export interface DevicePlugin {
   apps(): Promise<{apps: Array<{label: string; packageName: string; className: string; icon: string}>}>;
   launchApp(options: {packageName: string; className: string}): Promise<void>;
   voice(): Promise<{text: string}>;
+  /** Dictation for the settings test button; never touches a conversation draft. */
+  listenOnce(): Promise<{text: string}>;
   /** Reads Markdown aloud with the configured engine; replaces any reading in progress. */
   speak(options: {text: string}): Promise<void>;
   stopSpeaking(): Promise<void>;
+  voiceSettings(): Promise<VoiceState>;
+  setVoiceSettings(options: Partial<Pick<VoiceState, 'sttEngine'|'ttsEngine'|'speakMode'|'language'|'speechRate'|'wakeWords'|'wakeSensitivity'>>): Promise<VoiceState>;
+  /** Omit apiKey to keep the stored credential; pass an empty string to remove it. */
+  setVoiceRemote(options: {kind: 'stt'|'tts'; baseUrl: string; model: string; voice?: string; apiKey?: string}): Promise<VoiceState>;
+  /** Requests the microphone permission when enabling. */
+  setWakeEnabled(options: {enabled: boolean}): Promise<VoiceState>;
+  requestAssistantRole(): Promise<void>;
   chooseAttachment(options: {conversationId: string; kind: 'camera'|'image'|'file'}): Promise<{attachments: Attachment[]}>;
   removeAttachment(options: {conversationId: string; attachmentId: string}): Promise<void>;
   openAttachment(options: {attachmentId: string}): Promise<void>;
   chooseBackground(): Promise<void>;
   clearBackground(): Promise<void>;
   setAppearance(options: Partial<Pick<DeviceState, 'language'|'theme'|'background'|'backgroundMask'>>): Promise<DeviceState>;
-  openSystemSettings(options: {target: 'app'|'home'|'accessibility'|'settings'}): Promise<void>;
+  openSystemSettings(options: {target: 'app'|'home'|'accessibility'|'settings'|'tts'|'assistant'}): Promise<void>;
   repairPermissions(): Promise<void>;
   requestHome(): Promise<DeviceState|void>;
   enableGestures(): Promise<DeviceState>;

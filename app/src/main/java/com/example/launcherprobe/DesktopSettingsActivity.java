@@ -21,7 +21,7 @@ import java.nio.charset.StandardCharsets;
 import java.text.DateFormat;
 import java.util.*;
 
-/** Native desktop settings; assistant configuration remains in PiSettingsActivity. */
+/** Native desktop settings; assistant configuration lives in the chat settings page. */
 public final class DesktopSettingsActivity extends androidx.activity.ComponentActivity {
     public static final String EXTRA_ACTION = "desktop_settings_action";
     private static final int EXPORT = 41, IMPORT = 42;
@@ -180,7 +180,7 @@ public final class DesktopSettingsActivity extends androidx.activity.ComponentAc
         LinearLayout shortcuts = horizontal();
         shortcuts.addView(shortcut("desktop", "桌面设置", "布局、图标、小组件", () -> show("桌面")), new LinearLayout.LayoutParams(0, dp(92), 1));
         LinearLayout.LayoutParams assistantParams = new LinearLayout.LayoutParams(0, dp(92), 1); assistantParams.leftMargin = dp(10);
-        shortcuts.addView(shortcut("sparkles", "助手设置", "模型、工具与扩展", () -> startActivity(new Intent(this, PiSettingsActivity.class))), assistantParams);
+        shortcuts.addView(shortcut("sparkles", "助手设置", "模型、语音与扩展", () -> desktop("assistant_settings")), assistantParams);
         addBlock(shortcuts, -2, 12);
         String[] names = {"桌面", "Dock 栏", "搜索", "文件夹", "小组件", "手势", "外观", "备份与恢复"};
         String[] descriptions = {"网格、图标大小、锁定布局", "仅在桌面显示", "本地搜索与 AI 入口", "排序与批量添加", "第三方组件与 AI 组件", "上滑应用库，固定导航与三键", "壁纸、图标包、深浅模式", "桌面布局与设置"};

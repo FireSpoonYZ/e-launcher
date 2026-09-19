@@ -5,7 +5,7 @@ import { HashRouter, Navigate, Route, Routes, useLocation } from 'react-router-d
 import { Device, type DeviceState } from './native';
 import { Environment, useBack } from './ui';
 import { ArchivedPage, ChatPage, HistoryPage } from './Chat';
-import { SettingsHome, GeneralPage, AppearancePage, DevicePage, AboutPage } from './Settings';
+import { SettingsHome, GeneralPage, AppearancePage, DevicePage, AboutPage, VoicePage } from './Settings';
 import { ProvidersPage, ResourcesPage } from './Resources';
 import { AdvancedPage, EditorPage } from './Editor';
 import { SchedulesPage, ScheduleHistoryPage } from './Schedules';
@@ -105,6 +105,7 @@ function Shell({initialDevice}: {initialDevice: DeviceState}) {
     <Route path="/settings/appearance" element={<AppearancePage/>}/>
     <Route path="/settings/device" element={<DevicePage/>}/>
     <Route path="/settings/providers" element={<ProvidersPage/>}/>
+    <Route path="/settings/voice" element={<VoicePage/>}/>
     <Route path="/settings/resources/:kind" element={<ResourcesPage/>}/>
     <Route path="/settings/advanced" element={<AdvancedPage/>}/>
     <Route path="/settings/editor" element={<EditorPage/>}/>

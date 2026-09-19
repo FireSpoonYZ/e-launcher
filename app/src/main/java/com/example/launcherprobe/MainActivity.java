@@ -699,6 +699,7 @@ public class MainActivity extends BridgeActivity {
         if (action == null || homeDesktop == null) return;
         if (desktopRevision != new DesktopPreferences(this).revision()) { recreate(); return; }
         intent.removeExtra("desktop_settings_action");
+        if ("assistant_settings".equals(action)) { openAssistantSettings(); return; }
         showDesktop();
         homeDesktop.post(() -> {
             if ("add_widget".equals(action)) homeDesktop.showAddMenu();
@@ -887,8 +888,7 @@ public class MainActivity extends BridgeActivity {
         startActivity(new Intent(this, DesktopSettingsActivity.class));
     }
     public void openAssistantSettings() {
-        leaveDesktopEdit();
-        startActivity(new Intent(this, PiSettingsActivity.class));
+        launchWeb("/settings", null, null);
     }
     private void leaveDesktopEdit() {
         if (homeDesktop != null) homeDesktop.exitEdit();
