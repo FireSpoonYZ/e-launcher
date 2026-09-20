@@ -31,7 +31,9 @@ final class SwipeDetector {
 
     private final Zone zone;
     private final float minDistance;
+    private final float holdDistance;
     private static final long QUICK_SWIPE_MS = 200;
+    private static final long HOLD_RETRY_MS = 40;
     private final Scheduler scheduler;
     private final Runnable shortSwipe;
     private final Runnable longSwipe;
@@ -41,12 +43,14 @@ final class SwipeDetector {
     private float startX, startY;
     private long startTime;
     private boolean tracking, crossed, longFired, replayable, sideClaimed;
+    private float inward;
     private final Runnable hold = this::fireHold;
 
     SwipeDetector(Zone zone, float density, Scheduler scheduler, Runnable shortSwipe,
             Runnable longSwipe, Consumer<List<Sample>> unusedTouch, Feedback feedback) {
         this.zone = zone;
-        minDistance = (zone == Zone.BOTTOM ? 10 : 24) * density;
+        minDistance = (zone == Zone.BOTTOM ? 10 : 40) * density;
+        holdDistance = 32 * density;
         this.scheduler = scheduler;
         this.shortSwipe = shortSwipe;
         this.longSwipe = longSwipe;
@@ -56,6 +60,11 @@ final class SwipeDetector {
 
     private void fireHold() {
         if (!tracking || zone != Zone.BOTTOM || longSwipe == null || longFired) return;
+        // The app list needs a real pull, not just a finger resting on the edge.
+        if (inward < holdDistance) {
+            scheduler.post(hold, HOLD_RETRY_MS);
+            return;
+        }
         longFired = true;
         hideFeedback();
         longSwipe.run();
@@ -66,6 +75,7 @@ final class SwipeDetector {
         startX = x;
         startY = y;
         startTime = time;
+        inward = 0;
         tracking = true;
         replayable = unusedTouch != null;
         sample(x, y, time);
@@ -79,32 +89,29 @@ final class SwipeDetector {
     void move(float x, float y, long time) {
         sample(x, y, time);
         if (!tracking) return;
-        if (time - startTime > QUICK_SWIPE_MS) fireHold();
         float dx = x - startX;
         float dy = y - startY;
         float distance = zone == Zone.BOTTOM ? -dy : zone == Zone.LEFT ? dx : -dx;
+        inward = distance;
+        if (time - startTime > QUICK_SWIPE_MS) fireHold();
         // Once the side animation extends inward, never replay this touch as a scroll.
         if (zone != Zone.BOTTOM && distance > 0) {
             sideClaimed = true;
             replayable = false;
         }
-        if (!crossed) {
-            if (zone != Zone.BOTTOM && !sideClaimed && time - startTime > 1000) {
-                tracking = false;
-                hideFeedback();
-                return;
-            }
-            boolean triggered = distance >= minDistance
-                    && (zone != Zone.BOTTOM || Math.abs(dx) <= -dy);
-            if (triggered) crossed = true;
+        if (!crossed && zone != Zone.BOTTOM && !sideClaimed && time - startTime > 1000) {
+            tracking = false;
+            hideFeedback();
+            return;
         }
+        // Not sticky: pulling back under the threshold cancels the gesture, like HyperOS.
+        crossed = distance >= minDistance && (zone != Zone.BOTTOM || Math.abs(dx) <= -dy);
         showFeedback(x, y, Math.max(0, Math.min(1, distance / minDistance)));
     }
 
     void up(float x, float y, long time) {
-        // UP may contain the only sample that reaches the distance threshold.
-        if (zone == Zone.BOTTOM) move(x, y, time);
-        else sample(x, y, time);
+        // UP carries the distance that decides the gesture, on every edge.
+        move(x, y, time);
         scheduler.cancel(hold);
         boolean fires = tracking && crossed && !longFired
                 && (zone != Zone.BOTTOM || time - startTime <= QUICK_SWIPE_MS);
@@ -125,6 +132,7 @@ final class SwipeDetector {
         longFired = false;
         replayable = false;
         sideClaimed = false;
+        inward = 0;
         samples.clear();
     }
 

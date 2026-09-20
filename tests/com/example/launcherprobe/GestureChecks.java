@@ -85,16 +85,24 @@ public final class GestureChecks {
         actions.clear();
 
         bottom.down(100, 200, clock.now);
-        clock.advance(201); // No movement or distance gate for a hold.
-        assert actions.toString().equals("[recents]") : actions;
+        clock.advance(201); // A resting finger without a pull is not the app list.
+        assert actions.isEmpty() : actions;
         bottom.up(100, 200, clock.now);
+        assert actions.toString().equals("[replay]") : actions;
+        actions.clear();
+
+        bottom.down(100, 200, clock.now);
+        bottom.move(100, 168, clock.now); // Pulled past the hold distance, then held still.
+        clock.advance(201);
+        assert actions.toString().equals("[recents]") : actions;
+        bottom.up(100, 168, clock.now);
         assert actions.toString().equals("[recents]") : actions;
         actions.clear();
 
         bottom.down(100, 200, 0);
-        bottom.up(100, 190, 201); // Delayed Handler: event time still selects recents.
+        bottom.up(100, 190, 201); // Slow and short: neither a quick swipe nor a pulled hold.
         clock.advance(200);
-        assert actions.toString().equals("[recents]") : actions;
+        assert actions.toString().equals("[replay]") : actions;
         actions.clear();
 
         bottom.down(100, 200, 0);
@@ -114,9 +122,9 @@ public final class GestureChecks {
         }
         assert actions.isEmpty();
         bottom.down(100, 200, 0);
-        bottom.move(100, 180, 1001);
+        bottom.move(100, 160, 1001);
         assert !feedback.visible;
-        bottom.up(100, 180, 1100);
+        bottom.up(100, 160, 1100);
         assert actions.toString().equals("[recents]");
         actions.clear();
         for (SwipeDetector.Zone zone : new SwipeDetector.Zone[]{
@@ -125,7 +133,7 @@ public final class GestureChecks {
             SwipeDetector side = new SwipeDetector(zone, 1, clock,
                     () -> actions.add("back"), null, samples -> actions.add("replay"),
                     sideFeedback);
-            int dx = zone == SwipeDetector.Zone.LEFT ? 24 : -24;
+            int dx = zone == SwipeDetector.Zone.LEFT ? 40 : -40;
             side.down(100, 200, 0);
             side.move(100 - dx, 200, 20);
             side.up(100 - dx, 200, 30);
@@ -153,7 +161,7 @@ public final class GestureChecks {
                         sideFeedback);
                 int inward = zone == SwipeDetector.Zone.LEFT ? 1 : -1;
                 side.down(100, 300, 0);
-                side.move(100 + inward * 23, 300 + vertical, 20);
+                side.move(100 + inward * 39, 300 + vertical, 20);
                 assert sideFeedback.visible && !sideFeedback.crossed;
                 side.move(100, 300 + vertical, 1100); // Retract after animation: no scroll replay.
                 side.up(100, 300 + vertical, 1120);
@@ -162,16 +170,24 @@ public final class GestureChecks {
 
                 side.down(100, 300, 0);
                 side.move(100 + inward, 300 + vertical, 20);
-                side.move(100 + inward * 24, 300 + vertical, 1100);
+                side.move(100 + inward * 40, 300 + vertical, 1100);
                 assert sideFeedback.visible && sideFeedback.crossed;
-                side.up(100 + inward * 24, 300 + vertical, 1120);
+                side.up(100 + inward * 40, 300 + vertical, 1120);
                 assert actions.toString().equals("[back]") : actions;
                 actions.clear();
 
                 side.down(100, 300, 0);
-                side.move(100 + inward * 24, 300 + vertical, 20);
+                side.move(100 + inward * 60, 300 + vertical, 20);
+                assert sideFeedback.crossed;
+                side.move(100 + inward * 10, 300 + vertical, 40); // Pulled back under the threshold.
+                assert !sideFeedback.crossed;
+                side.up(100 + inward * 10, 300 + vertical, 60);
+                assert actions.isEmpty() : actions;
+
+                side.down(100, 300, 0);
+                side.move(100 + inward * 40, 300 + vertical, 20);
                 side.cancel();
-                side.up(100 + inward * 24, 300 + vertical, 40);
+                side.up(100 + inward * 40, 300 + vertical, 40);
                 assert actions.isEmpty() : actions;
                 // A fresh edge tap still passes through after cancellation.
                 side.down(100, 300, 50);
