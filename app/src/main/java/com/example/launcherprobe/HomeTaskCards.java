@@ -3,8 +3,6 @@ package com.example.launcherprobe;
 import android.animation.ValueAnimator;
 import android.content.Context;
 import android.graphics.Canvas;
-import android.graphics.Paint;
-import android.graphics.RectF;
 import android.content.res.ColorStateList;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
@@ -14,7 +12,6 @@ import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewConfiguration;
-import android.view.animation.LinearInterpolator;
 import android.widget.FrameLayout;
 import android.widget.HorizontalScrollView;
 import android.widget.LinearLayout;
@@ -400,57 +397,13 @@ final class HomeTaskCards extends LinearLayout {
     }
 
     private HorizontalScrollView taskStrip(List<JSONObject> tasks, String model) {
-        HorizontalScrollView strip = new HorizontalScrollView(getContext());
-        strip.setHorizontalScrollBarEnabled(false);
-        strip.setOverScrollMode(OVER_SCROLL_NEVER);
-        // The step strip scrolls independently; swiping the header switches conversations.
-        strip.setTag("todo-strip");
+        HorizontalScrollView strip = new TaskProgressStrip(getContext(), colors, tasks, model);
         strip.setOnScrollChangeListener((view, x, y, oldX, oldY) -> {
             if (findViewWithTag("todo-strip") != view) return;
             if (x == followingTarget) followingTarget = -1;
             if (stripSettling) scheduleScrollSettle();
         });
-        LinearLayout track = new LinearLayout(getContext()) {
-            private final Paint line = new Paint(Paint.ANTI_ALIAS_FLAG);
-            { setWillNotDraw(false); }
-            @Override protected void onDraw(Canvas canvas) {
-                super.onDraw(canvas);
-                line.setStrokeWidth(dp(1));
-                for (int i = 0; i + 1 < getChildCount(); i++) {
-                    View a = getChildAt(i), b = getChildAt(i + 1);
-                    line.setColor("completed".equals(tasks.get(i).optString("status"))
-                            ? colors.accent : colors.border);
-                    canvas.drawLine(a.getLeft() + a.getWidth() / 2f + dp(13), dp(19),
-                            b.getLeft() + b.getWidth() / 2f - dp(13), dp(19), line);
-                }
-            }
-        };
-        int width = Math.max(dp(58), (getResources().getDisplayMetrics().widthPixels - dp(60)) / Math.min(5, tasks.size()));
-        for (JSONObject task : tasks) {
-            String status = task.optString("status");
-            LinearLayout node = new LinearLayout(getContext());
-            node.setOrientation(VERTICAL);
-            node.setGravity(Gravity.CENTER_HORIZONTAL);
-            node.setPadding(dp(2), dp(2), dp(2), dp(2));
-            node.addView(new TaskStepMarker(getContext(), status, model, colors.accent), new LayoutParams(dp(34), dp(34)));
-            TextView subject = label(task.optString("subject"), 11);
-            subject.setMaxLines(1);
-            subject.setEllipsize(TextUtils.TruncateAt.END);
-            subject.setTextColor("in_progress".equals(status) ? colors.ink : colors.muted);
-            if ("in_progress".equals(status)) subject.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-            subject.setGravity(Gravity.CENTER);
-            subject.setPadding(0, dp(4), 0, 0);
-            node.addView(subject);
-            node.setContentDescription(task.optString("subject") + ", " + taskStatus(status));
-            track.addView(node, new LayoutParams(width, -2));
-        }
-        strip.addView(track);
         return strip;
-    }
-
-    private String taskStatus(String status) {
-        return "completed".equals(status) ? text("已完成", "Completed")
-                : "in_progress".equals(status) ? text("进行中", "In progress") : text("待开始", "Pending");
     }
 
     private boolean stripTouch;

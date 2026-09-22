@@ -56,6 +56,30 @@ final class HomeQuestionnaire extends LinearLayout {
                     && questionnaireId.equals(question.optString("id"));
         }
 
+        android.os.Bundle save() {
+            android.os.Bundle state = new android.os.Bundle();
+            state.putString("request", requestId); state.putString("questionnaire", questionnaireId); state.putInt("page", page);
+            for (Map.Entry<Integer, Answer> entry : answers.entrySet()) {
+                Answer answer = entry.getValue(); android.os.Bundle value = new android.os.Bundle();
+                value.putString("kind", answer.kind); value.putString("text", answer.text);
+                value.putStringArrayList("selected", new java.util.ArrayList<>(answer.selected));
+                state.putBundle("answer:" + entry.getKey(), value);
+            }
+            return state;
+        }
+
+        void restore(android.os.Bundle state) {
+            if (state == null || !requestId.equals(state.getString("request"))
+                    || !questionnaireId.equals(state.getString("questionnaire"))) return;
+            page = state.getInt("page");
+            for (String key : state.keySet()) if (key.startsWith("answer:")) {
+                android.os.Bundle value = state.getBundle(key);
+                Answer answer = answer(Integer.parseInt(key.substring(7)));
+                answer.kind = value.getString("kind", ""); answer.text = value.getString("text", "");
+                answer.selected.addAll(value.getStringArrayList("selected"));
+            }
+        }
+
         Answer answer(int index) { return answers.computeIfAbsent(index, ignored -> new Answer()); }
 
         void choose(JSONObject question, String label) {
@@ -181,6 +205,7 @@ final class HomeQuestionnaire extends LinearLayout {
         addView(scroll, new LayoutParams(-1, 0, 1));
 
         LinearLayout actions = new LinearLayout(getContext());
+        actions.setBaselineAligned(false);
         TextView previous = action("", "arrow-left", text("上一题", "Previous"), () -> {
             draft.page--; render();
         }, false);
@@ -324,7 +349,8 @@ final class HomeQuestionnaire extends LinearLayout {
     }
 
     private TextView action(String text, String icon, String description, Runnable onClick, boolean primary) {
-        TextView button = label(text, 13, primary ? 0xffffffff : colors.ink);
+        int foreground = primary ? (colors.dark ? colors.background : 0xffffffff) : colors.ink;
+        TextView button = label(text, 13, foreground);
         button.setGravity(Gravity.CENTER);
         button.setMinHeight(dp(48));
         button.setPadding(dp(text.isEmpty() ? 13 : 8), 0, dp(text.isEmpty() ? 13 : 8), 0);
@@ -340,7 +366,7 @@ final class HomeQuestionnaire extends LinearLayout {
             }
         });
         if (icon != null) {
-            ChatIcon drawable = new ChatIcon(icon, primary ? 0xffffffff : colors.muted);
+            ChatIcon drawable = new ChatIcon(icon, primary ? foreground : colors.muted);
             drawable.setBounds(0, 0, dp(text.isEmpty() ? 22 : 18), dp(text.isEmpty() ? 22 : 18));
             button.setCompoundDrawablesRelative(primary ? null : drawable, null, primary ? drawable : null, null);
             button.setCompoundDrawablePadding(dp(4));

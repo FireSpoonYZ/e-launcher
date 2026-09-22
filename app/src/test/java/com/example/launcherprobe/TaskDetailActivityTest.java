@@ -120,15 +120,77 @@ public class TaskDetailActivityTest {
                     ReflectionHelpers.ClassParameter.from(String.class, "手动操作"));
             assertNotNull(firstExact(root, "结束接管"));
             assertTrue(navigation.getChildAt(0).isEnabled());
-            ReflectionHelpers.callInstanceMethod(activity, "showDetails");
-            AlertDialog dialog = ShadowAlertDialog.getLatestAlertDialog();
-            assertEquals("任务进度", Shadows.shadowOf(dialog).getTitle().toString());
-            dialog.dismiss();
-            Shadows.shadowOf(android.os.Looper.getMainLooper()).idle();
-            android.widget.ScrollView details = ReflectionHelpers.getField(activity, "detailsScroll");
-            assertEquals(View.GONE, details.getVisibility());
-            assertNotNull(details.getParent());
+            View pane = ReflectionHelpers.getField(activity, "taskPane");
+            assertEquals("Progress stays visible beside the compact viewer", View.VISIBLE, pane.getVisibility());
+            View expand = ReflectionHelpers.getField(activity, "expand");
+            expand.performClick();
+            assertEquals(View.GONE, pane.getVisibility());
+            View summary = ReflectionHelpers.getField(activity, "taskSummary");
+            assertEquals(View.VISIBLE, summary.getVisibility());
+            summary.performClick();
+            assertEquals(View.VISIBLE, pane.getVisibility());
+            expand.performClick();
+            activity.getOnBackPressedDispatcher().onBackPressed();
+            assertFalse(activity.isFinishing());
+            assertEquals(View.VISIBLE, pane.getVisibility());
         }
+    }
+
+    @Test public void workbenchQuestionDraftSurvivesLiveUpdatesAndFullscreen() throws Exception {
+        ChatCoordinator coordinator = ChatCoordinator.get(application);
+        coordinator.store().save(Collections.singletonList(new AgentLoop.Message("user", "Desktop task")));
+        String id = coordinator.store().activeId();
+        try (var controller = Robolectric.buildActivity(TaskDetailActivity.class,
+                new Intent(application, TaskDetailActivity.class).putExtra(TaskDetailActivity.EXTRA_CONVERSATION_ID, id)).setup()) {
+            TaskDetailActivity activity = controller.get();
+            ((ShowerDesktopView) ReflectionHelpers.getField(activity, "desktop")).stop();
+            org.json.JSONObject card = HomeQuestionnaireTest.card().put("conversationId", id).put("todo", new org.json.JSONObject("""
+                    {"package":"@juicesharp/rpiv-todo","tasks":[
+                    {"id":"1","subject":"Read calendar","status":"completed"},
+                    {"id":"2","subject":"Organize","status":"in_progress"}]}
+                    """));
+            ReflectionHelpers.callInstanceMethod(activity, "renderTaskPane", ReflectionHelpers.ClassParameter.from(org.json.JSONObject.class, card));
+            View root = activity.getWindow().getDecorView();
+            View question = root.findViewWithTag("home-questionnaire");
+            assertNotNull(question);
+            root.findViewWithTag("option:Compact").performClick();
+            assertNotNull(root.findViewWithTag("todo-strip"));
+            ReflectionHelpers.setField(activity, "desktopAvailable", true);
+            ReflectionHelpers.callInstanceMethod(activity, "setFullscreen", ReflectionHelpers.ClassParameter.from(boolean.class, true));
+            ReflectionHelpers.callInstanceMethod(activity, "setFullscreen", ReflectionHelpers.ClassParameter.from(boolean.class, false));
+            card.getJSONObject("todo").getJSONArray("tasks").getJSONObject(1).put("status", "completed");
+            ReflectionHelpers.callInstanceMethod(activity, "renderTaskPane", ReflectionHelpers.ClassParameter.from(org.json.JSONObject.class, card));
+            assertSame("Progress refresh must not tear down an open questionnaire", question, root.findViewWithTag("home-questionnaire"));
+            assertTrue(root.findViewWithTag("option:Compact").createAccessibilityNodeInfo().isChecked());
+            card.put("questionnairePending", true);
+            ReflectionHelpers.callInstanceMethod(activity, "renderTaskPane", ReflectionHelpers.ClassParameter.from(org.json.JSONObject.class, card));
+            assertFalse(root.findViewWithTag("option:Compact").isEnabled());
+            assertTrue(root.findViewWithTag("option:Compact").createAccessibilityNodeInfo().isChecked());
+            card.put("questionnairePending", false).put("questionnaireError", "Try again");
+            ReflectionHelpers.callInstanceMethod(activity, "renderTaskPane", ReflectionHelpers.ClassParameter.from(org.json.JSONObject.class, card));
+            assertTrue(root.findViewWithTag("option:Compact").isEnabled());
+            card.getJSONObject("askUser").put("id", "next-question");
+            ReflectionHelpers.callInstanceMethod(activity, "renderTaskPane", ReflectionHelpers.ClassParameter.from(org.json.JSONObject.class, card));
+            assertFalse(root.findViewWithTag("option:Compact").createAccessibilityNodeInfo().isChecked());
+            card.put("modelState", "idle");
+            ReflectionHelpers.callInstanceMethod(activity, "renderTaskPane", ReflectionHelpers.ClassParameter.from(org.json.JSONObject.class, card));
+            assertNull(root.findViewWithTag("home-questionnaire"));
+        }
+    }
+
+    @Test public void timelineFitsItsPaneWhenTheScreenIsWider() throws Exception {
+        java.util.List<org.json.JSONObject> tasks = java.util.List.of(
+                new org.json.JSONObject("{\"subject\":\"One\",\"status\":\"completed\"}"),
+                new org.json.JSONObject("{\"subject\":\"Two\",\"status\":\"in_progress\"}"),
+                new org.json.JSONObject("{\"subject\":\"Three\",\"status\":\"pending\"}"));
+        TaskProgressStrip strip = new TaskProgressStrip(application, AppAppearance.readWorkbench(application), tasks, "working");
+        float density = application.getResources().getDisplayMetrics().density;
+        int width = Math.round(300 * density);
+        strip.measure(View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY),
+                View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
+        ViewGroup track = (ViewGroup) strip.getChildAt(0);
+        assertTrue(track.getMeasuredWidth() <= width);
+        for (int i = 0; i < 3; i++) assertEquals(width / 3, track.getChildAt(i).getMeasuredWidth());
     }
 
     private static TextView firstExact(View view, String expected) {

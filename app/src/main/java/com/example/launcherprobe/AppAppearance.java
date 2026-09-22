@@ -24,6 +24,21 @@ final class AppAppearance {
         error = dark ? 0xffffb4ab : desktop ? 0xffec4350 : 0xffb3261e;
     }
 
+    /** Neutral surfaces for the task workbench; follows the desktop's light/dark preference. */
+    private AppAppearance(AppAppearance desktopColors) {
+        dark = desktopColors.dark; desktop = false;
+        background = dark ? 0xff142126 : 0xfff4f7f8;
+        surface = dark ? 0xff1d2d33 : 0xffffffff;
+        ink = dark ? 0xffe4eef1 : 0xff183039;
+        muted = dark ? 0xffa1b4bb : 0xff657b84;
+        accent = dark ? 0xff70d4df : 0xff087f8c;
+        panel = dark ? 0xff273c44 : 0xffe8eff1;
+        border = dark ? 0xff385059 : 0xffdce5e9;
+        error = desktopColors.error;
+    }
+
+    static AppAppearance readWorkbench(Context context) { return new AppAppearance(readDesktop(context)); }
+
     static AppAppearance read(Context context) {
         String value = context.getSharedPreferences("ui", Context.MODE_PRIVATE).getString("theme", "system");
         boolean systemDark = (context.getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK)

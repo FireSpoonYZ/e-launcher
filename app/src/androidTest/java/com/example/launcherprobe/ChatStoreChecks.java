@@ -15,6 +15,7 @@ public final class ChatStoreChecks extends Instrumentation {
     private boolean npmOnly;
     private boolean questionnaireOnly;
     private boolean showerPreviewOnly;
+    private boolean workbenchOnly;
 
     @Override public void onCreate(Bundle arguments) {
         super.onCreate(arguments);
@@ -22,12 +23,18 @@ public final class ChatStoreChecks extends Instrumentation {
         npmOnly = arguments != null && "npm".equals(arguments.getString("checks"));
         questionnaireOnly = arguments != null && "questionnaire".equals(arguments.getString("checks"));
         showerPreviewOnly = arguments != null && "shower-preview".equals(arguments.getString("checks"));
+        workbenchOnly = arguments != null && "workbench".equals(arguments.getString("checks"));
         start();
     }
 
     @Override public void onStart() {
         Bundle result = new Bundle();
         try {
+            if (workbenchOnly) {
+                result.putString("stream", WorkbenchChecks.run(this) + "\n");
+                finish(Activity.RESULT_OK, result);
+                return;
+            }
             if (showerPreviewOnly) {
                 result.putString("stream", ShowerPreviewChecks.run(this) + "\n");
                 finish(Activity.RESULT_OK, result);

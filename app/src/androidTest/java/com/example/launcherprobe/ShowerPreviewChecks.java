@@ -48,18 +48,7 @@ final class ShowerPreviewChecks {
             waitFor(instrumentation, desktop::isManual, "Manual takeover did not become available");
             require(tools.existingController(id).hasDisplay(), "Preview lost its owning display");
             long before = fingerprint(instrumentation, texture);
-            long down = SystemClock.uptimeMillis();
-            for (int i = 0; i <= 16; i++) {
-                final int step = i;
-                instrumentation.runOnMainSync(() -> {
-                    int action = step == 0 ? MotionEvent.ACTION_DOWN : step == 16 ? MotionEvent.ACTION_UP : MotionEvent.ACTION_MOVE;
-                    MotionEvent event = MotionEvent.obtain(down, SystemClock.uptimeMillis(), action,
-                            texture.getWidth() * .5f, texture.getHeight() * (.82f - .6f * step / 16), 0);
-                    try { texture.dispatchTouchEvent(event); } finally { event.recycle(); }
-                });
-                SystemClock.sleep(25);
-            }
-            SystemClock.sleep(700);
+            swipe(instrumentation, texture, .82f, .22f);
             require(frames.get() >= 3, "Expected continuous rendered frames during touch; got " + frames.get());
             require(before != fingerprint(instrumentation, texture), "Touch did not change the virtual Settings screen");
             View expand = field(detail, "expand");
@@ -67,32 +56,43 @@ final class ShowerPreviewChecks {
             waitFor(instrumentation, () -> Boolean.TRUE.equals(field(detail, "fullscreen")), "Fullscreen did not open");
             instrumentation.runOnMainSync(() -> detail.getOnBackPressedDispatcher().onBackPressed());
             waitFor(instrumentation, () -> !Boolean.TRUE.equals(field(detail, "fullscreen")) && !detail.isFinishing(), "Back should exit fullscreen before closing details");
-            // Tap Settings' search field and send Unicode via the same input path as the keyboard dialog.
-            instrumentation.runOnMainSync(() -> {
-                long now = SystemClock.uptimeMillis();
-                for (int action : new int[]{MotionEvent.ACTION_DOWN, MotionEvent.ACTION_UP}) {
-                    MotionEvent event = MotionEvent.obtain(now, now, action, texture.getWidth() * .5f, texture.getHeight() * .055f, 0);
-                    try { texture.dispatchTouchEvent(event); } finally { event.recycle(); }
-                }
-            });
-            SystemClock.sleep(800);
-            instrumentation.runOnMainSync(() -> desktop.text("桌面输入验收"));
+            // ROMs place Settings search at different heights; locate its real bounds after scrolling back.
+            swipe(instrumentation, texture, .22f, .9f);
             android.app.UiAutomation automation = instrumentation.getUiAutomation(android.app.UiAutomation.FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES);
             android.accessibilityservice.AccessibilityServiceInfo info = automation.getServiceInfo();
             info.flags |= android.accessibilityservice.AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS;
             automation.setServiceInfo(info);
             int displayId = tools.existingController(id).screenshot(360, 640).getInt("displayId");
+            android.graphics.Rect search = new android.graphics.Rect();
+            java.util.List<android.view.accessibility.AccessibilityWindowInfo> searchWindows = automation.getWindowsOnAllDisplays().get(displayId);
+            if (searchWindows != null) for (android.view.accessibility.AccessibilityWindowInfo window : searchWindows) {
+                android.view.accessibility.AccessibilityNodeInfo root = window.getRoot();
+                if (root == null) continue;
+                for (String label : new String[]{"搜索", "Search"})
+                    for (android.view.accessibility.AccessibilityNodeInfo node : root.findAccessibilityNodeInfosByText(label))
+                        if (node.isVisibleToUser()) node.getBoundsInScreen(search);
+            }
+            require(!search.isEmpty(), "Settings search field was not visible on the virtual display");
+            instrumentation.runOnMainSync(() -> {
+                long now = SystemClock.uptimeMillis();
+                for (int action : new int[]{MotionEvent.ACTION_DOWN, MotionEvent.ACTION_UP}) {
+                    MotionEvent event = MotionEvent.obtain(now, now, action,
+                            texture.getWidth() * search.exactCenterX() / 720,
+                            texture.getHeight() * search.exactCenterY() / 1280, 0);
+                    try { texture.dispatchTouchEvent(event); } finally { event.recycle(); }
+                }
+            });
+            long focusDeadline = SystemClock.uptimeMillis() + 8000;
+            while (focusedInput(automation, displayId) == null && SystemClock.uptimeMillis() < focusDeadline) SystemClock.sleep(100);
+            require(focusedInput(automation, displayId) != null, "Settings search did not focus an editable field");
+            instrumentation.runOnMainSync(() -> desktop.text("桌面输入验收"));
             long textDeadline = SystemClock.uptimeMillis() + 8000;
             boolean textVisible = false;
             while (!textVisible && SystemClock.uptimeMillis() < textDeadline) {
-                java.util.List<android.view.accessibility.AccessibilityWindowInfo> windows = automation.getWindowsOnAllDisplays().get(displayId);
-                if (windows != null) for (android.view.accessibility.AccessibilityWindowInfo window : windows) {
-                    android.view.accessibility.AccessibilityNodeInfo node = window.getRoot();
-                    if (node != null && !node.findAccessibilityNodeInfosByText("桌面输入验收").isEmpty()) textVisible = true;
-                }
+                android.view.accessibility.AccessibilityNodeInfo focused = focusedInput(automation, displayId);
+                textVisible = focused != null && "桌面输入验收".contentEquals(focused.getText() == null ? "" : focused.getText());
                 if (!textVisible) SystemClock.sleep(100);
             }
-            require(textVisible, "Unicode text was not found in the virtual display's focused search field");
             // AI screenshot capture must remain usable while the local Surface is attached.
             ShowerController controller = tools.existingController(id);
             require(controller.screenshot(360, 640).getString("data").length() > 100, "AI screenshot failed with preview attached");
@@ -100,6 +100,8 @@ final class ShowerPreviewChecks {
             Bitmap image = instrumentation.getUiAutomation(android.app.UiAutomation.FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES).takeScreenshot();
             try (java.io.FileOutputStream output = new java.io.FileOutputStream(screenshot)) { image.compress(Bitmap.CompressFormat.PNG, 100, output); }
             finally { image.recycle(); }
+            require(textVisible, "Unicode text was not found in the virtual display's focused search field; search="
+                    + search + ", manual=" + desktop.isManual() + ", screenshot=" + screenshot);
             instrumentation.runOnMainSync(detail::finish);
             waitFor(instrumentation, () -> !Boolean.TRUE.equals(field(desktop, "started")), "Preview did not stop with the Activity");
             long deadline = SystemClock.uptimeMillis() + 5000;
@@ -112,6 +114,33 @@ final class ShowerPreviewChecks {
             tools.forgetConversation(id);
             coordinator.deleteConversation(id);
         }
+    }
+
+    private static android.view.accessibility.AccessibilityNodeInfo focusedInput(android.app.UiAutomation automation, int displayId) {
+        automation.clearCache();
+        java.util.List<android.view.accessibility.AccessibilityWindowInfo> windows = automation.getWindowsOnAllDisplays().get(displayId);
+        if (windows != null) for (android.view.accessibility.AccessibilityWindowInfo window : windows) {
+            android.view.accessibility.AccessibilityNodeInfo root = window.getRoot();
+            android.view.accessibility.AccessibilityNodeInfo focused = root == null ? null
+                    : root.findFocus(android.view.accessibility.AccessibilityNodeInfo.FOCUS_INPUT);
+            if (focused != null && focused.isEditable()) return focused;
+        }
+        return null;
+    }
+
+    private static void swipe(Instrumentation instrumentation, TextureView texture, float from, float to) {
+        long down = SystemClock.uptimeMillis();
+        for (int i = 0; i <= 16; i++) {
+            final int step = i;
+            instrumentation.runOnMainSync(() -> {
+                int action = step == 0 ? MotionEvent.ACTION_DOWN : step == 16 ? MotionEvent.ACTION_UP : MotionEvent.ACTION_MOVE;
+                MotionEvent event = MotionEvent.obtain(down, SystemClock.uptimeMillis(), action,
+                        texture.getWidth() * .5f, texture.getHeight() * (from + (to - from) * step / 16), 0);
+                try { texture.dispatchTouchEvent(event); } finally { event.recycle(); }
+            });
+            SystemClock.sleep(25);
+        }
+        SystemClock.sleep(700);
     }
 
     private interface Check { boolean get() throws Exception; }

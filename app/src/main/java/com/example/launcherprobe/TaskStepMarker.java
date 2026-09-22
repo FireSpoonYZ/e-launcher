@@ -53,7 +53,7 @@ final class TaskStepMarker extends View {
         if (completed) {
             paint.setColor(completedColor); paint.setStyle(Paint.Style.FILL);
             canvas.drawCircle(x, y, dp(11), paint);
-            paint.setColor(0xffffffff); paint.setStyle(Paint.Style.STROKE); paint.setStrokeWidth(dp(2));
+            paint.setColor(colors.dark ? colors.background : 0xffffffff); paint.setStyle(Paint.Style.STROKE); paint.setStrokeWidth(dp(2));
             canvas.drawLine(x - dp(5), y, x - dp(1), y + dp(4), paint);
             canvas.drawLine(x - dp(1), y + dp(4), x + dp(5), y - dp(4), paint);
         } else if (active) {
@@ -64,7 +64,7 @@ final class TaskStepMarker extends View {
             if (animator != null) canvas.drawArc(new RectF(x - dp(14), y - dp(14), x + dp(14), y + dp(14)), angle, 85, false, paint);
         } else {
             paint.setColor(colors.dark ? 0xff7898a4 : 0xffb8cdd5);
-            paint.setStyle(Paint.Style.FILL); canvas.drawCircle(x, y, dp(9), paint);
+            paint.setStyle(Paint.Style.STROKE); paint.setStrokeWidth(dp(1.5f)); canvas.drawCircle(x, y, dp(11), paint);
         }
     }
     private float dp(float value) { return value * getResources().getDisplayMetrics().density; }

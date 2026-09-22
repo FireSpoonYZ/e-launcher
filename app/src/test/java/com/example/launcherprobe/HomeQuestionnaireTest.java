@@ -45,6 +45,11 @@ public class HomeQuestionnaireTest {
         assertEquals("my layout", draft.result(questions).getJSONObject(0).getString("answer"));
         draft.choose(questions.getJSONObject(0), "Spacious");
         assertEquals("option", draft.result(questions).getJSONObject(0).getString("kind"));
+        draft.page = 1;
+        HomeQuestionnaire.Draft restored = new HomeQuestionnaire.Draft(card);
+        restored.restore(draft.save());
+        assertEquals(1, restored.page);
+        assertEquals(draft.result(questions).toString(), restored.result(questions).toString());
         assertTrue(draft.matches(card));
         card.put("requestId", "new-run");
         assertFalse(draft.matches(card));

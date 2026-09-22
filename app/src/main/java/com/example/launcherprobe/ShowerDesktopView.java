@@ -60,7 +60,7 @@ final class ShowerDesktopView extends FrameLayout implements TextureView.Surface
         message.setTextSize(15);
         message.setPadding(24, 24, 24, 24);
         message.setText(status);
-        message.setBackgroundColor(colors.surface);
+        message.setBackgroundColor(colors.panel);
         addView(message, new LayoutParams(-1, -1));
     }
 
@@ -254,8 +254,8 @@ final class ShowerDesktopView extends FrameLayout implements TextureView.Surface
     @Override protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
         super.onMeasure(widthMeasureSpec, heightMeasureSpec);
         // Fit before layout; changing LayoutParams in onSizeChanged lags one resize behind.
-        float scale = Math.min((float) getMeasuredWidth() / displayWidth,
-                (float) getMeasuredHeight() / displayHeight);
+        float scale = Math.min((float) (getMeasuredWidth() - getPaddingLeft() - getPaddingRight()) / displayWidth,
+                (float) (getMeasuredHeight() - getPaddingTop() - getPaddingBottom()) / displayHeight);
         texture.measure(MeasureSpec.makeMeasureSpec(Math.max(1, Math.round(displayWidth * scale)), MeasureSpec.EXACTLY),
                 MeasureSpec.makeMeasureSpec(Math.max(1, Math.round(displayHeight * scale)), MeasureSpec.EXACTLY));
     }
