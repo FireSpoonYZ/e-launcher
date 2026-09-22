@@ -121,6 +121,27 @@ public class ShowerPreviewTest {
         } finally { mapped.recycle(); original.recycle(); }
     }
 
+    @Test public void viewportFitsInTheSameLayoutPassWhenFullscreenChanges() {
+        android.content.Context context = RuntimeEnvironment.getApplication();
+        ShowerDesktopView view = new ShowerDesktopView(context, AppAppearance.readDesktop(context),
+                () -> null, (available, live, manual, status) -> {});
+        ReflectionHelpers.setField(view, "displayWidth", 1440);
+        ReflectionHelpers.setField(view, "displayHeight", 3200);
+        android.view.View texture = view.getChildAt(0);
+        try {
+            for (int height : new int[]{2000, 2400, 2000, 2400, 2000}) {
+                view.measure(android.view.View.MeasureSpec.makeMeasureSpec(1200, android.view.View.MeasureSpec.EXACTLY),
+                        android.view.View.MeasureSpec.makeMeasureSpec(height, android.view.View.MeasureSpec.EXACTLY));
+                view.layout(0, 0, 1200, height);
+                int expectedWidth = height * 1440 / 3200;
+                assertEquals("Resize must not lag one layout pass", expectedWidth, texture.getWidth());
+                assertEquals(height, texture.getHeight());
+                assertEquals((1200 - expectedWidth) / 2, texture.getLeft());
+                assertEquals(0, texture.getTop());
+            }
+        } finally { view.dispose(); }
+    }
+
     private static final class FakeServer {
         final Set<Integer> active = new HashSet<>();
         final AtomicInteger created = new AtomicInteger(), keys = new AtomicInteger();

@@ -120,7 +120,7 @@ final class ShowerDesktopView extends FrameLayout implements TextureView.Surface
                 displayWidth = width; displayHeight = height;
                 uiPreview = previewForUi;
                 attached = true; live = false; manual = false;
-                fitTexture();
+                requestLayout();
                 setStatus("正在等待实时画面…");
             });
         } catch (Exception exception) {
@@ -251,14 +251,13 @@ final class ShowerDesktopView extends FrameLayout implements TextureView.Surface
                 event.getEdgeFlags(), InputDevice.SOURCE_TOUCHSCREEN, event.getFlags());
     }
 
-    @Override protected void onSizeChanged(int w, int h, int oldw, int oldh) { super.onSizeChanged(w, h, oldw, oldh); fitTexture(); }
-
-    private void fitTexture() {
-        if (getWidth() == 0 || getHeight() == 0) return;
-        float scale = Math.min((float) getWidth() / displayWidth, (float) getHeight() / displayHeight);
-        LayoutParams params = new LayoutParams(Math.max(1, Math.round(displayWidth * scale)),
-                Math.max(1, Math.round(displayHeight * scale)), Gravity.CENTER);
-        texture.setLayoutParams(params);
+    @Override protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
+        super.onMeasure(widthMeasureSpec, heightMeasureSpec);
+        // Fit before layout; changing LayoutParams in onSizeChanged lags one resize behind.
+        float scale = Math.min((float) getMeasuredWidth() / displayWidth,
+                (float) getMeasuredHeight() / displayHeight);
+        texture.measure(MeasureSpec.makeMeasureSpec(Math.max(1, Math.round(displayWidth * scale)), MeasureSpec.EXACTLY),
+                MeasureSpec.makeMeasureSpec(Math.max(1, Math.round(displayHeight * scale)), MeasureSpec.EXACTLY));
     }
 
     private void setStatus(String value) {
