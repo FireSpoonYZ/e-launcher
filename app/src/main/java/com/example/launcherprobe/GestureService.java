@@ -896,7 +896,7 @@ public final class GestureService extends AccessibilityService {
     private void replay(List<SwipeDetector.Sample> samples) {
         if (replaying || samples.isEmpty()) return;
         SwipeDetector.Sample first = samples.get(0), last = samples.get(samples.size() - 1);
-        boolean tap = Math.hypot(last.x - first.x, last.y - first.y) < 12;
+        boolean tap = SwipeDetector.isTap(samples, ViewConfiguration.get(this).getScaledTouchSlop());
         Path path = new Path();
         path.moveTo(first.x, first.y);
         if (tap) path.lineTo(first.x + 1, first.y + 1);

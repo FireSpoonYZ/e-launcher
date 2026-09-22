@@ -27,6 +27,7 @@ final class SwipeDetector {
         final float y;
         final long time;
         Sample(float x, float y, long time) { this.x = x; this.y = y; this.time = time; }
+        double distanceFrom(Sample other) { return Math.hypot(x - other.x, y - other.y); }
     }
 
     private final Zone zone;
@@ -144,7 +145,27 @@ final class SwipeDetector {
         if (feedback != null) feedback.hide();
     }
 
+    static boolean isTap(List<Sample> samples, float touchSlop) {
+        Sample first = samples.get(0);
+        for (Sample sample : samples) {
+            if (sample.distanceFrom(first) > touchSlop) return false;
+        }
+        return true;
+    }
+
     private void sample(float x, float y, long time) {
-        if (replayable && samples.size() < 400) samples.add(new Sample(x, y, time));
+        if (!replayable) return;
+        Sample next = new Sample(x, y, time);
+        if (samples.size() < 400) {
+            samples.add(next);
+        } else {
+            // ponytail: keep the first 398 points, then the tail's furthest point and latest end.
+            // This simplifies long paths; use bounded resampling if replay fidelity needs improving.
+            Sample first = samples.get(0), previous = samples.get(399);
+            if (previous.distanceFrom(first) > samples.get(398).distanceFrom(first)) {
+                samples.set(398, previous);
+            }
+            samples.set(399, next);
+        }
     }
 }

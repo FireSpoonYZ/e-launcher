@@ -213,6 +213,57 @@ public final class GestureChecks {
         assert actions.toString().equals("[recents]") : actions;
     }
 
+    private static void replaySamples() {
+        for (SwipeDetector.Zone zone : SwipeDetector.Zone.values()) {
+            List<List<SwipeDetector.Sample>> replays = new ArrayList<>();
+            SwipeDetector detector = new SwipeDetector(zone, 1, new Clock(),
+                    () -> { throw new AssertionError("Unexpected navigation"); }, null,
+                    replays::add, null);
+            detector.down(100, 200, 0);
+            detector.move(100, 208, 20);
+            detector.up(100, 200, 40);
+            assert SwipeDetector.isTap(replays.getLast(), 8) : "Jitter within touch slop is a tap";
+
+            detector.down(100, 200, 50);
+            detector.move(100, 209, 70);
+            detector.up(100, 200, 90);
+            assert !SwipeDetector.isTap(replays.getLast(), 8) : "Returning to DOWN is still a drag";
+            assert SwipeDetector.isTap(replays.getLast(), 24) : "Use the supplied scaled touch slop";
+
+            detector.down(100, 200, 100);
+            detector.up(100, 209, 120);
+            assert !SwipeDetector.isTap(replays.getLast(), 8) : "Include the UP position";
+
+            detector.down(100, 200, 0);
+            for (int i = 1; i <= 450; i++) {
+                detector.move(100, i == 399 ? 230 : i == 450 ? 240 : 200, i);
+            }
+            detector.move(100, 200, 451);
+            detector.up(100, 201, 900);
+            List<SwipeDetector.Sample> samples = replays.getLast();
+            assert samples.size() == 400 : "Bound replay storage";
+            SwipeDetector.Sample first = samples.getFirst(), last = samples.getLast();
+            assert first.x == 100 && first.y == 200 && first.time == 0 : "Keep DOWN";
+            assert last.x == 100 && last.y == 201 && last.time == 900 : "Keep actual UP and duration";
+            assert !SwipeDetector.isTap(samples, 32) : "Keep excursions after the sample limit";
+            assert samples.get(398).y == 240 : "Keep the tail's furthest point in the replay path";
+            for (int i = 1; i < samples.size(); i++) {
+                assert samples.get(i).time >= samples.get(i - 1).time : "Keep path order";
+            }
+
+            detector.down(100, 200, 0);
+            detector.move(100, 240, 20);
+            detector.cancel();
+            int count = replays.size();
+            detector.up(100, 200, 40);
+            assert replays.size() == count : "Cancelled touches must not replay";
+            detector.down(100, 200, 50);
+            detector.up(100, 200, 650);
+            assert replays.getLast().size() == 2 && SwipeDetector.isTap(replays.getLast(), 8)
+                    : "A new stationary long press must not retain the old trajectory";
+        }
+    }
+
     private static void pager() {
         float width = 1000;
         float fling = 600;
@@ -375,10 +426,11 @@ public final class GestureChecks {
 
     public static void main(String[] args) {
         gestures();
+        replaySamples();
         pager();
         fluidGeometry();
         lifecycle();
         appSearch();
-        System.out.println("PASS: gestures, pager settle/restore, fluid geometry, navigation fail-safe ordering and local app search");
+        System.out.println("PASS: gestures, replay samples/touch slop, pager settle/restore, fluid geometry, navigation fail-safe ordering and local app search");
     }
 }
