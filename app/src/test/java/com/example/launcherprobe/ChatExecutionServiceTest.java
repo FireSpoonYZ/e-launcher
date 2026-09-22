@@ -14,6 +14,7 @@ import android.content.Context;
 import android.content.ContextWrapper;
 import android.content.Intent;
 import android.content.pm.ServiceInfo;
+import android.os.PowerManager;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -83,6 +84,25 @@ public class ChatExecutionServiceTest {
         } finally {
             controller.destroy();
         }
+    }
+
+    @Test public void activeTurnKeepsCpuAwakeUntilServiceStops() {
+        ServiceController<ChatExecutionService> controller = Robolectric.buildService(ChatExecutionService.class).create();
+        ChatExecutionService service = controller.get();
+        PowerManager.WakeLock wakeLock = ReflectionHelpers.getField(service, "executionWakeLock");
+        try {
+            assertFalse(wakeLock.isHeld());
+            ChatExecutionService.setActiveCount(application, 1);
+            service.onStartCommand(shadowApplication.getNextStartedService(), 0, 1);
+            assertTrue(wakeLock.isHeld());
+
+            ChatExecutionService.setActiveCount(application, 2);
+            assertTrue(wakeLock.isHeld());
+            ChatExecutionService.setActiveCount(application, 0);
+        } finally {
+            controller.destroy();
+        }
+        assertFalse(wakeLock.isHeld());
     }
 
     @Test public void staleStartCannotReplaceTheLatestCount() {
