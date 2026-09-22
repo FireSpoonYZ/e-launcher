@@ -123,6 +123,46 @@ final class ScheduledTasks {
         return snapshot();
     }
 
+    /** Model tool actions. Partial updates merge under the task lock, then reuse save(). */
+    synchronized JSONObject applyTool(JSONObject input) throws Exception {
+        if (input == null) throw new IllegalArgumentException("定时任务参数无效");
+        String action = ScheduleRule.text(input, "action");
+        if ("list".equals(action)) return snapshot();
+        if ("create".equals(action)) {
+            if (input.has("id") || input.has("revision")) throw new IllegalArgumentException("创建任务不能指定 id 或 revision");
+            JSONObject created = new JSONObject(input.toString());
+            created.remove("action");
+            return save(created);
+        }
+        if ("update".equals(action)) return save(mergeUpdate(input));
+        if ("delete".equals(action)) return delete(ScheduleRule.text(input, "id"), ScheduleRule.integer(input, "revision"));
+        throw new IllegalArgumentException("不支持的定时任务操作");
+    }
+
+    private JSONObject mergeUpdate(JSONObject input) throws Exception {
+        String id = ScheduleRule.text(input, "id");
+        int revision = ScheduleRule.integer(input, "revision");
+        JSONObject current = requireTask(read().getJSONArray("tasks"), id, revision);
+        String repeat = input.has("repeat") ? ScheduleRule.text(input, "repeat") : current.getString("repeat");
+        boolean repeatChanged = !repeat.equals(current.getString("repeat"));
+        JSONObject merged = new JSONObject().put("id", id).put("revision", revision)
+                .put("title", input.has("title") ? ScheduleRule.text(input, "title") : current.getString("title"))
+                .put("prompt", input.has("prompt") ? ScheduleRule.text(input, "prompt") : current.getString("prompt"))
+                .put("repeat", repeat)
+                .put("time", input.has("time") ? ScheduleRule.text(input, "time") : current.getString("time"));
+        if ("weekly".equals(repeat)) {
+            if (input.has("weekday")) merged.put("weekday", ScheduleRule.integer(input, "weekday"));
+            else if (!repeatChanged) merged.put("weekday", current.getInt("weekday"));
+            else throw new IllegalArgumentException("改为每周时必须提供 weekday");
+        }
+        if ("monthly".equals(repeat)) {
+            if (input.has("monthDay")) merged.put("monthDay", ScheduleRule.integer(input, "monthDay"));
+            else if (!repeatChanged) merged.put("monthDay", current.getInt("monthDay"));
+            else throw new IllegalArgumentException("改为每月时必须提供 monthDay");
+        }
+        return merged;
+    }
+
     /** Boot, clock changes and foreground recovery only schedule future work; they do not start agents. */
     synchronized void restore() throws Exception { restore(false); }
 

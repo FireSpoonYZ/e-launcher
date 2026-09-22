@@ -203,6 +203,63 @@ public class ScheduledTasksTest {
         assertEquals("broken json", application.getSharedPreferences("scheduled_tasks", Context.MODE_PRIVATE).getString("state", ""));
     }
 
+    @Test public void toolApplyMergesPartialUpdatesAndRejectsStaleOrUnarmedAlarms() throws Exception {
+        AlarmManager alarms = application.getSystemService(AlarmManager.class);
+        Shadows.shadowOf(alarms).setCanScheduleExactAlarms(false);
+        JSONObject created = tasks.applyTool(new JSONObject().put("action", "create").put("title", "早间简报")
+                .put("prompt", "整理今天的资讯").put("repeat", "daily").put("time", "08:00"));
+        assertFalse(created.getBoolean("exactAlarmGranted"));
+        assertEquals("", created.getString("schedulingError"));
+        assertEquals("UTC", created.getString("timeZone"));
+        assertEquals(0, Shadows.shadowOf(alarms).getScheduledAlarms().size());
+        JSONObject task = created.getJSONArray("tasks").getJSONObject(0);
+        assertEquals(1, task.getInt("revision"));
+        assertTrue(task.getBoolean("enabled"));
+        assertTrue(task.getLong("nextRunAt") > System.currentTimeMillis());
+        tasks.setEnabled(task.getString("id"), 1, false);
+        JSONObject updated = tasks.applyTool(new JSONObject().put("action", "update").put("id", task.getString("id"))
+                .put("revision", 2).put("time", "09:30"));
+        JSONObject next = updated.getJSONArray("tasks").getJSONObject(0);
+        assertEquals("09:30", next.getString("time"));
+        assertEquals("daily", next.getString("repeat"));
+        assertEquals("整理今天的资讯", next.getString("prompt"));
+        assertEquals("早间简报", next.getString("title"));
+        assertFalse(next.getBoolean("enabled"));
+        assertEquals(0, next.getLong("nextRunAt"));
+        assertEquals(3, next.getInt("revision"));
+        IllegalStateException stale = assertThrows(IllegalStateException.class, () -> tasks.applyTool(new JSONObject()
+                .put("action", "update").put("id", task.getString("id")).put("revision", 2).put("title", "过期")));
+        assertEquals("任务已更改，请刷新后重试", stale.getMessage());
+        assertEquals("早间简报", tasks.snapshot().getJSONArray("tasks").getJSONObject(0).getString("title"));
+        IllegalArgumentException missing = assertThrows(IllegalArgumentException.class, () -> tasks.applyTool(
+                new JSONObject().put("action", "delete").put("id", "missing").put("revision", 3)));
+        assertEquals("此定时任务已删除", missing.getMessage());
+        assertThrows(IllegalArgumentException.class, () -> tasks.applyTool(new JSONObject().put("action", "create")
+                .put("title", "坏").put("prompt", "x").put("repeat", "weekly").put("time", "08:00")));
+        assertThrows(IllegalArgumentException.class, () -> tasks.applyTool(new JSONObject().put("action", "update")
+                .put("id", task.getString("id")).put("revision", 3).put("repeat", "monthly")));
+        assertEquals(1, tasks.snapshot().getJSONArray("tasks").length());
+        tasks.applyTool(new JSONObject().put("action", "delete").put("id", task.getString("id")).put("revision", 3));
+        assertEquals(0, tasks.applyTool(new JSONObject().put("action", "list")).getJSONArray("tasks").length());
+        Shadows.shadowOf(alarms).setCanScheduleExactAlarms(true);
+        JSONObject weekly = tasks.applyTool(new JSONObject().put("action", "create").put("title", "周报")
+                .put("prompt", "汇总").put("repeat", "weekly").put("time", "07:00").put("weekday", 3));
+        JSONObject week = weekly.getJSONArray("tasks").getJSONObject(0);
+        assertTrue(weekly.getBoolean("exactAlarmGranted"));
+        assertEquals(1, Shadows.shadowOf(alarms).getScheduledAlarms().size());
+        JSONObject renamed = tasks.applyTool(new JSONObject().put("action", "update").put("id", week.getString("id"))
+                .put("revision", 1).put("title", "周三周报"));
+        JSONObject kept = renamed.getJSONArray("tasks").getJSONObject(0);
+        assertEquals("周三周报", kept.getString("title"));
+        assertEquals("weekly", kept.getString("repeat"));
+        assertEquals(3, kept.getInt("weekday"));
+        assertEquals("07:00", kept.getString("time"));
+        assertEquals("汇总", kept.getString("prompt"));
+        assertTrue(kept.getBoolean("enabled"));
+        assertEquals(2, kept.getInt("revision"));
+        assertEquals(1, Shadows.shadowOf(alarms).getScheduledAlarms().size());
+    }
+
     @Test public void recordsAreBoundedButActiveRunsAreKept() throws Exception {
         tasks.save(input());
         JSONObject state = stored();

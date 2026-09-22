@@ -77,7 +77,7 @@ jobs:
         run: ./scripts/prepare-pi-runtime.ps1
 
       - name: Assemble APK
-        run: ./gradlew --no-daemon --console=plain :app:assembleDebug ${{ github.ref == 'refs/heads/main' && ':app:assembleRelease' || '' }}
+        run: ./gradlew --no-daemon --console=plain :app:testDebugUnitTest :app:lintDebug :shower-server:lintDebug :app:assembleDebug ${{ github.ref == 'refs/heads/main' && ':app:assembleRelease' || '' }}
 
       - name: Upload debug APK
         uses: actions/upload-artifact@v4

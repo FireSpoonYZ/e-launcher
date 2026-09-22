@@ -79,6 +79,12 @@ const api = http.createServer((req, res) => {
       else {
         emit({ role: "assistant", content: "cwd-ok" }); emit({}, "stop"); res.end("data: [DONE]\n\n");
       }
+    } else if (prompt === "schedule-list" && !called.includes("schedule_task")) {
+      tool("schedule_task", { action:"list" });
+    } else if (prompt === "schedule-create" && !called.includes("schedule_task")) {
+      tool("schedule_task", { action:"create", title:"早间简报", prompt:"整理资讯", repeat:"daily", time:"08:00" });
+    } else if (prompt === "schedule-stale" && !called.includes("schedule_task")) {
+      tool("schedule_task", { action:"update", id:"task-1", revision:1, title:"新名称" });
     } else if (prompt === "timeout-A" && !called.includes("delay")) {
       tool("delay", {});
     } else if (prompt === "timeout-A") {
@@ -139,6 +145,16 @@ try {
           ? [{label:"Settings",packageName:"com.android.settings"}]
           : [{label:"Settings",packageName:"com.android.settings"},{label:"System UI",packageName:"com.android.systemui"}],
       })}\n`);
+      if (event.type === "schedule_request" && event.id !== "schedule-abort") {
+        const args = event.arguments ?? {};
+        const error = args.action === "update" ? "任务已更改，请刷新后重试" : undefined;
+        const result = args.action === "create"
+          ? { tasks:[{ id:"task-1", revision:1, title:args.title, enabled:true }], records:[],
+            exactAlarmGranted:false, schedulingError:"", timeZone:"UTC" }
+          : { tasks:[], records:[], exactAlarmGranted:false, schedulingError:"", timeZone:"UTC" };
+        socket.write(`${JSON.stringify({ type:"schedule_response", id:event.id, callId:event.callId,
+          ...(error ? { error } : { result }) })}\n`);
+      }
     }
   });
   await waitFor((event) => event.type === "ready");
@@ -265,6 +281,38 @@ try {
       "both app tools are registered in actual SDK provider requests");
   }
   console.log("PASS: shipped CJS registers and bridges list_apps/search_apps independently");
+  for (const [id, promptText, expectedArguments] of [
+    ["schedule-list", "schedule-list", { action:"list" }],
+    ["schedule-create", "schedule-create", { action:"create", title:"早间简报", prompt:"整理资讯", repeat:"daily", time:"08:00" }],
+  ]) {
+    send({ id, conversationId:id, type:"prompt", sdk:true, prompt:promptText, config });
+    assert.equal((await waitFor((event) => event.id === id && event.type === "end")).status,
+      "completed", JSON.stringify(events));
+    const scheduleRequest = events.find((event) => event.id === id && event.type === "schedule_request");
+    assert.deepEqual(scheduleRequest.arguments, expectedArguments);
+    assert.equal(events.filter((event) => event.id === id && event.type === "schedule_request").length, 1);
+    const scheduleMessage = events.find((event) => event.id === id && event.type === "message"
+      && event.message.role === "tool").message;
+    const scheduleResult = JSON.parse(scheduleMessage.content);
+    assert.equal(scheduleResult.exactAlarmGranted, false);
+    assert.equal(scheduleResult.schedulingError, "");
+    assert(requests.at(-1).tools.some((tool) => tool.function.name === "schedule_task"),
+      "schedule_task is registered in the actual SDK provider request");
+  }
+  send({ id:"schedule-stale", conversationId:"schedule-stale", type:"prompt", sdk:true, prompt:"schedule-stale", config });
+  assert.equal((await waitFor((event) => event.id === "schedule-stale" && event.type === "end")).status,
+    "completed", JSON.stringify(events));
+  const staleEnd = events.find((event) => event.id === "schedule-stale" && event.type === "tool_end");
+  assert.equal(staleEnd.isError, true);
+  assert.match(staleEnd.result.content[0].text, /任务已更改，请刷新后重试/);
+  assert.equal(events.filter((event) => event.id === "schedule-stale" && event.type === "schedule_request").length, 1);
+  send({ id:"schedule-abort", conversationId:"schedule-abort", type:"prompt", sdk:true, prompt:"schedule-list", config });
+  await waitFor((event) => event.id === "schedule-abort" && event.type === "schedule_request");
+  send({ id:"schedule-abort", type:"abort" });
+  assert.equal((await waitFor((event) => event.id === "schedule-abort" && event.type === "end")).status, "aborted");
+  assert.equal(events.filter((event) => event.id === "schedule-abort" && event.type === "schedule_request").length, 1);
+  assert.equal(events.filter((event) => event.id === "schedule-abort" && event.type === "schedule_cancel").length, 1);
+  console.log("PASS: shipped CJS registers schedule_task and routes one native request without retry");
   delete config.bundledShower;
   delete config.selection;
   const sdkHistory = events.find((event) => event.id === "sdk-tool" && event.type === "context").entries;

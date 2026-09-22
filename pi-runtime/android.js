@@ -4,6 +4,8 @@ import { createPiRuntime } from "./index.js";
 import { createSdkRuntime, sdkQuery } from "./sdk.js";
 import { createEventBus } from "@earendil-works/pi-coding-agent";
 import phoneControl from "./extensions/phone-control/index.js";
+import scheduleTool from "./extensions/schedule-tool/index.js";
+import showerContext from "./extensions/shower-context/index.js";
 import conversationTitle from "./extensions/conversation-title/index.js";
 
 // cross-spawn otherwise changes the process cwd temporarily while resolving cwd-bound commands.
@@ -110,6 +112,51 @@ function requestApps(operation, arguments_, signal) {
   });
 }
 
+function scheduleAbortError(reason) {
+  if (reason instanceof Error && reason.name !== "AbortError") return reason;
+  const error = new Error("定时任务操作已取消；不要重复提交，先 list 确认是否已保存");
+  error.name = "AbortError";
+  return error;
+}
+
+function requestSchedule(operation, action, params = {}, signal) {
+  const combined = signal ? AbortSignal.any([signal, operation.controller.signal])
+    : operation.controller.signal;
+  combined.throwIfAborted();
+  const callId = randomUUID();
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let sent = false;
+    let timeout;
+    const finish = (error, result, cancel) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      combined.removeEventListener("abort", onAbort);
+      operation.nativeCalls.delete(callId);
+      if (cancel && sent) send({ type: "schedule_cancel", id: operation.id, callId });
+      if (error) reject(error);
+      else resolve(result);
+    };
+    const onAbort = () => finish(scheduleAbortError(combined.reason), undefined, true);
+    timeout = setTimeout(() => finish(new Error(
+      "定时任务原生操作 20 秒内未返回；不要重复创建或修改，先 list 确认当前任务和 revision"),
+      undefined, true), 20_000);
+    if (combined.aborted) {
+      onAbort();
+      return;
+    }
+    operation.nativeCalls.set(callId, { finish });
+    combined.addEventListener("abort", onAbort, { once: true });
+    if (combined.aborted) {
+      onAbort();
+      return;
+    }
+    sent = true;
+    send({ type: "schedule_request", id: operation.id, callId, arguments: { ...params, action } });
+  });
+}
+
 async function handle(command) {
   if (command.type === "questionnaire_submit" || command.type === "questionnaire_cancel") {
     const operation = operations.get(command.id);
@@ -130,7 +177,8 @@ async function handle(command) {
     }
     return;
   }
-  if (command.type === "shower_response" || command.type === "apps_response") {
+  if (command.type === "shower_response" || command.type === "apps_response"
+      || command.type === "schedule_response") {
     const operation = operations.get(command.id);
     const pending = operation?.nativeCalls.get(command.callId);
     if (pending) pending.finish(command.error ? new Error(command.error) : undefined, command.result);
@@ -174,9 +222,14 @@ async function handle(command) {
         bridge.requestShower = (arguments_, signal) => requestShower(operation, arguments_, signal);
       }
     });
+    eventBus.on("schedule-tool:bridge", (bridge) => {
+      bridge.request = (action, params, signal) => requestSchedule(operation, action, params, signal);
+    });
     const resourceLoaderOptions = {
       eventBus, extensionFactories: [
         { name: "phone-control", factory: phoneControl },
+        { name: "schedule-tool", factory: scheduleTool },
+        { name: "shower-context", factory: showerContext },
         { name: "conversation-title", factory: (pi) => conversationTitle(pi,
           command.config?.settings?.conversationTitle, controller.signal) },
       ],
