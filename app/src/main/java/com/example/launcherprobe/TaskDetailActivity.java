@@ -1,6 +1,7 @@
 package com.example.launcherprobe;
 
-import android.app.Activity;
+import androidx.activity.ComponentActivity;
+import androidx.activity.OnBackPressedCallback;
 import android.app.AlertDialog;
 import android.content.Intent;
 import android.graphics.Typeface;
@@ -20,15 +21,20 @@ import android.widget.Toast;
 import org.json.JSONObject;
 import java.util.List;
 
-/** Read-only projection of the actual conversation and validated extension plan. */
-public final class TaskDetailActivity extends Activity {
+/** Conversation details with an optional, directly rendered interactive virtual desktop. */
+public final class TaskDetailActivity extends ComponentActivity {
     public static final String EXTRA_CONVERSATION_ID = "task_conversation_id";
     public static final String EXTRA_OPEN_CHAT = "task_open_chat";
     public static final String EXTRA_ARCHIVED_ID = "task_archived_id";
     private ChatCoordinator coordinator;
     private AppAppearance colors;
     private String id, signature = "";
-    private LinearLayout content, footer;
+    private LinearLayout content, footer, root, header, desktopPanel, navigation;
+    private ScrollView detailsScroll;
+    private TextView heading, desktopStatus, taskSummary, takeControl, expand;
+    private ShowerDesktopView desktop;
+    private boolean desktopAvailable, desktopLive, manualControl, fullscreen;
+    private AlertDialog detailsDialog;
     private TextView latestReply;
     private boolean replyExpanded;
     private JSONObject currentCard;
@@ -39,30 +45,65 @@ public final class TaskDetailActivity extends Activity {
         super.onCreate(state); colors.applySystemBars(this, colors.background);
         coordinator = ChatCoordinator.get(this); id = getIntent().getStringExtra(EXTRA_CONVERSATION_ID);
         replyExpanded = state != null && state.getBoolean("reply_expanded");
-        LinearLayout root = column(); root.setBackgroundColor(colors.background);
+        root = column(); root.setBackgroundColor(colors.background);
         root.setOnApplyWindowInsetsListener((view, insets) -> {
             androidx.core.graphics.Insets bars = androidx.core.view.WindowInsetsCompat.toWindowInsetsCompat(insets, view)
                     .getInsets(androidx.core.view.WindowInsetsCompat.Type.systemBars()
                             | androidx.core.view.WindowInsetsCompat.Type.displayCutout());
-            view.setPadding(bars.left + dp(20), bars.top, bars.right + dp(20), bars.bottom); return insets;
+            androidx.core.graphics.Insets gestures = androidx.core.view.WindowInsetsCompat.toWindowInsetsCompat(insets, view)
+                    .getInsets(androidx.core.view.WindowInsetsCompat.Type.systemGestures());
+            view.setPadding(Math.max(bars.left + dp(12), gestures.left), bars.top,
+                    Math.max(bars.right + dp(12), gestures.right), bars.bottom); return insets;
         });
-        LinearLayout header = row();
+        header = row();
         ImageView back = new ImageView(this); back.setImageDrawable(new ChatIcon("previous", colors.ink));
         back.setPadding(0, dp(12), dp(16), dp(12)); back.setContentDescription("返回");
         back.setFocusable(true); back.setOnClickListener(v -> finish());
         header.addView(back, new LinearLayout.LayoutParams(dp(40), dp(48)));
-        TextView heading = label("任务详情", 19, colors.ink); heading.setTypeface(null, Typeface.BOLD);
-        header.addView(heading); root.addView(header, new LinearLayout.LayoutParams(-1, dp(48)));
-        ScrollView scroll = new ScrollView(this); scroll.setVerticalScrollBarEnabled(false);
-        content = column(); content.setPadding(0, dp(10), 0, dp(8)); scroll.addView(content);
-        root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
-        footer = column(); footer.setPadding(0, dp(10), 0, 0); root.addView(footer);
+        heading = label("任务详情", 19, colors.ink); heading.setTypeface(null, Typeface.BOLD);
+        heading.setSingleLine(); heading.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        header.addView(heading, new LinearLayout.LayoutParams(0, -2, 1));
+        TextView more = button("⋮", colors.ink); more.setTextSize(24); more.setContentDescription("更多任务操作");
+        more.setOnClickListener(this::showMore); header.addView(more, new LinearLayout.LayoutParams(dp(48), dp(48)));
+        root.addView(header, new LinearLayout.LayoutParams(-1, dp(48)));
+        desktopPanel = column(); desktopPanel.setVisibility(View.GONE);
+        LinearLayout displayBar = row();
+        desktopStatus = label("正在连接虚拟桌面…", 13, colors.accent);
+        desktopStatus.setMaxLines(2); desktopStatus.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        displayBar.addView(desktopStatus, new LinearLayout.LayoutParams(0, -2, 1));
+        expand = button("⛶", colors.ink); expand.setTextSize(24); expand.setContentDescription("全屏显示虚拟桌面");
+        expand.setOnClickListener(v -> setFullscreen(!fullscreen));
+        displayBar.addView(expand, new LinearLayout.LayoutParams(dp(48), dp(48)));
+        desktopPanel.addView(displayBar);
+        desktop = new ShowerDesktopView(this, colors, () -> PiAgentBridge.existingDesktop(id), this::desktopChanged);
+        desktop.setBackground(shape(colors.surface, 12)); desktop.setClipToOutline(true);
+        desktopPanel.addView(desktop, new LinearLayout.LayoutParams(-1, 0, 1));
+        navigation = row();
+        navigationKey("◀", "虚拟桌面返回", android.view.KeyEvent.KEYCODE_BACK);
+        navigationApps("○", "虚拟桌面应用列表", false);
+        navigationApps("□", "虚拟桌面最近打开的应用", true);
+        TextView keyboard = button("⌨", colors.ink); keyboard.setTextSize(24); keyboard.setContentDescription("向虚拟桌面输入文字");
+        keyboard.setOnClickListener(v -> showKeyboard()); navigation.addView(keyboard, new LinearLayout.LayoutParams(0, dp(48), 1));
+        desktopPanel.addView(navigation);
+        root.addView(desktopPanel, new LinearLayout.LayoutParams(-1, 0, 1));
+        detailsScroll = new ScrollView(this); detailsScroll.setVerticalScrollBarEnabled(false);
+        content = column(); content.setPadding(0, dp(10), 0, dp(8)); detailsScroll.addView(content);
+        root.addView(detailsScroll, new LinearLayout.LayoutParams(-1, 0, 1));
+        taskSummary = button("任务进度", colors.ink); taskSummary.setGravity(Gravity.CENTER_VERTICAL);
+        taskSummary.setPadding(dp(12), 0, dp(12), 0); taskSummary.setSingleLine();
+        taskSummary.setEllipsize(android.text.TextUtils.TruncateAt.END); taskSummary.setBackground(shape(colors.surface, 12));
+        taskSummary.setContentDescription("展开任务进度和最新回复"); taskSummary.setVisibility(View.GONE);
+        taskSummary.setOnClickListener(v -> showDetails()); root.addView(taskSummary, new LinearLayout.LayoutParams(-1, dp(48)));
+        footer = column(); footer.setPadding(0, dp(8), 0, dp(8)); root.addView(footer);
         setContentView(root); root.requestApplyInsets(); refresh();
+        getOnBackPressedDispatcher().addCallback(this, new OnBackPressedCallback(true) {
+            @Override public void handleOnBackPressed() { back(); }
+        });
     }
     @Override public void onSaveInstanceState(Bundle state) {
         super.onSaveInstanceState(state); state.putBoolean("reply_expanded", replyExpanded);
     }
-    @Override protected void onStart() { super.onStart(); coordinator.addListener(listener); refresh(); }
+    @Override protected void onStart() { super.onStart(); coordinator.addListener(listener); refresh(); desktop.start(); }
     @Override protected void onResume() {
         super.onResume();
         new Thread(() -> {
@@ -72,7 +113,9 @@ public final class TaskDetailActivity extends Activity {
             runOnUiThread(() -> { if (!isFinishing()) refresh(); });
         }, "archive-purge").start();
     }
-    @Override protected void onStop() { coordinator.removeListener(listener); super.onStop(); }
+    @Override protected void onStop() { desktop.stop(); coordinator.removeListener(listener); super.onStop(); }
+    @Override protected void onDestroy() { desktop.dispose(); if (detailsDialog != null) detailsDialog.dismiss(); super.onDestroy(); }
+    private void back() { if (fullscreen) setFullscreen(false); else finish(); }
 
     private void refresh() {
         JSONObject card = id == null ? null : coordinator.taskCard(id);
@@ -81,7 +124,8 @@ public final class TaskDetailActivity extends Activity {
         if (latestReply != null && replyExpanded) latestReply.setText(card.optString("result"));
         String model = card.optString("modelState");
         String next = String.join("|", card.optString("title"), model, card.optString("runStatus"),
-                String.valueOf(card.opt("todo")), card.optString("error"), String.valueOf(card.optString("result").isEmpty()));
+                String.valueOf(card.opt("todo")), card.optString("error"), String.valueOf(card.optString("result").isEmpty()),
+                String.valueOf(desktopAvailable), String.valueOf(desktopLive), String.valueOf(manualControl));
         if (next.equals(signature)) return;
         signature = next; content.removeAllViews(); footer.removeAllViews(); latestReply = null;
         LinearLayout overview = row(); overview.setPadding(0, 0, 0, dp(16));
@@ -142,6 +186,23 @@ public final class TaskDetailActivity extends Activity {
                 toggle.setText(replyExpanded ? "收起最新回复" : "查看最新回复");
             });
         }
+        heading.setText(desktopAvailable ? card.optString("title") : "任务详情");
+        long completedCount = tasks.stream().filter(t -> "completed".equals(t.optString("status"))).count();
+        String currentStep = tasks.stream().filter(t -> "in_progress".equals(t.optString("status")))
+                .map(t -> t.optString("subject")).findFirst().orElse(HomeTaskCards.status(card));
+        taskSummary.setText(currentStep + (tasks.isEmpty() ? "" : "    " + completedCount + " / " + tasks.size()) + "  ⌃");
+        if (desktopAvailable) {
+            LinearLayout actions = row();
+            TextView chat = button("查看对话", colors.accent);
+            GradientDrawable outline = shape(colors.background, 12); outline.setStroke(dp(1), colors.accent); chat.setBackground(outline);
+            chat.setOnClickListener(v -> openChat(id)); actions.addView(chat, new LinearLayout.LayoutParams(0, dp(48), 1));
+            takeControl = button(manualControl ? "结束接管" : "接管操作", 0xffffffff);
+            takeControl.setBackground(shape(colors.accent, 12)); takeControl.setEnabled(desktopLive); takeControl.setAlpha(desktopLive ? 1f : .45f);
+            takeControl.setOnClickListener(v -> desktop.toggleControl());
+            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, dp(48), 1); params.leftMargin = dp(10);
+            actions.addView(takeControl, params); footer.addView(actions);
+            return;
+        }
         LinearLayout actions = row();
         boolean busy = !"idle".equals(model);
         TextView left = button("stopping".equals(model) ? "正在停止…" : busy ? "停止" : "归档", colors.error);
@@ -183,6 +244,118 @@ public final class TaskDetailActivity extends Activity {
                     .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP)); finish();
         }); footer.addView(home, new LinearLayout.LayoutParams(-1, dp(48)));
     }
+    private void desktopChanged(boolean available, boolean live, boolean manual, String status) {
+        desktopAvailable = available; desktopLive = live; manualControl = manual;
+        desktopStatus.setText(status);
+        for (int i = 0; i < navigation.getChildCount(); i++) {
+            navigation.getChildAt(i).setEnabled(manual && live);
+            navigation.getChildAt(i).setAlpha(manual && live ? 1f : .35f);
+        }
+        applyDesktopLayout();
+        refresh();
+    }
+
+    private void setFullscreen(boolean value) {
+        fullscreen = value && desktopAvailable;
+        expand.setText(fullscreen ? "退出" : "⛶"); expand.setTextSize(fullscreen ? 13 : 24);
+        expand.setContentDescription(fullscreen ? "退出全屏" : "全屏显示虚拟桌面");
+        applyDesktopLayout();
+    }
+
+    private void applyDesktopLayout() {
+        desktopPanel.setVisibility(desktopAvailable ? View.VISIBLE : View.GONE);
+        if (detailsDialog == null) detailsScroll.setVisibility(desktopAvailable ? View.GONE : View.VISIBLE);
+        header.setVisibility(fullscreen ? View.GONE : View.VISIBLE);
+        taskSummary.setVisibility(desktopAvailable && !fullscreen ? View.VISIBLE : View.GONE);
+        // Keep the control button and the host gesture safe area reachable in fullscreen too.
+        footer.setVisibility(View.VISIBLE);
+    }
+
+    private void navigationKey(String glyph, String description, int key) {
+        TextView control = button(glyph, colors.ink); control.setTextSize(26); control.setContentDescription(description);
+        control.setOnClickListener(v -> desktop.key(key)); navigation.addView(control, new LinearLayout.LayoutParams(0, dp(48), 1));
+    }
+
+    // Android's global HOME/RECENTS can affect the physical screen on secondary displays.
+    // Display-scoped app pickers provide navigation without invoking those global actions.
+    private void navigationApps(String glyph, String description, boolean recent) {
+        TextView control = button(glyph, colors.ink); control.setTextSize(26); control.setContentDescription(description);
+        control.setOnClickListener(v -> desktop.applications(recent, apps -> {
+            if (isFinishing() || isDestroyed() || !desktop.isManual()) return;
+            if (apps.isEmpty()) {
+                Toast.makeText(this, recent ? "此桌面还没有打开过应用" : "没有可启动的应用", Toast.LENGTH_SHORT).show();
+                return;
+            }
+            String[] packages = apps.keySet().toArray(new String[0]);
+            String[] labels = apps.values().toArray(new String[0]);
+            new AlertDialog.Builder(this).setTitle(recent ? "虚拟桌面 · 最近应用" : "虚拟桌面 · 应用列表")
+                    .setItems(labels, (dialog, which) -> desktop.launch(packages[which]))
+                    .setNegativeButton("取消", null).show();
+        }));
+        navigation.addView(control, new LinearLayout.LayoutParams(0, dp(48), 1));
+    }
+
+    private void showKeyboard() {
+        if (!desktop.isManual()) return;
+        android.widget.EditText input = new android.widget.EditText(this);
+        input.setHint("替换虚拟桌面当前输入框的文字"); input.setTextSize(16);
+        input.setInputType(android.text.InputType.TYPE_CLASS_TEXT | android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE);
+        input.setFilters(new android.text.InputFilter[]{new android.text.InputFilter.LengthFilter(1000)});
+        input.setMinLines(2); input.setMaxLines(6);
+        LinearLayout body = column(); body.setPadding(dp(20), dp(8), dp(20), 0); body.addView(input);
+        LinearLayout keys = row();
+        for (int code : new int[]{android.view.KeyEvent.KEYCODE_DEL, android.view.KeyEvent.KEYCODE_ENTER}) {
+            TextView key = button(code == android.view.KeyEvent.KEYCODE_DEL ? "退格" : "回车", colors.accent);
+            key.setOnClickListener(v -> desktop.key(code)); keys.addView(key, new LinearLayout.LayoutParams(0, dp(48), 1));
+        }
+        body.addView(keys);
+        AlertDialog dialog = new AlertDialog.Builder(this).setTitle("输入到虚拟桌面").setView(body)
+                .setNegativeButton("取消", null).setPositiveButton("替换输入", (d, which) -> desktop.text(input.getText().toString())).create();
+        dialog.setOnShowListener(d -> {
+            input.requestFocus();
+            dialog.getWindow().setSoftInputMode(android.view.WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE
+                    | android.view.WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
+        });
+        dialog.show();
+    }
+
+    private void showDetails() {
+        if (detailsDialog != null) return;
+        root.removeView(detailsScroll); detailsScroll.setVisibility(View.VISIBLE);
+        detailsDialog = new AlertDialog.Builder(this).setTitle("任务进度").setView(detailsScroll)
+                .setPositiveButton("收起", null).create();
+        detailsDialog.setOnDismissListener(dialog -> {
+            ((android.view.ViewGroup) detailsScroll.getParent()).removeView(detailsScroll);
+            root.addView(detailsScroll, root.indexOfChild(taskSummary), new LinearLayout.LayoutParams(-1, 0, 1));
+            detailsDialog = null;
+            applyDesktopLayout();
+        });
+        detailsDialog.show();
+    }
+
+    private void showMore(View anchor) {
+        android.widget.PopupMenu menu = new android.widget.PopupMenu(this, anchor);
+        if (currentCard != null && !"idle".equals(currentCard.optString("modelState"))) menu.getMenu().add("停止任务");
+        for (String name : new String[]{"归档", "永久删除", "已归档对话", "回到桌面"}) menu.getMenu().add(name);
+        menu.setOnMenuItemClickListener(item -> {
+            switch (item.getTitle().toString()) {
+                case "停止任务" -> { coordinator.cancel(id); refresh(); }
+                case "归档" -> archive();
+                case "永久删除" -> confirmPermanentDelete();
+                case "已归档对话" -> ConversationArchiveUi.showList(this, coordinator,
+                        archivedId -> { try { coordinator.restoreConversation(archivedId); } catch (RuntimeException e) { ConversationArchiveUi.toast(this, e); } },
+                        archivedId -> { try { coordinator.deleteConversation(archivedId); if (archivedId.equals(id)) finish(); } catch (RuntimeException e) { ConversationArchiveUi.toast(this, e); } }, this::openChat);
+                case "回到桌面" -> {
+                    startActivity(new Intent(this, MainActivity.class).setAction(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME)
+                            .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP)); finish();
+                }
+                default -> { return false; }
+            }
+            return true;
+        });
+        menu.show();
+    }
+
     private void archive() {
         try {
             coordinator.archiveConversation(id);

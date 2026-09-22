@@ -52,7 +52,12 @@ final class ShowerToolBridge {
         if (arguments == null) throw new IllegalArgumentException("缺少 Shower 工具参数");
         ShowerController controller = controllers.computeIfAbsent(conversationId,
                 ignored -> new ShowerController(context, manager));
+        synchronized (controller) {
+        boolean userOperated = controller.awaitAutomation();
         String action = arguments.optString("action", "");
+        if (userOperated && !"screenshot".equals(action)) {
+            throw new IllegalStateException("用户刚结束手动接管，画面可能已改变；本次操作未执行，请先 screenshot 重新定位再继续");
+        }
         return switch (action) {
             case "create" -> create(controller, arguments);
             case "launch" -> controller.launch(requiredString(arguments, "packageName", 255));
@@ -70,6 +75,11 @@ final class ShowerToolBridge {
             case "release" -> controller.release();
             default -> throw new IllegalArgumentException("未知 Shower action：" + action);
         };
+        }
+    }
+
+    ShowerController existingController(String conversationId) {
+        return conversationId == null ? null : controllers.get(conversationId);
     }
 
     @SuppressWarnings("deprecation") // Real metrics are the default display's full, current logical size.

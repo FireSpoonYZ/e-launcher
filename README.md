@@ -40,6 +40,20 @@ Pi Agent 是聊天的唯一执行路径。内置 `shower` 工具使用 Operit Sh
 
 “设置”底部面板保留默认桌面请求、系统/无障碍设置入口、固定手势启停、实时状态与 ADB 授权说明。每次 Activity 恢复仍先执行中断恢复检查。
 
+### 任务详情与实时桌面
+
+首页任务卡不显示虚拟桌面；点击标题进入详情页后，有关联虚拟屏的会话优先显示大画面，任务步骤和最新回复可从底部展开。画面使用 Android `VirtualDisplay.setSurface` 直接送入本机 `TextureView`，无截图轮询、网络传输或额外视频解码。画面按实际虚拟分辨率等比显示，可切换全屏；返回详情或切换应用后会解绑预览并恢复原 Surface，AI 截图和原屏幕继续可用。详情页只观察已存在的虚拟屏，不启动 Node、Shizuku 或新建屏幕。
+
+点击「接管操作」后可直接点击、长按、拖动、滑动和多指操作。该会话后续的 `shower` 工具调用等待接管结束；已等待的非截图操作不会直接重放，而是提示 AI 先截图重新定位。结束接管、离开详情或画面释放都会解除等待。导航栏提供虚拟屏返回、应用列表、最近打开的应用和文字输入；最近应用来自本虚拟屏成功启动记录，不是手机系统任务列表。应用列表替代全局 HOME/RECENTS，避免某些 ROM 将按键送往主屏。文字输入可替换当前焦点输入框（最多 1000 字符），并提供退格、回车。页面给手机系统侧边和底部手势留出空间。
+
+模拟器／设备检查需已运行并授权 Shizuku，安装 `:app:assembleDebug` 和 `:app:assembleDebugAndroidTest` 的 APK 后执行：
+
+```powershell
+& $adb shell am instrument -w -e checks shower-preview com.example.launcherprobe.test/com.example.launcherprobe.ChatStoreChecks
+```
+
+此检查使用临时会话和系统设置应用，不调用模型；验证连续画面、触摸后画面变化、预览期间 AI 截图及退出后继续操作。测试会删除临时会话，截图保存在设备应用外部文件目录的 `shower-preview-check.png`。已在 Android 16 模拟器验证；真机刷新率、键盘与 ROM 差异仍需设备验收。
+
 ### 定时任务
 
 聊天页左侧会话抽屉的「新会话」下方提供「定时任务」入口。管理页支持创建、编辑、启用／暂停、删除及执行记录；周期设置与主表单共用一个底部面板，返回时保留主表单，关闭未保存的修改时会确认。助手内置 `schedule_task`，可 list、create、update 和 delete。update 只提交要改的字段，宿主按当前 revision 合并未提供的规则并保留启用或暂停；revision 不一致或任务已删除会返回错误，不会自动再提交一次。返回里的 `exactAlarmGranted` 为 false 或 `schedulingError` 非空只表示任务已保存，精确闹钟尚未排上，不能当成到点一定会执行。

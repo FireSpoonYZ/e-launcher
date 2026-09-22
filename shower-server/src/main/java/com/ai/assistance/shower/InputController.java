@@ -20,6 +20,7 @@ final class InputController {
     private final Method injectInputEventMethod;
     private final Method setDisplayIdMethod;
     private final int displayId;
+    private MotionEvent lastTouch;
 
     InputController(int displayId) {
         if (displayId <= 0) throw new IllegalArgumentException("A virtual display id is required");
@@ -35,6 +36,28 @@ final class InputController {
         } catch (ReflectiveOperationException exception) {
             throw new IllegalStateException("Unable to initialize display input", exception);
         }
+    }
+
+    boolean touch(MotionEvent event) {
+        if (event.getActionMasked() == MotionEvent.ACTION_DOWN) cancelTouch();
+        event.setSource(InputDevice.SOURCE_TOUCHSCREEN);
+        boolean result = inject(event);
+        if (lastTouch != null) lastTouch.recycle();
+        lastTouch = MotionEvent.obtain(event);
+        if (!result) cancelTouch();
+        else if (event.getActionMasked() == MotionEvent.ACTION_UP
+                || event.getActionMasked() == MotionEvent.ACTION_CANCEL) {
+            lastTouch.recycle();
+            lastTouch = null;
+        }
+        return result;
+    }
+
+    void cancelTouch() {
+        if (lastTouch == null) return;
+        lastTouch.setAction(MotionEvent.ACTION_CANCEL);
+        try { inject(lastTouch); }
+        finally { lastTouch.recycle(); lastTouch = null; }
     }
 
     boolean injectKeyWithMeta(int keyCode, int metaState) {

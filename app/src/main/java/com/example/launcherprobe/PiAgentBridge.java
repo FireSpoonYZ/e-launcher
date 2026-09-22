@@ -48,6 +48,11 @@ final class PiAgentBridge {
         return instance;
     }
 
+    /** Observing a task must not start Node, Shizuku or a new virtual display. */
+    static synchronized ShowerController existingDesktop(String conversationId) {
+        return instance == null ? null : instance.showerTools.existingController(conversationId);
+    }
+
     static synchronized void forgetConversation(String conversationId) {
         PiAgentBridge bridge = instance;
         if (bridge == null) return;

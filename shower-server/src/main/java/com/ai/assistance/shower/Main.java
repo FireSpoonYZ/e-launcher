@@ -143,6 +143,39 @@ public final class Main {
                 }
             }
 
+            @Override public boolean hasDisplay(int displayId) {
+                enforceCaller();
+                return displayId > 0 && displays.containsKey(displayId);
+            }
+
+            @Override public boolean setPreviewSurface(int displayId, Surface surface, IShowerClient viewer) {
+                enforceCaller();
+                if (viewer == null) throw new IllegalArgumentException("Viewer token is required");
+                return withDisplay(displayId, current -> current.setPreview(surface, viewer.asBinder()));
+            }
+
+            @Override public boolean injectTouch(int displayId, android.view.MotionEvent event) {
+                enforceCaller();
+                if (event == null) throw new IllegalArgumentException("Touch event is required");
+                try {
+                    int action = event.getActionMasked();
+                    if (action != android.view.MotionEvent.ACTION_DOWN && action != android.view.MotionEvent.ACTION_UP
+                            && action != android.view.MotionEvent.ACTION_MOVE && action != android.view.MotionEvent.ACTION_CANCEL
+                            && action != android.view.MotionEvent.ACTION_POINTER_DOWN && action != android.view.MotionEvent.ACTION_POINTER_UP) {
+                        throw new IllegalArgumentException("Unsupported touch action");
+                    }
+                    if (event.getPointerCount() > 10 || event.getActionIndex() >= event.getPointerCount()) {
+                        throw new IllegalArgumentException("Invalid touch pointers");
+                    }
+                    return withDisplay(displayId, current -> {
+                        for (int i = 0; i < event.getPointerCount(); i++) {
+                            requireCoordinate(current, event.getX(i), event.getY(i));
+                        }
+                        return current.input.touch(event);
+                    });
+                } finally { event.recycle(); }
+            }
+
             @Override public boolean destroyDisplay(int displayId) {
                 enforceCaller();
                 markClientActive();
@@ -524,6 +557,9 @@ public final class Main {
         final Set<String> packages = new HashSet<>(); // Guarded by Main's monitor, including launch conflict checks.
         IBinder clientBinder;
         IBinder.DeathRecipient clientDeath;
+        IBinder viewerBinder;
+        IBinder.DeathRecipient viewerDeath;
+        Surface previewSurface;
         volatile boolean running = true;
         long lastActive = SystemClock.elapsedRealtime();
 
@@ -560,6 +596,49 @@ public final class Main {
             }
         }
 
+        // Same-device rendering uses the compositor directly; no encode/decode or frame copies.
+        synchronized boolean setPreview(Surface next, IBinder viewer) {
+            if (next == null) {
+                if (viewerBinder != viewer) return false; // A stale Activity must not detach its replacement.
+                restoreSurface();
+                return true;
+            }
+            if (!next.isValid()) { next.release(); throw new IllegalArgumentException("Invalid preview surface"); }
+            IBinder.DeathRecipient died = () -> {
+                synchronized (DisplaySession.this) {
+                    if (viewerBinder == viewer && running) restoreSurface();
+                }
+            };
+            try {
+                viewer.linkToDeath(died, 0);
+                input.cancelTouch();
+                virtualDisplay.setSurface(next);
+            } catch (Exception exception) {
+                viewer.unlinkToDeath(died, 0);
+                next.release();
+                throw new IllegalStateException("Unable to attach preview", exception);
+            }
+            clearViewer();
+            previewSurface = next;
+            viewerBinder = viewer;
+            viewerDeath = died;
+            return true;
+        }
+
+        private void restoreSurface() {
+            input.cancelTouch();
+            virtualDisplay.setSurface(surface);
+            clearViewer();
+            lastActive = SystemClock.elapsedRealtime();
+        }
+
+        private void clearViewer() {
+            if (viewerBinder != null && viewerDeath != null) viewerBinder.unlinkToDeath(viewerDeath, 0);
+            viewerBinder = null;
+            viewerDeath = null;
+            if (previewSurface != null) { previewSurface.release(); previewSurface = null; }
+        }
+
         void drainEncoder() {
             MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
             while (running) try {
@@ -573,6 +652,8 @@ public final class Main {
 
         synchronized void release() {
             running = false;
+            input.cancelTouch();
+            clearViewer();
             if (clientBinder != null && clientDeath != null) {
                 clientBinder.unlinkToDeath(clientDeath, 0);
                 clientBinder = null;

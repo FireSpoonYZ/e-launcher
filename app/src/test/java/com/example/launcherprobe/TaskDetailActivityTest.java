@@ -91,6 +91,46 @@ public class TaskDetailActivityTest {
         }
     }
 
+    @Test public void virtualDesktopHasCompactActionsAndSafeNavigationOnlyAfterTakeover() {
+        ChatCoordinator coordinator = ChatCoordinator.get(application);
+        coordinator.store().save(Collections.singletonList(new AgentLoop.Message("user", "Desktop task")));
+        String id = coordinator.store().activeId();
+        try (ActivityController<TaskDetailActivity> controller = Robolectric.buildActivity(TaskDetailActivity.class,
+                new Intent(application, TaskDetailActivity.class).putExtra(TaskDetailActivity.EXTRA_CONVERSATION_ID, id)).setup()) {
+            TaskDetailActivity activity = controller.get();
+            ShowerDesktopView desktop = ReflectionHelpers.getField(activity, "desktop");
+            desktop.stop(); // Drive display states explicitly; no Binder/renderer in this layout test.
+            ReflectionHelpers.callInstanceMethod(activity, "desktopChanged",
+                    ReflectionHelpers.ClassParameter.from(boolean.class, true),
+                    ReflectionHelpers.ClassParameter.from(boolean.class, true),
+                    ReflectionHelpers.ClassParameter.from(boolean.class, false),
+                    ReflectionHelpers.ClassParameter.from(String.class, "虚拟桌面 · 实时"));
+            View root = activity.getWindow().getDecorView();
+            assertNotNull(firstExact(root, "接管操作"));
+            assertNotNull(firstExact(root, "查看对话"));
+            assertNull("Low-frequency actions move to overflow", firstExact(root, "永久删除"));
+            android.widget.LinearLayout navigation = ReflectionHelpers.getField(activity, "navigation");
+            assertEquals(4, navigation.getChildCount());
+            assertFalse(navigation.getChildAt(0).isEnabled());
+            assertEquals("虚拟桌面应用列表", navigation.getChildAt(1).getContentDescription());
+            ReflectionHelpers.callInstanceMethod(activity, "desktopChanged",
+                    ReflectionHelpers.ClassParameter.from(boolean.class, true),
+                    ReflectionHelpers.ClassParameter.from(boolean.class, true),
+                    ReflectionHelpers.ClassParameter.from(boolean.class, true),
+                    ReflectionHelpers.ClassParameter.from(String.class, "手动操作"));
+            assertNotNull(firstExact(root, "结束接管"));
+            assertTrue(navigation.getChildAt(0).isEnabled());
+            ReflectionHelpers.callInstanceMethod(activity, "showDetails");
+            AlertDialog dialog = ShadowAlertDialog.getLatestAlertDialog();
+            assertEquals("任务进度", Shadows.shadowOf(dialog).getTitle().toString());
+            dialog.dismiss();
+            Shadows.shadowOf(android.os.Looper.getMainLooper()).idle();
+            android.widget.ScrollView details = ReflectionHelpers.getField(activity, "detailsScroll");
+            assertEquals(View.GONE, details.getVisibility());
+            assertNotNull(details.getParent());
+        }
+    }
+
     private static TextView firstExact(View view, String expected) {
         if (view instanceof TextView text && expected.equals(String.valueOf(text.getText()))) return text;
         if (view instanceof ViewGroup group) {
