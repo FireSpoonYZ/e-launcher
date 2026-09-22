@@ -28,6 +28,18 @@ final class ShowerController {
     private int dpi;
     private IBinder displayService;
     private IShowerClient clientToken;
+    private Preview preview;
+    private boolean manualControl;
+    private final java.util.LinkedHashSet<String> launchedPackages = new java.util.LinkedHashSet<>();
+
+    static final class Preview {
+        final int displayId, width, height;
+        final IShowerService service;
+        final IShowerClient token = new IShowerClient.Stub() { };
+        Preview(int displayId, int width, int height, IShowerService service) {
+            this.displayId = displayId; this.width = width; this.height = height; this.service = service;
+        }
+    }
 
     ShowerController(android.content.Context context, ShowerManager manager) {
         this.manager = manager;
@@ -90,6 +102,95 @@ final class ShowerController {
         return state("create").put("reused", false);
     }
 
+    /** Does not create a display or extend its idle lifetime. Called off the UI thread. */
+    synchronized boolean hasDisplay() throws android.os.RemoteException {
+        IShowerService service = manager.aliveService();
+        if (displayId == null) return false;
+        if (service == null || service.asBinder() != displayService || !service.hasDisplay(displayId)) {
+            clearDisplay();
+            return false;
+        }
+        return true;
+    }
+
+    synchronized Preview openPreview(android.view.Surface surface) throws Exception {
+        IShowerService service = activeService();
+        Preview next = new Preview(displayId, width, height, service);
+        if (!service.setPreviewSurface(displayId, surface, next.token)) {
+            throw new IllegalStateException("无法连接虚拟桌面画面");
+        }
+        preview = next;
+        manualControl = false;
+        notifyAll();
+        return next;
+    }
+
+    synchronized boolean keepPreviewAlive(Preview current) throws Exception {
+        return preview == current && hasDisplay() && current.service.touchDisplay(current.displayId);
+    }
+
+    synchronized void closePreview(Preview current) throws Exception {
+        if (preview != current) return;
+        // Unblock waiting tools even if the service has died.
+        preview = null;
+        manualControl = false;
+        notifyAll();
+        current.service.setPreviewSurface(current.displayId, null, current.token);
+    }
+
+    synchronized void setManualControl(Preview current, boolean enabled) throws Exception {
+        requirePreview(current);
+        manualControl = enabled;
+        notifyAll();
+    }
+
+    synchronized boolean awaitAutomation() throws InterruptedException {
+        boolean waited = manualControl;
+        while (manualControl) wait();
+        if (Thread.currentThread().isInterrupted()) throw new InterruptedException("虚拟屏操作已取消");
+        return waited;
+    }
+
+    synchronized void touch(Preview current, android.view.MotionEvent event) throws Exception {
+        requireManual(current);
+        if (!current.service.injectTouch(current.displayId, event)) {
+            throw new IllegalStateException("虚拟桌面触摸注入失败");
+        }
+    }
+
+    synchronized void previewKey(Preview current, int code) throws Exception {
+        requireManual(current);
+        key(code, 0, android.view.KeyEvent.keyCodeToString(code));
+    }
+
+    synchronized java.util.List<String> recentPackages(Preview current) {
+        requireManual(current);
+        java.util.List<String> recent = new java.util.ArrayList<>(launchedPackages);
+        java.util.Collections.reverse(recent);
+        return recent;
+    }
+
+    synchronized void previewLaunch(Preview current, String packageName) throws Exception {
+        requireManual(current);
+        launch(packageName);
+    }
+
+    synchronized void previewText(Preview current, String value) throws Exception {
+        requireManual(current);
+        text(value);
+    }
+
+    private void requirePreview(Preview current) {
+        if (preview != current || displayId == null || displayId != current.displayId) {
+            throw new IllegalStateException("虚拟桌面已结束或画面已在其他页面打开");
+        }
+    }
+
+    private void requireManual(Preview current) {
+        requirePreview(current);
+        if (!manualControl) throw new IllegalStateException("请先接管操作");
+    }
+
     synchronized JSONObject launch(String packageName) throws Exception {
         if (packageName == null || !packageName.matches(
                 "[A-Za-z][A-Za-z0-9_]*(?:\\.[A-Za-z][A-Za-z0-9_]*)+")) {
@@ -99,6 +200,8 @@ final class ShowerController {
         if (!service.launchApp(packageName, displayId)) {
             throw new IllegalStateException("应用不存在、不可启动或系统拒绝在虚拟屏启动");
         }
+        launchedPackages.remove(packageName);
+        launchedPackages.add(packageName);
         return state("launch").put("packageName", packageName);
     }
 
@@ -251,6 +354,10 @@ final class ShowerController {
     }
 
     private void clearDisplay() {
+        preview = null;
+        manualControl = false;
+        launchedPackages.clear();
+        notifyAll();
         displayId = null;
         width = 0;
         height = 0;

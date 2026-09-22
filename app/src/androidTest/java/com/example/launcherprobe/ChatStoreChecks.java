@@ -14,18 +14,25 @@ public final class ChatStoreChecks extends Instrumentation {
     private boolean storageOnly;
     private boolean npmOnly;
     private boolean questionnaireOnly;
+    private boolean showerPreviewOnly;
 
     @Override public void onCreate(Bundle arguments) {
         super.onCreate(arguments);
         storageOnly = arguments != null && "store".equals(arguments.getString("checks"));
         npmOnly = arguments != null && "npm".equals(arguments.getString("checks"));
         questionnaireOnly = arguments != null && "questionnaire".equals(arguments.getString("checks"));
+        showerPreviewOnly = arguments != null && "shower-preview".equals(arguments.getString("checks"));
         start();
     }
 
     @Override public void onStart() {
         Bundle result = new Bundle();
         try {
+            if (showerPreviewOnly) {
+                result.putString("stream", ShowerPreviewChecks.run(this) + "\n");
+                finish(Activity.RESULT_OK, result);
+                return;
+            }
             if (questionnaireOnly) {
                 ActivityMonitor monitor = addMonitor(MainActivity.class.getName(), null, false);
                 getTargetContext().startActivity(new android.content.Intent(android.content.Intent.ACTION_MAIN)
