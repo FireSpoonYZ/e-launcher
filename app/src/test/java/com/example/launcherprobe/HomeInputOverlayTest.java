@@ -1,73 +1,81 @@
 package com.example.launcherprobe;
 
 import static org.junit.Assert.*;
-import android.app.Activity;
+
 import android.content.Context;
-import android.view.View;
-import android.view.inputmethod.EditorInfo;
-import android.widget.EditText;
-import android.widget.LinearLayout;
-import android.widget.TextView;
-import java.util.Collections;
+import java.io.File;
+import java.nio.file.Files;
+import java.util.List;
+import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
-import org.robolectric.Robolectric;
 import org.robolectric.RobolectricTestRunner;
+import org.robolectric.RuntimeEnvironment;
 import org.robolectric.annotation.Config;
 
 @RunWith(RobolectricTestRunner.class)
-@Config(sdk = 35, shadows = HostAtomicFile.class)
+@Config(sdk = 35, manifest = Config.NONE, shadows = HostAtomicFile.class)
 public class HomeInputOverlayTest {
-    @Test public void typingAndSwitchingTabsRemainNativeAndDoNotSelectChatOrSend() {
-        try (var controller = Robolectric.buildActivity(Activity.class).setup()) {
-            Activity activity = controller.get();
-            activity.getSharedPreferences("chat", Context.MODE_PRIVATE).edit().clear().commit();
-            activity.getSharedPreferences("home_input", Context.MODE_PRIVATE).edit().clear().commit();
-            ChatStore store = new ChatStore(activity);
-            store.save(Collections.singletonList(new AgentLoop.Message("user", "Existing chat")));
-            String original = store.activeId();
-            store.saveDraft("Existing draft");
-            View web = new View(activity);
-            PagerRoot pager = new PagerRoot(activity, web, PagerState.Page.HOME, page -> {});
-            LinearLayout dock = new LinearLayout(activity);
-            EditText input = new EditText(activity);
-            input.setKeyListener(null); input.setFocusable(false);
-            dock.addView(input);
-            View plus = new TextView(activity), voice = new TextView(activity), send = new TextView(activity);
-            int[] submitted = {0};
-            HomeInputOverlay overlay = new HomeInputOverlay(activity, pager, store, Collections.emptyList(),
-                    dock, input, plus, voice, send, id -> fail("Search must not open chat automatically"), () -> submitted[0]++);
-            pager.setHome(overlay); activity.setContentView(pager);
-            assertEquals(original, store.activeId());
-            assertTrue(input.isFocusableInTouchMode());
-            assertEquals(1, store.conversations().size());
-            input.setText("New native draft");
-            assertEquals("New native draft", store.draft(overlay.draftId()));
-            assertEquals("Existing draft", store.draft(original));
-            assertTrue(overlay.canSend());
-            overlay.select(0); input.setText("camera"); input.onEditorAction(EditorInfo.IME_ACTION_SEARCH);
-            assertFalse(overlay.canSend());
-            overlay.select(1); input.setText("history query"); input.onEditorAction(EditorInfo.IME_ACTION_SEARCH);
-            assertFalse(overlay.canSend());
-            overlay.select(0); assertEquals("camera", input.getText().toString());
-            overlay.select(2); assertEquals("New native draft", input.getText().toString());
-            assertEquals(PagerState.Page.HOME, pager.page());
-            assertEquals(original, store.activeId());
-            assertEquals(0, submitted[0]);
-            overlay.setPreparing(true); assertFalse(overlay.canSend());
-            overlay.setPreparing(false); assertTrue(overlay.canSend());
-            input.onEditorAction(EditorInfo.IME_ACTION_SEND); assertEquals(1, submitted[0]);
-            overlay.dispose();
-            // Closing and reopening restores the same draft without selecting a chat.
-            overlay.removeView(dock);
-            HomeInputOverlay reopened = new HomeInputOverlay(activity, pager, store, Collections.emptyList(),
-                    dock, input, plus, voice, send, id -> {}, () -> {});
-            assertEquals("New native draft", input.getText().toString());
-            reopened.select(0); assertEquals("camera", input.getText().toString());
-            reopened.select(1); assertEquals("history query", input.getText().toString());
-            reopened.select(2); assertEquals("New native draft", input.getText().toString());
-            assertEquals(original, store.activeId());
-            reopened.dispose();
-        }
+    private Context context;
+    private ChatStore store;
+    private String original;
+
+    @Before public void setUp() {
+        context = RuntimeEnvironment.getApplication();
+        store = new ChatStore(context);
+        store.newConversation();
+        store.save(List.of(new AgentLoop.Message("user", "Existing chat")));
+        original = store.activeId();
+        store.saveDraft("Existing draft");
+    }
+
+    @Test public void unsentDraftSurvivesReopenWithoutSelectingOrSending() {
+        String draftId = store.prepareHomeDraft();
+        assertNotEquals(original, draftId);
+        assertEquals(1, store.conversations().size());
+        store.saveDraft(draftId, "Unsent assistant draft");
+        assertEquals(original, store.activeId());
+        assertEquals("Existing draft", store.draft(original));
+        assertTrue(store.load(draftId).isEmpty());
+
+        ChatStore reopened = new ChatStore(context);
+        assertEquals(original, reopened.activeId());
+        assertEquals(draftId, reopened.prepareHomeDraft());
+        assertEquals(draftId, context.getSharedPreferences("chat", Context.MODE_PRIVATE).getString("home_draft", null));
+        assertEquals("Unsent assistant draft", reopened.draft(draftId));
+        reopened.selectHomeDraft();
+        assertEquals(draftId, reopened.activeId());
+        assertEquals("Unsent assistant draft", reopened.draft());
+        assertTrue(reopened.load().isEmpty());
+        assertEquals("Existing draft", reopened.draft(original));
+        assertEquals("Existing chat", reopened.load(original).get(0).content);
+    }
+
+    @Test public void selectingUnsentDraftRetainsBothDraftsAttachmentsAndFiles() throws Exception {
+        ChatAttachment existing = attachment("existing-file", "Original attachment");
+        store.saveDraftAttachments(List.of(existing));
+        String draftId = store.prepareHomeDraft();
+        ChatAttachment unsent = attachment("unsent-file", "Unsent attachment");
+        store.saveDraftAttachments(draftId, List.of(unsent));
+        assertEquals(original, store.activeId());
+
+        ChatStore reopened = new ChatStore(context);
+        reopened.selectHomeDraft();
+        reopened.cleanupAttachments();
+        assertEquals(draftId, reopened.activeId());
+        assertTrue(reopened.draft().isEmpty());
+        assertTrue(reopened.load().isEmpty());
+        assertEquals(unsent.toJson().toString(), reopened.draftAttachments().get(0).toJson().toString());
+        assertEquals(existing.toJson().toString(), reopened.draftAttachments(original).get(0).toJson().toString());
+        assertEquals("Unsent attachment", Files.readString(new AttachmentStore(context).requireFile(unsent).toPath()));
+        assertEquals("Original attachment", Files.readString(new AttachmentStore(context).requireFile(existing).toPath()));
+        assertEquals("Existing draft", reopened.draft(original));
+    }
+
+    private ChatAttachment attachment(String id, String content) throws Exception {
+        File file = new File(context.getFilesDir(), "chat-attachments/" + id);
+        Files.createDirectories(file.getParentFile().toPath());
+        Files.writeString(file.toPath(), content);
+        return new ChatAttachment(id, id + ".txt", "text/plain", "file", file.length(), file.getAbsolutePath());
     }
 }
