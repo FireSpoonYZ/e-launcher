@@ -5,25 +5,56 @@ plugins {
 apply from: 'capacitor.build.gradle'
 
 def npmCommand = System.getProperty('os.name').toLowerCase().contains('windows') ? ['cmd', '/c', 'npm'] : ['npm']
+def webDependencies = rootProject.fileTree('node_modules') {
+    exclude '.cache/**', '.vite/**', '.vite-temp/**',
+            '@capacitor/android/capacitor/build/**', '@capacitor/app/android/build/**'
+}
+def webBuildInputs = rootProject.files(
+        rootProject.fileTree('web') { exclude 'dist/**', 'node_modules/**' },
+        rootProject.fileTree('.') { include 'package*.json', '*.config.*', 'tsconfig*.json', '.env*', '.npmrc' },
+        webDependencies)
 def buildWeb = tasks.register('buildWeb', Exec) {
     workingDir rootProject.projectDir
-    commandLine npmCommand + ['run', 'build']
+    // The runner avoids writing Vite's temporary config bundle into node_modules.
+    commandLine npmCommand + ['run', 'build', '--', '--configLoader', 'runner']
+    inputs.files webBuildInputs
+    inputs.file file('build.gradle')
+    inputs.property 'nodeEnv', System.getenv('NODE_ENV') ?: ''
+    inputs.property 'viteEnv', System.getenv().findAll { key, value -> key.startsWith('VITE_') }
+    outputs.dir rootProject.file('web/dist')
 }
+def cordovaManifest = rootProject.file('capacitor-cordova-android-plugins/src/main/AndroidManifest.xml')
 def copyWebAssets = tasks.register('copyWebAssets', Exec) {
     dependsOn buildWeb
     workingDir rootProject.projectDir
     commandLine npmCommand + ['exec', '--', 'cap', 'copy', 'android']
+    inputs.dir rootProject.file('web/dist')
+    inputs.files webDependencies, rootProject.file('capacitor.config.ts'),
+            rootProject.file('package.json'), rootProject.file('package-lock.json')
+    inputs.file file('build.gradle')
+    outputs.dir file('src/main/assets/public')
+    outputs.files file('src/main/assets/capacitor.config.json'), file('src/main/res/xml/config.xml'), cordovaManifest
+    doFirst {
+        // Capacitor copy only rewrites this side product if it already exists.
+        cordovaManifest.parentFile.mkdirs()
+        if (!cordovaManifest.exists()) cordovaManifest.createNewFile()
+    }
 }
 def installPiDependencies = tasks.register('installPiDependencies', Exec) {
     workingDir rootProject.file('pi-runtime')
     commandLine npmCommand + ['ci']
-    inputs.files rootProject.file('pi-runtime/package.json'), rootProject.file('pi-runtime/package-lock.json')
-    outputs.file rootProject.file('pi-runtime/node_modules/.package-lock.json')
+    inputs.files rootProject.file('pi-runtime/package.json'), rootProject.file('pi-runtime/package-lock.json'),
+            rootProject.fileTree('pi-runtime') { include '.npmrc' }, rootProject.fileTree('.') { include '.npmrc' }
+    outputs.dir rootProject.file('pi-runtime/node_modules')
 }
 def buildPiRuntime = tasks.register('buildPiRuntime', Exec) {
     dependsOn installPiDependencies
     workingDir rootProject.file('pi-runtime')
     commandLine npmCommand + ['run', 'build:android']
+    inputs.files rootProject.fileTree('pi-runtime') { exclude 'build/**', 'node_modules/.cache/**' }
+    inputs.file file('build.gradle')
+    outputs.file file('src/main/assets/pi-runtime.cjs')
+    outputs.dirs file('src/main/assets/pi-sdk'), file('src/main/assets/npm')
 }
 tasks.named('preBuild') { dependsOn copyWebAssets, buildPiRuntime }
 

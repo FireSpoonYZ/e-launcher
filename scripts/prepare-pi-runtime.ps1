@@ -1,3 +1,5 @@
+param([switch]$SkipRuntimeBuild)
+
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 $root = Split-Path $PSScriptRoot -Parent
@@ -38,6 +40,9 @@ try {
     }
     npm ci
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    npm run build:android
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    # CI can defer bundling/assets to the subsequent runtime tests or Gradle build.
+    if (-not $SkipRuntimeBuild) {
+        npm run build:android
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    }
 } finally { Pop-Location }
