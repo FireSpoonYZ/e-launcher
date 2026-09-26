@@ -77,7 +77,7 @@ jobs:
 
       - name: Prepare Pi runtime
         shell: pwsh
-        run: ./scripts/prepare-pi-runtime.ps1
+        run: ./scripts/prepare-pi-runtime.ps1 -SkipRuntimeBuild
 
       - name: Test Pi runtime
         run: npm --prefix pi-runtime test
