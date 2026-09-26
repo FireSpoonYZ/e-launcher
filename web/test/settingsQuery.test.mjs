@@ -37,7 +37,7 @@ function harness() {
     },
     async cancelQuery({ requestId }) { cancels.push(requestId); },
   };
-  const ui = loadSource('../web/src/ui.tsx', { './native': { NativeSettings: native } });
+  const ui = loadSource('../src/ui.tsx', { './native': { NativeSettings: native } });
   const emit = event => { for (const receive of listeners) receive(event); };
   const end = (id, result) => { emit({ id, type: 'result', result }); emit({ id, type: 'end', status: 'completed' }); };
   return { native, ui, starts, cancels, listeners, emit, end, removed: () => removed };
@@ -157,7 +157,7 @@ test('LoginFlow close and effect cleanup cancel only their own late login, not c
       useState: initial => [initial, () => {}], useRef: current => ({ current }),
       useEffect: effect => effects.push(effect),
     };
-    const { LoginFlow } = loadSource('../web/src/Resources.tsx', {
+    const { LoginFlow } = loadSource('../src/Resources.tsx', {
       react, './native': { NativeSettings: h.native }, './Settings': {}, './components/ui/dialog': {},
       './ui': { ...h.ui, useText: () => (_, en) => en, useAction: () => ({ setError: assert.fail }) },
     }, '\nexport { LoginFlow };');
