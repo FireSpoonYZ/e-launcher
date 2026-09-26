@@ -116,6 +116,20 @@
             android:noHistory="true"
             android:taskAffinity="${applicationId}.switcher"
             android:theme="@style/AppSwitcherTheme" />
+        <activity android:name=".ShareReceiverActivity" android:exported="true"
+            android:label="导入到 E Launcher">
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="*/*" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.PROCESS_TEXT" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
+            </intent-filter>
+        </activity>
         <activity android:name=".TaskDetailActivity" android:exported="false" />
         <activity
             android:name=".DesktopSettingsActivity"

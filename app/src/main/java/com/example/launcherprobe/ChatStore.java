@@ -139,6 +139,41 @@ public final class ChatStore {
         }
     }
 
+    /** Share intake commits text, files and its lifecycle token together; never selects or sends. */
+    String importShareDraft(String token, String targetId, String text, List<ChatAttachment> staged)
+            throws Exception {
+        synchronized (STORE_LOCK) {
+            String receipt = "share_intake_" + java.util.UUID.fromString(token);
+            String previous = preferences.getString(receipt, null);
+            if (previous != null) return previous;
+            JSONObject index = conversationIndex();
+            String id = targetId == null ? java.util.UUID.randomUUID().toString() : targetId;
+            JSONObject item = index.optJSONObject(id);
+            if (targetId != null && (item == null || item.optLong("archivedAt", 0) != 0))
+                throw new IllegalStateException("会话已删除或已归档，请重新选择");
+            if ((text == null || text.isBlank()) && staged.isEmpty())
+                throw new IllegalArgumentException("没有可导入的分享内容");
+            List<ChatAttachment> published = new ArrayList<>();
+            try {
+                for (ChatAttachment attachment : staged) published.add(attachments.publish(attachment));
+                List<ChatAttachment> merged = new ArrayList<>(draftAttachments(id));
+                merged.addAll(published);
+                String draft = draft(id);
+                if (text != null && !text.isBlank()) draft = draft.isEmpty() ? text : draft + "\n\n" + text;
+                SharedPreferences.Editor edit = preferences.edit()
+                        .putString("draft_" + id, draft)
+                        .putString("draft_attachments_" + id, AttachmentStore.json(merged).toString())
+                        .putString(receipt, id);
+                registerConversation(edit, id);
+                if (!edit.commit()) throw new IllegalStateException("无法保存分享草稿");
+                return id;
+            } catch (Exception exception) {
+                for (ChatAttachment attachment : published) new java.io.File(attachment.path).delete();
+                throw exception;
+            }
+        }
+    }
+
     void removeDraftAttachment(String conversationId, String attachmentId) {
         synchronized (STORE_LOCK) {
             if (!conversationId.equals(activeId()) && !conversationIndex().has(conversationId))
