@@ -88,6 +88,17 @@ public final class ChatStore {
         }
     }
 
+    /** Dictation stays with its original target; validation and append must not race archive/delete. */
+    String appendDictation(String conversationId, String words) {
+        if (conversationId == null || conversationId.isBlank()) throw new IllegalArgumentException("conversationId is required");
+        synchronized (STORE_LOCK) {
+            if (isArchived(conversationId)) throw new IllegalStateException("会话已归档，请先恢复");
+            String text = draft(conversationId) + words;
+            saveDraft(conversationId, text);
+            return text;
+        }
+    }
+
     public List<ChatAttachment> draftAttachments() { return draftAttachments(activeId()); }
 
     List<ChatAttachment> draftAttachments(String conversationId) {

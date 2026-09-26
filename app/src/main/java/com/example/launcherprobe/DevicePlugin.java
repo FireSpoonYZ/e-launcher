@@ -71,15 +71,18 @@ public final class DevicePlugin extends Plugin {
     }
     @PluginMethod public void voice(PluginCall call) {
         getActivity().runOnUiThread(() -> {
-            ChatStore store = ChatCoordinator.get(getContext()).store();
-            VoiceManager.get(getContext()).listen(getActivity(), store.activeId(), new VoiceManager.Callback() {
-                @Override public void onText(String words) {
-                    try { String text = store.draft() + words; store.saveDraft(text); call.resolve(object("text", text)); }
-                    catch (Exception exception) { reject(call, exception); }
-                }
-                @Override public void onError(String message) { call.reject(message); }
-                @Override public void onCancel() { call.reject("语音输入已取消"); }
-            });
+            try {
+                ChatStore store = ChatCoordinator.get(getContext()).store();
+                String conversationId = required(call, "conversationId");
+                VoiceManager.get(getContext()).listen(getActivity(), conversationId, new VoiceManager.Callback() {
+                    @Override public void onText(String words) {
+                        try { call.resolve(object("conversationId", conversationId, "text", store.appendDictation(conversationId, words))); }
+                        catch (Exception exception) { reject(call, exception); }
+                    }
+                    @Override public void onError(String message) { call.reject(message); }
+                    @Override public void onCancel() { call.reject("语音输入已取消"); }
+                });
+            } catch (Exception exception) { reject(call, exception); }
         });
     }
     @PluginMethod public void openVoiceConversation(PluginCall call) {
