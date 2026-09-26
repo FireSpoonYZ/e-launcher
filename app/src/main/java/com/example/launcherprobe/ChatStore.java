@@ -194,6 +194,24 @@ public final class ChatStore {
         }
     }
 
+    boolean reminderEligible(String id) {
+        return conversationIndex().has(id) && !isArchived(id);
+    }
+
+    String taskReminder(String id) { return preferences.getString("task_reminder_" + id, ""); }
+    boolean taskResultUnread(String id) { return preferences.getBoolean("task_unread_" + id, false); }
+
+    void saveTaskReminder(String id, String token, boolean unread) {
+        preferences.edit().putString("task_reminder_" + id, token)
+                .putBoolean("task_unread_" + id, unread).apply();
+    }
+
+    boolean markTaskRead(String id) {
+        if (!taskResultUnread(id)) return false;
+        preferences.edit().putBoolean("task_unread_" + id, false).apply();
+        return true;
+    }
+
     long createdAt(String id) {
         JSONObject item = conversationIndex().optJSONObject(id);
         return item == null ? 0 : item.optLong("created");
@@ -337,7 +355,8 @@ public final class ChatStore {
             if (conversationId.equals(activeId())) {
                 edit.putString("active_chat", java.util.UUID.randomUUID().toString());
             }
-            edit.apply();
+            edit.remove("task_reminder_" + conversationId).remove("task_unread_" + conversationId).apply();
+            new TaskNotifications(context).cancel(conversationId);
         }
     }
 
@@ -677,11 +696,13 @@ public final class ChatStore {
             SharedPreferences.Editor edit = preferences.edit().remove(historyKey(conversationId))
                     .remove("draft_" + conversationId).remove("draft_attachments_" + conversationId)
                     .remove("pi_selection_" + conversationId).remove("run_status_" + conversationId)
+                    .remove("task_reminder_" + conversationId).remove("task_unread_" + conversationId)
                     .remove("run_error_" + conversationId).putString("conversations", index.toString())
                     .putString(TASK_CARDS, stringArray(taskCards).toString());
             if (conversationId.equals(preferences.getString("home_draft", null))) edit.remove("home_draft");
             if (conversationId.equals(activeId())) edit.putString("active_chat", java.util.UUID.randomUUID().toString());
             edit.apply();
+            new TaskNotifications(context).cancel(conversationId);
             cleanupAttachmentsLocked();
         }
     }

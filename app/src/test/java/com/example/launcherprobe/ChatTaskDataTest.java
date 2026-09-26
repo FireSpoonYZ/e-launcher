@@ -157,8 +157,8 @@ public class ChatTaskDataTest {
                 .getJSONArray("tasks").getJSONObject(0).getString("status"));
 
         coordinator.dismissTaskCard(firstId);
-        assertEquals("desktop cards follow history, not dismiss membership",
-                Arrays.asList(secondId, firstId), ids(coordinator.taskCards()));
+        assertEquals("unread results precede ordinary history even after dismissing card membership",
+                Arrays.asList(firstId, secondId), ids(coordinator.taskCards()));
         assertTrue(store.conversations().stream().anyMatch(item -> firstId.equals(item.id)));
         assertTrue(coordinator.running(secondId));
 

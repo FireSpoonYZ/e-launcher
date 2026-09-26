@@ -79,6 +79,24 @@ export function useChat() {
     void listener.then(refresh).catch(e => { if (live) setError(errorText(e)); });
     return () => { live = false; window.removeEventListener('native-navigation', refresh); void listener.then(h => h.remove()); };
   }, []);
+  useEffect(() => {
+    const id = snapshot?.conversationId;
+    if (!id) return;
+    const markRead = () => {
+      if (document.visibilityState === 'visible' && document.hasFocus()
+          && /^#\/chat(?:\/|\?|$)/.test(location.hash))
+        void Chat.markTaskRead({conversationId: id}).catch(() => {});
+    };
+    markRead();
+    window.addEventListener('focus', markRead);
+    window.addEventListener('native-navigation', markRead);
+    document.addEventListener('visibilitychange', markRead);
+    return () => {
+      window.removeEventListener('focus', markRead);
+      window.removeEventListener('native-navigation', markRead);
+      document.removeEventListener('visibilitychange', markRead);
+    };
+  }, [snapshot?.conversationId, snapshot?.running]);
   return {snapshot, error, status, questionnaireReply, refresh: () => refreshRef.current()};
 }
 export function lineage(conversation: Conversation) {

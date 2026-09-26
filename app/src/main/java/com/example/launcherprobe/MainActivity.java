@@ -435,6 +435,10 @@ public class MainActivity extends BridgeActivity {
                         + JSONObject.quote("#" + initialWebRoute) + ")", null);
             }
             page = changed == PagerState.Page.CHAT ? "search" : "home";
+            if (changed == PagerState.Page.CHAT) {
+                TaskNotifications.requestPermission(this);
+                chatWebView.evaluateJavascript("window.dispatchEvent(new Event('native-navigation'))", null);
+            }
             if (changed == PagerState.Page.HOME && composerInput != null) refreshHomeComposer();
             if (taskCardHost != null) {
                 taskCardHost.setVisibility(changed == PagerState.Page.HOME ? View.VISIBLE : View.GONE);
@@ -461,6 +465,15 @@ public class MainActivity extends BridgeActivity {
         return expected.getScheme() != null && expected.getScheme().equals(actual.getScheme())
                 && expected.getAuthority() != null
                 && expected.getAuthority().equals(actual.getAuthority());
+    }
+
+    boolean isTaskConversationVisible(String conversationId) {
+        if (!hasWindowFocus() || nativeSearchPage != null || pager == null || pager.page() != PagerState.Page.CHAT
+                || !trustedWebContent || !chatStore.activeId().equals(conversationId)) return false;
+        String url = chatWebView.getUrl();
+        String fragment = url == null ? null : android.net.Uri.parse(url).getFragment();
+        String route = fragment == null ? "" : fragment.split("\\?", 2)[0];
+        return route.equals("/chat") || route.equals("/chat/" + conversationId);
     }
 
     String launchRoute() { return initialWebRoute == null ? "/chat" : initialWebRoute; }

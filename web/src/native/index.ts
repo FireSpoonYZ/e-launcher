@@ -39,6 +39,7 @@ export interface ChatPlugin {
   addListener(event: 'chatEvent'|'catalogEvent', listener: Listener): ListenerPromise;
   snapshot(): Promise<ChatSnapshot>;
   getConversation(): Promise<Conversation>;
+  markTaskRead(options: {conversationId: string}): Promise<void>;
   listConversations(options?: {query?: string}): Promise<{conversations: ConversationSummary[]}>;
   listArchivedConversations(options?: {query?: string}): Promise<{conversations: ConversationSummary[]}>;
   newConversation(): Promise<ChatSnapshot>;

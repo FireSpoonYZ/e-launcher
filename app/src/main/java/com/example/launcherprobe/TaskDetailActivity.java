@@ -43,6 +43,7 @@ public final class TaskDetailActivity extends ComponentActivity {
     private String questionSignature = "", progressSignature = "";
     private TextView latestReply;
     private boolean replyExpanded;
+    private boolean readingTask;
     private JSONObject currentCard;
     private final ChatCoordinator.Listener listener = (messages, event) -> refresh();
 
@@ -140,6 +141,9 @@ public final class TaskDetailActivity extends ComponentActivity {
     @Override protected void onStart() { super.onStart(); coordinator.addListener(listener); refresh(); desktop.start(); }
     @Override protected void onResume() {
         super.onResume();
+        readingTask = true;
+        coordinator.markTaskRead(id);
+        TaskNotifications.requestPermission(this);
         new Thread(() -> {
             try { coordinator.purgeExpiredArchives(); }
             catch (RuntimeException ignored) { }
@@ -147,6 +151,7 @@ public final class TaskDetailActivity extends ComponentActivity {
             runOnUiThread(() -> { if (!isFinishing()) refresh(); });
         }, "archive-purge").start();
     }
+    @Override protected void onPause() { readingTask = false; super.onPause(); }
     @Override protected void onStop() { desktop.stop(); coordinator.removeListener(listener); super.onStop(); }
     @Override protected void onDestroy() { desktop.dispose(); if (desktopSheet != null) desktopSheet.dismiss(); super.onDestroy(); }
     private void back() { if (fullscreen) setFullscreen(false); else finish(); }
@@ -154,6 +159,7 @@ public final class TaskDetailActivity extends ComponentActivity {
     private void refresh() {
         JSONObject card = id == null ? null : coordinator.taskCard(id);
         if (card == null) { finish(); return; }
+        if (readingTask) coordinator.markTaskRead(id);
         currentCard = card;
         if (latestReply != null && replyExpanded) latestReply.setText(card.optString("result"));
         renderTaskPane(card);

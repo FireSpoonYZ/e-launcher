@@ -24,6 +24,17 @@ public final class ChatPlugin extends Plugin {
         if (coordinator != null) coordinator.removeListener(listener);
     }
 
+    @PluginMethod public void markTaskRead(PluginCall call) {
+        try {
+            String id = required(call, "conversationId");
+            getActivity().runOnUiThread(() -> {
+                if (getActivity() instanceof MainActivity activity && activity.isTaskConversationVisible(id))
+                    coordinator.markTaskRead(id);
+                call.resolve();
+            });
+        } catch (Exception exception) { reject(call, exception); }
+    }
+
     @PluginMethod public void snapshot(PluginCall call) { resolve(call, coordinator.snapshot()); }
     @PluginMethod public void getConversation(PluginCall call) { resolve(call, NativeJson.conversation(coordinator.store())); }
     @PluginMethod public void listConversations(PluginCall call) {
@@ -109,6 +120,7 @@ public final class ChatPlugin extends Plugin {
         try {
             String id = required(call, "conversationId");
             if (!id.equals(coordinator.store().activeId())) throw new IllegalStateException("会话已切换");
+            getActivity().runOnUiThread(() -> TaskNotifications.requestPermission(getActivity()));
             String request = coordinator.send(id, call.getString("text", ""), call.getString("submissionId"));
             JSObject result = new JSObject();
             result.put("accepted", request != null);

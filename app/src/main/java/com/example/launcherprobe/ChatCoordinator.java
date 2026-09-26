@@ -150,6 +150,8 @@ final class ChatCoordinator {
                 throw failure;
             }
             recentResults.remove(conversationId);
+            store.saveTaskReminder(conversationId, "", false);
+            new TaskNotifications(context).cancel(conversationId);
             return run;
         }
     }
@@ -217,6 +219,7 @@ final class ChatCoordinator {
             if (run.bridge != null) run.bridge.abort(run.requestId);
             run.status = "stopping";
             run.message = "正在停止…";
+            new TaskNotifications(context).cancel(conversationId);
         }
         emit(run, "runStatus", null, json("status", run.status, "message", run.message));
     }
@@ -340,15 +343,55 @@ final class ChatCoordinator {
         String trimmed = ((String) value).trim();
         return trimmed.isEmpty() ? null : trimmed;
     }
-    /** Same recent-activity order as chat history, excluding unsent drafts. */
+    void markTaskRead(String conversationId) {
+        synchronized (runLock) {
+            if (conversationId == null || !store.markTaskRead(conversationId)) return;
+            new TaskNotifications(context).cancel(conversationId);
+        }
+        emit(conversationId, null, "taskRead", null, new JSONObject());
+    }
+
+    private void remindQuestion(SessionRun run) {
+        synchronized (runLock) {
+            if (!ownsRun(run) || !store.reminderEligible(run.conversationId)) return;
+            JSONObject question = run.extensionUi.optJSONObject("askUser");
+            if (question == null || run.cancellation.cancelled()) {
+                if (store.taskReminder(run.conversationId).startsWith("question:")) {
+                    new TaskNotifications(context).cancel(run.conversationId);
+                }
+                return;
+            }
+            remind(run, "question:" + run.requestId + ":" + question.optString("id"), true);
+        }
+    }
+
+    private void remind(SessionRun run, String token, boolean question) {
+        if (!store.reminderEligible(run.conversationId) || token.equals(store.taskReminder(run.conversationId))) return;
+        store.saveTaskReminder(run.conversationId, token, !question);
+        String title = "任务提醒";
+        for (ChatStore.Conversation conversation : store.conversations())
+            if (conversation.id.equals(run.conversationId)) { title = conversation.title; break; }
+        new TaskNotifications(context).show(run.conversationId, title, question, run.status);
+    }
+
+    /** Attention first, retaining recent-activity order within each group and the five-card limit. */
     JSONArray taskCards() {
         JSONArray cards = new JSONArray();
-        for (ChatStore.Conversation conversation : store.conversations()) {
+        List<ChatStore.Conversation> conversations = store.conversations();
+        conversations.sort(Comparator.comparingInt(conversation -> taskPriority(conversation.id)));
+        for (ChatStore.Conversation conversation : conversations) {
             if (store.load(conversation.id).isEmpty()) continue;
             cards.put(taskCard(conversation.id));
             if (cards.length() == 5) break;
         }
         return cards;
+    }
+
+    private int taskPriority(String id) {
+        SessionRun run = activeRuns.get(id);
+        if (run != null && !run.cancellation.cancelled() && run.extensionUi.optJSONObject("askUser") != null
+                && run.questionnaireReplyPending == null) return 0;
+        return store.taskResultUnread(id) ? 1 : 2;
     }
 
     /** Detail lookup is not limited to the desktop's five-card window. */
@@ -381,7 +424,7 @@ final class ChatCoordinator {
                 "questionnairePending", askUser != null && active.questionnaireReplyPending != null,
                 "questionnaireError", askUser == null ? "" : active.questionnaireError,
                 "result", response, "updated", conversation.updated,
-                "created", store.createdAt(conversationId),
+                "created", store.createdAt(conversationId), "unreadResult", store.taskResultUnread(conversationId),
                 "runStatus", result == null ? context.getSharedPreferences("chat", Context.MODE_PRIVATE)
                         .getString("run_status_" + conversationId, "") : result.status,
                 "error", result == null ? context.getSharedPreferences("chat", Context.MODE_PRIVATE)
@@ -456,6 +499,10 @@ final class ChatCoordinator {
                 run.message = "";
                 run.error = message;
                 recentResults.put(run.conversationId, new RunResult(run.status, run.error));
+                context.getSharedPreferences("chat", Context.MODE_PRIVATE).edit()
+                        .putString("run_status_" + run.conversationId, run.status)
+                        .putString("run_error_" + run.conversationId, run.error).apply();
+                remind(run, "result:" + run.requestId, false);
             }
             ChatExecutionService.setActiveCount(context, 0);
         }
@@ -522,6 +569,7 @@ final class ChatCoordinator {
                     && (askUser == null || !run.questionnaireReplyPending.equals(askUser.optString("id")))) {
                 run.questionnaireReplyPending = null;
             }
+            remindQuestion(run);
             emit(run, "extensionUi", null, run.extensionUi);
         } else if ("tool_start".equals(type)) emit(run, "toolStart", null, event);
         else if ("tool_end".equals(type)) emit(run, "toolEnd", null, event);
@@ -531,6 +579,8 @@ final class ChatCoordinator {
             emit(run, "runStatus", null, event);
         } else if ("questionnaire_reply".equals(type)) {
             String questionnaireId = event.optString("questionnaireId");
+            if (questionnaireId.equals(run.questionnaireReplyPending) && event.optBoolean("accepted"))
+                new TaskNotifications(context).cancel(run.conversationId);
             if (questionnaireId.equals(run.questionnaireReplyPending) && !event.optBoolean("accepted")) {
                 run.questionnaireReplyPending = null;
                 run.questionnaireError = event.optString("message", "回答未被接受，请重试");
@@ -592,6 +642,7 @@ final class ChatCoordinator {
             context.getSharedPreferences("chat", Context.MODE_PRIVATE).edit()
                     .putString("run_status_" + run.conversationId, status)
                     .putString("run_error_" + run.conversationId, run.error).apply();
+            remind(run, "result:" + run.requestId, false);
             ChatExecutionService.setActiveCount(context, activeRuns.size());
         }
         if (error != null && !error.isEmpty()) emit(run, "error", null, json("message", error));

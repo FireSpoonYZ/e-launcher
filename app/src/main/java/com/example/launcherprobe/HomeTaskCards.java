@@ -226,7 +226,7 @@ final class HomeTaskCards extends LinearLayout {
         brand.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
         decorate(brand, "sparkles", colors.accent);
         heading.addView(brand);
-        TextView state = label(status(card), 10);
+        TextView state = label(status(card) + (card.optBoolean("unreadResult") ? text(" · 未读", " · Unread") : ""), 10);
         state.setTextColor(colors.accent); state.setPadding(dp(8), dp(4), dp(8), dp(4));
         state.setBackground(fill(colors.dark ? 0xff254c59 : 0xffd9f3f7, 20));
         LayoutParams stateParams = new LayoutParams(-2, -2); stateParams.setMarginStart(dp(8));
