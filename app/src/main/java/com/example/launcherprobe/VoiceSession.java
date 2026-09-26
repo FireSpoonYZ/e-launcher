@@ -312,14 +312,14 @@ final class VoiceSession implements VoiceStream.Listener {
 
     void openTextChat() {
         if (sending) { statusLabel.setText(busyMessage()); return; }
-        // An unsaved chat has no history-list entry for the launcher's selectConversation route.
+        // Return to the originating composer: an unsaved chat has no selectable history-list entry.
         if (conversationId != null && conversationId.equals(emptyChatEntry)
                 && conversationId.equals(coordinator.conversationId())
                 && coordinator.store().conversations().stream().noneMatch(item -> item.id.equals(conversationId))) {
             close();
             return;
         }
-        // The launcher resolves archived/deleted targets explicitly; never substitute the active chat.
+        // The assistant entry resolves archived/deleted targets explicitly; never substitute the active chat.
         android.content.Intent intent = new android.content.Intent(context, MainActivity.class)
                 .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK | android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP)
                 .putExtra(TaskDetailActivity.EXTRA_OPEN_CHAT, conversationId == null ? "" : conversationId);

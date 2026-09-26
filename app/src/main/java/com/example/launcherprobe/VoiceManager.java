@@ -148,7 +148,7 @@ final class VoiceManager {
         }, fromWake ? 250 : 0);
     }
 
-    /** Wake word while this app is not the assistant: the spoken conversation if the launcher is visible, else no UI. */
+    /** Wake-word fallback: open voice mode if the assistant activity is visible, otherwise listen without UI. */
     void onWake(String keyword) {
         if (pending != null || session != null) { wakeHold = false; return; }
         output.stop();
