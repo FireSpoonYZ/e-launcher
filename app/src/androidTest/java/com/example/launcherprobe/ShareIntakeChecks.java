@@ -2,7 +2,6 @@ package com.example.launcherprobe;
 
 import android.app.Instrumentation;
 import android.content.ClipData;
-import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
@@ -19,8 +18,8 @@ public final class ShareIntakeChecks {
     public static String run(Instrumentation instrumentation) throws Exception {
         Context context = instrumentation.getTargetContext();
         Context tests = instrumentation.getContext();
-        tests.startActivity(new Intent().setComponent(new ComponentName(tests.getPackageName(),
-                ShareSourceActivity.class.getName())).putExtra("mode", "grant").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+        FeatureAcceptanceChecks.shell(instrumentation, "am start -W -n " + tests.getPackageName()
+                + "/" + ShareSourceActivity.class.getName() + " --es mode grant");
         long deadline = SystemClock.uptimeMillis() + 5000;
         while (context.checkUriPermission(ShareTestProvider.uri("notes.txt"), Process.myPid(), Process.myUid(),
                 Intent.FLAG_GRANT_READ_URI_PERMISSION) != PackageManager.PERMISSION_GRANTED) {

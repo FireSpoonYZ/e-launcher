@@ -86,7 +86,8 @@ final class FeatureAcceptanceChecks {
             return home;
         }
         Instrumentation.ActivityMonitor monitor = test.addMonitor(MainActivity.class.getName(), null, false);
-        context.startActivity(intent);
+        // HyperOS blocks a cold instrumentation process from launching a background Activity.
+        shell(test, "am start -W -n " + context.getPackageName() + "/" + MainActivity.class.getName());
         Activity activity = monitor.waitForActivityWithTimeout(15000);
         test.removeMonitor(monitor);
         if (activity == null && home != null) activity = home;
@@ -121,10 +122,10 @@ final class FeatureAcceptanceChecks {
         main(() -> { coordinator.finish(second, "error", "synthetic failure"); return null; });
         await(() -> notification(second.conversationId) != null, "failed notification");
         require(store.taskResultUnread(first.conversationId), "completion is unread on home");
-        shell("cmd statusbar expand-notifications");
+        shell(test, "cmd statusbar expand-notifications");
         SystemClock.sleep(500);
         screenshot("notifications-shade");
-        shell("cmd statusbar collapse");
+        shell(test, "cmd statusbar collapse");
         Instrumentation.ActivityMonitor monitor = test.addMonitor(TaskDetailActivity.class.getName(), null, false);
         notification(first.conversationId).contentIntent.send();
         Activity detail = monitor.waitForActivityWithTimeout(10000);
@@ -350,7 +351,7 @@ final class FeatureAcceptanceChecks {
             image.compress(Bitmap.CompressFormat.PNG, 100, output);
         } finally { image.recycle(); }
     }
-    private void shell(String command) throws Exception {
+    static void shell(Instrumentation test, String command) throws Exception {
         try (android.os.ParcelFileDescriptor fd = test.getUiAutomation(InstrumentationUi.FLAGS).executeShellCommand(command);
              java.io.InputStream in = new android.os.ParcelFileDescriptor.AutoCloseInputStream(fd)) { in.readAllBytes(); }
     }
