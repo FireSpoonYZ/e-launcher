@@ -18,6 +18,7 @@ import org.json.JSONObject;
 /** Opt-in device check: uses a temporary conversation and the Settings app, never a model/API call. */
 final class ShowerPreviewChecks {
     static String run(Instrumentation instrumentation) throws Exception {
+        java.io.File screenshot = new java.io.File(ChatStoreChecks.artifacts(instrumentation), "shower-preview-check.png");
         Context context = instrumentation.getTargetContext();
         PiAgentBridge bridge = PiAgentBridge.get(context);
         ShowerToolBridge tools = field(bridge, "showerTools");
@@ -96,7 +97,6 @@ final class ShowerPreviewChecks {
             // AI screenshot capture must remain usable while the local Surface is attached.
             ShowerController controller = tools.existingController(id);
             require(controller.screenshot(360, 640).getString("data").length() > 100, "AI screenshot failed with preview attached");
-            java.io.File screenshot = new java.io.File(context.getExternalFilesDir(null), "shower-preview-check.png");
             Bitmap image = instrumentation.getUiAutomation(android.app.UiAutomation.FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES).takeScreenshot();
             try (java.io.FileOutputStream output = new java.io.FileOutputStream(screenshot)) { image.compress(Bitmap.CompressFormat.PNG, 100, output); }
             finally { image.recycle(); }

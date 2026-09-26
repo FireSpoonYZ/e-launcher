@@ -10,9 +10,7 @@ import android.graphics.Bitmap;
 import android.os.SystemClock;
 import android.service.notification.StatusBarNotification;
 import android.view.View;
-import android.view.ViewGroup;
 import android.webkit.WebView;
-import android.widget.ListView;
 import android.widget.TextView;
 import java.io.File;
 import java.io.FileOutputStream;
@@ -24,7 +22,6 @@ import java.util.UUID;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
-import org.json.JSONArray;
 import org.json.JSONObject;
 
 /** On-device integration checks. Synthetic tasks/transcripts; real Activities, WebView and notifications. */
@@ -34,7 +31,7 @@ final class FeatureAcceptanceChecks {
     private final ChatCoordinator coordinator;
     private final ChatStore store;
     private final List<String> temporary = new ArrayList<>();
-    private MainActivity home;
+    private MainActivity assistant;
 
     private FeatureAcceptanceChecks(Instrumentation test) {
         this.test = test;
@@ -44,10 +41,11 @@ final class FeatureAcceptanceChecks {
     }
 
     static String run(Instrumentation test, String check) throws Exception {
+        ChatStoreChecks.artifacts(test);
         FeatureAcceptanceChecks checks = new FeatureAcceptanceChecks(test);
         String previous = checks.store.activeId();
         try {
-            checks.home = checks.openHome(null);
+            checks.assistant = checks.openAssistant(null);
             if ("notifications".equals(check)) checks.notifications();
             else if ("voice-continuity".equals(check)) checks.voice();
             else if ("search-consistency".equals(check)) checks.search();
@@ -64,7 +62,7 @@ final class FeatureAcceptanceChecks {
             }
             if (checks.store.conversations().stream().anyMatch(item -> previous.equals(item.id)))
                 checks.store.selectConversation(previous);
-            if (checks.home != null) checks.main(() -> { checks.home.showDesktop(); return null; });
+            if (checks.assistant != null) checks.main(() -> { checks.assistant.finish(); return null; });
             checks.context.getSharedPreferences("chat", 0).edit().commit();
         }
     }
@@ -76,20 +74,20 @@ final class FeatureAcceptanceChecks {
         return id;
     }
 
-    private MainActivity openHome(String id) throws Exception {
+    private MainActivity openAssistant(String id) throws Exception {
         Intent intent = new Intent(context, MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
         if (id != null) intent.putExtra(TaskDetailActivity.EXTRA_OPEN_CHAT, id);
-        if (home != null) {
+        if (assistant != null) {
             context.startActivity(intent);
             SystemClock.sleep(500);
             test.waitForIdleSync();
-            return home;
+            return assistant;
         }
         Instrumentation.ActivityMonitor monitor = test.addMonitor(MainActivity.class.getName(), null, false);
         context.startActivity(intent);
         Activity activity = monitor.waitForActivityWithTimeout(15000);
         test.removeMonitor(monitor);
-        if (activity == null && home != null) activity = home;
+        if (activity == null && assistant != null) activity = assistant;
         require(activity instanceof MainActivity, "MainActivity did not open");
         test.waitForIdleSync();
         return (MainActivity) activity;
@@ -114,13 +112,15 @@ final class FeatureAcceptanceChecks {
 
     private void notifications() throws Exception {
         require(context.getSystemService(NotificationManager.class).areNotificationsEnabled(), "Allow app notifications before this check");
+        main(() -> { assistant.openAssistantSettings(); return null; });
+        awaitWeb("location.hash.startsWith('#/settings') && document.querySelector('.chat-page') === null");
         ChatCoordinator.SessionRun first = task("ACCEPT completed");
         main(() -> { coordinator.finish(first, "completed", ""); return null; });
         await(() -> notification(first.conversationId) != null, "completed notification");
         ChatCoordinator.SessionRun second = task("ACCEPT failed");
         main(() -> { coordinator.finish(second, "error", "synthetic failure"); return null; });
         await(() -> notification(second.conversationId) != null, "failed notification");
-        require(store.taskResultUnread(first.conversationId), "completion is unread on home");
+        require(store.taskResultUnread(first.conversationId), "completion is unread in another conversation");
         shell("cmd statusbar expand-notifications");
         SystemClock.sleep(500);
         screenshot("notifications-shade");
@@ -135,7 +135,7 @@ final class FeatureAcceptanceChecks {
         require(notification(second.conversationId) != null && store.taskResultUnread(second.conversationId), "other result stays unread");
         screenshot("notification-target");
         main(() -> { detail.finish(); return null; });
-        home = openHome(second.conversationId);
+        assistant = openAssistant(second.conversationId);
         awaitWeb("document.querySelector('.chat-page') !== null");
         await(() -> !store.taskResultUnread(second.conversationId), "visible Web chat marks result read");
         main(() -> {
@@ -144,15 +144,16 @@ final class FeatureAcceptanceChecks {
             return null;
         });
         await(() -> !store.taskResultUnread(second.conversationId), "visible chat reads even an immediate completion");
-        main(() -> { home.showDesktop(); return null; });
+        main(() -> { assistant.openAssistantSettings(); return null; });
         ChatCoordinator.SessionRun hidden = task("ACCEPT hidden WebView");
-        home = openHome(hidden.conversationId);
+        assistant = openAssistant(hidden.conversationId);
         awaitWeb("document.querySelector('.chat-page') !== null");
-        main(() -> { home.showDesktop(); return null; });
-        await(() -> main(() -> ((PagerRoot) field(home, "pager")).page() == PagerState.Page.HOME), "home transition settled");
+        main(() -> { assistant.openAssistantSettings(); return null; });
+        awaitWeb("location.hash.startsWith('#/settings') && document.querySelector('.chat-page') === null");
+        require(!main(() -> assistant.isTaskConversationVisible(hidden.conversationId)), "settings is not a visible chat");
         main(() -> { coordinator.finish(hidden, "completed", ""); return null; });
         SystemClock.sleep(600);
-        require(store.taskResultUnread(hidden.conversationId), "covered WebView must not mark read");
+        require(store.taskResultUnread(hidden.conversationId), "settings route must not mark a conversation read");
         ChatCoordinator.SessionRun question = task("ACCEPT answer needed");
         JSONObject state = new JSONObject("{\"askUser\":{\"id\":\"accept-question\",\"questions\":[{\"questionIndex\":0,\"header\":\"方式\",\"question\":\"选择整理方式？\",\"multiSelect\":false,\"options\":[{\"label\":\"按日期\",\"description\":\"依次排列\"},{\"label\":\"按事项\",\"description\":\"同类合并\"}]}]}}");
         JSONObject event = new JSONObject().put("type", "extension_ui").put("state", state);
@@ -163,8 +164,11 @@ final class FeatureAcceptanceChecks {
         require(notification(question.conversationId) == null, "same question does not resurrect dismissed notification");
         require(coordinator.taskCards().getJSONObject(0).getString("conversationId").equals(question.conversationId), "question card first");
         test.waitForIdleSync();
-        main(() -> { ((HomeTaskCards) field(home, "homeTaskCards")).showLatest(); return null; });
-        screenshot("notification-question-card");
+        TaskDetailActivity questionDetail = (TaskDetailActivity) test.startActivitySync(new Intent(context, TaskDetailActivity.class)
+                .putExtra(TaskDetailActivity.EXTRA_CONVERSATION_ID, question.conversationId).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+        await(() -> main(() -> questionDetail.getWindow().getDecorView().findViewWithTag("home-questionnaire") != null), "question in task details");
+        screenshot("notification-question-detail");
+        main(() -> { questionDetail.finish(); return null; });
         main(() -> { coordinator.onPiEvent(new JSONObject().put("type", "extension_ui").put("state", new JSONObject()), question); coordinator.finish(question, "aborted", ""); return null; });
         coordinator.deleteConversation(question.conversationId);
         require(notification(question.conversationId) == null, "deleting clears notification");
@@ -176,7 +180,7 @@ final class FeatureAcceptanceChecks {
         String active = conversation("ACCEPT unrelated active", "前文".repeat(90) + keyword + " active content");
         String archived = conversation("ACCEPT unrelated archived", "前文".repeat(90) + keyword + " archived content");
         coordinator.archiveConversation(archived);
-        home = openHome(active);
+        assistant = openAssistant(active);
         awaitWeb("document.querySelector('.chat-page') !== null");
         js("document.querySelector('.chat-header .icon-button').click()");
         awaitWeb("document.querySelector('.conversation-list') !== null && document.querySelector('.search-field input') !== null");
@@ -192,40 +196,7 @@ final class FeatureAcceptanceChecks {
         awaitWeb("document.querySelector('.archived-page').textContent.includes('archived content')");
         screenshot("search-archived-body");
         require(store.isArchived(archived), "search does not restore archived chat");
-        ScheduledTasks schedules = ScheduledTasks.get(context);
-        String title = "ACCEPT task " + UUID.randomUUID();
-        JSONObject snapshot = schedules.save(new JSONObject().put("title", title).put("prompt", keyword + " schedule body")
-                .put("repeat", "monthly").put("monthDay", 1).put("time", "00:00"));
-        JSONObject task = null;
-        JSONArray tasks = snapshot.getJSONArray("tasks");
-        for (int i = 0; i < tasks.length(); i++) if (title.equals(tasks.getJSONObject(i).getString("title"))) task = tasks.getJSONObject(i);
-        require(task != null, "fixture schedule created");
-        String taskId = task.getString("id");
-        int revision = task.getInt("revision");
-        schedules.setEnabled(taskId, revision, false);
-        try {
-            String before = schedules.snapshot().getJSONArray("records").toString();
-            main(() -> { home.showGlobalSearch(keyword); return null; });
-            await(() -> main(() -> {
-                NativeSearchPage page = field(home, "nativeSearchPage");
-                if (page == null) return false;
-                ListView list = field(page, "list");
-                return findRow(list, "schedule body") != null;
-            }), "global task result");
-            screenshot("search-global");
-            main(() -> {
-                NativeSearchPage page = field(home, "nativeSearchPage");
-                ListView list = field(page, "list");
-                require(findRow(list, "active content") != null && findRow(list, "archived content") != null, "global has both chat categories");
-                View row = findRow(list, "schedule body");
-                View button = findText(row, "打开"); require(button != null, "global open button"); button.performClick(); return null;
-            });
-            awaitWeb("document.querySelector('.schedule-editor') !== null");
-            require(js("document.querySelector('.schedule-editor input').value").contains(title), "precise task editor target");
-            require(before.equals(schedules.snapshot().getJSONArray("records").toString()), "search/navigation does not execute task");
-            require(!coordinator.running(), "search never starts model");
-            screenshot("search-task-editor");
-        } finally { schedules.delete(taskId, revision + 1); }
+        require(!coordinator.running(), "chat history search never starts a model");
     }
 
     private void shareUi() throws Exception {
@@ -280,7 +251,7 @@ final class FeatureAcceptanceChecks {
         store.saveDraft(target, "typed draft remains");
         store.setPiSelection(target, "acceptance-unavailable-provider", "acceptance-model", "off");
         int count = store.conversations().size();
-        home = openHome(target);
+        assistant = openAssistant(target);
         awaitWeb("document.querySelector('.chat-page') !== null");
         // Enter through the real plugin API: the keyboard draft is deliberately non-empty.
         VoiceSessionActivity voiceActivity = openVoice(() -> js("window.Capacitor.Plugins.Device.openVoiceConversation({conversationId:" + JSONObject.quote(target) + "})"));
@@ -295,7 +266,7 @@ final class FeatureAcceptanceChecks {
         require(count == store.conversations().size(), "silent entry creates no conversation");
         // Busy ownership is exercised at the recognition boundary, never with microphone/network input.
         ChatCoordinator.SessionRun foreign = main(() -> coordinator.registerRun(target, null));
-        voiceActivity = openVoice(() -> main(() -> { VoiceSessionActivity.open(home, false, target); return null; }));
+        voiceActivity = openVoice(() -> main(() -> { VoiceSessionActivity.open(assistant, false, target); return null; }));
         VoiceSession busySession = field(voiceActivity, "session");
         main(() -> { invoke(busySession, "pauseInput"); invoke(busySession, "submit", "synthetic recognized words"); return null; });
         require(!foreign.cancellation.cancelled(), "voice cannot cancel a foreign run");
@@ -325,7 +296,7 @@ final class FeatureAcceptanceChecks {
 
     private String js(String script) throws Exception {
         CountDownLatch done = new CountDownLatch(1); String[] result = {null};
-        main(() -> { WebView web = field(home, "chatWebView"); web.evaluateJavascript(script, value -> { result[0] = value; done.countDown(); }); return null; });
+        main(() -> { WebView web = assistant.getBridge().getWebView(); web.evaluateJavascript(script, value -> { result[0] = value; done.countDown(); }); return null; });
         require(done.await(10, TimeUnit.SECONDS), "WebView JS timeout");
         return result[0] == null ? "null" : result[0];
     }
@@ -346,30 +317,13 @@ final class FeatureAcceptanceChecks {
         SystemClock.sleep(350);
         Bitmap image = test.getUiAutomation(InstrumentationUi.FLAGS).takeScreenshot();
         require(image != null, "screenshot unavailable");
-        try (FileOutputStream output = new FileOutputStream(new File(context.getExternalFilesDir(null), "accept-" + name + ".png"))) {
+        try (FileOutputStream output = new FileOutputStream(new File(ChatStoreChecks.artifacts(test), "accept-" + name + ".png"))) {
             image.compress(Bitmap.CompressFormat.PNG, 100, output);
         } finally { image.recycle(); }
     }
     private void shell(String command) throws Exception {
         try (android.os.ParcelFileDescriptor fd = test.getUiAutomation(InstrumentationUi.FLAGS).executeShellCommand(command);
              java.io.InputStream in = new android.os.ParcelFileDescriptor.AutoCloseInputStream(fd)) { in.readAllBytes(); }
-    }
-    private static View findRow(ListView list, String text) {
-        for (int i = 0; i < list.getAdapter().getCount(); i++) {
-            View row = list.getAdapter().getView(i, null, list);
-            if (contains(row, text)) return row;
-        }
-        return null;
-    }
-    private static boolean contains(View view, String text) {
-        if (view instanceof TextView label && label.getText().toString().contains(text)) return true;
-        if (view instanceof ViewGroup group) for (int i = 0; i < group.getChildCount(); i++) if (contains(group.getChildAt(i), text)) return true;
-        return false;
-    }
-    private static View findText(View view, String text) {
-        if (view instanceof TextView label && text.contentEquals(label.getText())) return view;
-        if (view instanceof ViewGroup group) for (int i = 0; i < group.getChildCount(); i++) { View hit = findText(group.getChildAt(i), text); if (hit != null) return hit; }
-        return null;
     }
     private static <T> T field(Object object, String name) throws Exception {
         Class<?> type = object.getClass();

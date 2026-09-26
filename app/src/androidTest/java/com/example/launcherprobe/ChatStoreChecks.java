@@ -9,7 +9,7 @@ import android.os.Bundle;
 import java.util.Arrays;
 import java.util.Collections;
 
-/** Store checks use test-package preferences; the target-Activity UI check is read-only. */
+/** Store checks use test-package preferences; opt-in integration checks clean up temporary conversations. */
 public final class ChatStoreChecks extends Instrumentation {
     private boolean storageOnly;
     private boolean npmOnly;
@@ -17,9 +17,11 @@ public final class ChatStoreChecks extends Instrumentation {
     private boolean showerPreviewOnly;
     private boolean workbenchOnly;
     private String featureCheck;
+    private String artifactDir;
 
     @Override public void onCreate(Bundle arguments) {
         super.onCreate(arguments);
+        artifactDir = arguments == null ? null : arguments.getString("artifactDir");
         featureCheck = arguments == null ? "" : arguments.getString("checks", "");
         storageOnly = arguments != null && "store".equals(arguments.getString("checks"));
         npmOnly = arguments != null && "npm".equals(arguments.getString("checks"));
@@ -39,6 +41,11 @@ public final class ChatStoreChecks extends Instrumentation {
                 finish(Activity.RESULT_OK, result);
                 return;
             }
+            if ("widget".equals(featureCheck)) {
+                result.putString("stream", TaskWidgetChecks.run(this) + "\n");
+                finish(Activity.RESULT_OK, result);
+                return;
+            }
             if (workbenchOnly) {
                 result.putString("stream", WorkbenchChecks.run(this) + "\n");
                 finish(Activity.RESULT_OK, result);
@@ -50,16 +57,7 @@ public final class ChatStoreChecks extends Instrumentation {
                 return;
             }
             if (questionnaireOnly) {
-                ActivityMonitor monitor = addMonitor(MainActivity.class.getName(), null, false);
-                getTargetContext().startActivity(new android.content.Intent(android.content.Intent.ACTION_MAIN)
-                        .addCategory(android.content.Intent.CATEGORY_HOME)
-                        .setClass(getTargetContext(), MainActivity.class)
-                        .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK));
-                Activity foreground = monitor.waitForActivityWithTimeout(15000);
-                removeMonitor(monitor);
-                if (foreground == null) throw new AssertionError("Could not foreground the desktop for questionnaire checks");
-                waitForIdleSync();
-                result.putString("stream", HomeQuestionnaireChecks.run(this, foreground) + "\n");
+                result.putString("stream", HomeQuestionnaireChecks.run(this) + "\n");
                 finish(Activity.RESULT_OK, result);
                 return;
             }
@@ -84,12 +82,11 @@ public final class ChatStoreChecks extends Instrumentation {
             checkPiContexts();
             checkMarkdown();
             if (!storageOnly) {
-                checkStationaryComposer();
-                checkPiStreaming();
+                checkAssistantEntryAndBackgroundPersistence();
             }
             result.putString("stream", storageOnly
                     ? "PASS: conversations, tree migration and branches, drafts, incomplete full long content; Markdown, math delimiters, code isolation and links\n"
-                    : "PASS: conversations and drafts; composer identity; streaming bubble identity, no animation reset, Markdown and final actions\n");
+                    : "PASS: conversations and drafts; ordinary Capacitor entry; coordinator stream persistence without Activity; Markdown\n");
             finish(Activity.RESULT_OK, result);
         } catch (Throwable failure) {
             result.putString("stream", "FAIL: " + android.util.Log.getStackTraceString(failure));
@@ -248,141 +245,77 @@ public final class ChatStoreChecks extends Instrumentation {
         prefs.edit().clear().commit();
     }
 
-    private void checkStationaryComposer() {
-        MainActivity activity = (MainActivity) startActivitySync(new android.content.Intent(
-                getTargetContext(), MainActivity.class).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK));
-        waitForIdleSync();
-        android.view.View[] dock = new android.view.View[1];
-        android.widget.EditText[] input = new android.widget.EditText[1];
-        runOnMainSync(() -> {
-            dock[0] = (android.view.View) field(activity, "composerDock");
-            input[0] = (android.widget.EditText) field(activity, "composerInput");
-            android.view.View wallpaper = (android.view.View) field(activity, "homeWallpaper");
-            android.view.View pageShell = (android.view.View) field(activity, "pageShell");
-            android.view.ViewGroup root = (android.view.ViewGroup) field(activity, "root");
-            require(wallpaper.getVisibility() == android.view.View.VISIBLE,
-                    "home wallpaper visible behind composer");
-            require(wallpaper.getLeft() == pageShell.getLeft()
-                    && wallpaper.getTop() == pageShell.getTop()
-                    && wallpaper.getRight() == pageShell.getRight()
-                    && wallpaper.getBottom() == pageShell.getBottom(),
-                    "home wallpaper covers padded page shell");
-            int[] wallpaperLocation = new int[2];
-            int[] dockLocation = new int[2];
-            wallpaper.getLocationOnScreen(wallpaperLocation);
-            dock[0].getLocationOnScreen(dockLocation);
-            require(dockLocation[0] >= wallpaperLocation[0]
-                    && dockLocation[1] >= wallpaperLocation[1]
-                    && dockLocation[0] + dock[0].getWidth()
-                            <= wallpaperLocation[0] + wallpaper.getWidth()
-                    && dockLocation[1] + dock[0].getHeight()
-                            <= wallpaperLocation[1] + wallpaper.getHeight(),
-                    "home wallpaper covers composer");
-            require(root.indexOfChild(wallpaper) < root.indexOfChild(pageShell),
-                    "wallpaper is behind shell");
-            require(!input[0].getShowSoftInputOnFocus(), "collapsed home input delegates IME to web panel");
-            long time = android.os.SystemClock.uptimeMillis();
-            android.view.MotionEvent down = android.view.MotionEvent.obtain(time, time,
-                    android.view.MotionEvent.ACTION_DOWN, input[0].getWidth() / 2f, input[0].getHeight() / 2f, 0);
-            android.view.MotionEvent up = android.view.MotionEvent.obtain(time, time + 60,
-                    android.view.MotionEvent.ACTION_UP, input[0].getWidth() / 2f, input[0].getHeight() / 2f, 0);
-            input[0].dispatchTouchEvent(down);
-            input[0].dispatchTouchEvent(up);
-            down.recycle();
-            up.recycle();
-            require("home".equals(field(activity, "page")), "home input stays on native home");
-            require(field(activity, "homeInputOverlay") != null, "native input overlay is open");
-            invoke(activity, "showHome");
-        });
-        waitForIdleSync();
-        runOnMainSync(() -> {
-            require(field(activity, "composerInput") == input[0], "input identity retained");
-            require(field(activity, "composerDock") == dock[0], "dock identity retained");
-            require(dock[0].getTranslationY() == 0 && dock[0].getAlpha() == 1f,
-                    "page animation excludes dock");
-            input[0].performClick();
-            require("home".equals(field(activity, "page")), "reopening stays on native home");
-            require(field(activity, "homeInputOverlay") != null, "native input overlay reopens");
-            require(((android.view.ViewGroup) field(activity, "contentStage")).getChildCount() == 1,
-                    "rapid navigation leaves only one native home page");
-            activity.finish();
-        });
-    }
-
-    /** UI-only fixture: no model request, provider change, or target preference write. */
-    private void checkPiStreaming() {
-        MainActivity activity = (MainActivity) startActivitySync(new android.content.Intent(
-                getTargetContext(), MainActivity.class).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK));
-        waitForIdleSync();
-        runOnMainSync(() -> {
-            Object original = field(activity, "history");
-            try {
-                invoke(activity, "showSearch");
-                java.lang.reflect.Field running = MainActivity.class.getDeclaredField("agentRunning");
-                java.lang.reflect.Field request = MainActivity.class.getDeclaredField("activePiRequestId");
-                running.setAccessible(true); request.setAccessible(true);
-                running.set(activity, true); request.set(activity, "streaming-view-check");
-                java.lang.reflect.Field messageId = MainActivity.class.getDeclaredField("activePiMessageId");
-                messageId.setAccessible(true); messageId.set(activity, "streaming-message-check");
-                java.lang.reflect.Method preview = MainActivity.class.getDeclaredMethod(
-                        "updatePiPreview", java.util.List.class, String.class);
-                preview.setAccessible(true);
-                java.util.List<AgentLoop.Message> work = Collections.singletonList(
-                        new AgentLoop.Message("user", "stream fixture"));
-                String text = "# Heading\n**bold**";
-                preview.invoke(activity, work, text);
-                android.widget.TextView body = (android.widget.TextView) field(activity, "piStreamingBody");
-                android.view.ViewGroup bubble = (android.view.ViewGroup) body.getParent();
-                android.view.ViewGroup list = (android.view.ViewGroup) field(activity, "messageList");
-                android.view.View user = list.getChildAt(0);
-                bubble.animate().cancel();
-                bubble.setAlpha(1f);
-                require(bubble.getChildCount() == 1, "stream has no stale copy/share actions");
-                for (int index = 0; index < 100; index++) {
-                    text += "\nline " + index;
-                    preview.invoke(activity, work, text);
-                    require(field(activity, "piStreamingBody") == body, "stream reuses text view");
-                    require(body.getParent() == bubble && list.getChildAt(0) == user,
-                            "stream does not rebuild bubbles or previous messages");
-                    require(bubble.getAlpha() == 1f, "stream does not restart fade-in");
-                }
-                require(body.getText().toString().contains("line 99"), "all deltas visible");
-                require(body.getText() instanceof android.text.Spanned
-                        && ((android.text.Spanned) body.getText()).getSpans(0, body.length(),
-                                io.noties.markwon.core.spans.StrongEmphasisSpan.class).length > 0, "stream retains Markdown spans");
-                java.lang.reflect.Method finish = MainActivity.class.getDeclaredMethod(
-                        "finishAgent", java.util.List.class, String.class);
-                finish.setAccessible(true);
-                finish.invoke(activity, Arrays.asList(work.get(0),
-                        new AgentLoop.Message("assistant", text)), "done");
-                require(field(activity, "piStreamingBody") == null, "final clears streaming reference");
-                require(((android.view.ViewGroup) list.getChildAt(1)).getChildCount() == 2,
-                        "final reply restores actions");
-                finish.invoke(activity, original, "");
-            } catch (ReflectiveOperationException exception) {
-                throw new AssertionError(exception);
-            } finally { activity.finish(); }
-        });
-    }
-
-    private static void invoke(MainActivity activity, String name) {
+    /** Synthetic Pi events exercise the real coordinator/persistence path without starting Node. */
+    private void checkAssistantEntryAndBackgroundPersistence() throws Exception {
+        Context context = getTargetContext();
+        ChatCoordinator coordinator = ChatCoordinator.get(context);
+        ChatStore store = coordinator.store();
+        String previous = store.activeId();
+        String id = java.util.UUID.randomUUID().toString();
+        AgentLoop.Message user = new AgentLoop.Message("user", "instrumentation stream fixture");
+        store.save(id, Collections.singletonList(user));
+        MainActivity activity = (MainActivity) startActivitySync(new android.content.Intent(context, MainActivity.class)
+                .putExtra(TaskDetailActivity.EXTRA_OPEN_CHAT, id)
+                .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK));
+        java.util.concurrent.CountDownLatch completed = new java.util.concurrent.CountDownLatch(1);
+        ChatCoordinator.Listener listener = (messages, event) -> {
+            if (id.equals(event.optString("conversationId")) && "end".equals(event.optString("type"))) completed.countDown();
+        };
+        ChatCoordinator.SessionRun[] run = {null};
         try {
-            java.lang.reflect.Method method = MainActivity.class.getDeclaredMethod(name);
-            method.setAccessible(true);
-            method.invoke(activity);
-        } catch (ReflectiveOperationException exception) {
-            throw new AssertionError(exception);
+            waitForIdleSync();
+            runOnMainSync(() -> {
+                require(activity.getBridge() != null && activity.getBridge().getWebView() != null,
+                        "ordinary assistant entry owns a Capacitor WebView");
+                require(activity.launchRoute().equals("/chat/" + id), "explicit conversation route retained");
+                require(id.equals(store.activeId()), "entry selects exact conversation");
+                require(activity.getIntent().getCategories() == null
+                        || !activity.getIntent().getCategories().contains(android.content.Intent.CATEGORY_HOME),
+                        "entry does not request HOME");
+                coordinator.addListener(listener);
+                run[0] = coordinator.registerRun(id, null);
+                run[0].persistence = new PiTurnPersistence(store, id, user.id, "fixture-" + run[0].requestId,
+                        Collections.singletonList(user));
+                activity.finish();
+            });
+            waitForIdleSync();
+            runOnMainSync(() -> {
+                require(activity.isFinishing(), "Activity is no longer the task owner");
+                try {
+                    for (int index = 0; index < 100; index++) coordinator.onPiEvent(new org.json.JSONObject()
+                            .put("type", "text_delta").put("delta", "line " + index + "\n"), run[0]);
+                    coordinator.onPiEvent(new org.json.JSONObject().put("type", "end").put("status", "completed"), run[0]);
+                } catch (Exception exception) { throw new AssertionError(exception); }
+            });
+            require(completed.await(10, java.util.concurrent.TimeUnit.SECONDS), "coordinator broadcasts terminal event without Activity");
+            ChatStore reopened = new ChatStore(context);
+            java.util.List<AgentLoop.Message> messages = reopened.load(id);
+            require(messages.size() == 2 && !messages.get(1).incomplete, "one complete assistant node survives reopening");
+            StringBuilder expected = new StringBuilder();
+            for (int index = 0; index < 100; index++) expected.append("line ").append(index).append('\n');
+            require(expected.toString().equals(messages.get(1).content), "all deltas persisted exactly once");
+            require(!coordinator.running(id) && "completed".equals(coordinator.taskCard(id).optString("runStatus")),
+                    "terminal state remains available to details and Widget");
+        } finally {
+            coordinator.removeListener(listener);
+            runOnMainSync(() -> {
+                if (run[0] != null && coordinator.running(id)) coordinator.finish(run[0], "aborted", "fixture cleanup");
+                activity.finish();
+            });
+            coordinator.deleteConversation(id);
+            if (store.conversations().stream().anyMatch(item -> previous.equals(item.id))) store.selectConversation(previous);
         }
     }
 
-    private static Object field(MainActivity activity, String name) {
-        try {
-            java.lang.reflect.Field field = MainActivity.class.getDeclaredField(name);
-            field.setAccessible(true);
-            return field.get(activity);
-        } catch (ReflectiveOperationException exception) {
-            throw new AssertionError(exception);
+    /** Explicit device-side output path; pull artifacts to a host directory outside the repository. */
+    static java.io.File artifacts(Instrumentation test) throws java.io.IOException {
+        String path = ((ChatStoreChecks) test).artifactDir;
+        if (path == null || !new java.io.File(path).isAbsolute()) {
+            throw new IllegalArgumentException("Pass -e artifactDir <absolute writable device directory>; pull evidence outside the repository");
         }
+        java.io.File directory = new java.io.File(path).getCanonicalFile();
+        if (!directory.isDirectory() && !directory.mkdirs()) throw new java.io.IOException("Cannot create artifactDir: " + directory);
+        return directory;
     }
 
     private static void require(boolean condition, String message) {

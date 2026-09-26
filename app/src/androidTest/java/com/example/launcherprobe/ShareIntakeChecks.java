@@ -14,7 +14,7 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.UUID;
 
-/** Register from the shared runner at integration time. Uses only synthetic, isolated drafts. */
+/** checks=share-intake: real URI grants and synthetic isolated drafts; never submits a model request. */
 public final class ShareIntakeChecks {
     public static String run(Instrumentation instrumentation) throws Exception {
         Context context = instrumentation.getTargetContext();
@@ -58,6 +58,7 @@ public final class ShareIntakeChecks {
             }
             check(active.equals(store.activeId()) && originalDraft.equals(store.draft(active)), "active draft untouched");
             check(store.load(id).isEmpty(), "no message submitted");
+            check(!ChatCoordinator.get(context).running(id), "share import does not start a task");
             return "Share intake: real URI text/image import, duplicate suppression, merge, empty/oversize rollback passed";
         } finally {
             if (id != null) store.clear(id);
