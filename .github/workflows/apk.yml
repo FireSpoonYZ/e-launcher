@@ -72,9 +72,15 @@ jobs:
       - name: Install web dependencies
         run: npm ci
 
+      - name: Test web
+        run: npm test
+
       - name: Prepare Pi runtime
         shell: pwsh
         run: ./scripts/prepare-pi-runtime.ps1
+
+      - name: Test Pi runtime
+        run: npm --prefix pi-runtime test
 
       - name: Assemble APK
         run: ./gradlew --no-daemon --console=plain :app:testDebugUnitTest :app:lintDebug :shower-server:lintDebug :app:assembleDebug ${{ github.ref == 'refs/heads/main' && ':app:assembleRelease' || '' }}

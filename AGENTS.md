@@ -64,13 +64,13 @@ exit $LASTEXITCODE
 | --- | --- |
 | 纯 Java 逻辑（Agent、历史、搜索） | `scripts/verify.ps1` 中的纯 Java 检查会覆盖 |
 | Android 业务逻辑 | `.\gradlew.bat :app:testDebugUnitTest --no-daemon --console=plain`（Robolectric） |
-| 前端 TypeScript/React | `npm run build`（tsc + vite） |
+| 前端 TypeScript/React | `npm test`（Node 行为测试）和 `npm run build`（tsc + vite） |
 | pi-runtime JS | `npm --prefix pi-runtime test` |
 | Shower 服务端 | `.\gradlew.bat :shower-server:lintDebug --no-daemon --console=plain` |
 | 定时任务 UI | `node scripts/check-schedules.mjs`（浏览器检查，不需要设备） |
 | Android 完整检查 | `powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/verify.ps1` |
 
-`scripts/verify.ps1` 执行纯 Java 断言检查、`:app:testDebugUnitTest :app:assembleDebug :app:lintDebug :shower-server:lintDebug`、APK 运行时资源检查、Shower 单 dex 与必需类检查、旧引用、HOME/桌面残留、Widget 注册/XML 检查和空白/行尾风格检查。可用 `-StaticOnly` 或 `-JavaOnly` 单独执行轻量检查。它不运行 Pi runtime 的 `npm test`、浏览器交互检查或设备检查；涉及这些范围时按表补充。
+`scripts/verify.ps1` 执行纯 Java 断言检查、`:app:testDebugUnitTest :app:assembleDebug :app:lintDebug :shower-server:lintDebug`、APK 运行时资源检查、Shower 单 dex 与必需类检查、旧引用、HOME/桌面残留、Widget 注册/XML 检查和空白/行尾风格检查。可用 `-StaticOnly` 或 `-JavaOnly` 单独执行轻量检查。它不运行根目录的 `npm test`、`npm --prefix pi-runtime test`、浏览器交互检查或设备检查；涉及这些范围时按表补充。
 
 ## 设备验证与自动测试的界限
 
