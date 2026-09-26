@@ -264,7 +264,10 @@ public final class SettingsPlugin extends Plugin {
             models.put("providers", providers);
             Map<String, Object> original = providers.get(id) instanceof Map ? ConfigJson.asObject(providers.get(id)) : new LinkedHashMap<>();
             Map<String, Object> next = new LinkedHashMap<>(original);
-            for (String field : new String[]{"name", "baseUrl", "api"}) next.put(field, definition.optString(field));
+            for (String field : new String[]{"baseUrl", "api"}) next.put(field, definition.optString(field));
+            // The SDK accepts an omitted provider name, but rejects an empty one.
+            String name = definition.optString("name");
+            if (name.trim().isEmpty()) next.remove("name"); else next.put("name", name);
             java.util.List<Object> updatedModels = new java.util.ArrayList<>();
             java.util.List<?> priorModels = original.get("models") instanceof java.util.List ? (java.util.List<?>) original.get("models") : java.util.Collections.emptyList();
             java.util.Set<String> modelIds = new java.util.HashSet<>();
