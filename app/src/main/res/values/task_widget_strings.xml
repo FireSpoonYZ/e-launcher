@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="task_widget_name">AI 助手</string>
+    <string name="task_widget_description">任务状态快照；切换任务，打开详情、开始对话或语音。</string>
+    <string name="task_widget_empty">暂无任务，打开助手开始对话</string>
+    <string name="task_widget_empty_hint">点击开始新对话，或选择语音</string>
+    <string name="task_widget_last_status">上次状态：%1$s</string>
+    <string name="task_widget_step">步骤：%1$s</string>
+    <string name="task_widget_detail_hint">打开详情查看任务与问卷</string>
+    <string name="task_widget_snapshot_hint">显示最后保存的状态</string>
+    <string name="task_widget_updated">快照 · %1$s</string>
+    <string name="task_widget_open_detail">打开任务详情</string>
+    <string name="task_widget_previous">上一个任务</string>
+    <string name="task_widget_next">下一个任务</string>
+    <string name="task_widget_new_chat">新对话</string>
+    <string name="task_widget_voice">语音</string>
+</resources>
