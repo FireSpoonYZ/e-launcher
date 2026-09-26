@@ -73,7 +73,31 @@ final class ChatCoordinator {
 
     /** A spoken request: never picks up the typed draft's attachments. */
     String sendVoice(String conversationId, String text) throws Exception {
-        return send(conversationId, text, Collections.emptyList(), null, false);
+        return sendVoice(conversationId, text, ignored -> { });
+    }
+
+    String sendVoice(String conversationId, String text, java.util.function.Consumer<String> registered) throws Exception {
+        return send(conversationId, text, Collections.emptyList(), null, true, registered);
+    }
+
+    /** Explicit voice targets may be inactive, but never missing or archived. */
+    String voiceConversationTitle(String id) {
+        synchronized (runLock) {
+            if (store.isArchived(id)) throw new IllegalStateException("请先恢复此会话再发送");
+            for (ChatStore.Conversation conversation : store.conversations())
+                if (conversation.id.equals(id)) return conversation.title;
+            if (id != null && id.equals(store.activeId())) return "新对话";
+            throw new IllegalStateException("会话不存在");
+        }
+    }
+
+    boolean cancelVoice(String id, String requestId) {
+        synchronized (runLock) {
+            SessionRun run = activeRuns.get(id);
+            if (run == null || !run.requestId.equals(requestId)) return false;
+            cancel(id);
+            return true;
+        }
     }
 
     /** Starts the fresh chat a spoken conversation gets, and tells every open UI to follow it. Any thread. */
@@ -98,12 +122,23 @@ final class ChatCoordinator {
 
     private String send(String conversationId, String text, List<ChatAttachment> attachments,
             String submissionId, boolean background) throws Exception {
+        return send(conversationId, text, attachments, submissionId, background, null);
+    }
+
+    private String send(String conversationId, String text, List<ChatAttachment> attachments,
+            String submissionId, boolean background, java.util.function.Consumer<String> voiceRegistered) throws Exception {
         String prompt = text == null ? "" : text.trim();
         if (prompt.isEmpty() && attachments.isEmpty()) throw new IllegalArgumentException("消息不能为空");
         AttachmentStore attachmentStore = new AttachmentStore(context);
         for (ChatAttachment attachment : attachments) attachmentStore.requireFile(attachment);
-        SessionRun run = registerRun(conversationId, submissionId, background);
-        if (run == null) return null;
+        SessionRun run;
+        synchronized (runLock) {
+            if (voiceRegistered != null) voiceConversationTitle(conversationId);
+            run = registerRun(conversationId, submissionId, background);
+            if (run == null) return null;
+            run.preserveDraft = voiceRegistered != null;
+            if (voiceRegistered != null) voiceRegistered.accept(run.requestId);
+        }
         try {
             emit(run, "runStatus", null, json("status", "running", "message", run.message));
             startPi(run, prompt, new ArrayList<>(attachments));
@@ -448,8 +483,10 @@ final class ChatCoordinator {
                 Collections.emptyList(), false, attachments);
         full.add(user);
         store.save(run.conversationId, full);
-        store.saveDraft(run.conversationId, "");
-        store.saveDraftAttachments(run.conversationId, Collections.emptyList());
+        if (!run.preserveDraft) {
+            store.saveDraft(run.conversationId, "");
+            store.saveDraftAttachments(run.conversationId, Collections.emptyList());
+        }
         run.assistantId = UUID.randomUUID().toString();
         List<AgentLoop.Message> work = new ArrayList<>(prior);
         work.add(user);
@@ -693,6 +730,7 @@ final class ChatCoordinator {
     }
 
     static final class SessionRun {
+        boolean preserveDraft;
         final String conversationId;
         final String requestId;
         final AgentLoop.CancelToken cancellation = new AgentLoop.CancelToken();

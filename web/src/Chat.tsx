@@ -251,7 +251,8 @@ export function ConversationComposer({conversation, running, archived=false, sel
     textarea.current?.blur();
     setComposerPanel(null);
     await Device.hideKeyboard();
-    await Device.openVoiceConversation();
+    await Chat.saveDraft({conversationId:conversation.id,text:draft});
+    await Device.openVoiceConversation({conversationId:conversation.id});
   });
   const send = () => action.run(async () => {
     if (archived || (!draft.trim() && !conversation.draftAttachments.length) || running || preparing) return;

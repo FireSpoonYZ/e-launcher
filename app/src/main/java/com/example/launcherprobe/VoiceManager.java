@@ -81,11 +81,13 @@ final class VoiceManager {
     void stopSpeaking() { output.stop(); }
 
     /** Opens a continuous spoken conversation in the given window, replacing any session already running. */
-    VoiceSession openSession(VoiceSession.Host host) {
+    VoiceSession openSession(VoiceSession.Host host) { return openSession(host, null); }
+
+    VoiceSession openSession(VoiceSession.Host host, String conversationId) {
         if (session != null) session.close();
         cancelListening();
         output.prewarm();
-        VoiceSession opened = new VoiceSession(host, output);
+        VoiceSession opened = new VoiceSession(host, output, conversationId);
         session = opened;
         releaseWakeHold();
         return opened;
@@ -127,7 +129,8 @@ final class VoiceManager {
     /** The assistant session was shown, by a wake word or the system assist gesture. */
     void listenInSession(LauncherVoiceSessionService.Session session, boolean fromWake) {
         output.stop();
-        String conversationId = ChatCoordinator.get(context).conversationId();        Callback spoken = spokenRequest(conversationId);
+        String conversationId = null;
+        Callback spoken = spokenRequest(conversationId);
         // The panel hides the session when it ends; failures before it appears must hide it too.
         Callback callback = new Callback() {
             @Override public void onText(String text) { spoken.onText(text); }
@@ -155,7 +158,7 @@ final class VoiceManager {
             VoiceSessionActivity.open(visible, true);
             return;
         }
-        String conversationId = ChatCoordinator.get(context).conversationId();
+        String conversationId = null;
         Callback callback = spokenRequest(conversationId);
         cue();
         MAIN.postDelayed(() -> {
@@ -283,11 +286,19 @@ final class VoiceManager {
     private void sendSpoken(String conversationId, String text) {
         WakeWordService.showProgress(UiText.get(context, "已发送：") + text);
         sender.execute(() -> {
-            try { ChatCoordinator.get(context).sendVoice(conversationId, text); }
+            String[] sentTo = {conversationId};
+            try {
+                if (text == null || text.trim().isEmpty()) return;
+                ChatCoordinator coordinator = ChatCoordinator.get(context);
+                String target = conversationId == null ? coordinator.startVoiceConversation() : conversationId;
+                sentTo[0] = target;
+                MAIN.post(() -> voiceTurns.add(target));
+                coordinator.sendVoice(target, text);
+            }
             catch (Exception failure) {
                 String message = failure.getMessage() == null ? UiText.get(context, "发送失败") : failure.getMessage();
                 MAIN.post(() -> {
-                    voiceTurns.remove(conversationId);
+                    voiceTurns.remove(sentTo[0]);
                     WakeWordService.showProgress(null);
                     output.speak(message);
                 });

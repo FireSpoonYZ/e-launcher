@@ -52,13 +52,16 @@ final class VoiceSession implements VoiceStream.Listener {
 
     private View view;
     private VoiceOrbView orb;
-    private TextView statusLabel, transcriptLabel;
+    private TextView statusLabel, transcriptLabel, titleLabel;
     private ScrollView transcriptScroll;
 
     private SpeechInput systemInput;
     private boolean remoteInput;
     private State state = State.GREETING;
     private String conversationId;
+    private volatile String ownedRequestId;
+    private boolean sending;
+    private final String emptyChatEntry;
     private String pendingText;
     private int spoken;
     private boolean streaming, closed, interrupted;
@@ -78,11 +81,19 @@ final class VoiceSession implements VoiceStream.Listener {
         }
     }
 
-    VoiceSession(Host host, SpeechOutput output) {
+    VoiceSession(Host host, SpeechOutput output) { this(host, output, null); }
+
+    VoiceSession(Host host, SpeechOutput output, String conversationId) {
+        this.conversationId = conversationId;
         this.host = host;
         this.context = host.context();
         this.output = output;
         coordinator = ChatCoordinator.get(context);
+        emptyChatEntry = context instanceof VoiceSessionActivity && conversationId != null
+                && conversationId.equals(coordinator.conversationId())
+                && !coordinator.store().isArchived(conversationId)
+                && coordinator.store().conversations().stream().noneMatch(item -> item.id.equals(conversationId))
+                ? conversationId : null;
         settings = new VoiceSettings(context);
         remoteInput = VoiceSettings.REMOTE.equals(settings.sttEngine());
     }
@@ -221,6 +232,14 @@ final class VoiceSession implements VoiceStream.Listener {
     // Turn handling.
 
     private void submit(String text) {
+        if (closed) return;
+        if (text == null || text.trim().isEmpty()) { listen(); return; }
+        text = text.trim();
+        if (sending) { listen(busyMessage()); return; }
+        if (conversationId != null) {
+            try { coordinator.voiceConversationTitle(conversationId); }
+            catch (RuntimeException failure) { listen(failure.getMessage()); return; }
+        }
         if (questionnaire != null) {
             answerQuestion(text);
             return;
@@ -231,7 +250,10 @@ final class VoiceSession implements VoiceStream.Listener {
         if (conversationId != null && coordinator.running(conversationId)) {
             // One run per conversation, so an interrupted turn has to end before the new one can start.
             pendingText = text;
-            coordinator.cancel(conversationId);
+            if (!coordinator.cancelVoice(conversationId, ownedRequestId)) {
+                pendingText = null;
+                listen(busyMessage());
+            }
             return;
         }
         send(text);
@@ -242,20 +264,73 @@ final class VoiceSession implements VoiceStream.Listener {
         reply.setLength(0);
         spoken = 0;
         if (conversationId == null) conversationId = coordinator.startVoiceConversation();
+        updateTitle();
         String target = conversationId;
+        sending = true;
         worker.execute(() -> deliver(target, text));
     }
 
     private void deliver(String target, String text) {
-        try { coordinator.sendVoice(target, text); }
+        try { coordinator.sendVoice(target, text, requestId -> ownedRequestId = requestId); }
         catch (Exception failure) {
             String message = failure.getMessage() == null ? UiText.get(context, "发送失败") : failure.getMessage();
             post(() -> listen(message));
+        } finally { post(() -> sending = false); }
+    }
+
+    private String busyMessage() {
+        return UiText.isEnglish(context) ? "This conversation is busy. Wait or continue in text chat." : "此会话正在运行，请等待或转文字聊天";
+    }
+
+    private void updateTitle() {
+        if (titleLabel == null) return;
+        try { titleLabel.setText(conversationId == null
+                ? (UiText.isEnglish(context) ? "New topic" : "新话题")
+                : coordinator.voiceConversationTitle(conversationId)); }
+        catch (RuntimeException failure) { titleLabel.setText(failure.getMessage()); }
+    }
+
+    void newTopic() {
+        if (sending || (conversationId != null && coordinator.running(conversationId))) {
+            statusLabel.setText(busyMessage());
+            return;
         }
+        pauseInput();
+        output.stop();
+        stream.setPlaying(false);
+        questionnaire = null;
+        pendingText = null;
+        ownedRequestId = null;
+        conversationId = null;
+        streaming = interrupted = false;
+        reply.setLength(0);
+        spoken = 0;
+        transcriptLabel.setText("");
+        updateTitle();
+        listen();
+    }
+
+    void openTextChat() {
+        if (sending) { statusLabel.setText(busyMessage()); return; }
+        // An unsaved chat has no history-list entry for the launcher's selectConversation route.
+        if (conversationId != null && conversationId.equals(emptyChatEntry)
+                && conversationId.equals(coordinator.conversationId())
+                && coordinator.store().conversations().stream().noneMatch(item -> item.id.equals(conversationId))) {
+            close();
+            return;
+        }
+        // The launcher resolves archived/deleted targets explicitly; never substitute the active chat.
+        android.content.Intent intent = new android.content.Intent(context, MainActivity.class)
+                .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK | android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                .putExtra(TaskDetailActivity.EXTRA_OPEN_CHAT, conversationId == null ? "" : conversationId);
+        context.startActivity(intent);
+        close();
     }
 
     private void onChatEvent(List<AgentLoop.Message> messages, JSONObject event) {
         if (closed || conversationId == null || !conversationId.equals(event.optString("conversationId"))) return;
+        updateTitle();
+        if (ownedRequestId == null || !ownedRequestId.equals(event.optString("requestId"))) return;
         JSONObject payload = event.optJSONObject("payload");
         switch (event.optString("type")) {
             case "textDelta":
@@ -426,14 +501,19 @@ final class VoiceSession implements VoiceStream.Listener {
             systemInput.start(new SpeechInput.Listener() {
                 @Override public void onLevel(float level) { VoiceSession.this.onLevel(level); }
                 @Override public void onSpeechActivity(boolean speaking) { VoiceSession.this.onSpeechActivity(speaking); }
-                @Override public void onPartial(String text) { transcriptLabel.setText(text); }
-                @Override public void onProcessing() { setState(State.TRANSCRIBING, UiText.get(context, "正在识别…")); }
+                @Override public void onPartial(String text) {
+                    if (!closed && generation == inputGeneration) transcriptLabel.setText(text);
+                }
+                @Override public void onProcessing() {
+                    if (!closed && generation == inputGeneration) setState(State.TRANSCRIBING, UiText.get(context, "正在识别…"));
+                }
                 @Override public void onResult(String text) {
                     if (closed || generation != inputGeneration) return;
                     systemInput = null;
                     submit(text);
                 }
                 @Override public void onError(String error) {
+                    if (closed || generation != inputGeneration) return;
                     systemInput = null;
                     if (!closed) main.postDelayed(() -> {
                         if (generation == inputGeneration) listen(error);
@@ -470,6 +550,14 @@ final class VoiceSession implements VoiceStream.Listener {
         root.setPadding(pad, Math.round(20 * density), pad, Math.round(16 * density));
         root.setClickable(true);
         root.setFitsSystemWindows(true);
+
+        titleLabel = new TextView(context);
+        titleLabel.setTextSize(20);
+        titleLabel.setTextColor(Color.WHITE);
+        titleLabel.setGravity(Gravity.CENTER);
+        titleLabel.setMaxLines(2);
+        root.addView(titleLabel, new LinearLayout.LayoutParams(-1, -2));
+        updateTitle();
 
         statusLabel = new TextView(context);
         statusLabel.setTextSize(14);
@@ -521,6 +609,8 @@ final class VoiceSession implements VoiceStream.Listener {
 
         LinearLayout actions = new LinearLayout(context);
         actions.setGravity(Gravity.CENTER);
+        actions.addView(action("plus", UiText.isEnglish(context) ? "New topic" : "新话题", false, density, this::newTopic));
+        actions.addView(action("bubble", UiText.isEnglish(context) ? "Text chat" : "文字聊天", false, density, this::openTextChat));
         if (!remoteInput) actions.addView(action("stop", "打断", false, density, this::onSpeechStart));
         actions.addView(action("close", "结束", true, density, this::close));
         root.addView(actions, new LinearLayout.LayoutParams(-2, -2));
@@ -531,7 +621,7 @@ final class VoiceSession implements VoiceStream.Listener {
         LinearLayout column = new LinearLayout(context);
         column.setOrientation(LinearLayout.VERTICAL);
         column.setGravity(Gravity.CENTER_HORIZONTAL);
-        column.setPadding(Math.round(14 * density), Math.round(12 * density), Math.round(14 * density), 0);
+        column.setPadding(Math.round(6 * density), Math.round(12 * density), Math.round(6 * density), 0);
         ImageButton button = new ImageButton(context);
         button.setContentDescription(UiText.get(context, label));
         button.setImageDrawable(new ChatIcon(icon, end ? 0xFFFFB3BF : Color.WHITE));

@@ -85,7 +85,7 @@ public final class DevicePlugin extends Plugin {
     }
     @PluginMethod public void openVoiceConversation(PluginCall call) {
         getActivity().runOnUiThread(() -> {
-            try { VoiceSessionActivity.open(getActivity(), false); call.resolve(); }
+            try { VoiceSessionActivity.open(getActivity(), false, call.getString("conversationId")); call.resolve(); }
             catch (Exception exception) { reject(call, exception); }
         });
     }

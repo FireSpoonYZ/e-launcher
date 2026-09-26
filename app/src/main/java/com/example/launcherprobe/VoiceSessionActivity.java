@@ -11,13 +11,19 @@ import android.view.WindowManager;
 /** Full-screen host for a spoken conversation while the launcher itself is in front. */
 public final class VoiceSessionActivity extends Activity implements VoiceSession.Host {
     private static final int REQUEST_MICROPHONE = 61;
+    static final String EXTRA_CONVERSATION_ID = "voiceConversationId";
 
     private VoiceSession session;
 
     /** Opens the conversation over the given screen; no-op when the microphone was refused. */
     static void open(Context from, boolean fromWake) {
+        open(from, fromWake, null);
+    }
+
+    static void open(Context from, boolean fromWake, String conversationId) {
         from.startActivity(new Intent(from, VoiceSessionActivity.class)
-                .putExtra(LauncherVoiceInteractionService.EXTRA_WAKE, fromWake));
+                .putExtra(LauncherVoiceInteractionService.EXTRA_WAKE, fromWake)
+                .putExtra(EXTRA_CONVERSATION_ID, conversationId));
     }
 
     @Override public Context context() { return this; }
@@ -49,7 +55,7 @@ public final class VoiceSessionActivity extends Activity implements VoiceSession
     }
 
     private void begin() {
-        session = VoiceManager.get(this).openSession(this);
+        session = VoiceManager.get(this).openSession(this, getIntent().getStringExtra(EXTRA_CONVERSATION_ID));
         setContentView(session.view());
         session.start(getIntent().getBooleanExtra(LauncherVoiceInteractionService.EXTRA_WAKE, false));
     }

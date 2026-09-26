@@ -62,6 +62,7 @@ public class VoiceQuestionnaireTest {
         }, output);
         session.view();
         ReflectionHelpers.setField(session, "conversationId", run.conversationId);
+        ReflectionHelpers.setField(session, "ownedRequestId", run.requestId);
         stream = ReflectionHelpers.getField(session, "stream");
         session.start(false);
         idle();
