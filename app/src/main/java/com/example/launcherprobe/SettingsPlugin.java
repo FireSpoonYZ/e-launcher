@@ -31,9 +31,8 @@ public final class SettingsPlugin extends Plugin {
             "packages", "install", "update", "remove", "resources", "resource_paths", "resource_toggle"));
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private PiConfigStore store;
-    private volatile PiAgentBridge queryBridge;
-    private volatile String queryRequestId;
-    private volatile boolean queryCancellable = true;
+    private final Map<String, PendingQuery> queries = new java.util.concurrent.ConcurrentHashMap<>();
+    private volatile boolean destroyed;
     private volatile okhttp3.Call publicCall;
 
     @Override public void load() {
@@ -42,7 +41,13 @@ public final class SettingsPlugin extends Plugin {
     }
 
     @Override protected void handleOnDestroy() {
-        cancelNativeQuery();
+        destroyed = true;
+        for (Map.Entry<String, PendingQuery> entry : queries.entrySet()) {
+            PendingQuery pending = entry.getValue();
+            synchronized (pending.bridge) {
+                if (queries.remove(entry.getKey(), pending) && pending.cancellable) pending.bridge.abort(entry.getKey());
+            }
+        }
         okhttp3.Call call = publicCall; if (call != null) call.cancel();
         worker.shutdownNow();
     }
@@ -326,28 +331,51 @@ public final class SettingsPlugin extends Plugin {
             PiAgentBridge bridge = PiAgentBridge.get(getContext());
             PiConfigStore queryStore = store;
             synchronized (bridge) {
+                if (destroyed) throw new IllegalStateException("设置页面已关闭");
+                PendingQuery pending = new PendingQuery(bridge, operation);
                 String id = bridge.query(operation, queryStore.snapshot(), arguments, queryStore, event -> {
-                    notifyListeners("settingsEvent", js(event), true);
-                    if ("end".equals(event.optString("type")) && event.optString("id").equals(queryRequestId)) {
-                        queryRequestId = null; queryBridge = null;
+                    String type = event.optString("type");
+                    if ("auth_prompt".equals(type)) pending.promptId = event.optString("promptId");
+                    if ("auth_prompt_end".equals(type) && event.optString("promptId").equals(pending.promptId)) pending.promptId = null;
+                    if ("end".equals(type)) {
+                        pending.ended = true;
+                        queries.remove(event.optString("id"), pending);
                     }
+                    if (!destroyed) notifyListeners("settingsEvent", js(event), true);
                 });
-                queryBridge = bridge;
-                queryRequestId = id;
-                queryCancellable = !Arrays.asList("install", "update", "remove").contains(operation);
-                call.resolve(js(new JSONObject().put("requestId", id).put("cancellable", queryCancellable)));
+                if (!pending.ended) queries.put(id, pending);
+                if (destroyed) {
+                    if (queries.remove(id, pending) && pending.cancellable) bridge.abort(id);
+                    throw new IllegalStateException("设置页面已关闭");
+                }
+                call.resolve(js(new JSONObject().put("requestId", id).put("cancellable", pending.cancellable)));
             }
         } catch (Exception exception) { reject(call, exception); }
     }
 
-    @PluginMethod public void cancelQuery(PluginCall call) { cancelNativeQuery(); call.resolve(); }
+    @PluginMethod public void cancelQuery(PluginCall call) {
+        try {
+            String id = required(call, "requestId");
+            PendingQuery pending = queries.get(id);
+            if (pending != null) synchronized (pending.bridge) {
+                if (queries.get(id) == pending && pending.cancellable) pending.bridge.abort(id);
+            }
+            call.resolve(); // Cancelling an already-ended request is harmless.
+        } catch (Exception exception) { reject(call, exception); }
+    }
 
     @PluginMethod public void replyAuth(PluginCall call) {
         try {
-            PiAgentBridge bridge = queryBridge;
-            if (bridge == null) throw new IllegalStateException("登录请求已结束");
-            bridge.replyAuth(required(call, "requestId"), required(call, "promptId"), call.getString("value", ""), call.getBoolean("cancelled", false));
-            call.resolve();
+            String id = required(call, "requestId"), promptId = required(call, "promptId");
+            PendingQuery pending = queries.get(id);
+            if (pending == null) throw new IllegalStateException("登录请求已结束");
+            synchronized (pending.bridge) {
+                if (queries.get(id) != pending || !pending.login || !promptId.equals(pending.promptId))
+                    throw new IllegalStateException("登录提示已结束");
+                pending.bridge.replyAuth(id, promptId, call.getString("value", ""), call.getBoolean("cancelled", false));
+                pending.promptId = null;
+                call.resolve();
+            }
         } catch (Exception exception) { reject(call, exception); }
     }
 
@@ -389,7 +417,17 @@ public final class SettingsPlugin extends Plugin {
         }
         store.initialize(chat);
     }
-    private void cancelNativeQuery() { PiAgentBridge bridge = queryBridge; if (bridge != null && queryCancellable) bridge.abort(queryRequestId); }
+    private static final class PendingQuery {
+        final PiAgentBridge bridge;
+        final boolean cancellable, login;
+        boolean ended;
+        String promptId;
+        PendingQuery(PiAgentBridge bridge, String operation) {
+            this.bridge = bridge;
+            cancellable = !Arrays.asList("install", "update", "remove").contains(operation);
+            login = "login".equals(operation);
+        }
+    }
     private SharedPreferences drafts() { return getContext().getSharedPreferences("settings_editor_drafts", Context.MODE_PRIVATE); }
     private String draftKey(boolean project, String name) {
         return (project ? "project/" + store.conversationId() + "/" : "global/") + name;

@@ -89,7 +89,8 @@ export interface SettingsPlugin {
   updateCredential(options: {providerId: string; apiKey?: string; authRevision: string}): Promise<void>;
   deleteProvider(options: {providerId: string; modelsRevision: string; authRevision: string}): Promise<void>;
   query(options: {operation: QueryOperation; arguments?: Record<string, unknown>}): Promise<{requestId: string; cancellable: boolean}>;
-  cancelQuery(): Promise<void>;
+  /** Targets only this request; ended IDs and non-cancellable package mutations are no-ops. */
+  cancelQuery(options: {requestId: string}): Promise<void>;
   replyAuth(options: {requestId: string; promptId: string; value?: string; cancelled?: boolean}): Promise<void>;
   publicSearch(options?: {query?: string; kind?: ''|'extension'|'skill'|'theme'|'prompt'; sort?: 'downloads'|'recent'|'name'; offset?: number}): Promise<Record<string, unknown>>;
   latestRelease(): Promise<{release: Record<string, unknown>|null}>;

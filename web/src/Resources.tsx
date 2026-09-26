@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { Check, Database, ExternalLink, FileCode2, Package, Plus, RefreshCw, Search } from 'lucide-react';
 import { Device, NativeSettings, type NativeEvent } from './native';
@@ -46,8 +46,15 @@ function LoginFlow({provider,method,close}:{provider:CatalogProvider;method:stri
     if(event.type==='auth_prompt'){setPrompt(event);setValue('');}
     if(event.type==='auth_prompt_end'){setPrompt(undefined);setValue('');}
   };
-  useEffect(()=>{void action.run(async()=>{await query('login',{providerId:provider.id,authType:method},receive);setDone(true);setStatus(t('登录成功','Signed in'));});},[]);
-  const cancel=()=>action.run(async()=>{if(!done)await NativeSettings.cancelQuery();close();});
+  const loginRequest=useRef<AbortController|null>(null);
+  useEffect(()=>{
+    const controller=new AbortController();loginRequest.current=controller;
+    void query('login',{providerId:provider.id,authType:method},receive,controller.signal).then(()=>{
+      if(!controller.signal.aborted){setDone(true);setStatus(t('登录成功','Signed in'));}
+    }).catch(error=>{if(!controller.signal.aborted)action.setError(error instanceof Error?error.message:String(error));});
+    return ()=>{controller.abort();if(loginRequest.current===controller)loginRequest.current=null;};
+  },[]);
+  const cancel=()=>{loginRequest.current?.abort();close();};
   const question=record(prompt?.prompt);
   return <Dialog open title={t('连接服务商','Connect provider')} onOpenChange={v=>!v&&cancel()}><div className="auth-flow"><h2>{provider.name||provider.id}</h2><p className="secondary">{method==='oauth'?t('浏览器登录','Browser login'):'API Key'}</p><div className="auth-status pre-wrap" role="status">{status||t('正在连接…','Connecting…')}</div>{link&&<button className="button secondary-button" onClick={()=>action.run(()=>Device.openUrl({url:link}))}><ExternalLink/>{t('打开浏览器','Open browser')}</button>}{prompt&&<form className="form" onSubmit={e=>{e.preventDefault();void action.run(async()=>{await NativeSettings.replyAuth({requestId:String(prompt.id),promptId:String(prompt.promptId),value});setValue('');setPrompt(undefined);});}}><label>{question.message}{question.type==='select'?<select value={value} required onChange={e=>setValue(e.target.value)}><option value="" disabled>{t('请选择','Select')}</option>{array<{id:string;label:string}>(question.options).map(o=><option key={o.id} value={o.id}>{o.label}</option>)}</select>:<input type={question.type==='secret'?'password':'text'} autoComplete="off" value={value} placeholder={question.placeholder} onChange={e=>setValue(e.target.value)}/>}</label><button className="button full">{t('继续','Continue')}</button></form>}<ErrorNotice error={action.error}/><button className="quiet-button full" onClick={cancel}>{done?t('完成','Done'):t('取消登录','Cancel login')}</button></div></Dialog>;
 }
