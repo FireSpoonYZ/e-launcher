@@ -21,6 +21,10 @@ public final class ChatStore {
     private final SharedPreferences preferences;
     private final java.io.File piContexts;
     private final AttachmentStore attachments;
+    // ponytail: one decoded history per store; alternating sessions miss rather than grow a cache.
+    // Guarded by STORE_LOCK. Compare the persisted string so other ChatStore instances invalidate it.
+    private String decodedHistory;
+    private ConversationTree decodedTree;
 
     public ChatStore(Context context) {
         this.context = context.getApplicationContext();
@@ -455,27 +459,37 @@ public final class ChatStore {
     ConversationTree tree(String conversation) { return tree(conversation, true); }
 
     private ConversationTree tree(String conversation, boolean persistLegacyIdentities) {
-        try {
-            Object stored = new org.json.JSONTokener(preferences.getString(historyKey(conversation), "[]")).nextValue();
-            boolean legacy = stored instanceof JSONArray;
-            JSONObject envelope = legacy ? null : (JSONObject) stored;
-            if (!legacy && envelope.getInt("version") != 1) throw new IllegalArgumentException("未知历史版本");
-            JSONArray values = legacy ? (JSONArray) stored : envelope.getJSONArray("nodes");
-            List<ConversationTree.Node> nodes = new ArrayList<>();
-            String parent = null;
-            for (int i = 0; i < values.length(); i++) {
-                JSONObject value = values.getJSONObject(i);
-                AgentLoop.Message message = readMessage(value);
-                nodes.add(new ConversationTree.Node(legacy ? parent : value.optString("parent_id", null), message));
-                parent = message.id;
+        synchronized (STORE_LOCK) {
+            try {
+                String history = preferences.getString(historyKey(conversation), "[]");
+                if (history.equals(decodedHistory))
+                    return new ConversationTree(decodedTree.nodes(), decodedTree.leaf());
+                Object stored = new org.json.JSONTokener(history).nextValue();
+                boolean legacy = stored instanceof JSONArray;
+                JSONObject envelope = legacy ? null : (JSONObject) stored;
+                if (!legacy && envelope.getInt("version") != 1) throw new IllegalArgumentException("未知历史版本");
+                JSONArray values = legacy ? (JSONArray) stored : envelope.getJSONArray("nodes");
+                List<ConversationTree.Node> nodes = new ArrayList<>();
+                String parent = null;
+                for (int i = 0; i < values.length(); i++) {
+                    JSONObject value = values.getJSONObject(i);
+                    AgentLoop.Message message = readMessage(value);
+                    nodes.add(new ConversationTree.Node(legacy ? parent : value.optString("parent_id", null), message));
+                    parent = message.id;
+                }
+                ConversationTree tree = new ConversationTree(nodes, legacy ? parent : envelope.optString("leaf", null));
+                // Persist generated identities once, before any caller can hold a path containing them.
+                if (persistLegacyIdentities && legacy && !nodes.isEmpty())
+                    preferences.edit().putString(historyKey(conversation), encodeTree(tree).toString()).apply();
+                if (!legacy) {
+                    decodedHistory = history;
+                    // Only immutable nodes/messages are shared, never the caller's mutable selection/tree.
+                    decodedTree = new ConversationTree(nodes, tree.leaf());
+                }
+                return tree;
+            } catch (Exception exception) {
+                throw new IllegalStateException("无法读取聊天记录", exception);
             }
-            ConversationTree tree = new ConversationTree(nodes, legacy ? parent : envelope.optString("leaf", null));
-            // Persist generated identities once, before any caller can hold a path containing them.
-            if (persistLegacyIdentities && legacy && !nodes.isEmpty())
-                preferences.edit().putString(historyKey(conversation), encodeTree(tree).toString()).apply();
-            return tree;
-        } catch (Exception exception) {
-            throw new IllegalStateException("无法读取聊天记录", exception);
         }
     }
 

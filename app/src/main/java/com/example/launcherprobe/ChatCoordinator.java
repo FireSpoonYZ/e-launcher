@@ -39,7 +39,10 @@ final class ChatCoordinator {
     private final Handler main = new Handler(Looper.getMainLooper());
     private final Set<Listener> listeners = new CopyOnWriteArraySet<>();
     private final AtomicLong sequence = new AtomicLong();
-    private final Object runLock = new Object();
+    // Orders run mutations, event sequence allocation and snapshots, including background callers.
+    // Lock order: coordinator -> PiTurnPersistence -> ChatStore; listeners are only posted here.
+    // ponytail: snapshot projection holds this monitor; use immutable projections if contention warrants it.
+    private final Object runLock = this;
     private final Map<String, SessionRun> activeRuns = new ConcurrentHashMap<>();
     private final Map<String, SessionRun> terminatingRuns = new ConcurrentHashMap<>();
     private final Map<String, RunResult> recentResults = new ConcurrentHashMap<>();
@@ -101,7 +104,7 @@ final class ChatCoordinator {
     }
 
     /** Starts the fresh chat a spoken conversation gets, and tells every open UI to follow it. Any thread. */
-    String startVoiceConversation() {
+    synchronized String startVoiceConversation() {
         store.newConversation();
         store.saveDraft("");
         store.saveDraftAttachments(Collections.emptyList());
@@ -125,7 +128,7 @@ final class ChatCoordinator {
         return send(conversationId, text, attachments, submissionId, background, null);
     }
 
-    private String send(String conversationId, String text, List<ChatAttachment> attachments,
+    private synchronized String send(String conversationId, String text, List<ChatAttachment> attachments,
             String submissionId, boolean background, java.util.function.Consumer<String> voiceRegistered) throws Exception {
         String prompt = text == null ? "" : text.trim();
         if (prompt.isEmpty() && attachments.isEmpty()) throw new IllegalArgumentException("消息不能为空");
@@ -157,7 +160,7 @@ final class ChatCoordinator {
         return registerRun(conversationId, submissionId, false);
     }
 
-    private SessionRun registerRun(String conversationId, String submissionId, boolean background) {
+    private synchronized SessionRun registerRun(String conversationId, String submissionId, boolean background) {
         SessionRun run = new SessionRun(conversationId, UUID.randomUUID().toString());
         run.extensionUi = parseObject(store.extensionUi(conversationId, store.load(conversationId)));
         // Questions belong to one live request, unlike durable todo snapshots.
@@ -190,7 +193,7 @@ final class ChatCoordinator {
         }
     }
 
-    void deleteConversation(String conversationId) {
+    synchronized void deleteConversation(String conversationId) {
         synchronized (runLock) {
             if (activeRuns.containsKey(conversationId) || terminatingRuns.containsKey(conversationId)) {
                 throw new IllegalStateException("此会话正在运行或结束中，请稍后再删除");
@@ -200,14 +203,14 @@ final class ChatCoordinator {
         emit(conversationId, null, "conversationDeleted", null, new JSONObject());
     }
 
-    public void archiveConversation(String id) {
+    public synchronized void archiveConversation(String id) {
         synchronized (runLock) {
             store.archive(id);
         }
         emit(id, null, "conversationArchived", null, new JSONObject());
     }
 
-    public void restoreConversation(String id) {
+    public synchronized void restoreConversation(String id) {
         boolean restored;
         synchronized (runLock) {
             restored = store.isArchived(id);
@@ -216,7 +219,7 @@ final class ChatCoordinator {
         if (restored) emit(id, null, "conversationRestored", null, new JSONObject());
     }
 
-    public void purgeExpiredArchives() {
+    public synchronized void purgeExpiredArchives() {
         List<String> expired = new ArrayList<>();
         long now = System.currentTimeMillis();
         for (ChatStore.Conversation conversation : store.archivedConversations()) {
@@ -244,7 +247,7 @@ final class ChatCoordinator {
         recentResults.remove(conversationId);
     }
 
-    void cancel(String conversationId) {
+    synchronized void cancel(String conversationId) {
         SessionRun run;
         synchronized (runLock) {
             run = activeRuns.get(conversationId);
@@ -377,7 +380,7 @@ final class ChatCoordinator {
         String trimmed = ((String) value).trim();
         return trimmed.isEmpty() ? null : trimmed;
     }
-    void markTaskRead(String conversationId) {
+    synchronized void markTaskRead(String conversationId) {
         synchronized (runLock) {
             if (conversationId == null || !store.markTaskRead(conversationId)) return;
             new TaskNotifications(context).cancel(conversationId);
@@ -508,15 +511,17 @@ final class ChatCoordinator {
                     run.nodeRegistered = true;
                 }
             } catch (Throwable exception) {
-                endPersistence(run, run.cancellation.cancelled() ? "aborted" : "error", exception);
-                if (ownsRun(run)) finish(run, run.cancellation.cancelled() ? "aborted" : "error",
-                        detail(exception));
-                else acknowledgeTermination(run);
+                synchronized (runLock) {
+                    endPersistence(run, run.cancellation.cancelled() ? "aborted" : "error", exception);
+                    if (ownsRun(run)) finish(run, run.cancellation.cancelled() ? "aborted" : "error",
+                            detail(exception));
+                    else acknowledgeTermination(run);
+                }
             }
         });
     }
 
-    void foregroundServiceTimedOut() {
+    synchronized void foregroundServiceTimedOut() {
         final String message = "Android 已停止超时的后台任务；返回应用后可重新发送";
         List<SessionRun> interrupted;
         synchronized (runLock) {
@@ -556,7 +561,7 @@ final class ChatCoordinator {
         }
     }
 
-    void onTerminatingPiEvent(JSONObject event, SessionRun run) {
+    synchronized void onTerminatingPiEvent(JSONObject event, SessionRun run) {
         if (terminatingRuns.get(run.conversationId) != run) return;
         Exception persistenceFailure = null;
         try { run.persistence.accept(event); }
@@ -569,10 +574,11 @@ final class ChatCoordinator {
                     .putString("run_error_" + run.conversationId, run.error).apply();
         }
         if (persistenceFailure != null) emit(run, "error", null, json("message", run.error));
+        else if ("message".equals(event.optString("type"))) emit(run, "snapshot", null, event);
         if ("end".equals(event.optString("type"))) acknowledgeTermination(run);
     }
 
-    private void acknowledgeTermination(SessionRun run) {
+    private synchronized void acknowledgeTermination(SessionRun run) {
         boolean released;
         synchronized (runLock) {
             run.terminationAcknowledged = true;
@@ -582,7 +588,7 @@ final class ChatCoordinator {
         maybePurgeExpiredArchives(run.conversationId);
     }
 
-    void onPiEvent(JSONObject event, SessionRun run) {
+    synchronized void onPiEvent(JSONObject event, SessionRun run) {
         if (!ownsRun(run)) return;
         String type = event.optString("type");
         JSONObject message = event.optJSONObject("message");
@@ -644,16 +650,18 @@ final class ChatCoordinator {
     private void flushPiDelta(boolean immediate, SessionRun run) {
         long delay = Math.max(0, 40 - (System.currentTimeMillis() - run.lastDeltaFlush));
         Runnable flush = () -> {
-            if (!ownsRun(run)) return;
-            final String delta;
-            synchronized (run.pendingDelta) {
-                if (run.pendingDelta.length() == 0) return;
-                delta = run.pendingDelta.toString();
-                run.pendingDelta.setLength(0);
+            synchronized (runLock) {
+                if (!ownsRun(run)) return;
+                final String delta;
+                synchronized (run.pendingDelta) {
+                    if (run.pendingDelta.length() == 0) return;
+                    delta = run.pendingDelta.toString();
+                    run.pendingDelta.setLength(0);
+                }
+                run.lastDeltaFlush = System.currentTimeMillis();
+                AgentLoop.Message assistant = run.persistence.savePreview();
+                if (assistant != null) emit(run, "textDelta", assistant.id, json("delta", delta));
             }
-            run.lastDeltaFlush = System.currentTimeMillis();
-            AgentLoop.Message assistant = run.persistence.savePreview();
-            if (assistant != null) emit(run, "textDelta", assistant.id, json("delta", delta));
         };
         if (immediate) {
             main.removeCallbacksAndMessages(run.persistence);
@@ -674,7 +682,7 @@ final class ChatCoordinator {
         return activeRuns.get(run.conversationId) == run;
     }
 
-    void finish(SessionRun run, String status, String error) {
+    synchronized void finish(SessionRun run, String status, String error) {
         synchronized (runLock) {
             if (!ownsRun(run)) return;
             if (error != null && !error.isEmpty()) run.error = error;
@@ -699,7 +707,7 @@ final class ChatCoordinator {
         if (store.isArchived(conversationId)) executor.execute(this::purgeExpiredArchives);
     }
 
-    JSONObject snapshot() {
+    synchronized JSONObject snapshot() {
         String activeId = store.activeId();
         SessionRun current;
         RunResult recent;
@@ -740,7 +748,7 @@ final class ChatCoordinator {
         emit(conversationId, requestId, type, nodeId, payload, immediate);
     }
 
-    private void emit(String conversationId, String requestId, String type, String nodeId,
+    private synchronized void emit(String conversationId, String requestId, String type, String nodeId,
             JSONObject payload, boolean immediate) {
         // The provider coalesces requests before projecting cards; no Activity or 40ms widget loop.
         TaskWidgetProvider.requestRefresh(context, immediate);
