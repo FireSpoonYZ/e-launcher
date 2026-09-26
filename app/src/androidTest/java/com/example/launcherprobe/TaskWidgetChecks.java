@@ -89,22 +89,29 @@ final class TaskWidgetChecks {
             await(() -> snapshotContains(prefs, conversations), "all six tasks persisted, without the old five-card limit");
             JSONArray snapshot = new JSONArray(prefs.getString("snapshot", "[]"));
             JSONObject initial = card(snapshot, conversations.get(0));
-            require(initial.length() == 6 && initial.has("status") && initial.has("step") && initial.getLong("savedAt") > 0,
-                    "snapshot contains only display fields and timestamp");
+            require(initial.has("modelState") && initial.has("unreadResult") && initial.getLong("savedAt") > 0
+                    && initial.getJSONArray("tasks").getJSONObject(0).length() == 2
+                    && !initial.has("result") && !initial.has("todo") && !initial.has("messages"),
+                    "bounded snapshot contains only card/node display fields and timestamp");
             prefs.edit().putString("selected:" + first, conversations.get(0))
                     .putString("selected:" + second, conversations.get(1)).commit();
             main(test, () -> { new TaskWidgetProvider().onUpdate(context, manager, new int[]{first, second}); return null; });
             await(() -> main(test, () -> title(views[0]).equals(initial.getString("title"))), "RemoteViews applied from persisted snapshot");
-            require(main(test, () -> text(views[0], R.id.task_widget_result)).equals("saved result 0"), "brief result rendered");
-            require(main(test, () -> text(views[0], R.id.task_widget_status)).contains(initial.getString("status")), "last status rendered");
-            require(main(test, () -> text(views[0], R.id.task_widget_step)).contains("Persisted step"), "current step rendered");
-            require(!main(test, () -> text(views[0], R.id.task_widget_updated)).isBlank(), "last-update label rendered");
+            require(main(test, () -> text(views[0], R.id.task_widget_status)).contains(initial.getString("status")), "saved status capsule rendered");
+            require(main(test, () -> text(views[0], R.id.task_widget_count)).equals("已完成 0 项，共 1 项"), "original count rendered");
+            require(main(test, () -> views[0].findViewById(R.id.task_widget_steps).getContentDescription().toString())
+                    .contains("Persisted step, 进行中"), "static original strip has accessible subjects/states");
+            String description = main(test, () -> views[0].findViewById(R.id.task_widget_body).getContentDescription().toString());
+            require(description.contains("上次状态") && description.contains("快照 · "), "saved time/status retained in accessibility, not a visible row");
+            require(main(test, () -> text(views[0], R.id.task_widget_archive)).equals("归档")
+                    && main(test, () -> text(views[0], R.id.task_widget_chat)).equals("查看对话"), "original two-button footer");
+            require(main(test, () -> views[0].findViewById(R.id.task_widget_back_two).getVisibility()) == View.VISIBLE, "two back-card layers");
             require(main(test, () -> noInput(views[0])), "no editable input embedded in RemoteViews");
             requireActivityIntent(context, first, "detail", conversations.get(0), TaskDetailActivity.class);
-            PendingIntent firstNew = requireActivityIntent(context, first, "new", conversations.get(0), MainActivity.class);
-            PendingIntent secondNew = requireActivityIntent(context, second, "new", conversations.get(1), MainActivity.class);
-            require(!firstNew.equals(secondNew), "PendingIntent identity separates Widget instances and conversations");
-            requireActivityIntent(context, first, "voice", conversations.get(0), VoiceSessionActivity.class);
+            PendingIntent firstChat = requireActivityIntent(context, first, "chat", conversations.get(0), MainActivity.class);
+            PendingIntent secondChat = requireActivityIntent(context, second, "chat", conversations.get(1), MainActivity.class);
+            require(!firstChat.equals(secondChat), "PendingIntent identity separates Widget instances and conversations");
+            requireActivityIntent(context, first, "archived", "", MainActivity.class);
 
             main(test, () -> { views[0].findViewById(R.id.task_widget_next).performClick(); return null; });
             await(() -> !conversations.get(0).equals(prefs.getString("selected:" + first, "")), "next persists selection");
@@ -143,18 +150,22 @@ final class TaskWidgetChecks {
                 require(expected.equals(detail.getIntent().getStringExtra(TaskDetailActivity.EXTRA_CONVERSATION_ID)), "detail PendingIntent has exact conversation target");
                 main(test, () -> { detail.finish(); return null; });
             }
-            String activeBeforeNew = store.activeId();
-            Activity assistant = clickActivity(test, views[1], R.id.task_widget_new_chat, MainActivity.class);
+            Activity assistant = clickActivity(test, views[1], R.id.task_widget_chat, MainActivity.class);
             opened.add(assistant);
-            String fresh = store.activeId();
-            if (!fresh.equals(activeBeforeNew)) conversations.add(fresh);
-            require(!fresh.equals(activeBeforeNew), "new-chat action creates an independent conversation");
-            require(main(test, () -> ((MainActivity) assistant).launchRoute()).equals("/chat/" + fresh), "new-chat opens the ordinary assistant route");
+            require(conversations.get(1).equals(store.activeId()), "view-chat action selects exactly the Widget conversation");
+            require(main(test, () -> ((MainActivity) assistant).launchRoute()).equals("/chat/" + conversations.get(1)), "view-chat opens the real chat route");
             main(test, () -> { assistant.finish(); return null; });
+            Activity archives = clickActivity(test, views[1], R.id.task_widget_folder, MainActivity.class);
+            opened.add(archives);
+            require(main(test, () -> ((MainActivity) archives).launchRoute()).equals("/archived"), "folder opens the existing archive list");
+            main(test, () -> { archives.finish(); return null; });
+            main(test, () -> { views[1].findViewById(R.id.task_widget_archive).performClick(); return null; });
+            await(() -> store.isArchived(conversations.get(1)), "archive click archives the exact selected conversation");
+            require(!store.isArchived(conversations.get(0)), "archive does not affect another Widget target");
             main(test, () -> { fixtureHost.deleteAppWidgetId(second); new TaskWidgetProvider().onDeleted(context, new int[]{second}); return null; });
             allocated.remove(Integer.valueOf(second));
             require(!prefs.contains("selected:" + second) && !store.load(conversations.get(1)).isEmpty(), "removing Widget leaves task data intact");
-            return "PASS: standard Widget XML/RemoteViews, six saved tasks, two independent selections, next/previous, restore and snapshot-only callbacks, exact detail/new-chat Intents, voice Intent identity, non-destructive removal; no real process death or system-desktop touch tested";
+            return "PASS: original card XML/RemoteViews, bounded node snapshots and saved-state accessibility, two independent selections, next/previous, restore and snapshot-only callbacks, exact detail/chat/archive-list routes and archive action, non-destructive removal; no real process death, live stop or system-desktop visual/touch tested";
         } finally {
             if (adopted) automation.dropShellPermissionIdentity();
             main(test, () -> {
@@ -175,7 +186,7 @@ final class TaskWidgetChecks {
     private static PendingIntent requireActivityIntent(Context context, int widgetId, String action, String conversation, Class<?> type) {
         Uri data = new Uri.Builder().scheme("assistant-widget").authority(context.getPackageName())
                 .appendPath(String.valueOf(widgetId)).appendPath(action).appendPath(conversation).build();
-        // FLAG_NO_CREATE inspects the real PendingIntent identity without changing extras or launching voice input.
+        // FLAG_NO_CREATE inspects the real PendingIntent identity without changing extras or launching an Activity.
         PendingIntent pending = PendingIntent.getActivity(context, 0, new Intent(context, type).setData(data),
                 PendingIntent.FLAG_NO_CREATE | PendingIntent.FLAG_IMMUTABLE);
         require(pending != null, "explicit activity PendingIntent exists for " + action);

@@ -10,17 +10,22 @@ final class AppAppearance {
     final boolean dark;
     final int background, surface, ink, muted, accent, panel, border, error;
 
-    private AppAppearance(boolean dark) {
+    private AppAppearance(boolean dark) { this(dark, false); }
+
+    /** The task widget retains the original task card palette, not the workbench palette. */
+    private AppAppearance(boolean dark, boolean taskWidget) {
         this.dark = dark;
-        background = dark ? 0xff121614 : 0xfff6f5f0;
-        surface = dark ? 0xff191e1b : 0xffffffff;
-        ink = dark ? 0xffe5eee9 : 0xff202521;
-        muted = dark ? 0xffa5b1aa : 0xff656d69;
-        accent = dark ? 0xff75c3af : 0xff267a69;
-        panel = dark ? 0xff242b27 : 0xfff1f1f2;
-        border = dark ? 0xff39423c : 0xffe8e8ea;
-        error = dark ? 0xffffb4ab : 0xffb3261e;
+        background = taskWidget ? (dark ? 0xff10272f : 0xffeffbfc) : (dark ? 0xff121614 : 0xfff6f5f0);
+        surface = taskWidget ? (dark ? 0xff193640 : 0xfff8fdff) : (dark ? 0xff191e1b : 0xffffffff);
+        ink = taskWidget ? (dark ? 0xffe5f5f8 : 0xff092e40) : (dark ? 0xffe5eee9 : 0xff202521);
+        muted = taskWidget ? (dark ? 0xff9dbac5 : 0xff547589) : (dark ? 0xffa5b1aa : 0xff656d69);
+        accent = taskWidget ? (dark ? 0xff70d4df : 0xff0098ad) : (dark ? 0xff75c3af : 0xff267a69);
+        panel = taskWidget ? (dark ? 0xff254651 : 0xffdef3f6) : (dark ? 0xff242b27 : 0xfff1f1f2);
+        border = taskWidget ? (dark ? 0xff365763 : 0xffdceef2) : (dark ? 0xff39423c : 0xffe8e8ea);
+        error = dark ? 0xffffb4ab : taskWidget ? 0xffec4350 : 0xffb3261e;
     }
+
+    static AppAppearance readTaskWidget(Context context) { return new AppAppearance(read(context).dark, true); }
 
     /** Neutral task surfaces follow the assistant's light/dark preference. */
     private AppAppearance(AppAppearance colors) {

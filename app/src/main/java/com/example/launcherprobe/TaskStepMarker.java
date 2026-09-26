@@ -18,9 +18,13 @@ final class TaskStepMarker extends View {
     private float angle;
 
     TaskStepMarker(Context context, String status, String model, int completedColor) {
+        this(context, status, model, completedColor, AppAppearance.readWorkbench(context));
+    }
+
+    TaskStepMarker(Context context, String status, String model, int completedColor, AppAppearance colors) {
         super(context);
         this.status = status; this.model = model; this.completedColor = completedColor;
-        colors = AppAppearance.readWorkbench(context);
+        this.colors = colors;
         setContentDescription("completed".equals(status) ? "已完成"
                 : "in_progress".equals(status) ? ("working".equals(model) ? "进行中" : "未完成") : "等待中");
     }

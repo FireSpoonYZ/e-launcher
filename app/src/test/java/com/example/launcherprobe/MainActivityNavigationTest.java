@@ -165,6 +165,24 @@ public class MainActivityNavigationTest {
                 "/settings", inFlight.getString("web_route"));
     }
 
+    @Test public void widgetFolderOpensOnlyArchivedRouteWithoutCreatingAConversation() {
+        String active = conversation("keep draft");
+        Intent request = new Intent(context, MainActivity.class).putExtra(MainActivity.EXTRA_OPEN_ARCHIVED, true);
+        TestMainActivity activity = open(new Intent(request));
+        assertEquals("/archived", activity.launchRoute());
+        assertEquals(active, store.activeId());
+        assertFalse(activity.getIntent().hasExtra(MainActivity.EXTRA_OPEN_ARCHIVED));
+        activity.openChat(active);
+        activity.onNewIntent(new Intent(request));
+        assertEquals("/archived", activity.launchRoute());
+        Bundle saved = new Bundle();
+        controller.pause().saveInstanceState(saved).stop().destroy();
+        controller = Robolectric.buildActivity(TestMainActivity.class, new Intent(request)).create(saved).start().resume();
+        assertEquals("/archived", controller.get().launchRoute());
+        assertEquals(active, store.activeId());
+        assertEquals("keep draft", store.draft(active));
+    }
+
     @Test public void newChatMigratesIndependentDraftOnceAndRecreationDoesNotCreateAgain() throws Exception {
         String original = conversation("keep active draft");
         ChatAttachment attachment = ChatAttachment.fromJson(new JSONObject().put("id", "kept")

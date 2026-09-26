@@ -20,6 +20,7 @@ import java.lang.ref.WeakReference;
 /** Ordinary assistant entry; execution and drafts belong to the process-owned coordinator. */
 public class MainActivity extends BridgeActivity {
     public static final String EXTRA_NEW_CHAT = "assistant_new_chat";
+    public static final String EXTRA_OPEN_ARCHIVED = "assistant_open_archived";
     private static final String ROUTE_KEY = "web_route";
     private static final String ENTRY_CONSUMED_KEY = "assistant_entry_consumed";
     private static final String ARCHIVED_PROMPT_KEY = "assistant_archived_prompt";
@@ -102,10 +103,15 @@ public class MainActivity extends BridgeActivity {
         boolean openChat = intent.hasExtra(TaskDetailActivity.EXTRA_OPEN_CHAT);
         String conversationId = intent.getStringExtra(TaskDetailActivity.EXTRA_OPEN_CHAT);
         boolean newChat = intent.getBooleanExtra(EXTRA_NEW_CHAT, false);
+        boolean archived = intent.getBooleanExtra(EXTRA_OPEN_ARCHIVED, false);
         String archivedId = intent.getStringExtra(TaskDetailActivity.EXTRA_ARCHIVED_ID);
         clearEntryExtras(intent);
         if (openChat) openChat(conversationId);
-        else if (newChat) {
+        else if (archived) {
+            pendingArchivedId = null;
+            archivePromptShown = false;
+            launchWeb("/archived");
+        } else if (newChat) {
             pendingArchivedId = null;
             archivePromptShown = false;
             try {
@@ -120,6 +126,7 @@ public class MainActivity extends BridgeActivity {
     private static void clearEntryExtras(Intent intent) {
         if (intent == null) return;
         intent.removeExtra(EXTRA_NEW_CHAT);
+        intent.removeExtra(EXTRA_OPEN_ARCHIVED);
         intent.removeExtra(TaskDetailActivity.EXTRA_OPEN_CHAT);
         intent.removeExtra(TaskDetailActivity.EXTRA_ARCHIVED_ID);
     }
