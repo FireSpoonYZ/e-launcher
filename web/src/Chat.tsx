@@ -1,5 +1,5 @@
 import { memo, useEffect, useRef, useState } from 'react';
-import { useNavigate, useSearchParams } from 'react-router-dom';
+import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import { Archive, ArchiveRestore, ArrowDown, ArrowUp, AudioLines, Camera, Check, ChevronDown, ChevronRight, Clock3, Copy, GitBranch, Image, LoaderCircle, Menu, Mic, Paperclip, Plus, RotateCcw, Search, Settings, Share2, Square, SquarePen, Trash2, Undo2, Volume2 } from 'lucide-react';
 import { Chat, Device, NativeSettings, ScheduledTasks, type ChatSnapshot, type Conversation, type ConversationNode, type ConversationSummary, type ExtensionUiState, type NativeEvent } from './native';
 import { archiveRemainingParts, isArchived } from './archive';
@@ -18,6 +18,7 @@ import { Empty, ErrorNotice, Header, Loading, SearchField, errorText, query, use
 
 export interface CatalogProvider { id: string; name: string; authMethods: string[]; auth: Record<string, unknown>; models: {id: string; name: string; reasoning: boolean; thinkingLevels: string[]; api: string}[] }
 export function useChat() {
+  const {pathname} = useLocation();
   const [snapshot, setSnapshot] = useState<ChatSnapshot>(); const [error, setError] = useState(''); const [status, setStatus] = useState('');
   const [questionnaireReply, setQuestionnaireReply] = useState<QuestionnaireReplyEvent>();
   const refreshRef = useRef<() => Promise<void>>(async () => {});
@@ -96,7 +97,7 @@ export function useChat() {
       window.removeEventListener('native-navigation', markRead);
       document.removeEventListener('visibilitychange', markRead);
     };
-  }, [snapshot?.conversationId, snapshot?.running, snapshot?.running ? undefined : snapshot?.sequence]);
+  }, [pathname, snapshot?.conversationId, snapshot?.running, snapshot?.running ? undefined : snapshot?.sequence]);
   return {snapshot, error, status, questionnaireReply, refresh: () => refreshRef.current()};
 }
 export function lineage(conversation: Conversation) {
@@ -146,12 +147,18 @@ function useConversationDefaults(conversation?: Conversation) {
 
 export function ChatPage() {
   const chat = useChat(); const action = useAction(); const t = useText();
+  const navigate = useNavigate(); const location = useLocation();
   const [params] = useSearchParams(); const keyboardVisible = useKeyboardVisible();
   const [panel, setPanel] = useState<'conversations'|'models'|null>(params.get('panel') === 'models' ? 'models' : null);
   const [following, setFollowing] = useState(true);
   const [undo, setUndo] = useState<{id: string; title: string; reopen: boolean}|null>(null);
   const [removeCurrent, setRemoveCurrent] = useState(false);
   const conversation = chat.snapshot?.conversation;
+  useEffect(() => {
+    if (!conversation) return;
+    const pathname = `/chat/${encodeURIComponent(conversation.id)}`;
+    if (location.pathname !== pathname) navigate({pathname, search:location.search}, {replace:true});
+  }, [conversation?.id, location.pathname, location.search, navigate]);
   const configured = useConversationDefaults(conversation);
   const scroll = useRef<HTMLDivElement>(null);
   const undoTimer = useRef<ReturnType<typeof setTimeout>>(undefined);

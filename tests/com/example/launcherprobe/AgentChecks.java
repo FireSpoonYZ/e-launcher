@@ -158,50 +158,6 @@ public final class AgentChecks {
         assert blocked;
     }
 
-    private static void observationAndActionFences() {
-        assert !ScreenNodePolicy.informative(null, null, false, false, false, false);
-        assert ScreenNodePolicy.informative("Open", null, false, false, false, false);
-        assert ScreenNodePolicy.informative(null, null, false, true, false, false);
-        assert ScreenNodePolicy.informative(null, null, true, false, false, false);
-        Map<String, Boolean> defaults = ScreenNodePolicy.booleanFields(
-                true, false, false, false, false);
-        assert defaults.isEmpty();
-        Map<String, Boolean> explicit = ScreenNodePolicy.booleanFields(
-                false, true, false, true, true);
-        assert explicit.size() == 4 && Boolean.FALSE.equals(explicit.get("enabled"));
-        assert Boolean.TRUE.equals(explicit.get("clickable"));
-        assert Boolean.TRUE.equals(explicit.get("scrollable"));
-        assert Boolean.TRUE.equals(explicit.get("password"));
-        assert ScreenNodePolicy.BOOLEAN_DEFAULTS.contains("enabled means true");
-
-        ObservationRegistry<String> observed = new ObservationRegistry<>(2);
-        assert observed.add("0", "window1-node1", false);
-        assert observed.add("0.0", "window1-password-child", true);
-        assert !observed.add("0.1", "excluded", false);
-        observed.require("0", "window1-node1", false, String::equals);
-        boolean rejected = false;
-        try { observed.require("0.1", "excluded", false, String::equals); }
-        catch (IllegalArgumentException expected) { rejected = true; }
-        assert rejected;
-        rejected = false;
-        try { observed.require("0.0", "window1-password-child", true, String::equals); }
-        catch (IllegalArgumentException expected) { rejected = true; }
-        assert rejected;
-        rejected = false;
-        try { observed.require("0", "window1-node2", false, String::equals); }
-        catch (IllegalStateException expected) { rejected = true; }
-        assert rejected;
-
-        AgentLoop.CancelToken token = new AgentLoop.CancelToken();
-        ActionFence timeout = new ActionFence(token, () -> true);
-        timeout.expire();
-        assert !timeout.tryStart();
-        ActionFence cancelled = new ActionFence(token, () -> true);
-        token.cancel();
-        assert !cancelled.tryStart();
-        assert !new ActionFence(() -> false, () -> false).tryStart();
-    }
-
     private static void lifecycleFenceAndConfig() throws Exception {
         RunEpoch epoch = new RunEpoch();
         long old = epoch.acquire();
@@ -268,9 +224,8 @@ public final class AgentChecks {
         oversizedTurnDrops();
         retentionBoundary();
         webAddressPolicy();
-        observationAndActionFences();
         lifecycleFenceAndConfig();
         searchParsing();
-        System.out.println("PASS: agent recovery/retention, action/lifecycle fences, config/text, search and URL policy");
+        System.out.println("PASS: agent recovery/retention, lifecycle fences, config/text, search and URL policy");
     }
 }

@@ -14,7 +14,7 @@ import java.nio.file.StandardCopyOption;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
 
-/** Shizuku operations restricted to this app's permissions, HOME and ASSISTANT roles and Shower server. */
+/** Shizuku operations restricted to this app's recovery permission, assistant role and Shower server. */
 public final class OwnPermissionService extends IOwnPermissionService.Stub {
     private static final Pattern HANDOFF_TOKEN = Pattern.compile("[a-f0-9-]{36}");
     private final Context context;
@@ -34,12 +34,6 @@ public final class OwnPermissionService extends IOwnPermissionService.Stub {
     public String grantOwnWriteSecureSettings() {
         return run("/system/bin/pm", "grant", "--user", userId,
                 packageName, "android.permission.WRITE_SECURE_SETTINGS");
-    }
-
-    @Override
-    public String setOwnDefaultHome() {
-        return run("/system/bin/cmd", "role", "add-role-holder", "--user", userId,
-                "android.app.role.HOME", packageName, "0");
     }
 
     /** The assistant role is not requestable through RoleManager and some ROMs hide its settings page. */

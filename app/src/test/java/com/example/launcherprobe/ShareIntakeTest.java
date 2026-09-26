@@ -6,13 +6,18 @@ import android.content.Context;
 import android.content.Intent;
 import android.net.Uri;
 import android.os.Bundle;
+import android.os.Looper;
+import android.widget.Button;
+import android.widget.Spinner;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.robolectric.Robolectric;
 import org.robolectric.RobolectricTestRunner;
 import org.robolectric.RuntimeEnvironment;
+import org.robolectric.Shadows;
 import org.robolectric.annotation.Config;
+import org.robolectric.util.ReflectionHelpers;
 import java.io.File;
 import java.nio.file.Files;
 import java.util.ArrayList;
@@ -111,6 +116,66 @@ public class ShareIntakeTest {
         assertEquals(attachments, real.getString("draft_attachments_" + target, null));
         assertFalse(real.contains("share_intake_" + operation));
         assertFalse(new File(context.getFilesDir(), "chat-attachments/" + added.id).exists());
+    }
+
+    @Test public void confirmationOpensTheChosenDraftInAssistantWithoutStartingATask() throws Exception {
+        store.saveDraft("unrelated draft");
+        String unrelated = store.activeId();
+        String target = store.importShareDraft(token(), null, "original", List.of());
+        Intent input = new Intent(Intent.ACTION_SEND).putExtra(Intent.EXTRA_TEXT, "shared");
+        var controller = Robolectric.buildActivity(ShareReceiverActivity.class, input).setup();
+        try {
+            selectTarget(controller.get(), target);
+            confirmImport(controller.get());
+            Intent opened = Shadows.shadowOf(controller.get()).getNextStartedActivity();
+            assertNotNull(opened);
+            assertEquals(MainActivity.class.getName(), opened.getComponent().getClassName());
+            assertEquals(target, opened.getStringExtra(TaskDetailActivity.EXTRA_OPEN_CHAT));
+            assertFalse(opened.hasCategory(Intent.CATEGORY_HOME));
+            assertNotEquals(Intent.ACTION_MAIN, opened.getAction());
+            assertTrue(controller.get().isFinishing());
+            assertEquals("original\n\nshared", store.draft(target));
+            assertEquals(unrelated, store.activeId());
+            assertEquals("unrelated draft", store.draft());
+            assertTrue(store.load(target).isEmpty());
+            assertTrue(context.getSharedPreferences("chat_submissions", 0).getAll().isEmpty());
+            assertNull("Draft import must not initialize the task engine",
+                    ReflectionHelpers.getStaticField(ChatCoordinator.class, "instance"));
+        } finally { controller.pause().stop().destroy(); }
+    }
+
+    @Test public void archivedAfterPreviewFailsWithoutRedirectingOrChangingDraft() throws Exception {
+        store.saveDraft("keep original");
+        String target = store.activeId();
+        Intent input = new Intent(Intent.ACTION_SEND).putExtra(Intent.EXTRA_TEXT, "must not import");
+        var controller = Robolectric.buildActivity(ShareReceiverActivity.class, input).setup();
+        try {
+            selectTarget(controller.get(), target);
+            store.archive(target);
+            confirmImport(controller.get());
+            assertFalse(controller.get().isFinishing());
+            assertNull(Shadows.shadowOf(controller.get()).getNextStartedActivity());
+            assertEquals("keep original", store.draft(target));
+            assertTrue(store.load(target).isEmpty());
+            assertTrue(((Button) ReflectionHelpers.getField(controller.get(), "confirm")).isEnabled());
+            assertNull(ReflectionHelpers.getStaticField(ChatCoordinator.class, "instance"));
+        } finally { controller.pause().stop().destroy(); }
+    }
+
+    private void selectTarget(ShareReceiverActivity activity, String target) {
+        List<String> ids = ReflectionHelpers.getField(activity, "ids");
+        ((Spinner) ReflectionHelpers.getField(activity, "destination")).setSelection(ids.indexOf(target));
+    }
+
+    private void confirmImport(ShareReceiverActivity activity) throws InterruptedException {
+        ((Button) ReflectionHelpers.getField(activity, "confirm")).performClick();
+        Object job = ReflectionHelpers.getField(activity, "job");
+        long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(5);
+        while (!Boolean.TRUE.equals(ReflectionHelpers.getField(job, "done")) && System.nanoTime() < deadline) {
+            Shadows.shadowOf(Looper.getMainLooper()).idle();
+            Thread.sleep(10);
+        }
+        assertEquals("Import must finish", Boolean.TRUE, ReflectionHelpers.getField(job, "done"));
     }
 
     @Test public void previewCancelAndRecreationDoNotImport() {

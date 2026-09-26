@@ -1,6 +1,65 @@
+param([switch]$StaticOnly, [switch]$JavaOnly)
+
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 Set-Location (Split-Path $PSScriptRoot -Parent)
+if ($StaticOnly -and $JavaOnly) { throw 'Choose at most one of -StaticOnly and -JavaOnly' }
+if (-not $JavaOnly) {
+    # Match retired components, not the legitimate voice component names, app catalog or Shower desktop.
+    $production = @(Get-ChildItem app/src/main/java, app/src/main/aidl, web/src -Recurse -File |
+        Where-Object { $_.Extension -in '.java', '.aidl', '.ts', '.tsx' })
+    $retired = '\b(HomeDesktop|HomeLayout|HomeInputOverlay|HomeTaskCards|DesktopBackup|DesktopBackupPreview|DesktopIconPack|DesktopMenu|DesktopPreferences|DesktopSettingsActivity|DesktopWidgets|LauncherSearchIndex|LauncherShortcuts|NativeSearchPage|SearchName|PagerRoot|PagerState|PagerGesture|AppSwitcherActivity|AppSwitcherView|AppSnapshots|AppLaunchHistory|GestureService|NavigationSession|SwipeDetector|FluidGestureGeometry|AgentTools|AccessibilityServices|AppWidgetHost|AppWidgetHostView)\b|\b(showDesktop|showHomeFromWeb|showAppLibrary|showGlobalSearch|beginDesktopDrag|sendSearchToAssistant|setOwnDefaultHome)\s*\(|\b(CATEGORY_HOME|ROLE_HOME|ACTION_CONFIRM_PIN_SHORTCUT|PinItemRequest)\b|android[.]intent[.]category[.]HOME|android[.]content[.]pm[.]action[.]CONFIRM_PIN_SHORTCUT'
+    $references = @($production | Select-String -Pattern $retired)
+    if ($references.Count -ne 0) { throw "Retired launcher implementation remains: $references" }
+    [xml]$manifest = Get-Content app/src/main/AndroidManifest.xml -Raw -Encoding UTF8
+    $ns = [Xml.XmlNamespaceManager]::new($manifest.NameTable)
+    $ns.AddNamespace('android', 'http://schemas.android.com/apk/res/android')
+    $forbidden = $manifest.SelectNodes('//category[@android:name="android.intent.category.HOME"] | //action[@android:name="android.content.pm.action.CONFIRM_PIN_SHORTCUT"] | //service[@android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"] | //activity[contains(@android:name,"AppSwitcher") or contains(@android:name,"DesktopSettings")] | //uses-permission[@android:name="android.permission.KILL_BACKGROUND_PROCESSES"]', $ns)
+    if ($forbidden.Count -ne 0) { throw 'Manifest still registers a retired HOME, shortcut host, accessibility service or desktop component' }
+    $receiver = $manifest.SelectSingleNode('//receiver[@android:name=".TaskWidgetProvider" or @android:name="com.example.launcherprobe.TaskWidgetProvider"]', $ns)
+    if ($null -eq $receiver -or $receiver.GetAttribute('exported', $ns.LookupNamespace('android')) -ne 'false' -or
+            $null -eq $receiver.SelectSingleNode('intent-filter/action[@android:name="android.appwidget.action.APPWIDGET_UPDATE"]', $ns) -or
+            $null -eq $receiver.SelectSingleNode('meta-data[@android:name="android.appwidget.provider" and @android:resource="@xml/task_widget_info"]', $ns)) {
+        throw 'TaskWidgetProvider must be non-exported with APPWIDGET_UPDATE and task_widget_info metadata'
+    }
+    [xml]$widget = Get-Content app/src/main/res/xml/task_widget_info.xml -Raw -Encoding UTF8
+    $info = $widget.DocumentElement
+    $android = $ns.LookupNamespace('android')
+    $resize = @($info.GetAttribute('resizeMode', $android).Split('|'))
+    if ($info.Name -ne 'appwidget-provider' -or $info.GetAttribute('updatePeriodMillis', $android) -ne '0' -or
+            $info.GetAttribute('widgetCategory', $android) -ne 'home_screen' -or
+            $resize -notcontains 'horizontal' -or $resize -notcontains 'vertical' -or
+            $info.GetAttribute('initialLayout', $android) -ne '@layout/task_widget') {
+        throw 'Widget must use event updates, home_screen, two-axis resizing and task_widget layout'
+    }
+    [xml]$layout = Get-Content app/src/main/res/layout/task_widget.xml -Raw -Encoding UTF8
+    if ($layout.SelectNodes('//*[contains(local-name(),"EditText") or contains(local-name(),"WebView") or contains(local-name(),"TextureView") or contains(local-name(),"SurfaceView")]').Count -ne 0) {
+        throw 'RemoteViews cannot embed chat input or Shower preview; open an Activity instead'
+    }
+    $legacyFiles = @(Get-ChildItem app/src/main/java, app/src/main/aidl, pi-runtime, scripts -Recurse -File |
+        Where-Object { $_.FullName -notmatch '[\\/]node_modules[\\/]' -and $_.FullName -ne $PSCommandPath })
+    $legacyFiles += Get-Item app/build.gradle, pi-runtime/package.json
+    $legacyReferences = @($legacyFiles |
+        Select-String -Pattern 'Lamda|lamda|bundledAndroidMcp|android-mcp|127[.]0[.]0[.]1:65000')
+    if ($legacyReferences.Count -ne 0) { throw "Legacy Lamda integration references remain: $legacyReferences" }
+
+    # Existing style: spaces (not tabs), no trailing whitespace, final newline.
+    $generatedXml = @(
+        (Join-Path (Get-Location) 'app/src/main/res/xml/config.xml'),
+        (Join-Path (Get-Location) 'capacitor-cordova-android-plugins/src/main/AndroidManifest.xml')
+    )
+    $files = @(Get-ChildItem app/src, shower-server/src, tests, scripts -Recurse -File |
+        Where-Object { ($_.Extension -in '.java', '.aidl', '.xml', '.ps1') -and ($_.FullName -notin $generatedXml) })
+    $files += Get-Item app/build.gradle, shower-server/build.gradle, build.gradle, settings.gradle, AGENTS.md, README.md, THIRD_PARTY_NOTICES.md
+    foreach ($file in $files) {
+        $text = [IO.File]::ReadAllText($file.FullName, [Text.Encoding]::UTF8)
+        if ($text -match "`t|(?m)[ ]+`r?$" -or -not $text.EndsWith("`n")) {
+            throw "Style check failed: $($file.FullName)"
+        }
+    }
+    Write-Output "PASS: assistant/Widget registration, retired references and style ($($files.Count) files)"
+    if ($StaticOnly) { return }
+}
 if (-not $env:JAVA_HOME) { throw 'JAVA_HOME must point to JDK 21' }
 $releaseFile = Join-Path $env:JAVA_HOME 'release'
 $javaVersion = if (Test-Path $releaseFile) {
@@ -19,39 +78,26 @@ New-Item -ItemType Directory -Force $classes | Out-Null
 & "$env:JAVA_HOME\bin\javac.exe" '-J-Duser.language=en' -encoding UTF-8 -cp $androidJar -d $classes `
     app/src/main/java/com/example/launcherprobe/ChatAttachment.java `
     app/src/main/java/com/example/launcherprobe/AgentLoop.java `
-    app/src/main/java/com/example/launcherprobe/ActionFence.java `
-    app/src/main/java/com/example/launcherprobe/AccessibilityServices.java `
     app/src/main/java/com/example/launcherprobe/AgentHistory.java `
     app/src/main/java/com/example/launcherprobe/ConversationTree.java `
-    app/src/main/java/com/example/launcherprobe/AttemptAll.java `
     app/src/main/java/com/example/launcherprobe/AppSearch.java `
     app/src/main/java/com/example/launcherprobe/ExactText.java `
-    app/src/main/java/com/example/launcherprobe/FluidGestureGeometry.java `
-    app/src/main/java/com/example/launcherprobe/ObservationRegistry.java `
     app/src/main/java/com/example/launcherprobe/ProviderConfig.java `
     app/src/main/java/com/example/launcherprobe/ReasoningEffort.java `
     app/src/main/java/com/example/launcherprobe/RunEpoch.java `
-    app/src/main/java/com/example/launcherprobe/SwipeDetector.java `
-    app/src/main/java/com/example/launcherprobe/PagerState.java `
-    app/src/main/java/com/example/launcherprobe/NavigationSession.java `
     app/src/main/java/com/example/launcherprobe/SearchConfig.java `
     app/src/main/java/com/example/launcherprobe/SearchParser.java `
-    app/src/main/java/com/example/launcherprobe/ScreenNodePolicy.java `
     app/src/main/java/com/example/launcherprobe/WebAddressPolicy.java `
     tests/com/example/launcherprobe/AgentChecks.java `
-    tests/com/example/launcherprobe/ConversationTreeChecks.java `
-    tests/com/example/launcherprobe/GestureChecks.java `
-    tests/com/example/launcherprobe/ShizukuRepairChecks.java
-if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-& "$env:JAVA_HOME\bin\java.exe" -ea -cp $classes com.example.launcherprobe.GestureChecks
-if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-& "$env:JAVA_HOME\bin\java.exe" -ea -cp $classes com.example.launcherprobe.ShizukuRepairChecks
+    tests/com/example/launcherprobe/ConversationTreeChecks.java
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 & "$env:JAVA_HOME\bin\java.exe" -ea -cp $classes com.example.launcherprobe.AgentChecks
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 & "$env:JAVA_HOME\bin\java.exe" -ea -cp $classes com.example.launcherprobe.ConversationTreeChecks
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+if ($JavaOnly) { Write-Output "PASS: AgentChecks and ConversationTreeChecks"; return }
 
 & $gradle --no-daemon --console=plain :app:testDebugUnitTest :app:assembleDebug :app:lintDebug :shower-server:lintDebug
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -83,25 +129,4 @@ foreach ($className in 'Main', 'IShowerService', 'IShowerClient', 'ShowerBinderC
         throw "Generated Operit Shower server asset is missing $className"
     }
 }
-$legacyFiles = @(Get-ChildItem app/src/main/java, app/src/main/aidl, pi-runtime, scripts -Recurse -File |
-    Where-Object { $_.FullName -notmatch '[\\/]node_modules[\\/]' -and $_.FullName -ne $PSCommandPath })
-$legacyFiles += Get-Item app/build.gradle, pi-runtime/package.json
-$legacyReferences = @($legacyFiles |
-    Select-String -Pattern 'Lamda|lamda|bundledAndroidMcp|android-mcp|127[.]0[.]0[.]1:65000')
-if ($legacyReferences.Count -ne 0) { throw "Legacy Lamda integration references remain: $legacyReferences" }
-
-# Existing style: spaces (not tabs), no trailing whitespace, final newline.
-$generatedXml = @(
-    (Join-Path (Get-Location) 'app/src/main/res/xml/config.xml'),
-    (Join-Path (Get-Location) 'capacitor-cordova-android-plugins/src/main/AndroidManifest.xml')
-)
-$files = @(Get-ChildItem app/src, shower-server/src, tests, scripts -Recurse -File |
-    Where-Object { ($_.Extension -in '.java', '.aidl', '.xml', '.ps1') -and ($_.FullName -notin $generatedXml) })
-$files += Get-Item app/build.gradle, shower-server/build.gradle, build.gradle, settings.gradle, README.md, THIRD_PARTY_NOTICES.md
-foreach ($file in $files) {
-    $text = [IO.File]::ReadAllText($file.FullName, [Text.Encoding]::UTF8)
-    if ($text -match "`t|(?m)[ ]+`r?$" -or -not $text.EndsWith("`n")) {
-        throw "Style check failed: $($file.FullName)"
-    }
-}
-Write-Output "PASS: style/legacy checks ($($files.Count) files); Java checks, Pi runtime assets, Shower asset, assembleDebug and lintDebug"
+Write-Output "PASS: assistant/Widget/style checks; Java checks, Pi runtime assets, Shower asset, assembleDebug and lintDebug"

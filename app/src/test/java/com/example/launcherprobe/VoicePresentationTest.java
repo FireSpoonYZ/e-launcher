@@ -17,8 +17,6 @@ import org.robolectric.annotation.GraphicsMode;
 import org.robolectric.shadows.ShadowMediaPlayer;
 import org.robolectric.shadows.ShadowSpeechRecognizer;
 
-import java.io.FileOutputStream;
-
 import static org.junit.Assert.*;
 
 @RunWith(RobolectricTestRunner.class)
@@ -120,10 +118,6 @@ public class VoicePresentationTest {
         assertEquals("fallback must not keep pink/purple overlays", 0, pink);
         assertTrue(blue > 20);
         assertTrue(bright > 5);
-        try (FileOutputStream out = new FileOutputStream(
-                "D:/tmp/codex-voice-research-20260919/voice-e-fallback-preview.png")) {
-            bitmap.compress(Bitmap.CompressFormat.PNG, 100, out);
-        }
     }
 
     @Test public void eSitsInLowerPartWithoutClippingOnShortScreens() {

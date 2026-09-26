@@ -95,7 +95,7 @@ export interface SettingsPlugin {
   latestRelease(): Promise<{release: Record<string, unknown>|null}>;
 }
 
-export type DeviceState = { launchRoute: string; language: 'system'|'zh'|'en'; theme: 'system'|'light'|'dark'; background: 'circles'|'solid'|'image'; backgroundMask: number; backgroundPath?: string; homeRole: boolean; gestureStatus: string; canWriteSecureSettings: boolean; accessibilityConnected: boolean };
+export type DeviceState = { launchRoute: string; language: 'system'|'zh'|'en'; theme: 'system'|'light'|'dark'; background: 'circles'|'solid'|'image'; backgroundMask: number; backgroundPath?: string; canWriteSecureSettings: boolean; legacyNavigationPending: boolean; legacyNavigationStatus: string; shizukuStatus: string };
 export type VoiceEngine = 'system'|'remote';
 export type VoiceRemote = { baseUrl: string; model: string; voice: string; configured: boolean };
 export type VoiceState = { sttEngine: VoiceEngine; ttsEngine: VoiceEngine; speakMode: 'off'|'afterVoice'|'always'; language: string; speechRate: number; stt: VoiceRemote; tts: VoiceRemote; wakeEnabled: boolean; wakeWords: string; wakeWordsDetail: string; wakeSensitivity: 'low'|'medium'|'high'; wakeStatus: string; wakeListening: boolean; assistantDefault: boolean; microphoneGranted: boolean };
@@ -126,11 +126,8 @@ export interface DevicePlugin {
   chooseBackground(): Promise<void>;
   clearBackground(): Promise<void>;
   setAppearance(options: Partial<Pick<DeviceState, 'language'|'theme'|'background'|'backgroundMask'>>): Promise<DeviceState>;
-  openSystemSettings(options: {target: 'app'|'home'|'accessibility'|'settings'|'tts'|'assistant'}): Promise<void>;
+  openSystemSettings(options: {target: 'app'|'settings'|'tts'|'assistant'}): Promise<void>;
   repairPermissions(): Promise<void>;
-  requestHome(): Promise<DeviceState|void>;
-  enableGestures(): Promise<DeviceState>;
-  disableGestures(): Promise<DeviceState>;
   share(options: {text: string; title?: string}): Promise<void>;
   openUrl(options: {url: string}): Promise<void>;
   hideKeyboard(): Promise<void>;

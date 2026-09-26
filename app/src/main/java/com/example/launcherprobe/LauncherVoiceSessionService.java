@@ -13,7 +13,7 @@ import android.widget.FrameLayout;
 public final class LauncherVoiceSessionService extends VoiceInteractionSessionService {
     @Override public VoiceInteractionSession onNewSession(Bundle args) { return new Session(this); }
 
-    /** Shows the listening panel over the current app and sends the request to the active conversation. */
+    /** Shows voice mode over the current app; a fresh topic is created only after recognition. */
     static final class Session extends VoiceInteractionSession implements VoiceSession.Host {
         private FrameLayout root;
         private VoiceManager.Presented presented;

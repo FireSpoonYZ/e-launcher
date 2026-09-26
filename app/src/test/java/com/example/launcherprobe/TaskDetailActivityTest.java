@@ -72,6 +72,68 @@ public class TaskDetailActivityTest {
         }
     }
 
+    @Test public void persistedDetailDoesNotStartEngineAndReturnsToOrdinaryAssistant() {
+        ChatStore store = ChatCoordinator.get(application).store();
+        store.save(java.util.List.of(new AgentLoop.Message("user", "Saved task"),
+                new AgentLoop.Message("assistant", "Saved answer")));
+        String id = store.activeId();
+        ReflectionHelpers.setStaticField(PiAgentBridge.class, "instance", null);
+        ReflectionHelpers.setStaticField(PiAgentBridge.class, "attempted", false);
+        try (var controller = Robolectric.buildActivity(TaskDetailActivity.class,
+                new Intent(application, TaskDetailActivity.class).putExtra(TaskDetailActivity.EXTRA_CONVERSATION_ID, id)).setup()) {
+            assertFalse((boolean) ReflectionHelpers.getStaticField(PiAgentBridge.class, "attempted"));
+            assertEquals("Saved answer", ((org.json.JSONObject) ReflectionHelpers.getField(controller.get(), "currentCard")).optString("result"));
+            View root = controller.get().getWindow().getDecorView();
+            firstExact(root, "返回助手").performClick();
+            Intent intent = Shadows.shadowOf(controller.get()).getNextStartedActivity();
+            assertEquals(MainActivity.class.getName(), intent.getComponent().getClassName());
+            assertFalse(intent.hasCategory(Intent.CATEGORY_HOME));
+            assertNull(intent.getAction());
+            assertEquals(id, store.activeId());
+        }
+    }
+
+    @Test public void archivedAndMissingTargetsNeverFallBackToActiveChat() {
+        ChatCoordinator coordinator = ChatCoordinator.get(application);
+        coordinator.store().save(Collections.singletonList(new AgentLoop.Message("user", "Archived")));
+        String archived = coordinator.store().activeId();
+        coordinator.archiveConversation(archived);
+        coordinator.store().save(Collections.singletonList(new AgentLoop.Message("user", "Current")));
+        String current = coordinator.store().activeId();
+        for (String target : java.util.List.of(archived, "missing")) {
+            try (var controller = Robolectric.buildActivity(TaskDetailActivity.class,
+                    new Intent(application, TaskDetailActivity.class).putExtra(TaskDetailActivity.EXTRA_CONVERSATION_ID, target)).setup()) {
+                assertTrue(controller.get().isFinishing());
+                assertNull(Shadows.shadowOf(controller.get()).getNextStartedActivity());
+                assertEquals(current, coordinator.store().activeId());
+            }
+        }
+    }
+
+    @Test public void questionnaireIsVisibleWithoutAVirtualScreenAndRestoresAfterRecreation() throws Exception {
+        ChatCoordinator coordinator = ChatCoordinator.get(application);
+        coordinator.store().save(Collections.singletonList(new AgentLoop.Message("user", "Question task")));
+        String id = coordinator.store().activeId();
+        ChatCoordinator.SessionRun run = coordinator.registerRun(id, null);
+        run.extensionUi = new org.json.JSONObject().put("askUser", HomeQuestionnaireTest.card().getJSONObject("askUser"));
+        try (var controller = Robolectric.buildActivity(TaskDetailActivity.class,
+                new Intent(application, TaskDetailActivity.class).putExtra(TaskDetailActivity.EXTRA_CONVERSATION_ID, id)).setup()) {
+            TaskDetailActivity activity = controller.get();
+            View pane = ReflectionHelpers.getField(activity, "taskPane");
+            assertEquals(View.VISIBLE, pane.getVisibility());
+            View root = activity.getWindow().getDecorView();
+            assertNotNull(root.findViewWithTag("home-questionnaire"));
+            root.findViewWithTag("option:Compact").performClick();
+            controller.recreate();
+            root = controller.get().getWindow().getDecorView();
+            assertTrue(root.findViewWithTag("option:Compact").createAccessibilityNodeInfo().isChecked());
+            coordinator.finish(run, "completed", "");
+            Shadows.shadowOf(android.os.Looper.getMainLooper()).idle();
+            assertNull(root.findViewWithTag("home-questionnaire"));
+            assertEquals(View.GONE, ((View) ReflectionHelpers.getField(controller.get(), "taskPane")).getVisibility());
+        }
+    }
+
     @Test public void runningDetailKeepsStopAndStillOffersArchive() {
         ChatCoordinator coordinator = ChatCoordinator.get(application);
         ChatStore store = coordinator.store();

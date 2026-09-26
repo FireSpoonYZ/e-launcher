@@ -71,6 +71,50 @@ public class ChatTaskDataTest {
         assertFalse(home.equals(store.activeId()));
     }
 
+    @Test public void assistantNewChatConsumesLegacyDraftOnceAndKeepsBothChatsAttachments() throws Exception {
+        ChatStore store = new ChatStore(application);
+        store.save(Collections.singletonList(message("existing", "user", "Existing chat")));
+        String existing = store.activeId();
+        store.saveDraft("active draft");
+        java.io.File file = new java.io.File(application.getFilesDir(), "unsent.txt");
+        java.nio.file.Files.write(file.toPath(), "keep attachment".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        ChatAttachment attachment = ChatAttachment.fromJson(new JSONObject().put("id", "unsent")
+                .put("name", "unsent.txt").put("mimeType", "text/plain")
+                .put("path", file.getAbsolutePath()).put("size", file.length()));
+        store.saveDraftAttachments(Collections.singletonList(attachment));
+        String legacy = store.prepareHomeDraft();
+        store.saveDraftAttachments(legacy, Collections.singletonList(attachment));
+
+        store.newAssistantConversation();
+        assertEquals("attachment-only legacy drafts are content too", legacy, store.activeId());
+        assertNull(store.homeDraftId());
+        assertEquals("active draft", store.draft(existing));
+        assertEquals(attachment.id, store.draftAttachments().get(0).id);
+        assertEquals(attachment.id, store.draftAttachments(existing).get(0).id);
+        assertTrue(file.exists());
+        store.saveDraft("recovered draft");
+        store.newAssistantConversation();
+        assertNotEquals(legacy, store.activeId());
+        assertEquals("", store.draft());
+        assertEquals("recovered draft", new ChatStore(application).draft(legacy));
+        assertTrue(file.exists());
+    }
+
+    @Test public void emptyLegacyDraftDoesNotReplaceNewChatAndVoiceDoesNotConsumeIt() {
+        ChatStore store = new ChatStore(application);
+        String legacy = store.prepareHomeDraft();
+        store.newAssistantConversation();
+        assertNotEquals(legacy, store.activeId());
+        store.saveDraft(legacy, "unsent desktop text");
+        ChatCoordinator.get(application).startVoiceConversation();
+        assertNotEquals(legacy, store.activeId());
+        assertEquals(legacy, store.homeDraftId());
+        assertEquals("unsent desktop text", store.draft(legacy));
+        store.newAssistantConversation();
+        assertEquals(legacy, store.activeId());
+        assertEquals("unsent desktop text", store.draft());
+    }
+
     @Test public void conversationSearchCoversTitlesAndEveryBranchWithoutChangingSelectionOrDraft() throws Exception {
         ChatStore store = new ChatStore(application);
         AgentLoop.Message root = message("root", "user", "Root question");
@@ -195,7 +239,7 @@ public class ChatTaskDataTest {
         assertTrue(coordinator.taskCard(id).isNull("askUser"));
     }
 
-    @Test public void taskCardsLimitToFiveRecentHistoriesAndExcludeUnsentDrafts() throws Exception {
+    @Test public void taskCardsIncludeEveryRecentHistoryAndExcludeUnsentDrafts() throws Exception {
         ChatCoordinator coordinator = ChatCoordinator.get(application);
         ChatStore store = coordinator.store();
         List<String> histories = new ArrayList<>();
@@ -214,9 +258,8 @@ public class ChatTaskDataTest {
 
         JSONArray cards = coordinator.taskCards();
         assertEquals(Arrays.asList(
-                histories.get(5), histories.get(4), histories.get(3), histories.get(2), histories.get(1)),
+                histories.get(5), histories.get(4), histories.get(3), histories.get(2), histories.get(1), histories.get(0)),
                 ids(cards));
-        assertFalse(ids(cards).contains(histories.get(0)));
         assertFalse(ids(cards).contains(draftId));
         assertTrue(store.conversations().stream().anyMatch(item -> draftId.equals(item.id)));
     }

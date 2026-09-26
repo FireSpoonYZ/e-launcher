@@ -88,7 +88,9 @@ public final class WakeWordService extends Service {
             status = "";
         } catch (RuntimeException notAllowed) {
             Log.w(TAG, "Microphone foreground service refused", notAllowed);
-            status = UiText.get(this, "系统拒绝在后台开启麦克风，请回到桌面后重试");
+            status = UiText.isEnglish(this)
+                    ? "Microphone access was refused in the background. Open the assistant and retry."
+                    : "系统拒绝在后台开启麦克风，请打开助手后重试";
             stopSelf();
             return START_NOT_STICKY;
         }

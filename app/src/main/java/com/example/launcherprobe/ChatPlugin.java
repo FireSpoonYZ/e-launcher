@@ -45,11 +45,7 @@ public final class ChatPlugin extends Plugin {
 
     @PluginMethod public void newConversation(PluginCall call) {
         try {
-            ChatStore store = coordinator.store();
-            store.newConversation();
-            store.saveDraft("");
-            store.saveDraftAttachments(java.util.Collections.emptyList());
-            store.cleanupAttachments();
+            coordinator.store().newAssistantConversation();
             resolve(call, coordinator.snapshot());
         } catch (Exception exception) { reject(call, exception); }
     }

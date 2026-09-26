@@ -153,40 +153,59 @@ public class TaskNotificationsTest {
         }
     }
 
-    public static class FocusedMainActivity extends MainActivity {
-        boolean focused = true;
-        @Override public boolean hasWindowFocus() { return focused; }
+    public static class VisibleMainActivity extends MainActivity {
+        boolean visible;
+        String conversationId;
+        @Override public boolean isTaskConversationVisible(String id) {
+            return visible && id.equals(conversationId);
+        }
     }
 
-    @Test public void retainedWebViewOnHomeCannotReadUntilTargetChatIsVisible() {
-        ChatCoordinator.SessionRun run = start("Read target");
-        coordinator.finish(run, "completed", "");
-        FocusedMainActivity activity = org.robolectric.Robolectric.buildActivity(FocusedMainActivity.class).get();
-        android.webkit.WebView web = new android.webkit.WebView(context);
-        web.loadUrl("https://localhost/#/chat/" + run.conversationId);
-        PagerRoot pager = new PagerRoot(context, web, PagerState.Page.HOME, ignored -> {});
-        ReflectionHelpers.setField(activity, "chatStore", store);
-        ReflectionHelpers.setField(activity, "chatWebView", web);
-        ReflectionHelpers.setField(activity, "pager", pager);
-        ReflectionHelpers.setField(activity, "trustedWebContent", true);
-        assertFalse(activity.isTaskConversationVisible(run.conversationId));
-        assertTrue(store.taskResultUnread(run.conversationId));
-        pager.show(PagerState.Page.CHAT, false);
-        assertTrue(activity.isTaskConversationVisible(run.conversationId));
-        assertFalse(activity.isTaskConversationVisible("other"));
-        activity.focused = false;
-        assertFalse(activity.isTaskConversationVisible(run.conversationId));
-        activity.focused = true;
-        web.loadUrl("https://localhost/#/settings");
-        assertFalse(activity.isTaskConversationVisible(run.conversationId));
-        web.loadUrl("https://localhost/#/chat/" + run.conversationId);
-        if (activity.isTaskConversationVisible(run.conversationId)) coordinator.markTaskRead(run.conversationId);
-        assertFalse(store.taskResultUnread(run.conversationId));
-        assertNull(notification(run.conversationId));
-        web.destroy();
+    @org.robolectric.annotation.Implements(value = com.getcapacitor.Plugin.class, isInAndroidSdk = false)
+    public static class PluginShadow {
+        static VisibleMainActivity activity;
+        @org.robolectric.annotation.Implementation protected androidx.appcompat.app.AppCompatActivity getActivity() {
+            return activity;
+        }
     }
 
-    @Test public void disabledNotificationsStillFinishAndAttentionSurvivesFiveCardLimit() throws Exception {
+    private static class ReadCall extends com.getcapacitor.PluginCall {
+        boolean resolved;
+        ReadCall(String id) {
+            super(null, "Chat", "read", "markTaskRead", new com.getcapacitor.JSObject().put("conversationId", id));
+        }
+        @Override public void resolve() { resolved = true; }
+        @Override public void reject(String message, Exception exception) { throw new AssertionError(message, exception); }
+    }
+
+    @Test
+    @Config(instrumentedPackages = "com.getcapacitor", shadows = {HostAtomicFile.class, PluginShadow.class})
+    public void pluginReadsOnlyWhenTheShellConfirmsTheExactConversationIsVisible() {
+        ChatCoordinator.SessionRun first = start("Read target");
+        coordinator.finish(first, "completed", "");
+        ChatCoordinator.SessionRun second = start("Other result");
+        coordinator.finish(second, "completed", "");
+        VisibleMainActivity activity = org.robolectric.Robolectric.buildActivity(VisibleMainActivity.class).get();
+        PluginShadow.activity = activity;
+        activity.conversationId = first.conversationId;
+        ChatPlugin plugin = new ChatPlugin();
+        ReflectionHelpers.setField(plugin, "coordinator", coordinator);
+        ReadCall hidden = new ReadCall(first.conversationId);
+        plugin.markTaskRead(hidden);
+        Shadows.shadowOf(android.os.Looper.getMainLooper()).idle();
+        assertTrue(hidden.resolved);
+        assertTrue(store.taskResultUnread(first.conversationId));
+        activity.visible = true;
+        plugin.markTaskRead(new ReadCall(second.conversationId));
+        plugin.markTaskRead(new ReadCall(first.conversationId));
+        Shadows.shadowOf(android.os.Looper.getMainLooper()).idle();
+        assertFalse(store.taskResultUnread(first.conversationId));
+        assertNull(notification(first.conversationId));
+        assertTrue(store.taskResultUnread(second.conversationId));
+        assertNotNull(notification(second.conversationId));
+    }
+
+    @Test public void disabledNotificationsStillFinishAndAttentionPrecedesAllHistory() throws Exception {
         Shadows.shadowOf(notifications).setNotificationsEnabled(false);
         ChatCoordinator.SessionRun unread = start("Unread");
         coordinator.finish(unread, "completed", "");
@@ -200,7 +219,7 @@ public class TaskNotificationsTest {
             coordinator.finish(read, "completed", "");
             coordinator.markTaskRead(read.conversationId);
         }
-        assertEquals(5, coordinator.taskCards().length());
+        assertEquals(8, coordinator.taskCards().length());
         assertEquals(pending.conversationId, coordinator.taskCards().optJSONObject(0).optString("conversationId"));
         assertEquals(unread.conversationId, coordinator.taskCards().optJSONObject(1).optString("conversationId"));
         assertTrue(coordinator.taskCards().optJSONObject(1).optBoolean("unreadResult"));

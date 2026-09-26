@@ -123,7 +123,7 @@ public class ShowerPreviewTest {
 
     @Test public void viewportFitsInTheSameLayoutPassWhenFullscreenChanges() {
         android.content.Context context = RuntimeEnvironment.getApplication();
-        ShowerDesktopView view = new ShowerDesktopView(context, AppAppearance.readDesktop(context),
+        ShowerDesktopView view = new ShowerDesktopView(context, AppAppearance.readWorkbench(context),
                 () -> null, (available, live, manual, status) -> {});
         ReflectionHelpers.setField(view, "displayWidth", 1440);
         ReflectionHelpers.setField(view, "displayHeight", 3200);

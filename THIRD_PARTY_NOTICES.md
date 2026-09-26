@@ -1,21 +1,17 @@
 # Third-party source notices
 
-Launcher Probe incorporates modified source from **Ogesture**, by the Ogesture contributors / team Olauncher:
+## Historical Ogesture derivation
+
+Earlier Launcher Probe versions incorporated modified source from **Ogesture**, by the Ogesture contributors / team Olauncher:
 
 - Repository: https://github.com/tanujnotes/Ogesture
 - Exact revision: `404fb0a27a5e3122b153a4a97a150f31c3c04804`
 - License: GNU Affero General Public License version 3, copied verbatim from upstream into [`LICENSE`](LICENSE).
-- Modification date: 2026-09-09. This modified application is distributed under AGPL-3.0; it is not an official Ogesture release.
+- Original modification date: 2026-09-09. This application remains distributed under AGPL-3.0; it is not an official Ogesture release.
 
-## Source mapping and modifications
+The standalone-assistant migration removes the derived `SwipeDetector.java` and `GestureService.java`, including the fixed navigation zones, accessibility overlays and touch replay. The former mappings were `gesture/SwipeDetector.kt` / `data/Models.kt` to `SwipeDetector.java`, and `service/EdgeOverlayService.kt` / `service/EdgeGestureAccessibilityService.kt` to `GestureService.java`. These are historical attributions, not a statement that the current APK includes that gesture implementation.
 
-| Upstream path (under `app/src/main/java/com/ogesture/`) | Local derived file (under `app/src/main/java/com/example/launcherprobe/`) | Changes |
-| --- | --- | --- |
-| `gesture/SwipeDetector.kt`, `data/Models.kt` | `SwipeDetector.java` | Java translation of fixed zones, direction/distance gates, side timeout, short/long exclusion, sample collection and cancellation. Scheduling is supplied by the service's Handler so the same logic runs in host tests. Bottom gestures return HOME on release within 200 ms of DOWN with at least 10 dp upward travel; holding longer opens the app switcher regardless of distance or continued movement. Optional visual feedback is supplied by the service. |
-| `service/EdgeOverlayService.kt` | `GestureService.java` | Port of three-zone geometry (80% lengths, 24dp sides / 12dp bottom; sides widened from upstream's 16dp), navigation insets, display updates, held-stream interactivity, touch-path replay and 65ms settling grace. Uses physical LEFT/RIGHT rather than locale-relative START/END; API29 reads real display dimensions. Updates existing windows on geometry changes and cancels old detector callbacks. No indicators, haptics, configuration/exclusions, foreground service or watchdog. |
-| `service/EdgeGestureAccessibilityService.kt` | `GestureService.java` | Global Back/Home/Recents and `dispatchGesture` callbacks. Checks failures and reports them. A single connected AccessibilityService owns trusted `TYPE_ACCESSIBILITY_OVERLAY` windows rather than a separate `TYPE_APPLICATION_OVERLAY` service. The original gesture path does not use window content; this application now separately exposes bounded accessibility-node observation/actions to its assistant. |
-
-`NavigationSession.java` and the HyperOS `force_fsg_nav_bar` write/readback, recovery marker, App controls, host checks and verification script are additions for this project, not features supplied by upstream Ogesture. The accessibility XML uses the corresponding platform capabilities; no upstream UI/resources or Kotlin build stack were copied.
+The project-added `NavigationSession.java` and accessibility configuration are also removed. `LegacyNavigationRecovery` is project migration code: only a retained pending-restore marker permits writing and verifying the old stop value (`force_fsg_nav_bar=0`). It neither recreates navigation gestures nor enables accessibility services. The project license and historical attribution are retained; no license file is deleted by this migration.
 
 ## Operit Shower
 
@@ -42,7 +38,7 @@ Network requests use [OkHttp 3.14.9](https://github.com/square/okhttp/tree/paren
 
 The pi.dev package catalog is parsed with [jsoup 1.21.2](https://jsoup.org/), Copyright Jonathan Hedley, under the [MIT License](https://jsoup.org/license).
 
-The selected upstream source files contain no individual copyright headers. Their attribution is retained here and at the heads of the derived Java files; the Free Software Foundation copyright in the license text refers to that document, not authorship of Ogesture's code. No upstream license notice has been removed.
+The selected upstream source files contain no individual copyright headers. Attribution for retained derived sources is kept here and at their Java file headers; historical removed-source mappings are documented above; the Free Software Foundation copyright in the license text refers to that document, not authorship of Ogesture's code. No upstream license notice has been removed.
 
 ## Pi runtime
 

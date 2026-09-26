@@ -8,25 +8,28 @@ import android.view.View;
 /** Android appearance preferences, separate from Pi's terminal theme. */
 final class AppAppearance {
     final boolean dark;
-    private final boolean desktop;
     final int background, surface, ink, muted, accent, panel, border, error;
 
-    private AppAppearance(boolean dark, boolean desktop) {
+    private AppAppearance(boolean dark) { this(dark, false); }
+
+    /** The task widget retains the original task card palette, not the workbench palette. */
+    private AppAppearance(boolean dark, boolean taskWidget) {
         this.dark = dark;
-        this.desktop = desktop;
-        background = desktop ? (dark ? 0xff10272f : 0xffeffbfc) : (dark ? 0xff121614 : 0xfff6f5f0);
-        surface = desktop ? (dark ? 0xff193640 : 0xfff8fdff) : (dark ? 0xff191e1b : 0xffffffff);
-        ink = desktop ? (dark ? 0xffe5f5f8 : 0xff092e40) : (dark ? 0xffe5eee9 : 0xff202521);
-        muted = desktop ? (dark ? 0xff9dbac5 : 0xff547589) : (dark ? 0xffa5b1aa : 0xff656d69);
-        accent = desktop ? (dark ? 0xff70d4df : 0xff0098ad) : (dark ? 0xff75c3af : 0xff267a69);
-        panel = desktop ? (dark ? 0xff254651 : 0xffdef3f6) : (dark ? 0xff242b27 : 0xfff1f1f2);
-        border = desktop ? (dark ? 0xff365763 : 0xffdceef2) : (dark ? 0xff39423c : 0xffe8e8ea);
-        error = dark ? 0xffffb4ab : desktop ? 0xffec4350 : 0xffb3261e;
+        background = taskWidget ? (dark ? 0xff10272f : 0xffeffbfc) : (dark ? 0xff121614 : 0xfff6f5f0);
+        surface = taskWidget ? (dark ? 0xff193640 : 0xfff8fdff) : (dark ? 0xff191e1b : 0xffffffff);
+        ink = taskWidget ? (dark ? 0xffe5f5f8 : 0xff092e40) : (dark ? 0xffe5eee9 : 0xff202521);
+        muted = taskWidget ? (dark ? 0xff9dbac5 : 0xff547589) : (dark ? 0xffa5b1aa : 0xff656d69);
+        accent = taskWidget ? (dark ? 0xff70d4df : 0xff0098ad) : (dark ? 0xff75c3af : 0xff267a69);
+        panel = taskWidget ? (dark ? 0xff254651 : 0xffdef3f6) : (dark ? 0xff242b27 : 0xfff1f1f2);
+        border = taskWidget ? (dark ? 0xff365763 : 0xffdceef2) : (dark ? 0xff39423c : 0xffe8e8ea);
+        error = dark ? 0xffffb4ab : taskWidget ? 0xffec4350 : 0xffb3261e;
     }
 
-    /** Neutral surfaces for the task workbench; follows the desktop's light/dark preference. */
-    private AppAppearance(AppAppearance desktopColors) {
-        dark = desktopColors.dark; desktop = false;
+    static AppAppearance readTaskWidget(Context context) { return new AppAppearance(read(context).dark, true); }
+
+    /** Neutral task surfaces follow the assistant's light/dark preference. */
+    private AppAppearance(AppAppearance colors) {
+        dark = colors.dark;
         background = dark ? 0xff142126 : 0xfff4f7f8;
         surface = dark ? 0xff1d2d33 : 0xffffffff;
         ink = dark ? 0xffe4eef1 : 0xff183039;
@@ -34,57 +37,16 @@ final class AppAppearance {
         accent = dark ? 0xff70d4df : 0xff087f8c;
         panel = dark ? 0xff273c44 : 0xffe8eff1;
         border = dark ? 0xff385059 : 0xffdce5e9;
-        error = desktopColors.error;
+        error = colors.error;
     }
 
-    static AppAppearance readWorkbench(Context context) { return new AppAppearance(readDesktop(context)); }
+    static AppAppearance readWorkbench(Context context) { return new AppAppearance(read(context)); }
 
     static AppAppearance read(Context context) {
         String value = context.getSharedPreferences("ui", Context.MODE_PRIVATE).getString("theme", "system");
         boolean systemDark = (context.getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK)
                 == Configuration.UI_MODE_NIGHT_YES;
-        return new AppAppearance(value.equals("dark") || (value.equals("system") && systemDark), false);
-    }
-
-    static AppAppearance readDesktop(Context context) {
-        String theme = new DesktopPreferences(context).theme();
-        boolean systemDark = (context.getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK)
-                == Configuration.UI_MODE_NIGHT_YES;
-        return new AppAppearance(theme.equals("dark") || (theme.equals("system") && systemDark), true);
-    }
-
-    View desktopWallpaper(Context context) {
-        boolean system = new DesktopPreferences(context).wallpaper().equals("system");
-        View view = new View(context) {
-            private final android.graphics.Paint paint = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
-            private final android.graphics.Path fold = new android.graphics.Path();
-            private final android.graphics.Path light = new android.graphics.Path();
-            private final android.graphics.Shader base = new android.graphics.LinearGradient(0, 0, 800, 2000,
-                    dark ? new int[]{0xff183e4e, 0xff164a55, 0xff102c39}
-                            : new int[]{0xffdef6fa, 0xff9cdae2, 0xff65becb}, null, android.graphics.Shader.TileMode.CLAMP);
-            private final android.graphics.Shader glow = new android.graphics.RadialGradient(780, 290, 1050,
-                    dark ? 0x303f9eae : 0xaaffffff, 0x00ffffff, android.graphics.Shader.TileMode.CLAMP);
-            private final android.graphics.Shader foldLight = new android.graphics.LinearGradient(100, 0, 1100, 1400,
-                    new int[]{0x00ffffff, dark ? 0x104bb5c4 : 0x26ffffff, 0x00ffffff}, null, android.graphics.Shader.TileMode.CLAMP);
-            {
-                fold.moveTo(1070, -100); fold.cubicTo(620, 400, 1020, 650, 380, 1100);
-                fold.cubicTo(-170, 1480, 660, 1540, 1120, 2100); fold.lineTo(800, 2100);
-                fold.cubicTo(350, 1640, -350, 1460, 190, 1020); fold.cubicTo(740, 590, 520, 320, 840, -100); fold.close();
-                light.moveTo(-120, 500); light.cubicTo(480, 640, 190, 1010, 800, 1280);
-                light.cubicTo(1300, 1500, 630, 1650, 270, 2100); light.lineTo(170, 2100);
-                light.cubicTo(500, 1600, 1050, 1460, 710, 1320); light.cubicTo(90, 1060, 360, 790, -120, 680); light.close();
-            }
-            @Override protected void onDraw(android.graphics.Canvas canvas) {
-                if (system) return;
-                int save = canvas.save(); canvas.scale(getWidth() / 1000f, getHeight() / 2000f);
-                paint.setShader(base); canvas.drawRect(0, 0, 1000, 2000, paint);
-                paint.setShader(glow); canvas.drawRect(0, 0, 1000, 2000, paint);
-                paint.setShader(foldLight); canvas.drawPath(fold, paint); canvas.drawPath(light, paint);
-                paint.setShader(null); canvas.restoreToCount(save);
-            }
-        };
-        view.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
-        return view;
+        return new AppAppearance(value.equals("dark") || (value.equals("system") && systemDark));
     }
 
     void apply(Activity activity) {
@@ -166,20 +128,19 @@ final class AppAppearance {
             }
         };
         android.graphics.drawable.GradientDrawable outline = new android.graphics.drawable.GradientDrawable();
-        outline.setColor(desktop ? android.graphics.Color.TRANSPARENT : surface);
+        outline.setColor(surface);
         outline.setCornerRadius(radiusDp * density);
         frame.setBackground(outline);
         frame.setClipToOutline(true);
-        frame.setElevation((desktop ? 1 : 3) * density);
+        frame.setElevation(3 * density);
         frame.setOutlineAmbientShadowColor(dark ? 0xff000000 : 0xff365348);
         frame.setOutlineSpotShadowColor(dark ? 0xff000000 : 0xff365348);
         frame.addView(backdrop, new android.widget.FrameLayout.LayoutParams(-1, 0));
         View tint = new View(context);
         android.graphics.drawable.GradientDrawable finish = new android.graphics.drawable.GradientDrawable(
                 android.graphics.drawable.GradientDrawable.Orientation.TL_BR,
-                desktop ? (dark ? new int[]{0xeb1b3b47, 0xe6264652} : new int[]{0xf5fbfeff, 0xe3f2fcff})
-                        : (dark ? new int[]{0xc02a352e, 0xb01c2520, 0xc0242c26}
-                        : new int[]{0xa6ffffff, 0x85e7efe6, 0xb8fcfcf7}));
+                dark ? new int[]{0xc02a352e, 0xb01c2520, 0xc0242c26}
+                        : new int[]{0xa6ffffff, 0x85e7efe6, 0xb8fcfcf7});
         finish.setDither(true);
         finish.setCornerRadius(radiusDp * density);
         finish.setStroke(Math.max(1, Math.round(density * .5f)), dark ? 0x405f8b9b : 0xb3ffffff);

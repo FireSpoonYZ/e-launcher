@@ -162,15 +162,20 @@ public final class TaskDetailActivity extends ComponentActivity {
 
     private void refresh() {
         JSONObject card = id == null ? null : coordinator.taskCard(id);
-        if (card == null) { finish(); return; }
+        if (card == null) {
+            Toast.makeText(this, id != null && coordinator.store().isArchived(id)
+                    ? "此会话已归档，请先在助手中恢复" : "会话不存在", Toast.LENGTH_LONG).show();
+            finish(); return;
+        }
         if (readingTask && hasWindowFocus()) coordinator.markTaskRead(id);
         currentCard = card;
         if (latestReply != null && replyExpanded) latestReply.setText(card.optString("result"));
         renderTaskPane(card);
+        applyDesktopLayout();
         String model = card.optString("modelState");
         String next = String.join("|", card.optString("title"), model, card.optString("runStatus"),
                 String.valueOf(card.opt("todo")), card.optString("error"), String.valueOf(card.optString("result").isEmpty()),
-                String.valueOf(desktopAvailable), String.valueOf(desktopLive), String.valueOf(manualControl), HomeTaskCards.status(card));
+                String.valueOf(desktopAvailable), String.valueOf(desktopLive), String.valueOf(manualControl), TaskCardModel.status(card));
         if (next.equals(signature)) return;
         signature = next; content.removeAllViews(); footer.removeAllViews(); latestReply = null;
         LinearLayout overview = row(); overview.setPadding(0, 0, 0, dp(16));
@@ -180,11 +185,11 @@ public final class TaskDetailActivity extends ComponentActivity {
         LinearLayout titles = column(); titles.setPadding(dp(14), 0, 0, 0);
         TextView title = label(card.optString("title"), 18, colors.ink); title.setTypeface(null, Typeface.BOLD);
         title.setMaxLines(3); title.setEllipsize(android.text.TextUtils.TruncateAt.END); titles.addView(title);
-        TextView state = label(HomeTaskCards.status(card), 14, "error".equals(card.optString("runStatus")) ? colors.error : colors.accent);
+        TextView state = label(TaskCardModel.status(card), 14, "error".equals(card.optString("runStatus")) ? colors.error : colors.accent);
         state.setPadding(0, dp(6), 0, 0); titles.addView(state);
         overview.addView(titles, new LinearLayout.LayoutParams(0, -2, 1)); content.addView(overview);
 
-        List<JSONObject> tasks = HomeTaskCards.tasks(card);
+        List<JSONObject> tasks = TaskCardModel.tasks(card);
         if (!tasks.isEmpty()) {
             int completed = (int) tasks.stream().filter(t -> "completed".equals(t.optString("status"))).count();
             LinearLayout summary = row();
@@ -234,7 +239,7 @@ public final class TaskDetailActivity extends ComponentActivity {
         heading.setText(desktopAvailable ? card.optString("title") : "任务详情");
         long completedCount = tasks.stream().filter(t -> "completed".equals(t.optString("status"))).count();
         String currentStep = tasks.stream().filter(t -> "in_progress".equals(t.optString("status")))
-                .map(t -> t.optString("subject")).findFirst().orElse(HomeTaskCards.status(card));
+                .map(t -> t.optString("subject")).findFirst().orElse(TaskCardModel.status(card));
         String summaryTitle = HomeQuestionnaire.liveQuestion(card) != null ? "需要你回答" : currentStep;
         String summaryDetail = tasks.isEmpty() ? "查看任务动态" : "任务进度 " + completedCount + " / " + tasks.size();
         android.text.SpannableString summaryText = new android.text.SpannableString(summaryTitle + "\n" + summaryDetail);
@@ -290,13 +295,12 @@ public final class TaskDetailActivity extends ComponentActivity {
                 },
                 this::openChat));
         footer.addView(archived, new LinearLayout.LayoutParams(-1, dp(48)));
-        TextView home = button("回到桌面", colors.accent); home.setTextSize(14); home.setOnClickListener(v -> {
-            startActivity(new Intent(this, MainActivity.class).setAction(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME)
-                    .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP)); finish();
-        }); footer.addView(home, new LinearLayout.LayoutParams(-1, dp(48)));
+        TextView assistant = button("返回助手", colors.accent); assistant.setTextSize(14);
+        assistant.setOnClickListener(v -> openAssistant());
+        footer.addView(assistant, new LinearLayout.LayoutParams(-1, dp(48)));
     }
     private void renderTaskPane(JSONObject card) {
-        List<JSONObject> tasks = HomeTaskCards.tasks(card);
+        List<JSONObject> tasks = TaskCardModel.tasks(card);
         long completed = tasks.stream().filter(t -> "completed".equals(t.optString("status"))).count();
         String progressKey = String.valueOf(card.opt("todo")) + card.optString("modelState");
         if (!progressKey.equals(progressSignature)) {
@@ -332,7 +336,7 @@ public final class TaskDetailActivity extends ComponentActivity {
         }
         JSONObject question = HomeQuestionnaire.liveQuestion(card);
         if (questionDraft != null && !questionDraft.matches(card)) questionDraft = null;
-        String next = question == null ? "reply:" + card.optString("result") + HomeTaskCards.status(card)
+        String next = question == null ? "reply:" + card.optString("result") + TaskCardModel.status(card)
                 : card.optString("requestId") + question + card.optBoolean("questionnairePending") + card.optString("questionnaireError");
         if (next.equals(questionSignature)) return;
         questionSignature = next; questionHost.removeAllViews();
@@ -352,7 +356,7 @@ public final class TaskDetailActivity extends ComponentActivity {
         } else {
             ScrollView scroll = new ScrollView(this); scroll.setVerticalScrollBarEnabled(false);
             LinearLayout body = column();
-            TextView state = label(HomeTaskCards.status(card), 12, colors.accent); state.setPadding(0, 0, 0, dp(10)); body.addView(state);
+            TextView state = label(TaskCardModel.status(card), 12, colors.accent); state.setPadding(0, 0, 0, dp(10)); body.addView(state);
             TextView reply = label(card.optString("result").isEmpty() ? "任务动态会显示在这里；需要回答时可直接在下方回复。" : card.optString("result"), 14, colors.ink);
             reply.setTextIsSelectable(true); reply.setLineSpacing(dp(3), 1f); body.addView(reply);
             scroll.addView(body); questionHost.addView(scroll, new LinearLayout.LayoutParams(-1, -1));
@@ -387,7 +391,8 @@ public final class TaskDetailActivity extends ComponentActivity {
         desktopPanel.setVisibility(desktopAvailable ? View.VISIBLE : View.GONE);
         detailsScroll.setVisibility(desktopAvailable ? View.GONE : View.VISIBLE);
         header.setVisibility(expanded ? View.GONE : View.VISIBLE);
-        taskPane.setVisibility(desktopAvailable && !expanded ? View.VISIBLE : View.GONE);
+        taskPane.setVisibility(!expanded && (desktopAvailable || HomeQuestionnaire.liveQuestion(currentCard) != null)
+                ? View.VISIBLE : View.GONE);
         taskArea.setVisibility(taskPane.getVisibility());
         taskSummary.setVisibility(expanded ? View.VISIBLE : View.GONE);
         footer.setVisibility(View.VISIBLE);
@@ -474,7 +479,7 @@ public final class TaskDetailActivity extends ComponentActivity {
     private void showMore(View anchor) {
         android.widget.PopupMenu menu = new android.widget.PopupMenu(this, anchor);
         if (currentCard != null && !"idle".equals(currentCard.optString("modelState"))) menu.getMenu().add("停止任务");
-        for (String name : new String[]{"归档", "永久删除", "已归档对话", "回到桌面"}) menu.getMenu().add(name);
+        for (String name : new String[]{"归档", "永久删除", "已归档对话", "返回助手"}) menu.getMenu().add(name);
         menu.setOnMenuItemClickListener(item -> {
             switch (item.getTitle().toString()) {
                 case "停止任务" -> { coordinator.cancel(id); refresh(); }
@@ -483,10 +488,7 @@ public final class TaskDetailActivity extends ComponentActivity {
                 case "已归档对话" -> ConversationArchiveUi.showList(this, coordinator,
                         archivedId -> { try { coordinator.restoreConversation(archivedId); } catch (RuntimeException e) { ConversationArchiveUi.toast(this, e); } },
                         archivedId -> { try { coordinator.deleteConversation(archivedId); if (archivedId.equals(id)) finish(); } catch (RuntimeException e) { ConversationArchiveUi.toast(this, e); } }, this::openChat);
-                case "回到桌面" -> {
-                    startActivity(new Intent(this, MainActivity.class).setAction(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME)
-                            .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP)); finish();
-                }
+                case "返回助手" -> openAssistant();
                 default -> { return false; }
             }
             return true;
@@ -516,6 +518,11 @@ public final class TaskDetailActivity extends ComponentActivity {
                     try { coordinator.deleteConversation(id); finish(); }
                     catch (RuntimeException e) { Toast.makeText(this, e.getMessage(), Toast.LENGTH_LONG).show(); refresh(); }
                 }).show();
+    }
+    private void openAssistant() {
+        startActivity(new Intent(this, MainActivity.class)
+                .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP));
+        finish();
     }
     private void openChat(String conversationId) {
         startActivity(new Intent(this, MainActivity.class).putExtra(EXTRA_OPEN_CHAT, conversationId)

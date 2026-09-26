@@ -1,28 +1,35 @@
 package com.example.launcherprobe;
 
-import android.app.Activity;
 import android.app.Instrumentation;
+import android.content.Intent;
 import android.graphics.Bitmap;
 import android.graphics.Rect;
+import android.os.SystemClock;
 import android.view.View;
 import android.view.ViewGroup;
 
-import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.File;
 import java.io.FileOutputStream;
+import java.util.Collections;
+import java.util.UUID;
 import java.util.concurrent.atomic.AtomicInteger;
 
-/** Exercises the real desktop card without creating conversations or contacting a model. */
+/** Exercises the retained questionnaire in real task details, without a model request. */
 final class HomeQuestionnaireChecks {
-    static String run(Instrumentation test, Activity activity) throws Exception {
-        java.lang.reflect.Field field = MainActivity.class.getDeclaredField("homeTaskCards");
-        field.setAccessible(true);
-        HomeTaskCards host = (HomeTaskCards) field.get(activity);
-        ChatCoordinator coordinator = ChatCoordinator.get(activity);
-        JSONObject ask = new JSONObject("""
-                {"id":"visual-question","questions":[
+    static String run(Instrumentation test) throws Exception {
+        File screenshot = new File(ChatStoreChecks.artifacts(test), "questionnaire-detail.png");
+        ChatCoordinator coordinator = ChatCoordinator.get(test.getTargetContext());
+        ChatStore store = coordinator.store();
+        String previous = store.activeId(), id = UUID.randomUUID().toString();
+        AgentLoop.Message user = new AgentLoop.Message("user", "问答详情检查");
+        store.save(id, Collections.singletonList(user));
+        store.selectConversation(id);
+        TaskDetailActivity activity = (TaskDetailActivity) test.startActivitySync(new Intent(test.getTargetContext(), TaskDetailActivity.class)
+                .putExtra(TaskDetailActivity.EXTRA_CONVERSATION_ID, id).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+        JSONObject state = new JSONObject("""
+                {"askUser":{"id":"visual-question","questions":[
                   {"questionIndex":0,"question":"你希望使用哪种布局？","options":[
                     {"label":"紧凑布局","description":"信息集中，一屏看全"},
                     {"label":"宽松布局","description":"留白更多，阅读轻松"}]},
@@ -30,82 +37,91 @@ final class HomeQuestionnaireChecks {
                     {"label":"任务进度","description":"显示当前任务"},
                     {"label":"对话入口","description":"随时查看对话"},
                     {"label":"运行状态","description":"显示当前状态"},
-                    {"label":"归档入口","description":"查看历史记录"}]}]}
+                    {"label":"归档入口","description":"查看历史记录"}]}]}}
                 """);
-        JSONObject card = new JSONObject().put("conversationId", "visual-check").put("requestId", "visual-run")
-                .put("title", "问答卡片视觉检查").put("modelState", "working").put("askUser", ask);
-        JSONArray cards = new JSONArray().put(card)
-                .put(new JSONObject().put("conversationId", "visual-2").put("title", "第二个会话").put("modelState", "idle"))
-                .put(new JSONObject().put("conversationId", "visual-3").put("title", "第三个会话").put("modelState", "idle"));
         AtomicInteger replies = new AtomicInteger();
-        File screenshot = new File(activity.getExternalFilesDir(null), "questionnaire-card.png");
+        ChatCoordinator.SessionRun[] run = {null};
+        View[] host = {null};
         try {
             test.runOnMainSync(() -> {
-                host.setQuestionReply((c, r, q, answers, cancelled) -> {
-                    require(!cancelled && answers.length() == 2, "all answers submitted together");
-                    require("紧凑布局".equals(answers.getJSONObject(0).getString("answer")), "single choice retained");
-                    require(answers.getJSONObject(1).getJSONArray("selected").length() == 2, "multi choice retained");
-                    replies.incrementAndGet();
-                });
-                host.update(cards);
-                host.showLatest();
-                host.findViewWithTag("option:紧凑布局").performClick();
+                run[0] = coordinator.registerRun(id, null);
+                run[0].persistence = new PiTurnPersistence(store, id, user.id, "fixture-" + run[0].requestId,
+                        Collections.singletonList(user));
+                try { coordinator.onPiEvent(new JSONObject().put("type", "extension_ui").put("state", state), run[0]); }
+                catch (Exception failure) { throw new AssertionError(failure); }
+            });
+            long deadline = SystemClock.uptimeMillis() + 10000;
+            do {
+                test.waitForIdleSync();
+                test.runOnMainSync(() -> host[0] = activity.getWindow().getDecorView().findViewWithTag("home-questionnaire"));
+                if (host[0] != null) break;
+                SystemClock.sleep(50);
+            } while (SystemClock.uptimeMillis() < deadline);
+            require(host[0] instanceof HomeQuestionnaire, "questionnaire is hosted in TaskDetailActivity");
+            test.runOnMainSync(() -> {
+                try {
+                    // Local reply sink: test payload/controls, not a paid model session.
+                    java.lang.reflect.Field reply = HomeQuestionnaire.class.getDeclaredField("reply");
+                    reply.setAccessible(true);
+                    reply.set(host[0], (HomeQuestionnaire.Reply) (c, r, q, answers, cancelled) -> {
+                        require(id.equals(c) && run[0].requestId.equals(r) && "visual-question".equals(q), "exact question ownership");
+                        require(!cancelled && answers.length() == 2, "all answers submitted together");
+                        require("紧凑布局".equals(answers.getJSONObject(0).getString("answer")), "single choice retained");
+                        require(answers.getJSONObject(1).getJSONArray("selected").length() == 2, "multi choice retained");
+                        replies.incrementAndGet();
+                    });
+                } catch (ReflectiveOperationException failure) { throw new AssertionError(failure); }
+                host[0].findViewWithTag("option:紧凑布局").performClick();
             });
             test.waitForIdleSync();
             test.runOnMainSync(() -> {
-                View questionnaire = host.findViewWithTag("home-questionnaire");
-                require(questionnaire != null, "questionnaire visible");
-                require(host.findViewWithTag("option:紧凑布局").createAccessibilityNodeInfo().isChecked(), "choice selected");
+                require(host[0].findViewWithTag("option:紧凑布局").createAccessibilityNodeInfo().isChecked(), "choice selected");
                 for (String description : new String[]{"上一题", "自定义回答", "下一题", "取消问答"}) {
-                    View action = action(questionnaire, description);
+                    View action = action(host[0], description);
                     require(action != null, "action exists: " + description);
                     Rect visible = new Rect();
-                    require(action.getGlobalVisibleRect(visible) && visible.height() == action.getHeight(),
-                            "action fully visible: " + description);
-                    require(action.getHeight() >= Math.round(48 * activity.getResources().getDisplayMetrics().density),
-                            "48dp action target: " + description);
+                    require(action.getGlobalVisibleRect(visible) && visible.height() == action.getHeight(), "action fully visible: " + description);
+                    require(action.getHeight() >= Math.round(48 * activity.getResources().getDisplayMetrics().density), "48dp action target: " + description);
                 }
             });
-            Bitmap image = Bitmap.createBitmap(activity.getWindow().getDecorView().getWidth(),
-                    activity.getWindow().getDecorView().getHeight(), Bitmap.Config.ARGB_8888);
-            java.util.concurrent.CountDownLatch captured = new java.util.concurrent.CountDownLatch(1);
-            AtomicInteger captureResult = new AtomicInteger(-1);
-            test.runOnMainSync(() -> android.view.PixelCopy.request(activity.getWindow(), image, value -> {
-                captureResult.set(value);
-                captured.countDown();
-            }, new android.os.Handler(android.os.Looper.getMainLooper())));
-            require(captured.await(10, java.util.concurrent.TimeUnit.SECONDS)
-                    && captureResult.get() == android.view.PixelCopy.SUCCESS, "screen capture available");
-            try (FileOutputStream output = new FileOutputStream(screenshot)) {
-                image.compress(Bitmap.CompressFormat.PNG, 100, output);
-            } finally { image.recycle(); }
+            Bitmap image = test.getUiAutomation(android.app.UiAutomation.FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES).takeScreenshot();
+            require(image != null, "screen capture available");
+            try (FileOutputStream output = new FileOutputStream(screenshot)) { image.compress(Bitmap.CompressFormat.PNG, 100, output); }
+            finally { image.recycle(); }
             test.runOnMainSync(() -> {
-                action(host, "下一题").performClick();
-                host.findViewWithTag("option:任务进度").performClick();
-                host.findViewWithTag("option:对话入口").performClick();
-                action(host, "上一题").performClick();
-                require(host.findViewWithTag("option:紧凑布局").createAccessibilityNodeInfo().isChecked(), "back retains answer");
-                action(host, "下一题").performClick();
-                action(host, "提交回答").performClick();
+                action(host[0], "下一题").performClick();
+                host[0].findViewWithTag("option:任务进度").performClick();
+                host[0].findViewWithTag("option:对话入口").performClick();
+                action(host[0], "上一题").performClick();
+                require(host[0].findViewWithTag("option:紧凑布局").createAccessibilityNodeInfo().isChecked(), "back retains answer");
+                action(host[0], "下一题").performClick();
+                action(host[0], "提交回答").performClick();
                 require(replies.get() == 1, "one submission");
-                require(!action(host, "提交回答").isEnabled(), "pending disables submit");
-                require(!action(host, "取消问答").isEnabled(), "pending disables cancel");
+                require(!action(host[0], "提交回答").isEnabled(), "pending disables submit");
+                require(!action(host[0], "取消问答").isEnabled(), "pending disables cancel");
             });
-            return "PASS: desktop option selection, paging, multi-select, request payload, pending controls, 48dp actions; screenshot " + screenshot;
+            return "PASS: task-detail choice selection, paging, multi-select, exact reply ownership, pending controls, 48dp actions; screenshot " + screenshot;
         } finally {
             test.runOnMainSync(() -> {
-                host.setQuestionReply((c, r, q, answers, cancelled) -> {
-                    if (cancelled) coordinator.cancelQuestionnaire(c, r, q);
-                    else coordinator.submitQuestionnaire(c, r, q, answers, null);
-                });
-                host.update(coordinator.taskCards());
-                host.showLatest();
+                activity.finish();
+                if (run[0] != null) coordinator.finish(run[0], "aborted", "fixture cleanup");
             });
+            coordinator.deleteConversation(id);
+            if (store.conversations().stream().anyMatch(item -> previous.equals(item.id))) store.selectConversation(previous);
         }
     }
 
-    private static View action(View view, String description) {
-        if (description.contentEquals(view.getContentDescription() == null ? "" : view.getContentDescription())) return view;
+    static View action(View view, String description) {
+        String english = switch (description) {
+            case "上一题" -> "Previous";
+            case "自定义回答" -> "Custom answer";
+            case "下一题" -> "Next";
+            case "取消问答" -> "Cancel questionnaire";
+            case "提交回答" -> "Submit answers";
+            default -> description;
+        };
+        CharSequence label = view.getContentDescription() == null ? "" : view.getContentDescription();
+        if (description.contentEquals(label) || english.contentEquals(label)) return view;
         if (view instanceof ViewGroup group) for (int i = 0; i < group.getChildCount(); i++) {
             View found = action(group.getChildAt(i), description);
             if (found != null) return found;

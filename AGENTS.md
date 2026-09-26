@@ -4,14 +4,22 @@
 
 | 目录 | 内容 |
 | --- | --- |
-| `app/src/main/` | Android 原生 Java（launcher、手势、Shower、Pi 桥接） |
+| `app/src/main/` | Android 原生 Java（独立助手入口、App Widget、语音、Shower、Pi 桥接） |
 | `web/src/` | React + TypeScript 前端（聊天、设置，Capacitor 桥接） |
 | `pi-runtime/` | Pi coding-agent SDK 集成，esbuild 打包为 `pi-runtime.cjs` |
 | `shower-server/` | Binder-only 虚拟屏服务，Gradle 构建后以 `shower-server.jar` 打入 App assets |
-| `tests/` | 纯 Java 断言检查（GestureChecks、AgentChecks 等），不依赖 Android stub |
+| `tests/` | 纯 Java 断言检查（AgentChecks、ConversationTreeChecks），不依赖 Android stub |
 | `app/src/test/` | Robolectric 单元测试 |
 | `app/src/androidTest/` | 设备端 instrumentation 检查 |
 | `scripts/` | 可重复运行的验证与辅助脚本 |
+
+## 助手与迁移边界
+
+- MainActivity 是普通 Capacitor 入口；不恢复 HOME、桌面网格/搜索、图标包、小组件宿主、导航手势或应用切换页。
+- TaskWidgetProvider 使用 RemoteViews/XML；不内嵌 EditText、问卷输入或虚拟屏。点击打开现有聊天/详情/语音 Activity，多个实例按会话分别选择任务。
+- 普通事件至少 1000ms 尾沿节流，开始/问卷/停止/终态及时刷新；冷状态只显示私有 `task_widget` 最后快照及更新时间，不启动 Pi/Shizuku/Shower/FGS。
+- 保留 applicationId、签名、聊天/附件/Pi/偏好数据路径及旧草稿。AppCatalog/AppSearch、Shower 和原系统语音组件名不是桌面残留。
+- 仅 `gestures.pending_restore=true` 可自动恢复旧导航值为 0，读回且 commit 清标成功才完成；不写 1，不改无障碍列表或申请 HOME。权限不足时保留标记与 ADB/系统设置/显式 Shizuku 救援入口，具体命令见 README。
 
 ## 构建先决条件
 
@@ -54,7 +62,7 @@ exit $LASTEXITCODE
 
 | 改动范围 | 最小验证 |
 | --- | --- |
-| 纯 Java 逻辑（手势、Agent、搜索） | `scripts/verify.ps1` 中的纯 Java 检查会覆盖 |
+| 纯 Java 逻辑（Agent、历史、搜索） | `scripts/verify.ps1` 中的纯 Java 检查会覆盖 |
 | Android 业务逻辑 | `.\gradlew.bat :app:testDebugUnitTest --no-daemon --console=plain`（Robolectric） |
 | 前端 TypeScript/React | `npm run build`（tsc + vite） |
 | pi-runtime JS | `npm --prefix pi-runtime test` |
@@ -62,13 +70,14 @@ exit $LASTEXITCODE
 | 定时任务 UI | `node scripts/check-schedules.mjs`（浏览器检查，不需要设备） |
 | Android 完整检查 | `powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/verify.ps1` |
 
-`scripts/verify.ps1` 执行纯 Java 断言检查、`:app:testDebugUnitTest :app:assembleDebug :app:lintDebug :shower-server:lintDebug`、APK 运行时资源检查、Shower 单 dex 与必需类检查、旧引用检查和空白/行尾风格检查。它不运行 Pi runtime 的 `npm test`、浏览器交互检查或设备检查；涉及这些范围时按表补充。
+`scripts/verify.ps1` 执行纯 Java 断言检查、`:app:testDebugUnitTest :app:assembleDebug :app:lintDebug :shower-server:lintDebug`、APK 运行时资源检查、Shower 单 dex 与必需类检查、旧引用、HOME/桌面残留、Widget 注册/XML 检查和空白/行尾风格检查。可用 `-StaticOnly` 或 `-JavaOnly` 单独执行轻量检查。它不运行 Pi runtime 的 `npm test`、浏览器交互检查或设备检查；涉及这些范围时按表补充。
 
 ## 设备验证与自动测试的界限
 
-- 纯 Java 检查和 Robolectric 测试覆盖逻辑正确性，不能证明 WindowManager、MotionEvent、ROM 转场或虚拟屏行为。
-- Instrumentation 检查（`ChatStoreChecks`）需要安装应用及测试 APK 的设备或模拟器；其中 `checks=shower-preview` 还需要 Shizuku 已运行并授权。
-- 手势、Shower 画面、定时任务后台执行、朗读等功能的最终验收必须在真机上进行，不能仅凭构建通过判定。
+- 纯 Java 检查和 Robolectric 测试覆盖逻辑正确性，不能证明真实桌面 Widget 呈现、MotionEvent 或虚拟屏行为。
+- Instrumentation 编译用 `:app:assembleDebugAndroidTest`。`ChatStoreChecks` 提供 `widget`、`questionnaire`、`notifications`、`share-intake`、`share-ui`、`voice-continuity`、`search-consistency` 等检查；`shower-preview`/`workbench` 还需 Shizuku。实际运行需要安装应用及测试 APK 的设备或模拟器，编译不等于已运行。
+- 截图检查必须传 `-e artifactDir <设备绝对可写目录>`；拉取到电脑时放仓库外。`workbench` 的控制/回答文件也使用此目录。
+- Widget 点击/系统恢复、Shower 画面、定时任务后台执行、朗读等功能的最终验收必须在真机上进行，不能仅凭构建通过判定。
 - ADB 触摸注入不等于真实手指验收；`input keyevent` 仅证明按键路径。
 
 ## 临时文件与密钥

@@ -13,7 +13,7 @@ import android.widget.TextView;
 import java.util.List;
 import org.json.JSONObject;
 
-/** Shared task timeline for the home card and expanded workbench. */
+/** Task timeline for the detail pane and expanded workbench. */
 final class TaskProgressStrip extends HorizontalScrollView {
     TaskProgressStrip(Context context, AppAppearance colors, List<JSONObject> tasks, String model) {
         super(context);
@@ -41,7 +41,7 @@ final class TaskProgressStrip extends HorizontalScrollView {
             node.setOrientation(LinearLayout.VERTICAL);
             node.setGravity(Gravity.CENTER_HORIZONTAL);
             node.setPadding(dp(2), dp(2), dp(2), dp(2));
-            node.addView(new TaskStepMarker(context, status, model, colors.accent), new LinearLayout.LayoutParams(dp(34), dp(34)));
+            node.addView(new TaskStepMarker(context, status, model, colors.accent, colors), new LinearLayout.LayoutParams(dp(34), dp(34)));
             TextView subject = new TextView(context);
             subject.setText(task.optString("subject")); subject.setTextSize(11); subject.setIncludeFontPadding(false);
             subject.setMaxLines(1); subject.setEllipsize(TextUtils.TruncateAt.END);

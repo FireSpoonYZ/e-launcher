@@ -100,8 +100,7 @@ public class VoiceContinuityTest {
         assertEquals(unrelated, store.activeId());
         assertEquals("other draft", store.draft(unrelated));
         session.openTextChat();
-        Intent textChat = Shadows.shadowOf(RuntimeEnvironment.getApplication()).getNextStartedActivity();
-        assertEquals(target, textChat.getStringExtra(TaskDetailActivity.EXTRA_OPEN_CHAT));
+        assertTextChatTarget(target);
     }
 
     @Test public void newEntryAndNewTopicStayLazyUntilNonemptyRecognition() throws Exception {
@@ -136,9 +135,13 @@ public class VoiceContinuityTest {
         coordinator.archiveConversation(target);
         heard("do not restore silently");
         assertNull(BridgeShadow.target);
+        assertEquals("请先恢复此会话再发送",
+                ((TextView) ReflectionHelpers.getField(session, "statusLabel")).getText().toString());
         coordinator.deleteConversation(target);
         heard("do not recreate a deleted target");
         assertNull(BridgeShadow.target);
+        assertEquals("会话不存在",
+                ((TextView) ReflectionHelpers.getField(session, "statusLabel")).getText().toString());
         assertNotEquals(target, store.activeId());
         session.newTopic();
         assertNull(ReflectionHelpers.getField(session, "conversationId"));
@@ -156,14 +159,68 @@ public class VoiceContinuityTest {
         assertTrue(store.conversations().isEmpty());
     }
 
-    @Test public void activityIntentCarriesOnlyExplicitChatTarget() {
+    @Test public void textChatKeepsArchivedAndDeletedTargetsForExplicitResolution() {
+        store.saveDraft("original target");
+        String target = store.activeId();
+        store.archive(target);
+        String unrelated = store.activeId();
+        for (boolean deleted : new boolean[]{false, true}) {
+            if (deleted) store.clear(target);
+            open(target);
+            session.openTextChat();
+            assertTextChatTarget(target);
+            assertEquals(unrelated, store.activeId());
+        }
+    }
+
+    @Test public void newVoiceTopicOpensNewTextChatWithoutSelectingAnUnrelatedDraft() {
+        store.saveDraft("keep this draft");
+        String unrelated = store.activeId();
+        open(null);
+        session.openTextChat();
+        assertTextChatTarget("");
+        assertEquals(unrelated, store.activeId());
+        assertEquals("keep this draft", store.draft());
+    }
+
+    private void assertTextChatTarget(String target) {
+        Intent intent = Shadows.shadowOf(RuntimeEnvironment.getApplication()).getNextStartedActivity();
+        assertNotNull(intent);
+        assertEquals(MainActivity.class.getName(), intent.getComponent().getClassName());
+        assertEquals(target, intent.getStringExtra(TaskDetailActivity.EXTRA_OPEN_CHAT));
+        assertFalse(intent.hasCategory(Intent.CATEGORY_HOME));
+        assertNotEquals(Intent.ACTION_MAIN, intent.getAction());
+    }
+
+    @Test public void activityIntentCarriesOnlyExplicitChatTargetAndWakeGreeting() {
         android.app.Activity activity = org.robolectric.Robolectric.buildActivity(android.app.Activity.class).setup().get();
         VoiceSessionActivity.open(activity, false, "chosen");
-        assertEquals("chosen", Shadows.shadowOf(activity).getNextStartedActivity()
-                .getStringExtra(VoiceSessionActivity.EXTRA_CONVERSATION_ID));
+        Intent explicit = Shadows.shadowOf(activity).getNextStartedActivity();
+        assertEquals(VoiceSessionActivity.class.getName(), explicit.getComponent().getClassName());
+        assertEquals("chosen", explicit.getStringExtra(VoiceSessionActivity.EXTRA_CONVERSATION_ID));
+        assertFalse(explicit.getBooleanExtra(LauncherVoiceInteractionService.EXTRA_WAKE, true));
+        assertFalse(explicit.hasCategory(Intent.CATEGORY_HOME));
         VoiceSessionActivity.open(activity, true);
-        assertNull(Shadows.shadowOf(activity).getNextStartedActivity()
-                .getStringExtra(VoiceSessionActivity.EXTRA_CONVERSATION_ID));
+        Intent wake = Shadows.shadowOf(activity).getNextStartedActivity();
+        assertEquals(VoiceSessionActivity.class.getName(), wake.getComponent().getClassName());
+        assertNull(wake.getStringExtra(VoiceSessionActivity.EXTRA_CONVERSATION_ID));
+        assertTrue(wake.getBooleanExtra(LauncherVoiceInteractionService.EXTRA_WAKE, false));
+    }
+
+    @Test public void directVoiceEntryDoesNotListenWhenMicrophonePermissionIsRefused() {
+        Shadows.shadowOf(RuntimeEnvironment.getApplication()).denyPermissions(android.Manifest.permission.RECORD_AUDIO);
+        Intent intent = new Intent(context, VoiceSessionActivity.class)
+                .putExtra(VoiceSessionActivity.EXTRA_CONVERSATION_ID, "chosen");
+        var controller = org.robolectric.Robolectric.buildActivity(VoiceSessionActivity.class, intent).create();
+        try {
+            assertNull(ReflectionHelpers.getField(controller.get(), "session"));
+            int request = ReflectionHelpers.getStaticField(VoiceSessionActivity.class, "REQUEST_MICROPHONE");
+            controller.get().onRequestPermissionsResult(request, new String[]{android.Manifest.permission.RECORD_AUDIO},
+                    new int[]{android.content.pm.PackageManager.PERMISSION_DENIED});
+            assertTrue(controller.get().isFinishing());
+            assertNull(ReflectionHelpers.getField(controller.get(), "session"));
+            assertTrue(store.conversations().isEmpty());
+        } finally { controller.destroy(); }
     }
 
     @Implements(value = PiAgentBridge.class, isInAndroidSdk = false)

@@ -6,7 +6,6 @@ import android.content.Intent;
 import android.graphics.Rect;
 import android.os.SystemClock;
 import android.view.View;
-import android.view.ViewGroup;
 import java.io.File;
 import java.lang.reflect.Field;
 import java.util.Collections;
@@ -14,10 +13,11 @@ import java.util.UUID;
 import org.json.JSONObject;
 
 /** Interactive device fixture: real Shower display, local question, no model/API request.
- * Run checks=workbench, interact with Orca, then touch external-files/workbench-stop to finish.
+ * Run checks=workbench, interact with Orca, then touch artifactDir/workbench-stop to finish.
  */
 final class WorkbenchChecks {
     static String run(Instrumentation test) throws Exception {
+        File directory = ChatStoreChecks.artifacts(test);
         Context context = test.getTargetContext();
         ChatCoordinator coordinator = ChatCoordinator.get(context);
         String previous = coordinator.store().activeId();
@@ -37,7 +37,6 @@ final class WorkbenchChecks {
                 """);
         ShowerToolBridge tools = field(PiAgentBridge.get(context), "showerTools");
         TaskDetailActivity activity = null;
-        File directory = context.getExternalFilesDir(null);
         File stop = new File(directory, "workbench-stop"); stop.delete();
         File ready = new File(directory, "workbench-ready"); ready.delete();
         File submitted = new File(directory, "workbench-answer.json"); submitted.delete();
@@ -59,10 +58,10 @@ final class WorkbenchChecks {
             test.runOnMainSync(() -> {
                 View root = detail.getWindow().getDecorView();
                 View question = root.findViewWithTag("home-questionnaire");
-                require(question != null, "Question and desktop must coexist");
+                require(question != null, "Question and Shower preview must coexist");
                 require(root.findViewWithTag("todo-strip") != null, "Progress timeline stays visible");
                 for (String description : new String[]{"自定义回答", "提交回答", "取消问答"}) {
-                    View action = action(question, description); Rect bounds = new Rect();
+                    View action = HomeQuestionnaireChecks.action(question, description); Rect bounds = new Rect();
                     require(action != null && action.getGlobalVisibleRect(bounds) && bounds.height() == action.getHeight(),
                             "Question action clipped: " + description + ", bounds=" + bounds + ", height=" + (action == null ? -1 : action.getHeight()));
                 }
@@ -91,13 +90,6 @@ final class WorkbenchChecks {
         }
     }
 
-    private static View action(View view, String description) {
-        if (description.contentEquals(view.getContentDescription() == null ? "" : view.getContentDescription())) return view;
-        if (view instanceof ViewGroup group) for (int i = 0; i < group.getChildCount(); i++) {
-            View found = action(group.getChildAt(i), description); if (found != null) return found;
-        }
-        return null;
-    }
     @SuppressWarnings("unchecked") private static <T> T field(Object object, String name) throws Exception {
         Field field = object.getClass().getDeclaredField(name); field.setAccessible(true); return (T) field.get(object);
     }

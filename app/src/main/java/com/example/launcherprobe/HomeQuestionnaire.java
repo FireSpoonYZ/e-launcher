@@ -26,7 +26,7 @@ import java.util.LinkedHashSet;
 import java.util.Map;
 import java.util.Set;
 
-/** Live desktop questionnaire. Drafts are owned by the card host, not the rendered views. */
+/** Live task questionnaire. Drafts belong to the detail host, not the rendered views. */
 final class HomeQuestionnaire extends LinearLayout {
     interface Reply {
         void send(String conversationId, String requestId, String questionnaireId,

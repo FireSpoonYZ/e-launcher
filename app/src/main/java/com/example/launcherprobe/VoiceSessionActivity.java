@@ -8,14 +8,15 @@ import android.content.pm.PackageManager;
 import android.os.Bundle;
 import android.view.WindowManager;
 
-/** Full-screen host for a spoken conversation while the launcher itself is in front. */
+/** Foreground voice entry shared by the assistant UI and task widgets. */
 public final class VoiceSessionActivity extends Activity implements VoiceSession.Host {
     private static final int REQUEST_MICROPHONE = 61;
+    /** Optional explicit target; omission starts a new topic lazily on the first recognized utterance. */
     static final String EXTRA_CONVERSATION_ID = "voiceConversationId";
 
     private VoiceSession session;
 
-    /** Opens the conversation over the given screen; no-op when the microphone was refused. */
+    /** Opens voice mode over the given screen; the activity obtains microphone permission before listening. */
     static void open(Context from, boolean fromWake) {
         open(from, fromWake, null);
     }

@@ -2,13 +2,9 @@ package com.example.launcherprobe;
 
 import static org.junit.Assert.*;
 
+import android.app.AlarmManager;
 import android.app.Application;
 import android.content.Context;
-import android.os.CancellationSignal;
-import android.view.View;
-import android.view.ViewGroup;
-import android.widget.TextView;
-import androidx.activity.ComponentActivity;
 import java.util.List;
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -16,14 +12,14 @@ import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
-import org.robolectric.Robolectric;
 import org.robolectric.RobolectricTestRunner;
 import org.robolectric.RuntimeEnvironment;
+import org.robolectric.Shadows;
 import org.robolectric.annotation.Config;
 import org.robolectric.util.ReflectionHelpers;
 
 @RunWith(RobolectricTestRunner.class)
-@Config(sdk = 35, shadows = HostAtomicFile.class)
+@Config(sdk = 35, manifest = Config.NONE, shadows = HostAtomicFile.class)
 public class SearchConsistencyTest {
     private Application context;
     private ChatStore store;
@@ -67,7 +63,7 @@ public class SearchConsistencyTest {
         assertEquals(1, store.archivedConversations(null).size());
     }
 
-    @Test public void globalSearchFindsSeparateChatAndTaskCategoriesWithoutExecuting() throws Exception {
+    @Test public void chatAndScheduledDefinitionQueriesStayReadOnly() throws Exception {
         String live = conversation("needle in a body");
         String archived = conversation("NEEDLE in archived body");
         store.archive(archived);
@@ -77,62 +73,22 @@ public class SearchConsistencyTest {
                 .put("runs", new JSONArray().put(new JSONObject().put("status", "running").put("processId", "old-process")));
         var preferences = context.getSharedPreferences("scheduled_tasks", Context.MODE_PRIVATE);
         preferences.edit().putString("state", state.toString()).commit();
-        LauncherSearchIndex index = new LauncherSearchIndex(context, new CancellationSignal());
-        LauncherSearchIndex.Result result = index.search("needle", true, new CancellationSignal(), ignored -> {});
-        assertEquals(live, result.conversations().get(0).id);
-        assertEquals(archived, result.archived().get(0).id);
-        assertEquals("task/中文", result.tasks().get(0).id());
-        assertTrue(result.tasks().get(0).snippet().contains("needle"));
+        String activeId = store.activeId();
+        assertEquals(List.of(live), store.conversations("needle").stream().map(hit -> hit.id).toList());
+        assertEquals(List.of(archived), store.archivedConversations("needle").stream().map(hit -> hit.id).toList());
+        ScheduledTasks scheduled = ScheduledTasks.get(context);
+        JSONArray definitions = scheduled.tasksForSearch();
+        assertEquals(1, definitions.length());
+        assertEquals("task/中文", definitions.getJSONObject(0).getString("id"));
+        assertEquals(task.getString("prompt"), definitions.getJSONObject(0).getString("prompt"));
+        definitions.getJSONObject(0).put("title", "mutation");
+        assertEquals("Unrelated task", scheduled.tasksForSearch().getJSONObject(0).getString("title"));
         assertEquals(state.toString(), preferences.getString("state", ""));
+        assertEquals(activeId, store.activeId());
+        assertEquals(1, store.conversations().size());
+        assertEquals(1, store.archivedConversations().size());
         assertFalse(ChatCoordinator.get(context).running());
-        ScheduledTasks.get(context).tasksForSearch().getJSONObject(0).put("title", "mutation");
-        assertEquals("Unrelated task", ScheduledTasks.get(context).tasksForSearch().getJSONObject(0).getString("title"));
-        assertTrue(index.search("", true, new CancellationSignal(), ignored -> {}).tasks().isEmpty());
-        assertTrue(index.search("needle", false, new CancellationSignal(), ignored -> {}).conversations().isEmpty());
-
-        try (var controller = Robolectric.buildActivity(ComponentActivity.class).setup()) {
-            SearchHost host = new SearchHost();
-            NativeSearchPage page = new NativeSearchPage(controller.get(), NativeSearchPage.Mode.GLOBAL_SEARCH, "needle", host);
-            try {
-                ReflectionHelpers.callInstanceMethod(page, "render", ReflectionHelpers.ClassParameter.from(LauncherSearchIndex.Result.class, result));
-                android.widget.ListView list = ReflectionHelpers.getField(page, "list");
-                boolean chatClicked = false, taskClicked = false, archivedSeen = false;
-                for (int i = 0; i < list.getAdapter().getCount(); i++) {
-                    View row = list.getAdapter().getView(i, null, list);
-                    if (contains(row, "已归档会话")) archivedSeen = true;
-                    if (contains(row, "needle in a body")) { clickOpen(row); chatClicked = true; }
-                    if (contains(row, result.tasks().get(0).snippet())) { clickOpen(row); taskClicked = true; }
-                }
-                assertTrue(chatClicked); assertTrue(taskClicked); assertTrue(archivedSeen);
-                assertEquals(live, host.conversation);
-                assertEquals("task/中文", host.task);
-                assertEquals(0, host.sent);
-                assertEquals(state.toString(), preferences.getString("state", ""));
-            } finally { page.dispose(); }
-        }
-    }
-
-    private static boolean contains(View view, String text) {
-        if (view instanceof TextView label && text.contentEquals(label.getText())) return true;
-        if (view instanceof ViewGroup group)
-            for (int i = 0; i < group.getChildCount(); i++) if (contains(group.getChildAt(i), text)) return true;
-        return false;
-    }
-
-    private static void clickOpen(View view) {
-        if (view instanceof TextView label && "打开".contentEquals(label.getText())) { view.performClick(); return; }
-        if (view instanceof ViewGroup group)
-            for (int i = 0; i < group.getChildCount(); i++) clickOpen(group.getChildAt(i));
-    }
-
-    private static final class SearchHost implements NativeSearchPage.Host {
-        String conversation, task;
-        int sent;
-        public void showDesktop() { }
-        public void sendToAssistant(String prompt) { sent++; }
-        public void openConversation(String id) { conversation = id; }
-        public void openScheduledTask(String id) { task = id; }
-        public void openSettings(String destination) { }
-        public void onDragStarted(NativeSearchPage.DragItem item) { }
+        assertTrue(Shadows.shadowOf(context.getSystemService(AlarmManager.class)).getScheduledAlarms().isEmpty());
+        assertNull(Shadows.shadowOf(context).getNextStartedService());
     }
 }
