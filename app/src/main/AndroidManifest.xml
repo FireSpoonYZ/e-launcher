@@ -13,8 +13,6 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
-    <!-- Used only when a switcher card is flicked away; the system still decides what may be stopped. -->
-    <uses-permission android:name="android.permission.KILL_BACKGROUND_PROCESSES" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
@@ -96,26 +94,12 @@
             android:name=".WakeWordService"
             android:exported="false"
             android:foregroundServiceType="microphone" />
-        <service
-            android:name=".GestureService"
-            android:exported="false"
-            android:label="Launcher Probe 手势"
-            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+        <receiver android:name=".TaskWidgetProvider" android:exported="false">
             <intent-filter>
-                <action android:name="android.accessibilityservice.AccessibilityService" />
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
             </intent-filter>
-            <meta-data
-                android:name="android.accessibilityservice"
-                android:resource="@xml/accessibility_service_config" />
-        </service>
-        <activity
-            android:name=".AppSwitcherActivity"
-            android:exported="false"
-            android:excludeFromRecents="true"
-            android:launchMode="singleTask"
-            android:noHistory="true"
-            android:taskAffinity="${applicationId}.switcher"
-            android:theme="@style/AppSwitcherTheme" />
+            <meta-data android:name="android.appwidget.provider" android:resource="@xml/task_widget_info" />
+        </receiver>
         <activity android:name=".ShareReceiverActivity" android:exported="true"
             android:label="导入到 E Launcher">
             <intent-filter>
@@ -131,10 +115,6 @@
             </intent-filter>
         </activity>
         <activity android:name=".TaskDetailActivity" android:exported="false" />
-        <activity
-            android:name=".DesktopSettingsActivity"
-            android:exported="false"
-            android:windowSoftInputMode="adjustResize" />
         <activity
             android:name=".PiSettingsActivity"
             android:exported="false"
@@ -154,16 +134,7 @@
             android:windowSoftInputMode="adjustResize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.HOME" />
-                <category android:name="android.intent.category.DEFAULT" />
-            </intent-filter>
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
-            </intent-filter>
-            <intent-filter>
-                <action android:name="android.content.pm.action.CONFIRM_PIN_SHORTCUT" />
-                <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
         </activity>
     </application>
