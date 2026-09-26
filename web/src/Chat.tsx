@@ -5,7 +5,7 @@ import { Chat, Device, NativeSettings, ScheduledTasks, type ChatSnapshot, type C
 import { archiveRemainingParts, isArchived } from './archive';
 import { AttachmentList } from './AttachmentList';
 import { LatestRequest } from './latestRequest';
-import { pairToolResults, toolCallKey } from './toolResults';
+import { pairToolResults, toolCallKey, type ToolResultPairs } from './toolResults';
 import { ToolCallView } from './ToolCallView';
 import { ConfirmDialog, Dialog } from './components/ui/dialog';
 import { ThinkingControl } from './ThinkingControl';
@@ -17,68 +17,87 @@ import { Questionnaire, type QuestionnaireReplyEvent } from './Questionnaire';
 import { Empty, ErrorNotice, Header, Loading, SearchField, errorText, query, useAction, useText } from './ui';
 
 export interface CatalogProvider { id: string; name: string; authMethods: string[]; auth: Record<string, unknown>; models: {id: string; name: string; reasoning: boolean; thinkingLevels: string[]; api: string}[] }
+export function createChatStream(readSnapshot: () => Promise<ChatSnapshot>, update: {
+  snapshot(next: ChatSnapshot): void;
+  error(message: string): void;
+  status(message: string): void;
+  questionnaireReply(reply: QuestionnaireReplyEvent): void;
+}) {
+  let live = true, reading = false, again = false;
+  let current: ChatSnapshot | undefined; let events: NativeEvent[] = [];
+  const commit = (next: ChatSnapshot) => { current = next; if (live) update.snapshot(next); };
+  const refresh = async () => {
+    if (!live) return;
+    if (reading) { again = true; return; }
+    reading = true;
+    try {
+      const next = await readSnapshot();
+      if (!live) return;
+      if (!current || next.sequence >= current.sequence) { commit(next); update.error(next.error ?? ''); update.status(next.status ?? ''); }
+    } catch (e) { if (live) update.error(errorText(e)); }
+    finally { reading = false; }
+    const pending = events; events = []; pending.forEach(receive);
+    if (again && live) { again = false; void refresh(); }
+  };
+  const receive = (event: NativeEvent) => {
+    if (!live) return;
+    if (!current || reading) { events.push(event); return; }
+    const sequence = event.sequence ?? 0;
+    // A snapshot can cover this sequence without carrying a rejected reply; preserve its identity for Questionnaire.
+    if (event.type === 'questionnaireReply') {
+      const payload = event.payload ?? {};
+      if (typeof payload.questionnaireId === 'string' && typeof payload.accepted === 'boolean') {
+        update.questionnaireReply({
+          questionnaireId: payload.questionnaireId,
+          accepted: payload.accepted,
+          message: typeof payload.message === 'string' ? payload.message : undefined,
+          conversationId: event.conversationId,
+          requestId: event.requestId,
+          sequence,
+        });
+      }
+    }
+    if (sequence <= current.sequence) return;
+    if (sequence !== current.sequence + 1) { void refresh(); return; }
+    if (event.conversationId !== current.conversationId) {
+      if (event.type === 'textDelta' && current.activeRuns.some(run => run.conversationId === event.conversationId && run.requestId === event.requestId)) {
+        // Advance the global cursor without publishing an unchanged visible conversation.
+        current = {...current, sequence};
+      } else void refresh();
+      return;
+    }
+    if (event.type === 'textDelta' && event.requestId === current.requestId && event.nodeId) {
+      const delta = String(event.payload?.delta ?? ''); const id = event.nodeId;
+      const nodes = current.conversation.nodes;
+      const existing = nodes.find(n => n.id === id);
+      const updated: ConversationNode = existing
+        ? {...existing, message: {...existing.message, content: (existing.message.content ?? '') + delta}}
+        : {id, parentId: current.conversation.leaf, message: {id, role:'assistant', content:delta, incomplete:true, toolCalls:[], toolCallId:null, attachments:[]}};
+      commit({...current, sequence, conversation: {...current.conversation, leaf:id, nodes: existing ? nodes.map(n => n.id === id ? updated : n) : [...nodes, updated]}});
+    } else if (event.type === 'extensionUi' && event.requestId === current.requestId) {
+      commit({...current, sequence, extensionUi:event.payload as ExtensionUiState});
+    } else {
+      if (event.type === 'error') update.error(String(event.payload?.message ?? ''));
+      if (event.type === 'runStatus') update.status(String(event.payload?.message ?? event.payload?.status ?? ''));
+      if (event.type === 'end') update.status('');
+      void refresh();
+    }
+  };
+  return {refresh, receive, dispose: () => { live = false; events = []; }};
+}
 export function useChat() {
   const {pathname} = useLocation();
   const [snapshot, setSnapshot] = useState<ChatSnapshot>(); const [error, setError] = useState(''); const [status, setStatus] = useState('');
   const [questionnaireReply, setQuestionnaireReply] = useState<QuestionnaireReplyEvent>();
   const refreshRef = useRef<() => Promise<void>>(async () => {});
   useEffect(() => {
-    let live = true, reading = false, again = false;
-    let current: ChatSnapshot | undefined; let events: NativeEvent[] = [];
-    const commit = (next: ChatSnapshot) => { current = next; if (live) setSnapshot(next); };
-    const refresh = async () => {
-      if (reading) { again = true; return; }
-      reading = true;
-      try {
-        const next = await Chat.snapshot();
-        if (!live) return;
-        if (!current || next.sequence >= current.sequence) { commit(next); setError(next.error ?? ''); setStatus(next.status ?? ''); }
-      } catch (e) { if (live) setError(errorText(e)); }
-      finally { reading = false; }
-      const pending = events; events = []; pending.forEach(receive);
-      if (again && live) { again = false; void refresh(); }
-    };
-    const receive = (event: NativeEvent) => {
-      if (!live) return;
-      if (!current || reading) { events.push(event); return; }
-      const sequence = event.sequence ?? 0;
-      if (event.type === 'questionnaireReply') {
-        const payload = event.payload ?? {};
-        if (typeof payload.questionnaireId === 'string' && typeof payload.accepted === 'boolean') {
-          setQuestionnaireReply({
-            questionnaireId: payload.questionnaireId,
-            accepted: payload.accepted,
-            message: typeof payload.message === 'string' ? payload.message : undefined,
-            conversationId: event.conversationId,
-            requestId: event.requestId,
-            sequence,
-          });
-        }
-      }
-      if (sequence <= current.sequence) return;
-      if (sequence !== current.sequence + 1 || event.conversationId !== current.conversationId) { void refresh(); return; }
-      if (event.type === 'textDelta' && event.requestId === current.requestId && event.nodeId) {
-        const delta = String(event.payload?.delta ?? ''); const id = event.nodeId;
-        const nodes = current.conversation.nodes;
-        const existing = nodes.find(n => n.id === id);
-        const updated: ConversationNode = existing
-          ? {...existing, message: {...existing.message, content: (existing.message.content ?? '') + delta}}
-          : {id, parentId: current.conversation.leaf, message: {id, role:'assistant', content:delta, incomplete:true, toolCalls:[], toolCallId:null, attachments:[]}};
-        commit({...current, sequence, conversation: {...current.conversation, leaf:id, nodes: existing ? nodes.map(n => n.id === id ? updated : n) : [...nodes, updated]}});
-      } else if (event.type === 'extensionUi' && event.requestId === current.requestId) {
-        commit({...current, sequence, extensionUi:event.payload as ExtensionUiState});
-      } else {
-        if (event.type === 'error') setError(String(event.payload?.message ?? ''));
-        if (event.type === 'runStatus') setStatus(String(event.payload?.message ?? event.payload?.status ?? ''));
-        if (event.type === 'end') setStatus('');
-        void refresh();
-      }
-    };
-    refreshRef.current = refresh;
-    const listener = Chat.addListener('chatEvent', receive);
-    window.addEventListener('native-navigation', refresh);
-    void listener.then(refresh).catch(e => { if (live) setError(errorText(e)); });
-    return () => { live = false; window.removeEventListener('native-navigation', refresh); void listener.then(h => h.remove()); };
+    let live = true;
+    const stream = createChatStream(() => Chat.snapshot(), {snapshot:setSnapshot, error:setError, status:setStatus, questionnaireReply:setQuestionnaireReply});
+    refreshRef.current = stream.refresh;
+    const listener = Chat.addListener('chatEvent', stream.receive);
+    window.addEventListener('native-navigation', stream.refresh);
+    void listener.then(stream.refresh).catch(e => { if (live) setError(errorText(e)); });
+    return () => { live = false; stream.dispose(); window.removeEventListener('native-navigation', stream.refresh); void listener.then(h => h.remove()); };
   }, []);
   useEffect(() => {
     const id = snapshot?.conversationId;
@@ -116,14 +135,14 @@ function archiveTimeLabel(archivedAt: number, t: (zh: string, en: string) => str
   return t('归档于 ', 'Archived ') + new Date(archivedAt).toLocaleString();
 }
 const archiveEvent = (event: NativeEvent) => event.type === 'conversationArchived' || event.type === 'conversationRestored' || event.type === 'conversationDeleted';
-const MessageView = memo(function MessageView({node, toolResults, pending}: {node: ConversationNode; toolResults: Map<string, ConversationNode[]>; pending: boolean}) {
+const MessageView = memo(function MessageView({node, toolResults, pending}: {node: ConversationNode; toolResults?: ConversationNode[][]; pending: boolean}) {
   const t = useText(); const action = useAction(); const [copied, setCopied] = useState(false); const message = node.message;
   if (message.role === 'system') return null;
   if (message.role === 'tool') return <ToolCallView results={[node]}/>;
   return <article className={`message ${message.role}`}>
     {!!message.attachments?.length && <AttachmentList attachments={message.attachments} sent/>}
     {message.content && <Markdown text={message.content}/>}
-    {message.toolCalls.map((tool, index) => <ToolCallView key={toolCallKey(node.id, index)} tool={tool} results={toolResults.get(toolCallKey(node.id, index)) ?? []} pending={pending}/>)}
+    {message.toolCalls.map((tool, index) => <ToolCallView key={toolCallKey(node.id, index)} tool={tool} results={toolResults?.[index] ?? []} pending={pending}/>)}
     {message.incomplete && <small className="secondary">{t('尚未完成','Not completed')}</small>}
     {message.content && message.role === 'assistant' && <div className="message-actions"><button className="icon-button" aria-label={t('复制','Copy')} onClick={() => action.run(async () => { await navigator.clipboard.writeText(message.content!); setCopied(true); })}>{copied ? <Check/> : <Copy/>}</button><button className="icon-button" aria-label={t('分享','Share')} onClick={() => action.run(() => Device.share({text:message.content!,title:'Pi'}))}><Share2/></button><button className="icon-button" aria-label={t('朗读','Read aloud')} onClick={() => action.run(() => Device.speak({text:message.content!}))}><Volume2/></button></div>}
     <ErrorNotice error={action.error}/>
@@ -161,6 +180,7 @@ export function ChatPage() {
   }, [conversation?.id, location.pathname, location.search, navigate]);
   const configured = useConversationDefaults(conversation);
   const scroll = useRef<HTMLDivElement>(null);
+  const pairedRef = useRef<ToolResultPairs | undefined>(undefined);
   const undoTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
   useEffect(() => { if (following && scroll.current) scroll.current.scrollTop = scroll.current.scrollHeight; }, [chat.snapshot?.sequence, conversation?.id, following]);
   useEffect(() => () => { if (undoTimer.current) clearTimeout(undoTimer.current); }, []);
@@ -181,7 +201,8 @@ export function ChatPage() {
     setUndo(null); setPanel(null); await chat.refresh();
   });
   const selection = {model: configured.defaults.defaultModel, thinkingLevel: configured.defaults.defaultThinkingLevel, ...conversation.piSelection};
-  const path = lineage(conversation); const paired = pairToolResults(path);
+  const path = lineage(conversation); const paired = pairToolResults(path, pairedRef.current);
+  pairedRef.current = paired;
   const activeMessage = path.filter(node => node.message.role !== 'tool').at(-1);
   return <main className="chat-page"><header className="chat-header"><button className="icon-button" aria-label={t('会话列表','Conversations')} onClick={() => setPanel('conversations')}><Menu/></button><button className="model-title" onClick={() => setPanel('models')}><strong>Pi</strong><span>{String(selection.model || t('选择模型','Choose model'))}<ChevronDown/></span></button><button className="icon-button" aria-label={t('新会话','New conversation')} disabled={action.busy} onClick={() => action.run(async () => { await Chat.newConversation(); await chat.refresh(); })}><SquarePen/></button></header>
     <section className="messages" ref={scroll} onClick={e => {
@@ -189,7 +210,7 @@ export function ChatPage() {
         document.querySelector<HTMLTextAreaElement>('.composer textarea')?.blur(); void Device.hideKeyboard();
       }
     }} onScroll={e => { const el = e.currentTarget; setFollowing(el.scrollHeight - el.scrollTop - el.clientHeight < 90); }}>
-      {path.some(n => n.message.role !== 'system') ? path.filter(node => !paired.embeddedResultIds.has(node.id)).map(node => <MessageView node={node} toolResults={paired.byCall} pending={running && node.id === activeMessage?.id} key={node.id}/>) : <div className="chat-empty"><span className="empty-mark">Pi</span><h1>{t('今天想聊些什么？','What’s on your mind?')}</h1><p>{t('从一个问题开始。','Start with a question.')}</p></div>}
+      {path.some(n => n.message.role !== 'system') ? path.filter(node => !paired.embeddedResultIds.has(node.id)).map(node => <MessageView node={node} toolResults={paired.byMessage.get(node.id)} pending={running && node.id === activeMessage?.id} key={node.id}/>) : <div className="chat-empty"><span className="empty-mark">Pi</span><h1>{t('今天想聊些什么？','What’s on your mind?')}</h1><p>{t('从一个问题开始。','Start with a question.')}</p></div>}
     </section>
     <footer className="composer-wrap">{!following && <button className="scroll-latest icon-button" aria-label={t('回到最新消息','Latest message')} onClick={() => setFollowing(true)}><ArrowDown/></button>}
       <ErrorNotice error={action.error || chat.error || configured.error}/>

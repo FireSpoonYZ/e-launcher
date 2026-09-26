@@ -2,6 +2,7 @@ import type { Attachment, ConversationNode } from './native';
 
 export type ToolResultPairs = {
   byCall: Map<string, ConversationNode[]>;
+  byMessage: Map<string, ConversationNode[][]>;
   embeddedResultIds: Set<string>;
 };
 
@@ -31,8 +32,10 @@ export function toolResultAttachments(results: ConversationNode[]): Attachment[]
   return results.flatMap(result => result.message.attachments);
 }
 
-/** Pair only within one assistant/tool-message run so reused call IDs cannot cross turn boundaries. */
-export function pairToolResults(nodes: ConversationNode[]): ToolResultPairs {
+const noResults: ConversationNode[] = [];
+
+/** Pair within one assistant/tool run; retain unchanged per-message props for React.memo. */
+export function pairToolResults(nodes: ConversationNode[], previous?: ToolResultPairs): ToolResultPairs {
   const byCall = new Map<string, ConversationNode[]>();
   const embeddedResultIds = new Set<string>();
   let calls = new Map<string, string | null>();
@@ -52,5 +55,16 @@ export function pairToolResults(nodes: ConversationNode[]): ToolResultPairs {
     embeddedResultIds.add(node.id);
   }
 
-  return {byCall, embeddedResultIds};
+  for (const [key, results] of byCall) {
+    const before = previous?.byCall.get(key);
+    if (before && before.length === results.length && results.every((node, index) => node === before[index])) byCall.set(key, before);
+  }
+  const byMessage = new Map<string, ConversationNode[][]>();
+  for (const node of nodes) {
+    if (!node.message.toolCalls.length) continue;
+    const results = node.message.toolCalls.map((_, index) => byCall.get(toolCallKey(node.id, index)) ?? noResults);
+    const before = previous?.byMessage.get(node.id);
+    byMessage.set(node.id, before && before.length === results.length && results.every((value, index) => value === before[index]) ? before : results);
+  }
+  return {byCall, byMessage, embeddedResultIds};
 }

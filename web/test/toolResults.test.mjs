@@ -55,6 +55,32 @@ test('returns persisted tool result attachments for the production tool view', (
   ]), [image]);
 });
 
+test('retains only unchanged message result props as results arrive, change, or leave the branch', () => {
+  const first = node('first', 'assistant', {toolCalls:[call('read')]});
+  const result = node('result', 'tool', {toolCallId:'read'});
+  const second = node('second', 'assistant', {toolCalls:[call('read')]});
+  const path = [first, result, second];
+  const initial = pairToolResults(path);
+  const fresh = node('fresh', 'tool', {toolCallId:'read'});
+  const appended = pairToolResults([...path, fresh], initial);
+  assert.equal(appended.byMessage.get('first'), initial.byMessage.get('first'));
+  assert.notEqual(appended.byMessage.get('second'), initial.byMessage.get('second'));
+  assert.deepEqual(appended.byMessage.get('second'), [[fresh]]);
+  assert.deepEqual(initial.byMessage.get('second'), [[]], 'previous props are never mutated');
+
+  const changed = {...result, message:{...result.message, content:'updated'}};
+  const updated = pairToolResults([first, changed, second, fresh], appended);
+  assert.notEqual(updated.byMessage.get('first'), appended.byMessage.get('first'));
+  assert.equal(updated.byMessage.get('second'), appended.byMessage.get('second'));
+  assert.deepEqual(updated.byMessage.get('first'), [[changed]]);
+
+  const branched = pairToolResults([first, second], updated);
+  assert.deepEqual(branched.byMessage.get('first'), [[]]);
+  assert.deepEqual(branched.byMessage.get('second'), [[]]);
+  assert.equal(branched.embeddedResultIds.size, 0);
+  assert.equal(branched.byCall.size, 0);
+});
+
 test('leaves ambiguous duplicate IDs in one assistant message visible', () => {
   const paired = pairToolResults([
     node('a', 'assistant', {toolCalls: [call('same'), call('same')]}),
