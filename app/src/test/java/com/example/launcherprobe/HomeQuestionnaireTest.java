@@ -57,33 +57,33 @@ public class HomeQuestionnaireTest {
         assertNull(HomeQuestionnaire.liveQuestion(card));
     }
 
-    @Test public void desktopRetainsDraftAcrossRefreshAndSwitchButDropsExpiredRequest() throws Exception {
+    @Test public void detailControlRestoresOnlyTheSameLiveRequestDraft() throws Exception {
         try (var controller = Robolectric.buildActivity(Activity.class).setup()) {
             Activity activity = controller.get();
-            HomeTaskCards host = new HomeTaskCards(activity, null, id -> {}, id -> {}, id -> {});
-            host.setQuestionReply((c, r, q, a, cancelled) -> {});
-            activity.setContentView(host);
-            JSONObject a = card();
-            JSONObject b = new JSONObject(card().toString()).put("conversationId", "b");
-            host.update(new JSONArray().put(a).put(b));
-            host.findViewWithTag("option:Compact").performClick();
-            host.update(new JSONArray().put(b).put(a));
-            assertEquals("a", host.selectedId());
-            host.showLatest();
-            assertEquals("b", host.selectedId());
-            host.update(new JSONArray().put(a).put(b));
-            host.showLatest();
-            assertTrue(host.findViewWithTag("option:Compact").createAccessibilityNodeInfo().isChecked());
-            host.setEditing(true);
-            assertNull(host.findViewWithTag("home-questionnaire"));
-            host.setEditing(false);
-            assertTrue(host.findViewWithTag("option:Compact").createAccessibilityNodeInfo().isChecked());
-            a.getJSONObject("askUser").put("id", "new-question");
-            host.update(new JSONArray().put(a).put(b));
-            assertFalse(host.findViewWithTag("option:Compact").createAccessibilityNodeInfo().isChecked());
-            a.put("modelState", "idle");
-            host.update(new JSONArray().put(a));
-            assertNull(host.findViewWithTag("home-questionnaire"));
+            JSONObject card = card();
+            HomeQuestionnaire.Draft draft = new HomeQuestionnaire.Draft(card);
+            HomeQuestionnaire view = new HomeQuestionnaire(activity, card, draft,
+                    (c, r, q, a, cancelled) -> {}, AppAppearance.readWorkbench(activity));
+            activity.setContentView(view);
+            view.findViewWithTag("option:Compact").performClick();
+            android.os.Bundle saved = draft.save();
+            HomeQuestionnaire.Draft restored = new HomeQuestionnaire.Draft(card);
+            restored.restore(saved);
+            HomeQuestionnaire refreshed = new HomeQuestionnaire(activity, card, restored,
+                    (c, r, q, a, cancelled) -> {}, AppAppearance.readWorkbench(activity));
+            activity.setContentView(refreshed);
+            assertTrue(refreshed.findViewWithTag("option:Compact").createAccessibilityNodeInfo().isChecked());
+            card.put("requestId", "next-run");
+            HomeQuestionnaire.Draft nextRun = new HomeQuestionnaire.Draft(card);
+            nextRun.restore(saved);
+            assertTrue(nextRun.answers.isEmpty());
+            card.put("requestId", "r").getJSONObject("askUser").put("id", "new-question");
+            HomeQuestionnaire.Draft nextQuestion = new HomeQuestionnaire.Draft(card);
+            nextQuestion.restore(saved);
+            assertTrue(nextQuestion.answers.isEmpty());
+            assertFalse(draft.matches(card));
+            card.put("modelState", "idle");
+            assertNull(HomeQuestionnaire.liveQuestion(card));
         }
     }
 
@@ -101,7 +101,7 @@ public class HomeQuestionnaireTest {
                 assertEquals("A", a.getJSONObject(0).getJSONArray("selected").getString(0));
                 if (calls.incrementAndGet() == 1) throw new IllegalStateException("retry me");
             };
-            HomeQuestionnaire view = new HomeQuestionnaire(activity, card, draft, reply, AppAppearance.readDesktop(activity));
+            HomeQuestionnaire view = new HomeQuestionnaire(activity, card, draft, reply, AppAppearance.readWorkbench(activity));
             activity.setContentView(view);
             action(view, "Submit answers").performClick();
             assertEquals("retry me", draft.error);
@@ -112,10 +112,10 @@ public class HomeQuestionnaireTest {
             assertFalse(action(view, "Cancel questionnaire").isEnabled());
             assertFalse(view.findViewWithTag("option:A").isEnabled());
             card.put("questionnairePending", true);
-            HomeQuestionnaire refreshed = new HomeQuestionnaire(activity, card, draft, reply, AppAppearance.readDesktop(activity));
+            HomeQuestionnaire refreshed = new HomeQuestionnaire(activity, card, draft, reply, AppAppearance.readWorkbench(activity));
             assertFalse(action(refreshed, "Submit answers").isEnabled());
             card.put("questionnairePending", false).put("questionnaireError", "rejected");
-            refreshed = new HomeQuestionnaire(activity, card, draft, reply, AppAppearance.readDesktop(activity));
+            refreshed = new HomeQuestionnaire(activity, card, draft, reply, AppAppearance.readWorkbench(activity));
             assertTrue(action(refreshed, "Submit answers").isEnabled());
             assertTrue(refreshed.findViewWithTag("option:A").createAccessibilityNodeInfo().isChecked());
         }

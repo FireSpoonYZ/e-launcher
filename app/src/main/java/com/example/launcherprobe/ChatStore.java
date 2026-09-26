@@ -376,6 +376,17 @@ public final class ChatStore {
         preferences.edit().putString("active_chat", java.util.UUID.randomUUID().toString()).apply();
     }
 
+    /** Ordinary new-chat consumes an unsent legacy draft once, without clearing either chat's draft. */
+    void newAssistantConversation() {
+        synchronized (STORE_LOCK) {
+            String id = homeDraftId();
+            if (id != null && !isArchived(id)
+                    && (!draft(id).isEmpty() || !draftAttachments(id).isEmpty())) {
+                preferences.edit().putString("active_chat", id).remove("home_draft").apply();
+            } else newConversation();
+        }
+    }
+
     /** Creates a scheduled result destination without changing the visible chat or its draft. */
     void createBackgroundConversation(String id, String title) throws org.json.JSONException {
         synchronized (STORE_LOCK) {

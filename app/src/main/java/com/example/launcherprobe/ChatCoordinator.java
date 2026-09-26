@@ -140,7 +140,6 @@ final class ChatCoordinator {
             if (voiceRegistered != null) voiceRegistered.accept(run.requestId);
         }
         try {
-            emit(run, "runStatus", null, json("status", "running", "message", run.message));
             startPi(run, prompt, new ArrayList<>(attachments));
             if (submissionId != null && !submissionId.isEmpty()) {
                 context.getSharedPreferences("chat_submissions", Context.MODE_PRIVATE)
@@ -256,7 +255,7 @@ final class ChatCoordinator {
             run.message = "正在停止…";
             new TaskNotifications(context).cancel(conversationId);
         }
-        emit(run, "runStatus", null, json("status", run.status, "message", run.message));
+        emit(run, "runStatus", null, json("status", run.status, "message", run.message), true);
     }
 
     void submitQuestionnaire(String conversationId, String requestId, String questionnaireId,
@@ -409,7 +408,7 @@ final class ChatCoordinator {
         new TaskNotifications(context).show(run.conversationId, title, question, run.status);
     }
 
-    /** Attention first, retaining recent-activity order within each group and the five-card limit. */
+    /** Attention first, retaining recent-activity order within each group. */
     JSONArray taskCards() {
         JSONArray cards = new JSONArray();
         List<ChatStore.Conversation> conversations = store.conversations();
@@ -417,7 +416,6 @@ final class ChatCoordinator {
         for (ChatStore.Conversation conversation : conversations) {
             if (store.load(conversation.id).isEmpty()) continue;
             cards.put(taskCard(conversation.id));
-            if (cards.length() == 5) break;
         }
         return cards;
     }
@@ -429,7 +427,7 @@ final class ChatCoordinator {
         return store.taskResultUnread(id) ? 1 : 2;
     }
 
-    /** Detail lookup is not limited to the desktop's five-card window. */
+    /** A specific task lookup never substitutes the currently selected conversation. */
     JSONObject taskCard(String conversationId) {
         ChatStore.Conversation conversation = null;
         for (ChatStore.Conversation candidate : store.conversations())
@@ -491,6 +489,8 @@ final class ChatCoordinator {
         List<AgentLoop.Message> work = new ArrayList<>(prior);
         work.add(user);
         run.persistence = new PiTurnPersistence(store, run.conversationId, user.id, run.assistantId, work);
+        // The first widget refresh must see the new task's persisted user message.
+        emit(run, "runStatus", null, json("status", "running", "message", run.message), true);
         emit(run, "snapshot", user.id, new JSONObject());
         executor.execute(() -> {
             try {
@@ -546,10 +546,12 @@ final class ChatCoordinator {
         for (SessionRun run : interrupted) {
             emit(run, "error", null, json("message", message));
             emit(run, "end", null, json("status", "aborted", "finishedRequestId", run.requestId));
+            boolean released;
             synchronized (runLock) {
                 run.timeoutFinalized = true;
-                if (run.terminationAcknowledged) terminatingRuns.remove(run.conversationId, run);
+                released = run.terminationAcknowledged && terminatingRuns.remove(run.conversationId, run);
             }
+            if (released) emit(run, "snapshot", null, new JSONObject(), true);
             if (run.nodeRegistered && run.bridge != null) run.bridge.abort(run.requestId);
         }
     }
@@ -562,16 +564,21 @@ final class ChatCoordinator {
             persistenceFailure = exception;
             run.error = "Pi 会话未保存：" + detail(exception);
             recentResults.put(run.conversationId, new RunResult("error", run.error));
+            context.getSharedPreferences("chat", Context.MODE_PRIVATE).edit()
+                    .putString("run_status_" + run.conversationId, "error")
+                    .putString("run_error_" + run.conversationId, run.error).apply();
         }
         if (persistenceFailure != null) emit(run, "error", null, json("message", run.error));
         if ("end".equals(event.optString("type"))) acknowledgeTermination(run);
     }
 
     private void acknowledgeTermination(SessionRun run) {
+        boolean released;
         synchronized (runLock) {
             run.terminationAcknowledged = true;
-            if (run.timeoutFinalized) terminatingRuns.remove(run.conversationId, run);
+            released = run.timeoutFinalized && terminatingRuns.remove(run.conversationId, run);
         }
+        if (released) emit(run, "snapshot", null, new JSONObject(), true);
         maybePurgeExpiredArchives(run.conversationId);
     }
 
@@ -607,7 +614,8 @@ final class ChatCoordinator {
                 run.questionnaireReplyPending = null;
             }
             remindQuestion(run);
-            emit(run, "extensionUi", null, run.extensionUi);
+            emit(run, "extensionUi", null, run.extensionUi,
+                    !String.valueOf(previousQuestion).equals(String.valueOf(askUser)));
         } else if ("tool_start".equals(type)) emit(run, "toolStart", null, event);
         else if ("tool_end".equals(type)) emit(run, "toolEnd", null, event);
         else if ("status".equals(type)) {
@@ -719,7 +727,23 @@ final class ChatCoordinator {
         emit(run.conversationId, run.requestId, type, nodeId, payload);
     }
 
+    private void emit(SessionRun run, String type, String nodeId, JSONObject payload, boolean immediate) {
+        emit(run.conversationId, run.requestId, type, nodeId, payload, immediate);
+    }
+
     private void emit(String conversationId, String requestId, String type, String nodeId, JSONObject payload) {
+        boolean immediate = switch (type) {
+            case "end", "error", "questionnairePending", "questionnaireReply",
+                    "conversationArchived", "conversationRestored", "conversationDeleted" -> true;
+            default -> false;
+        };
+        emit(conversationId, requestId, type, nodeId, payload, immediate);
+    }
+
+    private void emit(String conversationId, String requestId, String type, String nodeId,
+            JSONObject payload, boolean immediate) {
+        // The provider coalesces requests before projecting cards; no Activity or 40ms widget loop.
+        TaskWidgetProvider.requestRefresh(context, immediate);
         JSONObject event = json("sequence", sequence.incrementAndGet(), "type", type,
                 "conversationId", conversationId,
                 "requestId", requestId == null ? JSONObject.NULL : requestId,

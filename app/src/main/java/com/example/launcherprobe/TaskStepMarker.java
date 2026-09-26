@@ -8,7 +8,7 @@ import android.graphics.RectF;
 import android.view.View;
 import android.view.animation.LinearInterpolator;
 
-/** Shared step indicator for the desktop card and task details. */
+/** Step indicator for task details and the virtual-screen workbench. */
 final class TaskStepMarker extends View {
     private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final AppAppearance colors;
@@ -20,7 +20,7 @@ final class TaskStepMarker extends View {
     TaskStepMarker(Context context, String status, String model, int completedColor) {
         super(context);
         this.status = status; this.model = model; this.completedColor = completedColor;
-        colors = AppAppearance.readDesktop(context);
+        colors = AppAppearance.readWorkbench(context);
         setContentDescription("completed".equals(status) ? "已完成"
                 : "in_progress".equals(status) ? ("working".equals(model) ? "进行中" : "未完成") : "等待中");
     }
@@ -34,7 +34,7 @@ final class TaskStepMarker extends View {
     private void updateAnimation() {
         if (animator != null) { animator.cancel(); animator = null; }
         if (isAttachedToWindow() && isShown() && getWindowVisibility() == VISIBLE
-                && HomeTaskCards.animateNode(model, status, ValueAnimator.areAnimatorsEnabled())) {
+                && TaskCardModel.animateNode(model, status, ValueAnimator.areAnimatorsEnabled())) {
             animator = ValueAnimator.ofFloat(0, 360);
             animator.setDuration(1200); animator.setRepeatCount(ValueAnimator.INFINITE);
             animator.setInterpolator(new LinearInterpolator());
