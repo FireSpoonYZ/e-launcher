@@ -1,6 +1,6 @@
 # e-launcher 独立 AI 助手
 
-普通 Android AI 助手应用，保留 Pi SDK 聊天、后台与定时任务、通知、分享导入、语音会话、系统语音助手、唤醒和朗读，以及 Shower 虚拟屏与接管。可把标准 Android App Widget 添加到其他桌面，不再充当默认 HOME，不提供桌面布局、应用网格／全局桌面搜索、壁纸／图标包管理、小组件宿主、模拟导航手势或自定义应用切换页。
+普通 Android AI 助手应用，安装后显示为 **AI Assistant**，保留 Pi SDK 聊天、后台与定时任务、通知、分享导入、语音会话、系统语音助手、唤醒和朗读，以及 Shower 虚拟屏与接管。可把标准 Android App Widget 添加到其他桌面，不再充当默认 HOME，不提供桌面布局、应用网格／全局桌面搜索、壁纸／图标包管理、小组件宿主、模拟导航手势或自定义应用切换页。
 
 ## 界面与数据
 
@@ -16,7 +16,7 @@ Pi 模式接入固定版本 **0.85.1** 的完整 coding-agent SDK，提供模型
 
 界面支持跟随系统／中英文、浅色／深色、助手背景图片预览和遮罩。扩展页可直接输入 npm 包名安装，扩展社区使用 npm 公开元数据并提供搜索和分页；配置状态、SDK 找到的安装路径与成功加载分别说明。APK 内置与 Node 24 兼容的官方 npm 11.6.2，无需 Termux 或系统 npm；Git 来源仍需要对应系统命令。安装第三方包可能执行 lifecycle 脚本和代码，请仅使用可信来源。安装成功后会重新读取资源并报告加载、停用／过滤或错误状态，当前聊天下一次发送时使用新扩展。
 
-内置 `conversation-title` 扩展在每轮正常回复完成后生成概括性短标题，对话选择页与任务 Widget共用该标题。在「高级配置 → 模型与思考 → 标题生成模型」填写 `provider/modelId`，也可编辑全局 `~/.pi/agent/settings.json` 或工作区 `.pi/settings.json`：
+内置 `conversation-title` 扩展在每轮正常回复完成后生成概括性短标题，对话选择页与任务 Widget 共用该标题。在「高级配置 → 模型与思考 → 标题生成模型」填写 `provider/modelId`，也可编辑全局 `~/.pi/agent/settings.json` 或工作区 `.pi/settings.json`：
 
 ```json
 {
@@ -114,7 +114,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/verify.ps1
 exit $LASTEXITCODE
 ```
 
-安装应用及测试 APK 后，由验收者选择 `checks=store`、`widget`、`questionnaire`、`notifications`、`share-intake`、`share-ui`、`voice-continuity`、`search-consistency`、`shower-preview`、`workbench` 或 `npm`。不传 `checks` 时运行持久化、普通 Capacitor 入口及无 Activity 的协调器文字流检查。`search-consistency` 是聊天／归档历史搜索，不是桌面搜索。Widget 检查只用 instrumentation 临时 `AppWidgetHost` 和短暂 `BIND_APPWIDGET` shell identity，结束时删除自有测试实例，不改变用户已有 Widget；验证真实 RemoteViews、两实例选择、详情／新对话点击和语音 PendingIntent 身份，不启动语音识别或注入系统桌面触摸。新建 provider 对象读取快照不是实际进程死亡，系统桌面添加／点击与真实进程重建由验收者另行记录。
+安装应用及测试 APK 后，由验收者选择 `checks=store`、`migration`、`widget`、`questionnaire`、`notifications`、`share-intake`、`share-ui`、`voice-continuity`、`search-consistency`、`shower-preview`、`workbench` 或 `npm`。不传 `checks` 时运行持久化、普通 Capacitor 入口及无 Activity 的协调器文字流检查。`search-consistency` 是聊天／归档历史搜索，不是桌面搜索。Widget 检查只用 instrumentation 临时 `AppWidgetHost` 和短暂 `BIND_APPWIDGET` shell identity，结束时删除自有测试实例，不改变用户已有 Widget；验证真实 RemoteViews、两实例选择、详情／新对话点击和语音 PendingIntent 身份，不启动语音识别或注入系统桌面触摸。新建 provider 对象读取快照不是实际进程死亡，系统桌面添加／点击与真实进程重建由验收者另行记录。
+
+`store` 检查使用目标应用缓存下的独立目录与专用偏好命名空间，不触碰真实聊天；instrumentation 与测试 APK 的 UID 不同，不能直接使用测试 APK 的私有目录。`migration` 检查需要预先授予 `WRITE_SECURE_SETTINGS`，验证实际系统设置在无标记、有标记和恢复完成后的行为，并在结束时恢复原导航值与标记。
 
 产生截图的检查必须传 `-e artifactDir <设备绝对可写目录>`；`workbench` 的 ready/stop/answer 文件也在此目录。示例设备目录为 `/sdcard/Android/data/com.example.launcherprobe/files/acceptance`。截图、日志及拉取后的证据均在仓库外；测试生成物只放已忽略的 `build/`。详情／通知检查需预先授予通知权限，避免首次授权弹窗遮挡；语音连续性检查需录音权限。Shower 检查需 Shizuku 已运行并授权。独立构建、ADB 注入与真实手指体验不是同一层验收；本迁移文档不宣称设备检查已通过。
 

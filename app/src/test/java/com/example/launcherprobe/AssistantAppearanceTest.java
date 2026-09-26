@@ -46,7 +46,8 @@ public class AssistantAppearanceTest {
         }
     }
 
-    @Test public void assistantBackgroundKeepsPrivateImageAndIgnoresLegacySystemWallpaper() throws Exception {
+    @Test @org.robolectric.annotation.GraphicsMode(org.robolectric.annotation.GraphicsMode.Mode.NATIVE)
+    public void assistantBackgroundKeepsPrivateImageAndIgnoresLegacySystemWallpaper() throws Exception {
         Context context = RuntimeEnvironment.getApplication();
         context.getSharedPreferences("launcher_desktop", 0).edit().putString("wallpaper", "system").commit();
         context.getSharedPreferences("ui", 0).edit().putString("background", "solid").putInt("backgroundMask", 100).commit();

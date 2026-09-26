@@ -16,7 +16,7 @@ function installFixture() {
   let sequence = 0;
   const listeners = name => subscriptions.get(name) ?? new Map();
   const emit = (name, value = {}) => { for (const fn of listeners(name).values()) fn(clone(value)); };
-  const device = {language: 'zh', theme: 'light', launchRoute: '/chat', background: 'solid', backgroundMask: 63, homeRole: true, gestureStatus: '', canWriteSecureSettings: false, accessibilityConnected: false};
+  const device = {language: 'zh', theme: 'light', launchRoute: '/chat', background: 'solid', backgroundMask: 63, canWriteSecureSettings: false, legacyNavigationPending: false, legacyNavigationStatus: '', shizukuStatus: ''};
   const now = Date.now();
   let conversationId = 'chat-a';
   const conversations = [
@@ -93,6 +93,7 @@ function installFixture() {
         return snapshot();
       },
       saveDraft: () => ({}),
+      markTaskRead: () => ({}),
       send: ({conversationId: id}) => {
         if (find(id)?.archivedAt) throw new Error('请先恢复此会话');
         return {accepted: true, requestId: 'req-1'};
@@ -171,14 +172,29 @@ if (process.argv.includes('--serve')) {
       const result = await call('Runtime.evaluate', {expression, returnByValue: true, awaitPromise: true});
       assert.ok(!result.exceptionDetails, JSON.stringify(result.exceptionDetails)); return result.result.value;
     };
-    const wait = expression => evaluate(`new Promise((resolve,reject)=>{const observer=new MutationObserver(check);const timeout=setTimeout(()=>{observer.disconnect();reject(new Error('UI wait timed out: '+${JSON.stringify(expression)}))},10000);function check(){if(${expression}){clearTimeout(timeout);observer.disconnect();resolve(true)}}observer.observe(document,{subtree:true,childList:true,attributes:true,characterData:true});check()})`);
+    const wait = expression => evaluate(`new Promise((resolve,reject)=>{
+      const observer=new MutationObserver(check);
+      const timeout=setTimeout(()=>{cleanup();reject(new Error('UI wait timed out: '+${JSON.stringify(expression)}+'; hash='+location.hash+'; active='+archiveFixture.active()+'; text='+document.body.innerText))},10000);
+      function cleanup(){clearTimeout(timeout);observer.disconnect();window.removeEventListener('hashchange',check);window.removeEventListener('popstate',check)}
+      function check(){if(${expression}){cleanup();resolve(true)}}
+      observer.observe(document,{subtree:true,childList:true,attributes:true,characterData:true});
+      window.addEventListener('hashchange',check);window.addEventListener('popstate',check);check();
+    })`);
     const click = selector => evaluate(`(()=>{const el=document.querySelector(${JSON.stringify(selector)});if(!el)throw new Error('Missing '+${JSON.stringify(selector)});el.scrollIntoView({block:'nearest'});el.click()})()`);
     const clickText = text => evaluate(`(()=>{const el=[...document.querySelectorAll('button')].find(e=>e.textContent.trim()===${JSON.stringify(text)});if(!el)throw new Error('Missing button '+${JSON.stringify(text)});el.scrollIntoView({block:'nearest'});el.click()})()`);
     const screenshot = async name => { const result = await call('Page.captureScreenshot', {format: 'png'}); await writeFile(join(output, name + '.png'), Buffer.from(result.data, 'base64')); };
     await call('Page.enable'); await call('Runtime.enable');
     await call('Emulation.setDeviceMetricsOverride', {width: 390, height: 844, deviceScaleFactor: 1, mobile: true});
     await call('Page.navigate', {url});
-    await wait('document.querySelector(".chat-page")');
+    await wait('document.querySelector(".chat-page") && location.hash === "#/chat/chat-a"');
+    await click('[aria-label="会话列表"]');
+    await wait('document.querySelectorAll(".conversation-row").length===2');
+    await click('.conversation-row:not(.selected) > button:first-child');
+    await wait('location.hash === "#/chat/chat-b" && !document.querySelector(".drawer")');
+    await click('[aria-label="会话列表"]');
+    await wait('document.querySelectorAll(".conversation-row").length===2');
+    await click('.conversation-row:not(.selected) > button:first-child');
+    await wait('location.hash === "#/chat/chat-a" && !document.querySelector(".drawer")');
     await click('[aria-label="会话列表"]');
     await wait('document.querySelectorAll(".conversation-row").length===2');
     assert.equal(await evaluate('!!document.querySelector("[role=dialog] .conversation-row .icon-button[aria-label=\\"归档会话\\"]")'), true);
@@ -212,6 +228,7 @@ if (process.argv.includes('--serve')) {
     await click('.conversation-row.selected [aria-label="归档会话"]');
     await wait('document.querySelector(".archive-undo") && !document.querySelector("[role=dialog].drawer, .dialog-content.drawer")');
     assert.ok(await evaluate('archiveFixture.active().startsWith("blank-")'), 'Archiving the current conversation must leave it');
+    assert.equal(await evaluate('location.hash'), '#/chat/' + await evaluate('archiveFixture.active()'), 'The native read-state gate must see the active conversation route');
     await click('[aria-label="会话列表"]');
     await click('.drawer-archived');
     await wait('document.querySelectorAll(".archived-page .conversation-row").length>=1');

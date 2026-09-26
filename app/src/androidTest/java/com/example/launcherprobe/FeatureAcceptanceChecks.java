@@ -58,12 +58,14 @@ final class FeatureAcceptanceChecks {
                     ChatCoordinator.SessionRun run = ((java.util.Map<String, ChatCoordinator.SessionRun>) field(checks.coordinator, "activeRuns")).get(id);
                     if (run != null) checks.coordinator.finish(run, "aborted", "fixture cleanup");
                 }
-                checks.coordinator.deleteConversation(id);
+                if (id.equals(checks.store.activeId()) || checks.store.conversations().stream().anyMatch(item -> id.equals(item.id)))
+                    checks.coordinator.deleteConversation(id);
             }
             if (checks.store.conversations().stream().anyMatch(item -> previous.equals(item.id)))
                 checks.store.selectConversation(previous);
             if (checks.assistant != null) checks.main(() -> { checks.assistant.finish(); return null; });
             checks.context.getSharedPreferences("chat", 0).edit().commit();
+            test.waitForIdleSync();
         }
     }
 

@@ -77,7 +77,7 @@ public class ChatTaskDataTest {
         String existing = store.activeId();
         store.saveDraft("active draft");
         java.io.File file = new java.io.File(application.getFilesDir(), "unsent.txt");
-        java.nio.file.Files.writeString(file.toPath(), "keep attachment");
+        java.nio.file.Files.write(file.toPath(), "keep attachment".getBytes(java.nio.charset.StandardCharsets.UTF_8));
         ChatAttachment attachment = ChatAttachment.fromJson(new JSONObject().put("id", "unsent")
                 .put("name", "unsent.txt").put("mimeType", "text/plain")
                 .put("path", file.getAbsolutePath()).put("size", file.length()));

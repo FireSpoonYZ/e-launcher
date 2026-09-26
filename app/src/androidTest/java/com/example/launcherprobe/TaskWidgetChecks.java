@@ -168,6 +168,7 @@ final class TaskWidgetChecks {
             for (String id : conversations) coordinator.deleteConversation(id);
             if (store.conversations().stream().anyMatch(item -> previous.equals(item.id))) store.selectConversation(previous);
             TaskWidgetProvider.requestRefresh(context, true);
+            test.waitForIdleSync();
         }
     }
 

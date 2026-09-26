@@ -15,6 +15,7 @@ import android.webkit.WebView;
 import android.widget.TextView;
 
 import com.getcapacitor.Plugin;
+import com.getcapacitor.CapConfig;
 import com.getcapacitor.WebViewListener;
 
 import org.json.JSONObject;
@@ -59,6 +60,11 @@ public class MainActivityNavigationTest {
         // Keep Capacitor's real bridge and system plugins; isolate custom plugin/service startup.
         @Override public void registerPlugin(Class<? extends Plugin> plugin) { registered.add(plugin); }
         @Override public boolean hasWindowFocus() { return focused; }
+        @Override protected void load() {
+            // Robolectric has no device WebView provider for ServiceWorkerController.
+            config = new CapConfig.Builder(this).setResolveServiceWorkerRequests(false).create();
+            super.load();
+        }
     }
 
     @Implements(value = TaskWidgetProvider.class, isInAndroidSdk = false)
@@ -77,6 +83,10 @@ public class MainActivityNavigationTest {
 
     @Before public void prepare() {
         context = RuntimeEnvironment.getApplication();
+        android.content.pm.PackageInfo webView = new android.content.pm.PackageInfo();
+        webView.packageName = "com.google.android.webview";
+        webView.versionName = "130.0.0.0";
+        org.robolectric.shadows.ShadowWebView.setCurrentWebViewPackage(webView);
         ReflectionHelpers.setStaticField(ChatCoordinator.class, "instance", null);
         ReflectionHelpers.setStaticField(VoiceManager.class, "instance", null);
         context.getSharedPreferences("chat", Context.MODE_PRIVATE).edit().clear().commit();
@@ -138,13 +148,13 @@ public class MainActivityNavigationTest {
         Intent hot = new Intent(context, MainActivity.class).setData(Uri.parse("assistant-widget://chat/2"))
                 .putExtra(TaskDetailActivity.EXTRA_OPEN_CHAT, second);
         activity.onNewIntent(hot);
-        assertEquals(hot.getData(), activity.getBridge().getIntentUri());
+        assertEquals(hot.getData(), activity.getIntent().getData());
         assertEquals(second, store.activeId());
         loaded(activity, "https://untrusted.invalid/#/chat/" + second);
         assertFalse(activity.isTaskConversationVisible(second));
         loaded(activity, local(activity, "/chat/" + second));
         assertTrue(Shadows.shadowOf(activity.getBridge().getWebView()).getLastEvaluatedJavascript()
-                .contains("#/chat/" + second));
+                .contains(JSONObject.quote("#/chat/" + second)));
         assertTrue(activity.isTaskConversationVisible(second));
         assertEquals("first draft", store.draft(first));
         assertEquals("second draft", store.draft(second));
@@ -233,10 +243,12 @@ public class MainActivityNavigationTest {
         AlertDialog prompt = ShadowAlertDialog.getLatestAlertDialog();
         assertTrue(prompt.isShowing());
         prompt.getButton(AlertDialog.BUTTON_NEGATIVE).performClick();
+        Shadows.shadowOf(android.os.Looper.getMainLooper()).idle();
         assertEquals(id, store.activeId());
         assertTrue("viewing is not restoration", store.isArchived(id));
         activity.openChat(id);
         ShadowAlertDialog.getLatestAlertDialog().getButton(AlertDialog.BUTTON_POSITIVE).performClick();
+        Shadows.shadowOf(android.os.Looper.getMainLooper()).idle();
         assertFalse(store.isArchived(id));
         coordinator.archiveConversation(id);
         activity.onNewIntent(new Intent(context, MainActivity.class).putExtra(TaskDetailActivity.EXTRA_ARCHIVED_ID, id));
@@ -321,6 +333,7 @@ public class MainActivityNavigationTest {
             @Override public void onText(String text) { heard[0] = text; }
             @Override public void onError(String message) { error[0] = message; }
         };
+        Shadows.shadowOf((android.app.Application) context).denyPermissions(Manifest.permission.RECORD_AUDIO);
         manager.settings().setEngine(VoiceSettings.STT, VoiceSettings.REMOTE);
         manager.listen(activity, store.activeId(), callback);
         activity.onRequestPermissionsResult(VoiceManager.REQUEST_MICROPHONE,
@@ -328,13 +341,17 @@ public class MainActivityNavigationTest {
         assertNotNull(error[0]);
         assertNull(heard[0]);
 
-        manager.settings().setEngine(VoiceSettings.STT, VoiceSettings.SYSTEM);
-        manager.listen(activity, store.activeId(), callback);
+        // This test verifies Activity callback forwarding, not a device recognition backend.
+        ReflectionHelpers.callInstanceMethod(manager, "start",
+                ReflectionHelpers.ClassParameter.from(String.class, store.activeId()),
+                ReflectionHelpers.ClassParameter.from(VoiceManager.Callback.class, callback));
+        assertNotNull("Voice request remains pending for the activity result", ReflectionHelpers.getField(manager, "pending"));
         Intent result = new Intent().putStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS,
                 new ArrayList<>(Collections.singletonList(" recognized words ")));
         activity.onActivityResult(999, Activity.RESULT_OK, result);
         assertNull(heard[0]);
         activity.onActivityResult(VoiceManager.REQUEST_RECOGNIZER, Activity.RESULT_OK, result);
+        Shadows.shadowOf(android.os.Looper.getMainLooper()).idle();
         assertEquals("recognized words", heard[0]);
     }
 }

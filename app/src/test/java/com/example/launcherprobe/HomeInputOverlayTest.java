@@ -5,6 +5,7 @@ import static org.junit.Assert.*;
 import android.content.Context;
 import java.io.File;
 import java.nio.file.Files;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import org.junit.Before;
 import org.junit.Test;
@@ -67,15 +68,15 @@ public class HomeInputOverlayTest {
         assertTrue(reopened.load().isEmpty());
         assertEquals(unsent.toJson().toString(), reopened.draftAttachments().get(0).toJson().toString());
         assertEquals(existing.toJson().toString(), reopened.draftAttachments(original).get(0).toJson().toString());
-        assertEquals("Unsent attachment", Files.readString(new AttachmentStore(context).requireFile(unsent).toPath()));
-        assertEquals("Original attachment", Files.readString(new AttachmentStore(context).requireFile(existing).toPath()));
+        assertEquals("Unsent attachment", new String(Files.readAllBytes(new AttachmentStore(context).requireFile(unsent).toPath()), StandardCharsets.UTF_8));
+        assertEquals("Original attachment", new String(Files.readAllBytes(new AttachmentStore(context).requireFile(existing).toPath()), StandardCharsets.UTF_8));
         assertEquals("Existing draft", reopened.draft(original));
     }
 
     private ChatAttachment attachment(String id, String content) throws Exception {
         File file = new File(context.getFilesDir(), "chat-attachments/" + id);
         Files.createDirectories(file.getParentFile().toPath());
-        Files.writeString(file.toPath(), content);
+        Files.write(file.toPath(), content.getBytes(StandardCharsets.UTF_8));
         return new ChatAttachment(id, id + ".txt", "text/plain", "file", file.length(), file.getAbsolutePath());
     }
 }

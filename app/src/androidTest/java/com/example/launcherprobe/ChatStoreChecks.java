@@ -9,7 +9,7 @@ import android.os.Bundle;
 import java.util.Arrays;
 import java.util.Collections;
 
-/** Store checks use test-package preferences; opt-in integration checks clean up temporary conversations. */
+/** Store checks use isolated fixture storage; opt-in integration checks clean up temporary conversations. */
 public final class ChatStoreChecks extends Instrumentation {
     private boolean storageOnly;
     private boolean npmOnly;
@@ -31,6 +31,22 @@ public final class ChatStoreChecks extends Instrumentation {
         start();
     }
 
+    // Instrumentation runs under the target UID, so isolate fixtures in its cache and pref namespace.
+    private Context storageContext() {
+        java.io.File root = new java.io.File(getTargetContext().getCacheDir(), "instrumentation-store");
+        java.io.File files = new java.io.File(root, "files"), cache = new java.io.File(root, "cache");
+        files.mkdirs();
+        cache.mkdirs();
+        return new android.content.ContextWrapper(getTargetContext()) {
+            @Override public Context getApplicationContext() { return this; }
+            @Override public java.io.File getFilesDir() { return files; }
+            @Override public java.io.File getCacheDir() { return cache; }
+            @Override public SharedPreferences getSharedPreferences(String name, int mode) {
+                return super.getSharedPreferences("instrumentation_store_" + name, mode);
+            }
+        };
+    }
+
     @Override public void onStart() {
         Bundle result = new Bundle();
         try {
@@ -38,6 +54,11 @@ public final class ChatStoreChecks extends Instrumentation {
                     || "voice-continuity".equals(featureCheck) || "search-consistency".equals(featureCheck)) {
                 result.putString("stream", ("share-intake".equals(featureCheck)
                         ? ShareIntakeChecks.run(this) : FeatureAcceptanceChecks.run(this, featureCheck)) + "\n");
+                finish(Activity.RESULT_OK, result);
+                return;
+            }
+            if ("migration".equals(featureCheck)) {
+                result.putString("stream", AssistantMigrationChecks.run(this) + "\n");
                 finish(Activity.RESULT_OK, result);
                 return;
             }
@@ -72,11 +93,11 @@ public final class ChatStoreChecks extends Instrumentation {
                 removeMonitor(monitor);
                 if (foreground == null) throw new AssertionError("Could not foreground the test application");
                 runOnMainSync(() -> foreground.getWindow().addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON));
-                result.putString("stream", NpmRuntimeChecks.run(getTargetContext(), getContext()) + "\n");
+                result.putString("stream", NpmRuntimeChecks.run(getTargetContext(), storageContext()) + "\n");
                 finish(Activity.RESULT_OK, result);
                 return;
             }
-            PiConfigChecks.run(getContext());
+            PiConfigChecks.run(storageContext());
             checkConversations();
             checkTreePersistence();
             checkPiContexts();
@@ -95,7 +116,7 @@ public final class ChatStoreChecks extends Instrumentation {
     }
 
     private void checkTreePersistence() {
-        Context context = getContext();
+        Context context = storageContext();
         SharedPreferences prefs = context.getSharedPreferences("chat", Context.MODE_PRIVATE);
         prefs.edit().clear().putString("history", "[{\"role\":\"user\",\"content\":\"old\"},{\"role\":\"assistant\",\"content\":\"answer\"}]").commit();
         ChatStore store = new ChatStore(context);
@@ -128,7 +149,7 @@ public final class ChatStoreChecks extends Instrumentation {
     }
 
     private void checkPiContexts() throws Exception {
-        Context context = getContext();
+        Context context = storageContext();
         ChatStore store = new ChatStore(context);
         store.newConversation();
         org.json.JSONArray nativeMessages = new org.json.JSONArray("[{\"role\":\"toolResult\",\"toolCallId\":\"read-1\",\"content\":[{\"type\":\"text\",\"text\":\"kept\"}]}]");
@@ -195,7 +216,7 @@ public final class ChatStoreChecks extends Instrumentation {
     }
 
     private void checkConversations() {
-        Context context = getContext();
+        Context context = storageContext();
         SharedPreferences prefs = context.getSharedPreferences("chat", Context.MODE_PRIVATE);
         prefs.edit().clear().putString("history", "[{\"role\":\"user\",\"content\":\"旧对话\"}]")
                 .putString("api_key", "test-only-key").commit();

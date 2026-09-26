@@ -163,7 +163,8 @@ public class TaskWidgetProviderTest {
         assertNull(ReflectionHelpers.getStaticField(ChatCoordinator.class, "instance"));
     }
 
-    @Test public void remoteViewsApplyAtBothSizesAndClicksAreDirectActivities() throws Exception {
+    @Test @org.robolectric.annotation.GraphicsMode(org.robolectric.annotation.GraphicsMode.Mode.NATIVE)
+    public void remoteViewsApplyAtBothSizesAndClicksAreDirectActivities() throws Exception {
         snapshot(display("a"));
         int id = widget();
         for (int height : new int[]{180, 320}) {
