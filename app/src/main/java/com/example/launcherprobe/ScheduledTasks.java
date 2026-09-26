@@ -52,6 +52,11 @@ final class ScheduledTasks {
                 || context.getSystemService(AlarmManager.class).canScheduleExactAlarms();
     }
 
+    /** Fresh definition snapshot only: searching must not recover runs or schedule execution. */
+    synchronized JSONArray tasksForSearch() throws JSONException {
+        return read().getJSONArray("tasks");
+    }
+
     synchronized JSONObject snapshot() throws Exception {
         JSONObject state = read();
         if (recoverRuns(state)) write(state);

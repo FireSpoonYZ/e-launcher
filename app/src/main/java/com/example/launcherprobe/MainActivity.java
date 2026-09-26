@@ -753,6 +753,14 @@ public class MainActivity extends BridgeActivity {
         return new NativeSearchPage.Host() {
             public void showDesktop() { closeNativeSearch(true); }
             public void sendToAssistant(String prompt) { sendSearchToAssistant(prompt); }
+            public void openConversation(String conversationId) {
+                closeNativeSearch(true);
+                MainActivity.this.openConversation(conversationId);
+            }
+            public void openScheduledTask(String taskId) {
+                closeNativeSearch(true);
+                launchWeb("/schedules?taskId=" + android.net.Uri.encode(taskId), null, null);
+            }
             public void openSettings(String destination) {
                 if ("assistant".equals(destination)) openAssistantSettings();
                 else startActivity(new Intent(MainActivity.this, DesktopSettingsActivity.class)

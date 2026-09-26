@@ -62,6 +62,16 @@ export function SchedulesPage() {
   const [menu, setMenu] = useState<ScheduledTask>();
   const [removing, setRemoving] = useState<ScheduledTask>();
   const [notice, setNotice] = useState('');
+  const [params, setParams] = useSearchParams();
+  const taskId = params.get('taskId');
+  useEffect(() => {
+    if (taskId === null || !state.data) return;
+    const task = state.data.tasks.find(item => item.id === taskId);
+    if (task) setEditing(task);
+    else setNotice(t('任务已删除或不存在', 'This task was deleted or no longer exists'));
+    const next = new URLSearchParams(params); next.delete('taskId');
+    setParams(next, {replace: true});
+  }, [taskId, state.data, params, setParams, t]);
   const tasks = state.data?.tasks ?? [];
   const enabled = tasks.filter(task => task.enabled).length;
   const visible = tasks.filter(task => filter === 'all' || task.enabled === (filter === 'enabled'));

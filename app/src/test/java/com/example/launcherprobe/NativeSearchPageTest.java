@@ -172,6 +172,8 @@ public class NativeSearchPageTest {
         int closed;
         @Override public void showDesktop() { closed++; }
         @Override public void sendToAssistant(String prompt) { }
+        @Override public void openConversation(String conversationId) { }
+        @Override public void openScheduledTask(String taskId) { }
         @Override public void openSettings(String destination) { }
         @Override public void onDragStarted(NativeSearchPage.DragItem item) { }
     }

@@ -279,12 +279,34 @@ function BranchPopover({conversation, disabled, close, onChange}: {conversation:
     <ErrorNotice error={action.error}/>
   </ComposerPopover>;
 }
+function useConversationSearch(search: string, archived: boolean, open = true) {
+  const [result, setResult] = useState<{query: string; items: ConversationSummary[]}>({query: '', items: []});
+  const [error, setError] = useState('');
+  const refresh = useRef<() => Promise<void>>(async () => {});
+  useEffect(() => {
+    if (!open) return;
+    let live = true;
+    const gate = new LatestRequest();
+    const load = async () => {
+      const request = gate.begin();
+      try {
+        const value = await (archived ? Chat.listArchivedConversations({query: search}) : Chat.listConversations({query: search}));
+        if (live && gate.current(request)) { setResult({query: search, items: value.conversations}); setError(''); }
+      } catch (e) { if (live && gate.current(request)) setError(errorText(e)); }
+    };
+    refresh.current = load;
+    const listener = Chat.addListener('chatEvent', event => { if (live && archiveEvent(event)) void load(); });
+    void load();
+    return () => { live = false; refresh.current = async () => {}; void listener.then(handle => handle.remove()); };
+  }, [search, archived, open]);
+  return {items: result.query === search && open ? result.items : [], error, load: () => refresh.current()};
+}
 function ConversationDrawer({open, close, conversation, activeRuns, onChange, onArchived}: {open: boolean; close(): void; conversation: Conversation; activeRuns: ChatSnapshot['activeRuns']; onChange(): Promise<void>; onArchived(item: ConversationSummary): void}) {
-  const [items, setItems] = useState<ConversationSummary[]>([]); const [search, setSearch] = useState(''); const [remove, setRemove] = useState<ConversationSummary>();
+  const [search, setSearch] = useState(''); const [remove, setRemove] = useState<ConversationSummary>();
+  const {items, error: searchError, load} = useConversationSearch(search, false, open);
   const [scheduleCount, setScheduleCount] = useState<number>();
   const action = useAction(); const t = useText(); const nav = useNavigate();
   const running = new Map(activeRuns.map(run => [run.conversationId, run]));
-  const load = () => Chat.listConversations().then(value => setItems(value.conversations));
   useEffect(() => {
     if (!open) return;
     let live = true;
@@ -292,20 +314,13 @@ function ConversationDrawer({open, close, conversation, activeRuns, onChange, on
       .catch(() => { if (live) setScheduleCount(undefined); });
     return () => { live = false; };
   }, [open]);
-  useEffect(() => {
-    if (!open) return;
-    let live = true;
-    void action.run(async () => { const value = await Chat.listConversations(); if (live) setItems(value.conversations); });
-    const listener = Chat.addListener('chatEvent', event => { if (live && archiveEvent(event)) void load(); });
-    return () => { live = false; void listener.then(handle => handle.remove()); };
-  }, [open]);
   const archive = (item: ConversationSummary) => action.run(async () => {
     await Chat.archiveConversation({conversationId: item.id});
     onArchived(item);
     if (item.id === conversation.id) await onChange();
     else await load();
   });
-  return <><Dialog open={open} onOpenChange={value => !value && close()} title={t('会话','Conversations')} drawer><SearchField value={search} onChange={setSearch} placeholder={t('搜索会话','Search conversations')}/><button className="wide-action" onClick={() => action.run(async () => { await Chat.newConversation(); await onChange(); })}><Plus/>{t('新会话','New conversation')}</button><button className="wide-action drawer-schedules" onClick={() => { close(); nav('/schedules'); }}><Clock3/><span>{t('定时任务','Scheduled tasks')}</span><span className="drawer-schedule-count">{scheduleCount ?? ''}<ChevronRight/></span></button><button className="wide-action drawer-archived" onClick={() => { close(); nav('/archived'); }}><Archive/><span>{t('已归档','Archived')}</span><ChevronRight/></button><ErrorNotice error={action.error}/><div className="conversation-list">{items.filter(item => item.title.toLowerCase().includes(search.toLowerCase())).map(item => { const run=running.get(item.id); const current = item.id === conversation.id; return <div className={`conversation-row ${current ? 'selected' : ''}`} key={item.id}><button onClick={() => action.run(async () => { await Chat.selectConversation({conversationId:item.id}); await onChange(); })}><span>{item.title}</span><small>{run ? run.message || t('正在回复…','Working…') : new Date(item.updated).toLocaleDateString()}</small></button><button className="icon-button" aria-label={t('归档会话','Archive conversation')} onClick={() => void archive(item)}><Archive/></button>{current && <button className="icon-button" aria-label={t('永久删除','Delete forever')} disabled={!!run} onClick={() => setRemove(item)}><Trash2/></button>}</div>;})}</div><button className="wide-action drawer-settings" onClick={() => { close(); nav('/settings'); }}><Settings/>{t('设置','Settings')}</button></Dialog><ConfirmDialog open={!!remove} title={t('永久删除会话？','Delete conversation forever?')} description={t('会话及所有分支、工作区将被删除，无法恢复。','This conversation, its branches, and workspace will be permanently deleted.')} danger onCancel={() => setRemove(undefined)} onConfirm={() => action.run(async () => { await Chat.deleteConversation({conversationId:remove!.id}); setRemove(undefined); await onChange(); })}/></>;
+  return <><Dialog open={open} onOpenChange={value => !value && close()} title={t('会话','Conversations')} drawer><SearchField value={search} onChange={setSearch} placeholder={t('搜索会话','Search conversations')}/><button className="wide-action" onClick={() => action.run(async () => { await Chat.newConversation(); await onChange(); })}><Plus/>{t('新会话','New conversation')}</button><button className="wide-action drawer-schedules" onClick={() => { close(); nav('/schedules'); }}><Clock3/><span>{t('定时任务','Scheduled tasks')}</span><span className="drawer-schedule-count">{scheduleCount ?? ''}<ChevronRight/></span></button><button className="wide-action drawer-archived" onClick={() => { close(); nav('/archived'); }}><Archive/><span>{t('已归档','Archived')}</span><ChevronRight/></button><ErrorNotice error={action.error || searchError}/><div className="conversation-list">{items.map(item => { const run=running.get(item.id); const current = item.id === conversation.id; return <div className={`conversation-row ${current ? 'selected' : ''}`} key={item.id}><button onClick={() => action.run(async () => { await Chat.selectConversation({conversationId:item.id}); await onChange(); })}><span>{item.title}</span>{item.snippet && <small>{item.snippet}</small>}<small>{run ? run.message || t('正在回复…','Working…') : new Date(item.updated).toLocaleDateString()}</small></button><button className="icon-button" aria-label={t('归档会话','Archive conversation')} onClick={() => void archive(item)}><Archive/></button>{current && <button className="icon-button" aria-label={t('永久删除','Delete forever')} disabled={!!run} onClick={() => setRemove(item)}><Trash2/></button>}</div>;})}</div><button className="wide-action drawer-settings" onClick={() => { close(); nav('/settings'); }}><Settings/>{t('设置','Settings')}</button></Dialog><ConfirmDialog open={!!remove} title={t('永久删除会话？','Delete conversation forever?')} description={t('会话及所有分支、工作区将被删除，无法恢复。','This conversation, its branches, and workspace will be permanently deleted.')} danger onCancel={() => setRemove(undefined)} onConfirm={() => action.run(async () => { await Chat.deleteConversation({conversationId:remove!.id}); setRemove(undefined); await onChange(); })}/></>;
 }
 function ModelSheet({conversation, disabled, close, onChange}: {conversation: Conversation; disabled: boolean; close(): void; onChange(): Promise<void>}) {
   const t = useText(); const nav = useNavigate(); const action = useAction();
@@ -344,23 +359,15 @@ export function HistoryPage() {
 }
 export function ArchivedPage() {
   const t = useText(); const nav = useNavigate(); const action = useAction();
-  const [items, setItems] = useState<ConversationSummary[]>([]);
   const [search, setSearch] = useState(''); const [remove, setRemove] = useState<ConversationSummary>();
   const [now, setNow] = useState(Date.now());
-  const load = (query?: string) => Chat.listArchivedConversations(query ? {query} : undefined).then(value => setItems(value.conversations));
+  const {items: visible, error: searchError, load} = useConversationSearch(search, true);
   useEffect(() => {
     const tick = setInterval(() => setNow(Date.now()), 60_000);
     return () => clearInterval(tick);
   }, []);
-  useEffect(() => {
-    let live = true;
-    void action.run(async () => { const value = await Chat.listArchivedConversations(search ? {query: search} : undefined); if (live) setItems(value.conversations); });
-    const listener = Chat.addListener('chatEvent', event => { if (live && archiveEvent(event)) void load(search); });
-    return () => { live = false; void listener.then(handle => handle.remove()); };
-  }, [search]);
-  const visible = items.filter(item => item.title.toLowerCase().includes(search.toLowerCase()));
-  return <main className="page archived-page"><Header title={t('已归档','Archived')}/><p className="archive-ttl">{t('归档会话会在 14 天后自动删除。恢复不会改动更新时间；再次归档会重新计时。','Archived conversations are deleted 14 days after this archive. Restore does not change last-updated time; archiving again restarts the timer.')}</p><SearchField value={search} onChange={setSearch} placeholder={t('搜索已归档会话','Search archived')}/><ErrorNotice error={action.error}/>{!visible.length ? <Empty>{t('没有已归档会话','No archived conversations')}</Empty> : <div className="conversation-list archived-list">{visible.map(item => {
+  return <main className="page archived-page"><Header title={t('已归档','Archived')}/><p className="archive-ttl">{t('归档会话会在 14 天后自动删除。恢复不会改动更新时间；再次归档会重新计时。','Archived conversations are deleted 14 days after this archive. Restore does not change last-updated time; archiving again restarts the timer.')}</p><SearchField value={search} onChange={setSearch} placeholder={t('搜索已归档会话','Search archived')}/><ErrorNotice error={action.error || searchError}/>{!visible.length ? <Empty>{t('没有已归档会话','No archived conversations')}</Empty> : <div className="conversation-list archived-list">{visible.map(item => {
     const archivedAt = item.archivedAt ?? 0;
-    return <div className="conversation-row" key={item.id}><button onClick={() => action.run(async () => { await Chat.selectConversation({conversationId: item.id}); nav(`/chat/${item.id}`); })}><span>{item.title}</span><small>{archiveTimeLabel(archivedAt, t)}</small><small>{remainingLabel(archivedAt, t, now)}</small></button><button className="icon-button" aria-label={t('恢复','Restore')} onClick={() => action.run(async () => { await Chat.restoreConversation({conversationId: item.id}); await load(search); })}><ArchiveRestore/></button><button className="icon-button" aria-label={t('永久删除','Delete forever')} onClick={() => setRemove(item)}><Trash2/></button></div>;
-  })}</div>}<ConfirmDialog open={!!remove} title={t('永久删除会话？','Delete conversation forever?')} description={t('会话及所有分支、工作区将被删除，无法恢复。','This conversation, its branches, and workspace will be permanently deleted.')} danger onCancel={() => setRemove(undefined)} onConfirm={() => action.run(async () => { await Chat.deleteConversation({conversationId: remove!.id}); setRemove(undefined); await load(search); })}/></main>;
+    return <div className="conversation-row" key={item.id}><button onClick={() => action.run(async () => { await Chat.selectConversation({conversationId: item.id}); nav(`/chat/${item.id}`); })}><span>{item.title}</span>{item.snippet && <small>{item.snippet}</small>}<small>{archiveTimeLabel(archivedAt, t)}</small><small>{remainingLabel(archivedAt, t, now)}</small></button><button className="icon-button" aria-label={t('恢复','Restore')} onClick={() => action.run(async () => { await Chat.restoreConversation({conversationId: item.id}); await load(); })}><ArchiveRestore/></button><button className="icon-button" aria-label={t('永久删除','Delete forever')} onClick={() => setRemove(item)}><Trash2/></button></div>;
+  })}</div>}<ConfirmDialog open={!!remove} title={t('永久删除会话？','Delete conversation forever?')} description={t('会话及所有分支、工作区将被删除，无法恢复。','This conversation, its branches, and workspace will be permanently deleted.')} danger onCancel={() => setRemove(undefined)} onConfirm={() => action.run(async () => { await Chat.deleteConversation({conversationId: remove!.id}); setRemove(undefined); await load(); })}/></main>;
 }

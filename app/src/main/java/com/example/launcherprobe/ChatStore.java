@@ -299,14 +299,22 @@ public final class ChatStore {
                 if (content == null || content.trim().isEmpty()
                         || !content.toLowerCase(Locale.ROOT).contains(needle)) continue;
                 matched = true;
-                snippet = content.replaceAll("[\\r\\n]+", " ").trim();
-                snippet = snippet.substring(0, Math.min(120, snippet.length()));
+                snippet = searchSnippet(content, needle);
                 break;
             }
             if (matched) matches.add(new Conversation(conversation.id, conversation.title,
                     conversation.updated, snippet, conversation.archivedAt));
         }
         return matches;
+    }
+
+    static String searchSnippet(String content, String query) {
+        String text = content.replaceAll("[\\r\\n]+", " ").trim();
+        String needle = query == null ? "" : query.trim().toLowerCase(Locale.ROOT);
+        int hit = text.toLowerCase(Locale.ROOT).indexOf(needle);
+        int start = Math.min(text.length(), Math.max(0, hit - 40));
+        int end = Math.min(text.length(), Math.max(start + 120, hit + needle.length()));
+        return (start > 0 ? "…" : "") + text.substring(start, end) + (end < text.length() ? "…" : "");
     }
 
     List<String> taskCardIds() {

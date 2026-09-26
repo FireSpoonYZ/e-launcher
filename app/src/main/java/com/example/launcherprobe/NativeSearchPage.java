@@ -54,6 +54,8 @@ public final class NativeSearchPage extends FrameLayout {
         void showDesktop();
         /** Must create, submit through ChatCoordinator, and open the existing chat; not a draft action. */
         void sendToAssistant(String prompt);
+        void openConversation(String conversationId);
+        void openScheduledTask(String taskId);
         /** destination is desktop/grid/layout/dock/search/folders/widgets/gestures/wallpaper/icons/theme/backup/assistant. */
         void openSettings(String destination);
         /** Called after startDragAndDrop succeeds. Reveal the desktop without ending the drag. */
@@ -124,7 +126,7 @@ public final class NativeSearchPage extends FrameLayout {
         searchBar.addView(magnifier, new LinearLayout.LayoutParams(dp(22), dp(22)));
         input = new EditText(activity); input.setSingleLine(true);
         input.setTextColor(colors.ink); input.setHintTextColor(colors.muted); input.setTextSize(16);
-        input.setHint(mode == Mode.APP_LIBRARY ? "搜索应用" : "搜索应用、快捷方式、设置与文件");
+        input.setHint(mode == Mode.APP_LIBRARY ? "搜索应用" : "搜索应用、会话、定时任务与文件");
         input.setBackgroundColor(android.graphics.Color.TRANSPARENT);
         input.setPadding(dp(10), 0, 0, 0);
         input.setImeOptions(android.view.inputmethod.EditorInfo.IME_ACTION_SEARCH);
@@ -481,6 +483,15 @@ public final class NativeSearchPage extends FrameLayout {
             if (!result.shortcutNotice().isEmpty()) rows.add(new Row(result.shortcutNotice(), null,
                     () -> open(new Intent(Settings.ACTION_HOME_SETTINGS)), false));
             else if (result.shortcuts().isEmpty()) rows.add(new Row("没有匹配的快捷方式", null, null, false));
+            conversationRows("会话", result.conversations());
+            conversationRows("已归档会话", result.archived());
+            header("定时任务");
+            for (LauncherSearchIndex.Task task : result.tasks()) {
+                Row row = new Row(task.title(), null, () -> host.openScheduledTask(task.id()), false);
+                row.subtitle = task.snippet();
+                rows.add(row);
+            }
+            if (result.tasks().isEmpty()) rows.add(new Row("没有匹配的定时任务", null, null, false));
             header("设置");
             for (LauncherSearchIndex.Setting setting : result.settings())
                 rows.add(new Row(setting.label(), null, () -> {
@@ -497,6 +508,16 @@ public final class NativeSearchPage extends FrameLayout {
             rows.add(new Row("授权文件夹", null, this::authorizeDirectory, false));
         }
         notifyRows();
+    }
+
+    private void conversationRows(String title, List<ChatStore.Conversation> conversations) {
+        header(title);
+        for (ChatStore.Conversation conversation : conversations) {
+            Row row = new Row(conversation.title, null, () -> host.openConversation(conversation.id), false);
+            row.subtitle = conversation.snippet;
+            rows.add(row);
+        }
+        if (conversations.isEmpty()) rows.add(new Row("没有匹配的会话", null, null, false));
     }
 
     private void notifyRows() {
@@ -697,6 +718,11 @@ public final class NativeSearchPage extends FrameLayout {
             if (row.heading) { label.setTypeface(null, android.graphics.Typeface.BOLD); label.setAccessibilityHeading(true); }
             else { label.setMaxLines(2); label.setEllipsize(android.text.TextUtils.TruncateAt.END); }
             words.addView(label);
+            if (row.subtitle != null && !row.subtitle.isEmpty()) {
+                TextView snippet = text(row.subtitle, 12, colors.muted);
+                snippet.setMaxLines(2); snippet.setEllipsize(android.text.TextUtils.TruncateAt.END);
+                words.addView(snippet);
+            }
             if (row.accent) {
                 label.setTypeface(null, android.graphics.Typeface.BOLD);
                 TextView subtitle = text("新建对话并发送", 11, colors.muted); subtitle.setPadding(0, dp(3), 0, 0); words.addView(subtitle);
@@ -858,6 +884,7 @@ public final class NativeSearchPage extends FrameLayout {
         final boolean accent;
         boolean heading, grouped;
         String section = "";
+        String subtitle;
         LauncherSearchIndex.Shortcut shortcut;
         Row(String title, List<LauncherSearchIndex.App> apps, Runnable click, boolean accent) {
             this.title = title; this.apps = apps; this.click = click; this.accent = accent;
@@ -870,6 +897,8 @@ public final class NativeSearchPage extends FrameLayout {
             case "应用" -> "grid";
             case "快捷方式" -> "link";
             case "设置" -> "settings";
+            case "会话", "已归档会话" -> "bubble";
+            case "定时任务" -> "list";
             default -> "file";
         };
     }

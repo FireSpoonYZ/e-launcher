@@ -35,8 +35,10 @@ final class LauncherSearchIndex {
     record Shortcut(ShortcutInfo info, String label) { }
     record Setting(String label, String destination, Intent intent) { }
     record FileResult(String name, Uri uri, String mime) { }
+    record Task(String id, String title, String snippet) { }
     record Result(List<App> apps, List<Shortcut> shortcuts, List<Setting> settings,
-            List<FileResult> files, String shortcutNotice, String fileNotice) { }
+            List<FileResult> files, String shortcutNotice, String fileNotice,
+            List<ChatStore.Conversation> conversations, List<ChatStore.Conversation> archived, List<Task> tasks) { }
 
     final List<App> apps;
     private final Context context;
@@ -77,7 +79,7 @@ final class LauncherSearchIndex {
             if (app.matches(query)) matches.add(app);
         }
         if (!global || query.trim().isEmpty())
-            return new Result(matches, List.of(), List.of(), List.of(), "", "");
+            return new Result(matches, List.of(), List.of(), List.of(), "", "", List.of(), List.of(), List.of());
         DesktopPreferences preferences = new DesktopPreferences(context);
         List<Shortcut> shortcutResults = new ArrayList<>();
         String shortcutNotice = "";
@@ -94,13 +96,35 @@ final class LauncherSearchIndex {
             shortcutNotice = "快捷方式暂不可访问，请检查默认桌面授权";
         }
         List<Setting> settings = settings(query, matches);
+        ChatStore store = new ChatStore(context);
+        List<ChatStore.Conversation> conversations = store.conversations(query);
+        cancellation.throwIfCanceled();
+        List<ChatStore.Conversation> archived = store.archivedConversations(query);
+        List<Task> tasks = tasks(query, cancellation);
         if (!preferences.searchFiles()) return new Result(matches, shortcutResults, settings, List.of(),
-                shortcutNotice, "已在桌面设置中关闭文件名称搜索");
+                shortcutNotice, "已在桌面设置中关闭文件名称搜索", conversations, archived, tasks);
         localResults.accept(new Result(matches, shortcutResults, settings, List.of(), shortcutNotice,
-                "正在搜索已授权目录的文件名…"));
+                "正在搜索已授权目录的文件名…", conversations, archived, tasks));
         List<FileResult> files = new ArrayList<>();
         String fileNotice = findFiles(query, files, cancellation);
-        return new Result(matches, shortcutResults, settings, files, shortcutNotice, fileNotice);
+        return new Result(matches, shortcutResults, settings, files, shortcutNotice, fileNotice, conversations, archived, tasks);
+    }
+
+    private List<Task> tasks(String query, CancellationSignal cancellation) {
+        List<Task> result = new ArrayList<>();
+        String needle = query.trim().toLowerCase(java.util.Locale.ROOT);
+        try {
+            org.json.JSONArray tasks = ScheduledTasks.get(context).tasksForSearch();
+            for (int i = 0; i < tasks.length(); i++) {
+                cancellation.throwIfCanceled();
+                org.json.JSONObject task = tasks.getJSONObject(i);
+                String title = task.getString("title"), prompt = task.getString("prompt");
+                if (title.toLowerCase(java.util.Locale.ROOT).contains(needle)
+                        || prompt.toLowerCase(java.util.Locale.ROOT).contains(needle))
+                    result.add(new Task(task.getString("id"), title, ChatStore.searchSnippet(prompt, query)));
+            }
+        } catch (org.json.JSONException failure) { throw new IllegalStateException("无法读取定时任务", failure); }
+        return result;
     }
 
     private List<Setting> settings(String query, List<App> matchingApps) {
