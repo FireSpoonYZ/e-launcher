@@ -50,6 +50,11 @@ public final class ChatStoreChecks extends Instrumentation {
     @Override public void onStart() {
         Bundle result = new Bundle();
         try {
+            if ("chat-persistence".equals(featureCheck)) {
+                result.putString("stream", ChatPersistenceChecks.run(this) + "\n");
+                finish(Activity.RESULT_OK, result);
+                return;
+            }
             if ("share-intake".equals(featureCheck) || "share-ui".equals(featureCheck) || "notifications".equals(featureCheck)
                     || "voice-continuity".equals(featureCheck) || "search-consistency".equals(featureCheck)) {
                 result.putString("stream", ("share-intake".equals(featureCheck)
