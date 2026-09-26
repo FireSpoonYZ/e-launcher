@@ -142,7 +142,7 @@ public final class TaskDetailActivity extends ComponentActivity {
     @Override protected void onResume() {
         super.onResume();
         readingTask = true;
-        coordinator.markTaskRead(id);
+        if (hasWindowFocus()) coordinator.markTaskRead(id);
         TaskNotifications.requestPermission(this);
         new Thread(() -> {
             try { coordinator.purgeExpiredArchives(); }
@@ -150,6 +150,10 @@ public final class TaskDetailActivity extends ComponentActivity {
             if (isFinishing()) return;
             runOnUiThread(() -> { if (!isFinishing()) refresh(); });
         }, "archive-purge").start();
+    }
+    @Override public void onWindowFocusChanged(boolean focused) {
+        super.onWindowFocusChanged(focused);
+        if (focused && readingTask) coordinator.markTaskRead(id);
     }
     @Override protected void onPause() { readingTask = false; super.onPause(); }
     @Override protected void onStop() { desktop.stop(); coordinator.removeListener(listener); super.onStop(); }
@@ -159,7 +163,7 @@ public final class TaskDetailActivity extends ComponentActivity {
     private void refresh() {
         JSONObject card = id == null ? null : coordinator.taskCard(id);
         if (card == null) { finish(); return; }
-        if (readingTask) coordinator.markTaskRead(id);
+        if (readingTask && hasWindowFocus()) coordinator.markTaskRead(id);
         currentCard = card;
         if (latestReply != null && replyExpanded) latestReply.setText(card.optString("result"));
         renderTaskPane(card);

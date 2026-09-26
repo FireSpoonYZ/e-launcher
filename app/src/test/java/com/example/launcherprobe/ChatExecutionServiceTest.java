@@ -64,6 +64,20 @@ public class ChatExecutionServiceTest {
         ChatExecutionService.setActiveCount(application, 0);
     }
 
+    @Test public void alreadyFinishedTurnDoesNotStopPendingStartBeforePromotion() {
+        ChatExecutionService.setActiveCount(application, 1);
+        Intent stale = shadowApplication.getNextStartedService();
+        ChatExecutionService.setActiveCount(application, 0);
+        org.junit.Assert.assertNull("Stopping a not-yet-promoted FGS crashes Android", shadowApplication.getNextStoppedService());
+        ServiceController<ChatExecutionService> controller = Robolectric.buildService(ChatExecutionService.class).create();
+        try {
+            controller.get().onStartCommand(stale, 0, 1);
+            assertTrue(Shadows.shadowOf(controller.get()).isStoppedBySelf());
+            PowerManager.WakeLock lock = ReflectionHelpers.getField(controller.get(), "executionWakeLock");
+            assertFalse(lock.isHeld());
+        } finally { controller.destroy(); }
+    }
+
     @Test public void notificationCountTracksOneTwoOneZero() {
         ServiceController<ChatExecutionService> controller = Robolectric.buildService(ChatExecutionService.class).create();
         ChatExecutionService service = controller.get();

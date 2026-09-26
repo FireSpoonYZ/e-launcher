@@ -467,6 +467,12 @@ public class MainActivity extends BridgeActivity {
                 && expected.getAuthority().equals(actual.getAuthority());
     }
 
+    @Override public void onWindowFocusChanged(boolean focused) {
+        super.onWindowFocusChanged(focused);
+        if (focused && chatWebView != null && pager != null && pager.page() == PagerState.Page.CHAT)
+            chatWebView.evaluateJavascript("window.dispatchEvent(new Event('native-navigation'))", null);
+    }
+
     boolean isTaskConversationVisible(String conversationId) {
         if (!hasWindowFocus() || nativeSearchPage != null || pager == null || pager.page() != PagerState.Page.CHAT
                 || !trustedWebContent || !chatStore.activeId().equals(conversationId)) return false;

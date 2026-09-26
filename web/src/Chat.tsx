@@ -83,7 +83,7 @@ export function useChat() {
     const id = snapshot?.conversationId;
     if (!id) return;
     const markRead = () => {
-      if (document.visibilityState === 'visible' && document.hasFocus()
+      if (document.visibilityState === 'visible'
           && /^#\/chat(?:\/|\?|$)/.test(location.hash))
         void Chat.markTaskRead({conversationId: id}).catch(() => {});
     };
@@ -96,7 +96,7 @@ export function useChat() {
       window.removeEventListener('native-navigation', markRead);
       document.removeEventListener('visibilitychange', markRead);
     };
-  }, [snapshot?.conversationId, snapshot?.running]);
+  }, [snapshot?.conversationId, snapshot?.running, snapshot?.running ? undefined : snapshot?.sequence]);
   return {snapshot, error, status, questionnaireReply, refresh: () => refreshRef.current()};
 }
 export function lineage(conversation: Conversation) {

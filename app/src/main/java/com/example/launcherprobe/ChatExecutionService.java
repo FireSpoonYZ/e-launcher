@@ -29,8 +29,11 @@ public final class ChatExecutionService extends Service {
         Intent service = new Intent(context, ChatExecutionService.class)
                 .putExtra(EXTRA_COUNT, activeCount).putExtra(EXTRA_GENERATION, next);
         if (activeCount == 0) {
-            foreground = false;
-            context.stopService(service);
+            // A pending start must reach onStartCommand and promote before it may stop.
+            if (foreground) {
+                foreground = false;
+                context.stopService(service);
+            }
         } else if (foreground) {
             context.getSystemService(NotificationManager.class).notify(NOTIFICATION_ID,
                     notification(context, activeCount));
@@ -58,12 +61,17 @@ public final class ChatExecutionService extends Service {
         long requestedGeneration = intent == null ? -1 : intent.getLongExtra(EXTRA_GENERATION, -1);
         synchronized (ChatExecutionService.class) {
             int count = countFor(requestedGeneration);
+            // Each foreground-service start needs promotion, including stale commands
+            // delivered to an already-created service after a rapid stop/restart.
+            startForeground(NOTIFICATION_ID, notification(this, Math.max(1, activeCount)),
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC);
             if (count < 1) {
-                if (activeCount == 0) stopSelf(startId);
+                if (activeCount == 0) {
+                    stopForeground(STOP_FOREGROUND_REMOVE);
+                    stopSelf(startId);
+                }
                 return START_NOT_STICKY;
             }
-            startForeground(NOTIFICATION_ID, notification(this, count),
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC);
             if (!executionWakeLock.isHeld()) executionWakeLock.acquire();
             foreground = true;
         }

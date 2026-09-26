@@ -82,6 +82,37 @@ public class ShareIntakeTest {
         store.clear(target);
         assertThrows(IllegalStateException.class, () -> store.importShareDraft(token(), target, "bad", List.of()));
     }
+    @Test public void failedPreferenceCommitRestoresDraftIndexAndReceipt() throws Exception {
+        String target = store.importShareDraft(token(), null, "keep", List.of(staged("original")));
+        android.content.SharedPreferences real = context.getSharedPreferences("chat", 0);
+        String index = real.getString("conversations", null);
+        String attachments = real.getString("draft_attachments_" + target, null);
+        java.util.concurrent.atomic.AtomicBoolean failNext = new java.util.concurrent.atomic.AtomicBoolean(true);
+        android.content.SharedPreferences failing = (android.content.SharedPreferences) java.lang.reflect.Proxy.newProxyInstance(
+                getClass().getClassLoader(), new Class<?>[]{android.content.SharedPreferences.class}, (proxy, method, args) -> {
+                    if (!method.getName().equals("edit")) return method.invoke(real, args);
+                    android.content.SharedPreferences.Editor edit = real.edit();
+                    return java.lang.reflect.Proxy.newProxyInstance(getClass().getClassLoader(),
+                            new Class<?>[]{android.content.SharedPreferences.Editor.class}, (editorProxy, editMethod, values) -> {
+                                if (editMethod.getName().equals("commit") && failNext.getAndSet(false)) {
+                                    edit.apply(); // Android has already replaced its in-memory values when disk writing fails.
+                                    return false;
+                                }
+                                Object result = editMethod.invoke(edit, values);
+                                return result == edit ? editorProxy : result;
+                            });
+                });
+        org.robolectric.util.ReflectionHelpers.setField(store, "preferences", failing);
+        String operation = token();
+        ChatAttachment added = staged("must roll back");
+        assertThrows(IllegalStateException.class, () -> store.importShareDraft(operation, target, "lost", List.of(added)));
+        assertEquals("keep", store.draft(target));
+        assertEquals(index, real.getString("conversations", null));
+        assertEquals(attachments, real.getString("draft_attachments_" + target, null));
+        assertFalse(real.contains("share_intake_" + operation));
+        assertFalse(new File(context.getFilesDir(), "chat-attachments/" + added.id).exists());
+    }
+
     @Test public void previewCancelAndRecreationDoNotImport() {
         store.saveDraft("unchanged");
         int count = store.conversations().size();

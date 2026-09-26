@@ -153,6 +153,10 @@ public final class ChatStore {
                 throw new IllegalStateException("会话已删除或已归档，请重新选择");
             if ((text == null || text.isBlank()) && staged.isEmpty())
                 throw new IllegalArgumentException("没有可导入的分享内容");
+            String oldDraft = preferences.getString("draft_" + id, null);
+            String oldAttachments = preferences.getString("draft_attachments_" + id, null);
+            String oldIndex = preferences.getString("conversations", null);
+            boolean committing = false;
             List<ChatAttachment> published = new ArrayList<>();
             try {
                 for (ChatAttachment attachment : staged) published.add(attachments.publish(attachment));
@@ -165,9 +169,14 @@ public final class ChatStore {
                         .putString("draft_attachments_" + id, AttachmentStore.json(merged).toString())
                         .putString(receipt, id);
                 registerConversation(edit, id);
+                committing = true;
                 if (!edit.commit()) throw new IllegalStateException("无法保存分享草稿");
                 return id;
             } catch (Exception exception) {
+                // SharedPreferences updates memory even when its disk commit fails.
+                if (committing) preferences.edit().putString("draft_" + id, oldDraft)
+                        .putString("draft_attachments_" + id, oldAttachments)
+                        .putString("conversations", oldIndex).remove(receipt).commit();
                 for (ChatAttachment attachment : published) new java.io.File(attachment.path).delete();
                 throw exception;
             }
@@ -312,8 +321,8 @@ public final class ChatStore {
         String text = content.replaceAll("[\\r\\n]+", " ").trim();
         String needle = query == null ? "" : query.trim().toLowerCase(Locale.ROOT);
         int hit = text.toLowerCase(Locale.ROOT).indexOf(needle);
-        int start = Math.min(text.length(), Math.max(0, hit - 40));
-        int end = Math.min(text.length(), Math.max(start + 120, hit + needle.length()));
+        int start = Math.min(text.length(), Math.max(0, hit - 16));
+        int end = Math.min(text.length(), start + 118);
         return (start > 0 ? "…" : "") + text.substring(start, end) + (end < text.length() ? "…" : "");
     }
 

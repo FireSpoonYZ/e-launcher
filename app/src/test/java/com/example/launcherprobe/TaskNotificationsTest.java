@@ -137,10 +137,19 @@ public class TaskNotificationsTest {
                 org.robolectric.Robolectric.buildActivity(TaskDetailActivity.class,
                         new Intent(context, TaskDetailActivity.class)
                                 .putExtra(TaskDetailActivity.EXTRA_CONVERSATION_ID, run.conversationId)).setup()) {
+            detail.windowFocusChanged(true);
             assertFalse(store.taskResultUnread(run.conversationId));
             assertNull(notification(run.conversationId));
             assertTrue(store.taskResultUnread(other.conversationId));
             assertNotNull(notification(other.conversationId));
+            detail.windowFocusChanged(false);
+            store.selectConversation(run.conversationId);
+            ChatCoordinator.SessionRun next = coordinator.registerRun(run.conversationId, null);
+            coordinator.finish(next, "completed", "");
+            Shadows.shadowOf(android.os.Looper.getMainLooper()).idle();
+            assertTrue("covered detail keeps a new result unread", store.taskResultUnread(run.conversationId));
+            detail.windowFocusChanged(true);
+            assertFalse(store.taskResultUnread(run.conversationId));
         }
     }
 

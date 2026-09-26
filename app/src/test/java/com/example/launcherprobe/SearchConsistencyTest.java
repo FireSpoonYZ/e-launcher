@@ -57,7 +57,7 @@ public class SearchConsistencyTest {
         assertFalse(hit.title.contains("中文命中"));
         assertTrue(hit.snippet.contains("中文命中"));
         assertTrue(hit.snippet.startsWith("…"));
-        assertTrue(hit.snippet.length() <= 122);
+        assertTrue(hit.snippet.length() <= 120);
         assertEquals(1, store.conversations("   ").size());
         assertNull(store.conversations("").get(0).snippet);
         store.archive(id);

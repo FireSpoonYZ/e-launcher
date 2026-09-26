@@ -16,9 +16,11 @@ public final class ChatStoreChecks extends Instrumentation {
     private boolean questionnaireOnly;
     private boolean showerPreviewOnly;
     private boolean workbenchOnly;
+    private String featureCheck;
 
     @Override public void onCreate(Bundle arguments) {
         super.onCreate(arguments);
+        featureCheck = arguments == null ? "" : arguments.getString("checks", "");
         storageOnly = arguments != null && "store".equals(arguments.getString("checks"));
         npmOnly = arguments != null && "npm".equals(arguments.getString("checks"));
         questionnaireOnly = arguments != null && "questionnaire".equals(arguments.getString("checks"));
@@ -30,6 +32,13 @@ public final class ChatStoreChecks extends Instrumentation {
     @Override public void onStart() {
         Bundle result = new Bundle();
         try {
+            if ("share-intake".equals(featureCheck) || "share-ui".equals(featureCheck) || "notifications".equals(featureCheck)
+                    || "voice-continuity".equals(featureCheck) || "search-consistency".equals(featureCheck)) {
+                result.putString("stream", ("share-intake".equals(featureCheck)
+                        ? ShareIntakeChecks.run(this) : FeatureAcceptanceChecks.run(this, featureCheck)) + "\n");
+                finish(Activity.RESULT_OK, result);
+                return;
+            }
             if (workbenchOnly) {
                 result.putString("stream", WorkbenchChecks.run(this) + "\n");
                 finish(Activity.RESULT_OK, result);
