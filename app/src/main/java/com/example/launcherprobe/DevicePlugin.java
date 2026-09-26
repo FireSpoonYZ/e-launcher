@@ -2,7 +2,6 @@ package com.example.launcherprobe;
 
 import android.Manifest;
 import android.app.Activity;
-import android.app.role.RoleManager;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.net.Uri;
@@ -287,8 +286,6 @@ public final class DevicePlugin extends Plugin {
         try {
             String target = required(call, "target"); Intent intent;
             if ("app".equals(target)) intent = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:" + getContext().getPackageName()));
-            else if ("home".equals(target)) intent = new Intent(Settings.ACTION_HOME_SETTINGS);
-            else if ("accessibility".equals(target)) intent = new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS);
             else if ("settings".equals(target)) intent = new Intent(Settings.ACTION_SETTINGS);
             else if ("tts".equals(target)) intent = new Intent("com.android.settings.TTS_SETTINGS");
             else if ("assistant".equals(target)) intent = new Intent(Settings.ACTION_MANAGE_DEFAULT_APPS_SETTINGS);
@@ -303,20 +300,6 @@ public final class DevicePlugin extends Plugin {
         } catch (Exception exception) { reject(call, exception); }
     }
     @PluginMethod public void repairPermissions(PluginCall call) { repair.repairFromButton(); call.resolve(); }
-    @PluginMethod public void requestHome(PluginCall call) {
-        RoleManager roles = getContext().getSystemService(RoleManager.class);
-        if (roles == null || !roles.isRoleAvailable(RoleManager.ROLE_HOME)) { call.reject("系统未提供 HOME 角色请求"); return; }
-        if (roles.isRoleHeld(RoleManager.ROLE_HOME)) { call.resolve(); return; }
-        startActivityForResult(call, roles.createRequestRoleIntent(RoleManager.ROLE_HOME), "roleResult");
-    }
-    @ActivityCallback private void roleResult(PluginCall call, androidx.activity.result.ActivityResult result) { if (call != null) call.resolve(stateObject()); }
-    // Overlay input must belong to the main Looper, not the WebView's disposable plugin thread.
-    @PluginMethod public void enableGestures(PluginCall call) {
-        getActivity().runOnUiThread(() -> { GestureService.enable(getContext()); call.resolve(stateObject()); });
-    }
-    @PluginMethod public void disableGestures(PluginCall call) {
-        getActivity().runOnUiThread(() -> { GestureService.disable(getContext()); call.resolve(stateObject()); });
-    }
     @PluginMethod public void share(PluginCall call) {
         try { getActivity().startActivity(Intent.createChooser(new Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, required(call, "text")), call.getString("title", "分享"))); call.resolve(); }
         catch (Exception exception) { reject(call, exception); }
@@ -334,24 +317,20 @@ public final class DevicePlugin extends Plugin {
     }
     @PluginMethod public void close(PluginCall call) {
         call.resolve();
-        if (getActivity() instanceof MainActivity) {
-            ((MainActivity) getActivity()).showHomeFromWeb();
-        } else {
-            getActivity().finish();
-        }
+        getActivity().runOnUiThread(() -> getActivity().finish());
     }
 
     private JSObject stateObject() {
         android.content.SharedPreferences ui = getContext().getSharedPreferences("ui", android.content.Context.MODE_PRIVATE);
-        RoleManager roles = getContext().getSystemService(RoleManager.class);
         String route = getActivity() instanceof MainActivity ? ((MainActivity) getActivity()).launchRoute() : null;
         return object("launchRoute", route == null ? "/chat" : route,
                 "language", ui.getString("language", "system"), "theme", ui.getString("theme", "system"),
                 "background", ui.getString("background", "circles"), "backgroundMask", AppAppearance.maskStrength(getContext()),
                 "backgroundPath", new java.io.File(getContext().getFilesDir(), "appearance/background.png").isFile()
                     ? new java.io.File(getContext().getFilesDir(), "appearance/background.png").getAbsolutePath() : "",
-                "homeRole", roles != null && roles.isRoleHeld(RoleManager.ROLE_HOME), "gestureStatus", GestureService.status(getContext()),
-                "canWriteSecureSettings", GestureService.canWrite(getContext()), "accessibilityConnected", GestureService.isConnected());
+                "canWriteSecureSettings", getContext().checkSelfPermission(Manifest.permission.WRITE_SECURE_SETTINGS) == PackageManager.PERMISSION_GRANTED,
+                "legacyNavigationPending", LegacyNavigationRecovery.pending(getContext()),
+                "legacyNavigationStatus", LegacyNavigationRecovery.status(getContext()), "shizukuStatus", ShizukuRepair.statusText());
     }
     private static JSObject object(Object... values) {
         JSObject result = new JSObject();

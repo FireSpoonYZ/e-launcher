@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { Capacitor } from '@capacitor/core';
 import { App as CapacitorApp } from '@capacitor/app';
 import * as Switch from '@radix-ui/react-switch';
-import { Database, ExternalLink, FileText, Grid2X2, Hand, Info, Mic, Palette, Puzzle, RefreshCw, Settings, Share2, Shield, SlidersHorizontal } from 'lucide-react';
+import { Database, ExternalLink, FileText, Grid2X2, Info, Mic, Palette, Puzzle, RefreshCw, Settings, Share2, Shield, SlidersHorizontal } from 'lucide-react';
 import { Device, NativeSettings, type DeviceState, type VoiceRemote, type VoiceState } from './native';
 import { Dialog } from './components/ui/dialog';
 import { Environment, ErrorNotice, Header, Row, Section, useAction, useText } from './ui';
@@ -13,7 +13,7 @@ export function SettingsHome() {
   return <main className="page settings-home"><Header title={t('设置','Settings')}/><Section title={t('偏好','Preferences')}>
     <Row icon={<Settings/>} title={t('通用','General')} detail={t('语言与权限规则','Language & permission rules')} onClick={() => nav('/settings/general')}/>
     <Row icon={<Palette/>} title={t('外观','Appearance')} detail={t('主题与背景','Theme & background')} onClick={() => nav('/settings/appearance')}/>
-    <Row icon={<Hand/>} title={t('桌面与手势','Home & gestures')} detail={t('默认桌面与系统权限','Default home & permissions')} onClick={() => nav('/settings/device')}/>
+    <Row icon={<Shield/>} title={t('助手权限','Assistant permissions')} detail={t('Shizuku、系统权限与迁移状态','Shizuku, permissions & migration status')} onClick={() => nav('/settings/device')}/>
   </Section><Section title={t('AI 与工具','AI & tools')}>
     <Row icon={<FileText/>} title={t('全局 AGENTS.md','Global AGENTS.md')} detail={t('编辑与保存全局 Agent 指令','Edit and save global agent instructions')} onClick={() => nav('/settings/editor?project=false&file=AGENTS.md')}/>
     <Row icon={<Database/>} title={t('服务商与模型','Providers & models')} onClick={() => nav('/settings/providers')}/>
@@ -34,18 +34,38 @@ export function AppearancePage() {
   if (!device) return null;
   const change = (options: Parameters<typeof Device.setAppearance>[0]) => action.run(async () => { await Device.setAppearance(options); await refresh(); });
   return <main className="page"><Header title={t('外观','Appearance')}/><div className={`appearance-preview bg-${device.background}`}>
-    {device.background === 'image' && device.backgroundPath && <img src={Capacitor.convertFileSrc(device.backgroundPath)} alt=""/>}<div className="appearance-mask" style={{opacity:mask/100}}/><div className="appearance-clock"><span>{new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}</span><small>{t('桌面预览','Home preview')}</small></div>
+    {device.background === 'image' && device.backgroundPath && <img src={Capacitor.convertFileSrc(device.backgroundPath)} alt=""/>}<div className="appearance-mask" style={{opacity:mask/100}}/><div className="appearance-sample"><span>{t('有什么可以帮你？','How can I help?')}</span><small>{t('助手背景预览','Assistant background preview')}</small></div>
   </div><Section title={t('主题','Theme')}><div className="theme-options">{(['system','light','dark'] as const).map((theme,index) => <button key={theme} aria-pressed={device.theme === theme} onClick={() => change({theme})}><span className={`theme-sample ${theme}`}><i/><i/><i/></span>{[t('跟随系统','System'),t('浅色','Light'),t('深色','Dark')][index]}</button>)}</div></Section><Section title={t('背景','Background')}><Row title={t('背景类型','Background style')}><select aria-label={t('背景类型','Background style')} value={device.background} onChange={e => change({background:e.target.value as DeviceState['background']})}><option value="circles">{t('圆形','Circles')}</option><option value="solid">{t('纯色','Solid')}</option><option value="image">{t('图片','Image')}</option></select></Row><Row title={t('选择图片','Choose image')} onClick={() => action.run(async () => { await Device.chooseBackground(); await refresh(); })}/>{device.backgroundPath && <Row title={t('清除图片','Clear image')} onClick={() => action.run(async () => { await Device.clearBackground(); await refresh(); })}/>}<label className="range-row"><span>{t('遮罩强度','Mask opacity')}<output>{mask}%</output></span><input aria-label={t('遮罩强度','Mask opacity')} type="range" min="20" max="100" value={mask} onChange={e => setMask(Number(e.target.value))} onPointerUp={() => change({backgroundMask:mask})} onKeyUp={() => change({backgroundMask:mask})}/></label></Section><ErrorNotice error={action.error}/></main>;
 }
 export function DevicePage() {
-  const {device, refresh} = useContext(Environment); const action = useAction(); const t = useText(); if (!device) return null;
+  const {device, refresh} = useContext(Environment); const action = useAction(); const t = useText(); const [copied, setCopied] = useState(false);
+  if (!device) return null;
   const perform = (fn:() => Promise<unknown>) => action.run(async () => { await fn(); await refresh(); });
-  return <main className="page"><Header title={t('桌面与手势','Home & gestures')}/><Section title={t('设备状态','Device status')}>{[[t('默认桌面','Default home'),device.homeRole],[t('安全设置权限','Secure settings permission'),device.canWriteSecureSettings],[t('无障碍服务','Accessibility service'),device.accessibilityConnected]].map(([label,ready]) => <Row key={String(label)} title={String(label)}><span className={ready ? 'success' : 'secondary'}>{ready ? t('已就绪','Ready') : t('未启用','Not enabled')}</span></Row>)}</Section><Section title={t('桌面','Home')}><Row title={t('设为默认桌面','Set as default home')} onClick={() => perform(Device.requestHome)}/><Row title={t('系统默认应用设置','System default apps')} onClick={() => perform(() => Device.openSystemSettings({target:'home'}))}/></Section><Section title={t('手势','Gestures')}><p className="secondary pre-wrap">{device.gestureStatus}</p><div className="action-row"><button className="button" onClick={() => perform(Device.enableGestures)}>{t('启用手势','Enable gestures')}</button><button className="button secondary-button" onClick={() => perform(Device.disableGestures)}>{t('停用','Disable')}</button></div><Row title={t('修复 Shizuku 权限','Repair Shizuku permissions')} onClick={() => perform(Device.repairPermissions)}/><Row title={t('无障碍设置','Accessibility settings')} onClick={() => perform(() => Device.openSystemSettings({target:'accessibility'}))}/><Row title={t('应用系统设置','App settings')} onClick={() => perform(() => Device.openSystemSettings({target:'app'}))}/></Section><ErrorNotice error={action.error}/></main>;
+  const recoveryCommands = 'adb shell pm grant com.example.launcherprobe android.permission.WRITE_SECURE_SETTINGS\nadb shell settings put global force_fsg_nav_bar 0';
+  return <main className="page"><Header title={t('助手权限','Assistant permissions')}/>
+    <Section title={t('设备状态','Device status')}>
+      <Row title={t('安全设置权限','Secure settings permission')} detail={t('仅用于旧版导航恢复与显式救援','Used only for legacy navigation recovery and explicit repair')}><span className={device.canWriteSecureSettings ? 'success' : 'secondary'}>{device.canWriteSecureSettings ? t('已授权','Granted') : t('未授权','Not granted')}</span></Row>
+      <Row title="Shizuku" detail={device.shizukuStatus}/>
+      <Row title={t('导航迁移状态','Navigation migration status')} detail={device.legacyNavigationStatus}/>
+    </Section>
+    {device.legacyNavigationPending && <Section title={t('恢复系统导航','Restore system navigation')}>
+      <p className="secondary">{t('旧版曾隐藏系统导航栏，恢复尚未完成。可启动 Shizuku 后点击下方授权与恢复；也可通过已授权的电脑执行以下 ADB 命令，恢复三键导航后返回助手重新检查。不会重新启用模拟手势或无障碍服务。','The previous version hid system navigation and recovery is still pending. Start Shizuku and use the recovery button below, or run these ADB commands from an authorized computer to restore three-button navigation, then return to the assistant to recheck. Simulated gestures and accessibility services will not be enabled.')}</p>
+      <pre className="recovery-commands"><code>{recoveryCommands}</code></pre>
+      <button className="button secondary-button" onClick={() => action.run(async () => { await navigator.clipboard.writeText(recoveryCommands); setCopied(true); })}>{copied ? t('已复制命令','Commands copied') : t('复制 ADB 命令','Copy ADB commands')}</button>
+    </Section>}
+    <Section title={t('授权与系统设置','Authorization & system settings')}>
+      <p className="secondary">{t('Shizuku 用于 Shower 虚拟屏与接管，也可按需设置系统数字助理。普通聊天不需要这些授权。','Shizuku supports Shower virtual displays and takeover, and can set the default digital assistant on request. Normal chat does not require these permissions.')}</p>
+      <Row title={device.legacyNavigationPending ? t('通过 Shizuku 授权并重试恢复','Authorize with Shizuku and retry recovery') : t('Shizuku 授权与检查','Authorize and check Shizuku')} onClick={() => perform(Device.repairPermissions)}/>
+      <Row title={t('应用权限与通知设置','App permissions & notifications')} onClick={() => perform(() => Device.openSystemSettings({target:'app'}))}/>
+      <Row title={t('系统默认数字助理设置','System default assistant settings')} onClick={() => perform(() => Device.openSystemSettings({target:'assistant'}))}/>
+      <Row title={t('打开系统设置','Open system settings')} onClick={() => perform(() => Device.openSystemSettings({target:'settings'}))}/>
+    </Section><ErrorNotice error={action.error}/>
+  </main>;
 }
 export function AboutPage() {
   const t = useText(); const action = useAction(); const [version,setVersion] = useState(''); const [release,setRelease] = useState<Record<string,unknown>|null>();
   useEffect(() => { void action.run(async () => setVersion((await CapacitorApp.getInfo()).version)); }, []);
-  return <main className="page"><Header title={t('关于','About')}/><div className="about-heading"><span className="empty-mark">Pi</span><h2>E Launcher</h2><p>{version}</p><p className="secondary">{t('你的桌面，也是对话的起点。','Your home. A place to start a conversation.')}</p></div><Section title={t('项目','Project')}><Row icon={<ExternalLink/>} title={t('源代码与反馈','Source & feedback')} onClick={() => action.run(() => Device.openUrl({url:'https://github.com/FireSpoonYZ/e-launcher'}))}/><Row icon={<ExternalLink/>} title={t('Pi 文档','Pi documentation')} onClick={() => action.run(() => Device.openUrl({url:'https://github.com/badlogic/pi-mono'}))}/><Row icon={<RefreshCw/>} title={t('检查更新','Check for updates')} onClick={() => action.run(async () => setRelease((await NativeSettings.latestRelease()).release))}/></Section>{release === null && <p className="secondary">{t('暂无公开发布版本。','No public release yet.')}</p>}{release && <Row title={String(release.tag_name)} detail={String(release.name ?? '')} onClick={() => action.run(() => Device.openUrl({url:String(release.html_url)}))}/>}<ErrorNotice error={action.error}/></main>;
+  return <main className="page"><Header title={t('关于','About')}/><div className="about-heading"><span className="empty-mark">Pi</span><h2>E Launcher</h2><p>{version}</p><p className="secondary">{t('独立 AI 助手，让对话与任务随时继续。','An AI assistant for conversations and tasks, wherever you left off.')}</p></div><Section title={t('项目','Project')}><Row icon={<ExternalLink/>} title={t('源代码与反馈','Source & feedback')} onClick={() => action.run(() => Device.openUrl({url:'https://github.com/FireSpoonYZ/e-launcher'}))}/><Row icon={<ExternalLink/>} title={t('Pi 文档','Pi documentation')} onClick={() => action.run(() => Device.openUrl({url:'https://github.com/badlogic/pi-mono'}))}/><Row icon={<RefreshCw/>} title={t('检查更新','Check for updates')} onClick={() => action.run(async () => setRelease((await NativeSettings.latestRelease()).release))}/></Section>{release === null && <p className="secondary">{t('暂无公开发布版本。','No public release yet.')}</p>}{release && <Row title={String(release.tag_name)} detail={String(release.name ?? '')} onClick={() => action.run(() => Device.openUrl({url:String(release.html_url)}))}/>}<ErrorNotice error={action.error}/></main>;
 }
 const engines: Array<VoiceState['sttEngine']> = ['system','remote'];
 const speakModes: Array<VoiceState['speakMode']> = ['off','afterVoice','always'];
@@ -78,7 +98,7 @@ export function VoicePage() {
   const remoteDetail = (value: VoiceRemote) => value.baseUrl ? `${value.model} · ${value.baseUrl}${value.configured ? ` · ${t('已保存 API Key','API key saved')}` : ''}` : t('未配置','Not configured');
   const wakeDetail = !voice.wakeEnabled ? t('已关闭','Off') : voice.wakeStatus
     || (voice.wakeListening ? (voice.assistantDefault ? t('正在监听（默认助手，由系统保持运行）','Listening (default assistant)') : t('正在监听（前台服务）','Listening (foreground service)'))
-      : t('已开启，回到桌面后开始监听','On; listening starts on the home screen'));
+      : t('已开启，等待监听恢复','On; waiting for listening to resume'));
   return <main className="page"><Header title={t('语音','Voice')}/>
     <Section title={t('语音识别','Speech recognition')}>
       <Row title={t('识别引擎','Recognition engine')}><select aria-label={t('识别引擎','Recognition engine')} value={voice.sttEngine} onChange={e => apply({sttEngine: e.target.value as VoiceState['sttEngine']})}>{engines.map((engine,index) => <option key={engine} value={engine}>{engineLabels[index]}</option>)}</select></Row>
@@ -93,7 +113,7 @@ export function VoicePage() {
         : <Row title={t('系统朗读引擎设置','System speech engine settings')} onClick={() => action.run(() => Device.openSystemSettings({target:'tts'}))}/>}
       <Row title={t('语速','Speech rate')}><select aria-label={t('语速','Speech rate')} value={String(voice.speechRate)} onChange={e => apply({speechRate: Number(e.target.value)})}>{rates.map(rate => <option key={rate} value={String(rate)}>{rate}×</option>)}</select></Row>
       <Row title={t('自动朗读回复','Read replies aloud')}><select aria-label={t('自动朗读回复','Read replies aloud')} value={voice.speakMode} onChange={e => apply({speakMode: e.target.value as VoiceState['speakMode']})}>{speakModes.map((mode,index) => <option key={mode} value={mode}>{[t('关闭','Off'),t('语音输入后朗读','After voice input'),t('总是朗读当前会话','Always in the open chat')][index]}</option>)}</select></Row>
-      <div className="action-row"><button className="button" onClick={() => action.run(() => Device.speak({text: t('你好，我是你的桌面助手。这是一段朗读测试。','Hello, this is a read-aloud test.')}))}>{t('试听朗读','Play sample')}</button><button className="button secondary-button" onClick={() => action.run(() => Device.stopSpeaking())}>{t('停止朗读','Stop')}</button></div>
+      <div className="action-row"><button className="button" onClick={() => action.run(() => Device.speak({text: t('你好，我是你的 AI 助手。这是一段朗读测试。','Hello, this is a read-aloud test.')}))}>{t('试听朗读','Play sample')}</button><button className="button secondary-button" onClick={() => action.run(() => Device.stopSpeaking())}>{t('停止朗读','Stop')}</button></div>
     </Section>
     <Section title={t('语音唤醒','Wake word')}>
       <Row title={t('语音唤醒','Wake word')} detail={wakeDetail}><Toggle label={t('语音唤醒','Wake word')} checked={voice.wakeEnabled} onChange={enabled => action.run(async () => setVoice(await Device.setWakeEnabled({enabled})))}/></Row>
