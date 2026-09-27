@@ -56,9 +56,13 @@ try {
     assert.equal(events.find((event) => event.type === "message").message.content, "sdk-ok");
     assert.equal(events.find((event) => event.type === "message").message.stopReason, "stop");
     assert.equal(events.at(-1).status, "completed");
-    const previousLength = context?.length ?? 0;
+    // Pi 0.86+ records the system prompt as a transcript message; count conversation turns only.
+    const turns = (messages = []) => messages.filter((message) => message.role !== "system").length;
+    const previousLength = turns(context);
     context = events.find((event) => event.type === "context").messages;
-    assert.equal(context.length, previousLength + 2, "native history survives subsequent turns");
+    assert.equal(turns(context), previousLength + 2, "native history survives subsequent turns");
+    assert.equal(requests.at(-1).messages.filter((message) => ["system", "developer"].includes(message.role)).length, 1,
+      "resumed history sends one system prompt");
   }
   const imageData = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
   const imageId = "11111111-1111-1111-1111-111111111111", fileId = "22222222-2222-2222-2222-222222222222";

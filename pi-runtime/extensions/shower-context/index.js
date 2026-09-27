@@ -1,5 +1,5 @@
 /**
- * Pi 0.85.1 fires `context` with a deep copy before each model call.
+ * Pi fires `context` with a deep copy of the conversation before each model call.
  * Only that copy is rewritten; session entries and attachments stay as stored.
  */
 const omitted = "[历史截图已省略，仅保留最新截图]";

@@ -65,6 +65,16 @@
     "globalOnly": false
   },
   {
+    "key": "cacheWarming",
+    "options": ["off", "streaming", "idle"],
+    "label": "提示缓存保温",
+    "group": "请求与消息",
+    "type": "string",
+    "default": "\"streaming\"",
+    "description": "Keep eligible provider prompt caches warm during active runs or, with `\"idle\"`, between runs. Global setting only.",
+    "globalOnly": true
+  },
+  {
     "key": "thinkingBudgets",
     "label": "思考 Token 预算",
     "group": "模型与思考",
@@ -135,15 +145,6 @@
     "type": "boolean",
     "default": "false",
     "description": "Opt-in analytics data sharing. Currently only asked for during the experimental first-time setup (`PI_EXPERIMENTAL=1`)",
-    "globalOnly": false
-  },
-  {
-    "key": "trackingId",
-    "label": "追踪标识",
-    "group": "隐私与诊断",
-    "type": "string",
-    "default": "-",
-    "description": "Analytics tracking identifier, generated when `enableAnalytics` is turned on",
     "globalOnly": false
   },
   {
@@ -290,6 +291,15 @@
     "globalOnly": false
   },
   {
+    "key": "compaction.modelOverrides",
+    "label": "按模型设置压缩预算",
+    "group": "上下文与会话",
+    "type": "object",
+    "default": "-",
+    "description": "Per-model `reserveTokens` and `keepRecentTokens` keyed by exact `\"provider/modelId\"`; unset values fall back to the compaction settings above",
+    "globalOnly": false
+  },
+  {
     "key": "branchSummary.reserveTokens",
     "label": "分支摘要预留 Token",
     "group": "上下文与会话",
@@ -332,6 +342,15 @@
     "type": "number",
     "default": "2000",
     "description": "Base delay for agent-level exponential backoff (2s, 4s, 8s)",
+    "globalOnly": false
+  },
+  {
+    "key": "retry.maxAgentDelayMs",
+    "label": "最大重试延迟（毫秒）",
+    "group": "请求与消息",
+    "type": "number",
+    "default": "60000",
+    "description": "Maximum agent-level retry backoff delay in milliseconds",
     "globalOnly": false
   },
   {
@@ -416,6 +435,15 @@
     "type": "boolean",
     "default": "true",
     "description": "Show images in terminal (if supported)",
+    "globalOnly": false
+  },
+  {
+    "key": "terminal.showTerminalProgress",
+    "label": "终端标签页进度",
+    "group": "终端与渲染",
+    "type": "boolean",
+    "default": "false",
+    "description": "Show OSC 9;4 progress in the terminal tab",
     "globalOnly": false
   },
   {

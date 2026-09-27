@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 
 const fields = JSON.parse(await readFile(new URL("../app/src/main/assets/pi-settings-fields.json", import.meta.url), "utf8"));
 const documentation = await readFile(new URL("node_modules/@earendil-works/pi-coding-agent/docs/settings.md", import.meta.url), "utf8");
-const documented = [...documentation.matchAll(/^\|\s*`([^`]+)`\s*\|\s*(?:string|boolean|number|object|array)/gm)].map((match) => match[1]);
+const documented = [...documentation.matchAll(/^\|\s*`([^`]+)`\s*\|/gm)].map((match) => match[1]);
 const keys = fields.map((field) => field.key);
 assert.equal(new Set(keys).size, keys.length, "no duplicate setting controls");
 assert.deepEqual(fields.filter((field) => !field.extension).map((field) => field.key).sort(),

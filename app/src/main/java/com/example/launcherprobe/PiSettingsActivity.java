@@ -221,7 +221,7 @@ public final class PiSettingsActivity extends Activity {
                         }
                     }
                 }));
-                note(t("Pi 配置格式 0.85.1。Pi Agent 使用完整 SDK 读取设置和资源。终端专用选项保留在文件中，不改变 Android 界面。"));
+                note(t("Pi 配置格式 0.87.1。Pi Agent 使用完整 SDK 读取设置和资源。终端专用选项保留在文件中，不改变 Android 界面。"));
             } else if (page.equals("通用")) {
                 String[] languages = {"system", "zh", "en"};
                 String[] languageLabels = {t("跟随系统 / System"), t("简体中文"), "English"};
@@ -266,7 +266,7 @@ public final class PiSettingsActivity extends Activity {
             } else if (page.equals("关于")) {
                 android.content.pm.PackageInfo info = getPackageManager().getPackageInfo(getPackageName(), 0);
                 note("E Launcher\n" + t("应用版本：") + info.versionName + " (" + info.getLongVersionCode() + ")");
-                note(t("Pi Coding Agent SDK 0.85.1 · 本地 Node Agent"));
+                note(t("Pi Coding Agent SDK 0.87.1 · 本地 Node Agent"));
                 action(t("源码"), () -> openPublicUrl(SettingsCatalog.REPOSITORY));
                 action(t("反馈问题"), () -> openPublicUrl(SettingsCatalog.REPOSITORY + "/issues"));
                 TextView release = text("", 15, INK); content.addView(release);
