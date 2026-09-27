@@ -188,7 +188,7 @@ public final class SettingsPlugin extends Plugin {
                     JSONArray fields = new JSONArray(read(input));
                     for (int i = 0; i < fields.length(); i++) {
                         String key = fields.getJSONObject(i).getString("key");
-                        sources.put(key, ConfigJson.encode(ConfigJson.get(value, key)));
+                        sources.put(key, ConfigJson.encode(ConfigJson.get(value, key)).trim());
                     }
                 }
                 result.put("sources", sources);
