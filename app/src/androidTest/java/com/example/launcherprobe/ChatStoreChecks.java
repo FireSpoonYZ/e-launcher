@@ -98,7 +98,7 @@ public final class ChatStoreChecks extends Instrumentation {
                 removeMonitor(monitor);
                 if (foreground == null) throw new AssertionError("Could not foreground the test application");
                 runOnMainSync(() -> foreground.getWindow().addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON));
-                result.putString("stream", NpmRuntimeChecks.run(getTargetContext(), storageContext()) + "\n");
+                result.putString("stream", NpmRuntimeChecks.run(getTargetContext(), getContext()) + "\n");
                 finish(Activity.RESULT_OK, result);
                 return;
             }
