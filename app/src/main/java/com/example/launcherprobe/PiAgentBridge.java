@@ -79,6 +79,9 @@ final class PiAgentBridge {
             for (int count; (count = in.read(buffer)) >= 0;) out.write(buffer, 0, count);
         }
         copyAssets(context, "pi-sdk", new File(home, "pi-sdk"));
+        copyAssets(context, "codemode-worker.js", new File(home, "codemode-worker.js"));
+        copyAssets(context, "image-resize-worker.js", new File(home, "image-resize-worker.js"));
+        copyAssets(context, "photon_rs_bg.wasm", new File(home, "photon_rs_bg.wasm"));
         String endpoint = "e-launcher-pi-" + UUID.randomUUID();
         CountDownLatch ready = new CountDownLatch(1);
         final LocalSocket[] accepted = new LocalSocket[1];
@@ -302,8 +305,7 @@ final class PiAgentBridge {
                     }
                     if ("setting".equals(event.optString("type"))) {
                         try {
-                            request.configStore.updateSetting(event.optBoolean("project"), event.getString("key"),
-                                    event.get("value").toString(), event.get("previous").toString());
+                            applySettingEvent(request.configStore, event);
                         } catch (Exception exception) {
                             current.event(new JSONObject().put("id", id).put("type", "error")
                                     .put("message", "配置未保存：" + exception.getMessage()));
@@ -321,6 +323,13 @@ final class PiAgentBridge {
         } catch (Exception ignored) {
             // EOF and read failures have the same terminal semantics.
         } finally { fail("pi Node 连接已结束，请重新启动应用进程"); }
+    }
+
+    static void applySettingEvent(PiConfigStore store, JSONObject event) throws Exception {
+        Object value = event.get("value"), previous = event.get("previous");
+        store.updateSetting(event.optBoolean("project"), event.getString("key"),
+                value instanceof String ? JSONObject.quote((String) value) : value.toString(),
+                previous instanceof String ? JSONObject.quote((String) previous) : previous.toString());
     }
 
     private synchronized void handleShowerRequest(JSONObject event) {

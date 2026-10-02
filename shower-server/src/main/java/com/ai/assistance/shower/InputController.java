@@ -1,5 +1,6 @@
 package com.ai.assistance.shower;
 
+import android.os.Build;
 import android.os.SystemClock;
 import android.view.InputDevice;
 import android.view.InputEvent;
@@ -26,7 +27,9 @@ final class InputController {
         if (displayId <= 0) throw new IllegalArgumentException("A virtual display id is required");
         this.displayId = displayId;
         try {
-            Class<?> type = Class.forName("android.hardware.input.InputManager");
+            Class<?> type = Class.forName(Build.VERSION.SDK_INT >= 34
+                    ? "android.hardware.input.InputManagerGlobal"
+                    : "android.hardware.input.InputManager");
             Method getInstance = type.getDeclaredMethod("getInstance");
             getInstance.setAccessible(true);
             inputManager = getInstance.invoke(null);

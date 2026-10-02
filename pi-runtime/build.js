@@ -1,6 +1,7 @@
 import { build } from "esbuild";
 import { cp, mkdir, copyFile, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
+import { createRequire } from "node:module";
 
 // Hash every payload path and byte, not just npm's version or directory timestamp.
 async function payloadHash(root) {
@@ -29,13 +30,31 @@ async function readIfPresent(path) {
 
 const sdk = "node_modules/@earendil-works/pi-coding-agent";
 const assets = "../app/src/main/assets/pi-sdk";
+const sdkRequire = createRequire(new URL(`${sdk}/package.json`, import.meta.url));
 // Copy is a replacement: removed SDK docs/themes must not survive a rebuild.
 await rm(assets, { recursive: true, force: true });
 await mkdir(assets, { recursive: true });
 for (const name of ["package.json", "README.md", "CHANGELOG.md"]) await copyFile(`${sdk}/${name}`, `${assets}/${name}`);
-for (const name of ["docs", "dist/modes/interactive/theme", "dist/core/export-html"]) {
+for (const name of ["docs", "examples", "dist/modes/interactive/theme", "dist/core/export-html"]) {
   await cp(`${sdk}/${name}`, `${assets}/${name}`, { recursive: true, filter: (path) => !path.endsWith(".map") && !path.endsWith(".d.ts") });
 }
+
+await copyFile(sdkRequire.resolve("quickjs-wasi/quickjs.wasm"), `${assets}/quickjs.wasm`);
+// Photon CJS reads beside the bundle (__dirname), not beside Node or the session cwd.
+await copyFile(sdkRequire.resolve("@silvia-odwyer/photon-node/photon_rs_bg.wasm"), "../app/src/main/assets/photon_rs_bg.wasm");
+await copyFile(sdkRequire.resolve("@silvia-odwyer/photon-node/LICENSE.md"), `${assets}/PHOTON_LICENSE.md`);
+await build({
+  entryPoints: [`${sdk}/dist/utils/image-resize-worker.js`],
+  bundle: true, platform: "node", format: "esm", target: "node24",
+  banner: { js: 'import { createRequire as __workerRequire } from "node:module"; import { fileURLToPath as __workerPath } from "node:url"; import { dirname as __workerDir } from "node:path"; const require = __workerRequire(import.meta.url); const __dirname = __workerDir(__workerPath(import.meta.url));' },
+  outfile: "../app/src/main/assets/image-resize-worker.js",
+});
+await build({
+  entryPoints: [`${sdk}/dist/extensions/codemode/worker.js`],
+  bundle: true, platform: "node", format: "esm", target: "node24",
+  banner: { js: 'import { createRequire } from "node:module"; const require = createRequire(import.meta.url);' },
+  outfile: "../app/src/main/assets/codemode-worker.js",
+});
 
 const npmVersion = JSON.parse(await readFile("package.json", "utf8")).dependencies.npm;
 if (JSON.parse(await readFile("node_modules/npm/package.json", "utf8")).version !== npmVersion) {
@@ -65,6 +84,8 @@ if (!reusable) {
 await build({
   entryPoints: ["android.js"],
   bundle: true,
+  // SDK may carry a nested pi-ai copy; static OAuth/Bedrock loaders must share its registry.
+  alias: { "@earendil-works/pi-ai": "@earendil-works/pi-ai" },
   platform: "node",
   format: "cjs",
   target: "node24",

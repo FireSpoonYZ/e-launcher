@@ -64,6 +64,15 @@ try {
     assert.equal(requests.at(-1).messages.filter((message) => ["system", "developer"].includes(message.role)).length, 1,
       "resumed history sends one system prompt");
   }
+  config.settings.defaultTools = ["+codemode"];
+  config.settings.codemode = { mode: "only" };
+  await (await createSdkRuntime({ config })).prompt("codemode only check");
+  assert.deepEqual(requests.at(-1).tools.map(tool => tool.function.name), ["codemode"],
+    "codemode only hides direct tools from the model");
+  assert(requests.at(-1).tools[0].function.description.includes("read"),
+    "native tools remain available through codemode");
+  config.settings.defaultTools = [];
+  delete config.settings.codemode;
   const imageData = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
   const imageId = "11111111-1111-1111-1111-111111111111", fileId = "22222222-2222-2222-2222-222222222222";
   await writeFile(join(config.chatAttachmentRoot, imageId), Buffer.from(imageData, "base64"));

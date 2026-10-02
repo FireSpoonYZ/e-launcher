@@ -15,6 +15,8 @@
 - `requestApps(arguments, signal)`：接收 `{ action: "list" }` 或 `{ action: "search", query }`，返回 `{ label, packageName }[]`。
 - `requestShower(arguments, signal)`：接收 Shower 工具参数，返回原生结果对象；截图结果包含 `data`（PNG base64）、`mimeType: "image/png"`、虚拟尺寸 `width/height` 和图片尺寸 `imageWidth/imageHeight`。
 
+直接调用时，模型仍看到原来的文字；截图另附 PNG。`shower` 声明 `outputSchema` 后，codemode 脚本的 screenshot 得到对象，调用 `image(shot.image)` 把图片交给模型。不要 `text(shot)`、`return shot`，也不要输出 `shot.image.data`。其他 action 的脚本结果仍是与直接调用相同的 JSON 字符串。失败继续 reject，不返回截图对象。
+
 回调返回 Promise，失败时 reject，并负责响应 AbortSignal。未提供的能力不注册对应工具；两个回调均缺失时报告加载错误。每个聊天操作使用独立 event bus 和绑定到该操作的回调，不能使用进程全局 bridge。
 
 e-launcher 在 `pi-runtime/android.js` 中提供回调，并通过 `resourceLoaderOptions.extensionFactories` 加载名为 `phone-control` 的扩展。`sdk.js` 仅传递通用资源加载参数。扩展源码随 Android runtime 一起打包，无需手机额外安装 npm 包。资源列表显示为 `<inline:phone-control>`；此内置加载方式不提供包资源开关。

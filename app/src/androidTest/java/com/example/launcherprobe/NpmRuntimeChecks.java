@@ -34,6 +34,9 @@ final class NpmRuntimeChecks {
             if (!node.isFile() || marker.lastModified() != prepared) throw new AssertionError("APK upgrade link repair / payload cache failed");
             PiAgentBridge.copyAssets(context, "pi-runtime.cjs", new File(home, "pi-runtime.cjs"));
             PiAgentBridge.copyAssets(context, "pi-sdk", new File(home, "pi-sdk"));
+            PiAgentBridge.copyAssets(context, "codemode-worker.js", new File(home, "codemode-worker.js"));
+            PiAgentBridge.copyAssets(context, "image-resize-worker.js", new File(home, "image-resize-worker.js"));
+            PiAgentBridge.copyAssets(context, "photon_rs_bg.wasm", new File(home, "photon_rs_bg.wasm"));
             PiAgentBridge.copyAssets(tests, "npm-check.cjs", new File(home, "npm-check.cjs"));
             JSONObject snapshot = new JSONObject(new PiConfigStore(isolated).snapshot());
             JSONArray npm = snapshot.getJSONObject("globalSettings").getJSONArray("npmCommand");

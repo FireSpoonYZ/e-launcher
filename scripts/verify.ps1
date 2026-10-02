@@ -111,7 +111,9 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
 $apk = [IO.Compression.ZipFile]::OpenRead((Resolve-Path 'app/build/outputs/apk/debug/app-debug.apk'))
 try {
     $npmVersion = (Get-Content 'pi-runtime/package.json' -Raw | ConvertFrom-Json).dependencies.npm
-    foreach ($asset in 'assets/pi-runtime.cjs', 'assets/pi-sdk/package.json',
+    foreach ($asset in 'assets/pi-runtime.cjs', 'assets/codemode-worker.js', 'assets/image-resize-worker.js', 'assets/photon_rs_bg.wasm',
+            'assets/pi-sdk/quickjs.wasm', 'assets/pi-sdk/PHOTON_LICENSE.md', 'assets/pi-sdk/package.json',
+            'assets/pi-sdk/examples/sdk/01-minimal.ts',
             "assets/npm/$npmVersion/bin/npm-cli.js", "assets/npm/$npmVersion/payload-complete.txt") {
         $entry = $apk.GetEntry($asset)
         if ($null -eq $entry -or $entry.Length -eq 0) { throw "APK is missing required pi runtime asset: $asset" }

@@ -17,6 +17,21 @@ import org.json.JSONObject;
 
 /** Opt-in device check: uses a temporary conversation and the Settings app, never a model/API call. */
 final class ShowerPreviewChecks {
+    static String createCheck(Instrumentation instrumentation) throws Exception {
+        Context context = instrumentation.getTargetContext();
+        ShowerToolBridge tools = field(PiAgentBridge.get(context), "showerTools");
+        String id = UUID.randomUUID().toString();
+        try {
+            JSONObject created = tools.execute(id, new JSONObject().put("action", "create"));
+            tools.execute(id, new JSONObject().put("action", "launch").put("packageName", "com.android.settings"));
+            JSONObject shot = tools.execute(id, new JSONObject().put("action", "screenshot"));
+            require(shot.getString("data").length() > 100, "Virtual display screenshot was empty");
+            return "PASS: created display " + created.getInt("displayId") + ", launched Settings and captured screenshot";
+        } finally {
+            tools.forgetConversation(id);
+        }
+    }
+
     static String run(Instrumentation instrumentation) throws Exception {
         java.io.File screenshot = new java.io.File(ChatStoreChecks.artifacts(instrumentation), "shower-preview-check.png");
         Context context = instrumentation.getTargetContext();
@@ -29,8 +44,15 @@ final class ShowerPreviewChecks {
         try {
             tools.execute(id, new JSONObject().put("action", "create").put("width", 720).put("height", 1280).put("dpi", 240));
             tools.execute(id, new JSONObject().put("action", "launch").put("packageName", "com.android.settings"));
+            // Launching Settings on another display can revoke foreground launch eligibility on this ROM.
+            try (android.os.ParcelFileDescriptor launch = instrumentation.getUiAutomation(android.app.UiAutomation.FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES)
+                    .executeShellCommand("am start --display 0 -W -n com.example.launcherprobe/.MainActivity");
+                    java.io.InputStream output = new android.os.ParcelFileDescriptor.AutoCloseInputStream(launch)) {
+                output.readNBytes(4096);
+            }
             activity = (TaskDetailActivity) instrumentation.startActivitySync(new Intent(context, TaskDetailActivity.class)
-                    .putExtra(TaskDetailActivity.EXTRA_CONVERSATION_ID, id).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+                    .putExtra(TaskDetailActivity.EXTRA_CONVERSATION_ID, id).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                    android.app.ActivityOptions.makeBasic().setLaunchDisplayId(0).toBundle());
             TaskDetailActivity detail = activity;
             ShowerDesktopView desktop = field(detail, "desktop");
             TextureView texture = field(desktop, "texture");

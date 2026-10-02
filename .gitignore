@@ -19,6 +19,9 @@ web/dist/
 app/src/main/assets/public/
 app/src/main/assets/pi-runtime.mjs
 app/src/main/assets/pi-runtime.cjs
+app/src/main/assets/codemode-worker.js
+app/src/main/assets/image-resize-worker.js
+app/src/main/assets/photon_rs_bg.wasm
 app/src/main/assets/pi-sdk/
 app/src/main/assets/npm/
 app/src/main/jniLibs/

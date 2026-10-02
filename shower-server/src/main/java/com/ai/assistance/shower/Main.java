@@ -301,7 +301,8 @@ public final class Main {
             } catch (Exception ignored) { }
             if (encoder != null) encoder.release();
             if (surface != null) surface.release();
-            throw new IllegalStateException("Unable to create virtual display", throwable);
+            logToFile("Unable to create virtual display", throwable);
+            throw new IllegalStateException("Unable to create virtual display: " + throwable, throwable);
         }
     }
 

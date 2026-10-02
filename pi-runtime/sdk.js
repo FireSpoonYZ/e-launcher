@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import { join, resolve, relative, dirname } from "node:path";
 import {
   AgentSessionRuntime, createAgentSessionServices, createAgentSessionFromServices, ModelRuntime, SettingsManager, SessionManager,
-  DefaultPackageManager,
+  DefaultPackageManager, createCodemodeExtension,
 } from "@earendil-works/pi-coding-agent";
 import { InMemoryCredentialStore, getSupportedThinkingLevels } from "@earendil-works/pi-ai";
 import undici from "./node_modules/@earendil-works/pi-coding-agent/node_modules/undici/index.js";
@@ -84,7 +84,13 @@ async function services(config, signal, resourceLoaderOptions) {
         modelsStorePath: join(agentDir, "models-store.json"), allowModelNetwork: false, signal });
       if (modelRuntime.getError()) throw new Error(modelRuntime.getError());
       return createAgentSessionServices({ cwd, agentDir, settingsManager, modelRuntime,
-        modelRuntimeSignal: signal, resourceLoaderOptions });
+        modelRuntimeSignal: signal, resourceLoaderOptions: {
+          ...resourceLoaderOptions,
+          extensionFactories: [
+            { name: "codemode", builtin: true, factory: createCodemodeExtension() },
+            ...(resourceLoaderOptions?.extensionFactories ?? []),
+          ],
+        } });
     });
     return { ...native, credentials, fetch, withHttp: (task) => sessionHttp.run(fetch, task), dispose: async () => {
       try { await dispatcher.close(); }
@@ -388,9 +394,20 @@ export async function sdkQuery(command, signal, emit = () => {}, interact = asyn
       return { source: command.source };
     }
     if (command.type === "login") {
-      await s.modelRuntime.login(command.providerId, command.authType ?? "oauth", {
-        signal, prompt: interact, notify: (event) => emit({ type: "auth", event }),
-      });
+      let deviceIdRequested = false;
+      try {
+        await s.modelRuntime.login(command.providerId, command.authType ?? "oauth", {
+          signal, prompt: interact, notify: (event) => emit({ type: "auth", event }),
+        }, { getDeviceId() {
+          deviceIdRequested = true;
+          const previous = s.settingsManager.getGlobalSettings().deviceId;
+          const value = s.settingsManager.getOrCreateDeviceId();
+          if (value !== previous) emit({ type: "setting", project: false, key: "deviceId", previous: previous ?? null, value });
+          return value;
+        } });
+      } finally {
+        if (deviceIdRequested) await s.settingsManager.flush();
+      }
       return { providerId: command.providerId };
     }
     if (command.type === "logout") {

@@ -33,16 +33,25 @@ test('runtime build reuses complete npm only and repairs changed/deleted assets'
     await cp(join(root, 'pi-runtime/build.js'), join(runtime, 'build.js'));
     await put(join(runtime, 'android.js'), 'import { value } from "./value.js"; console.log(value);');
     await put(join(runtime, 'value.js'), 'export const value = "first-bundle";');
-    for (const name of ['package.json', 'README.md', 'CHANGELOG.md', 'docs/old.md', 'dist/modes/interactive/theme/dark.json', 'dist/core/export-html/template.html']) {
+    for (const name of ['package.json', 'README.md', 'CHANGELOG.md', 'docs/old.md', 'examples/sdk/example.ts', 'dist/modes/interactive/theme/dark.json', 'dist/core/export-html/template.html']) {
       await put(join(sdk, name), name === 'package.json' ? '{}' : name);
     }
     await put(join(sdk, 'docs/ignored.d.ts'), 'ignored');
+    await put(join(sdk, 'dist/extensions/codemode/worker.js'), 'console.log("worker-fixture");');
+    await put(join(sdk, 'dist/utils/image-resize-worker.js'), 'console.log("resize-worker-fixture");');
+    await put(join(runtime, 'node_modules/@silvia-odwyer/photon-node/package.json'), '{}');
+    await put(join(runtime, 'node_modules/@silvia-odwyer/photon-node/photon_rs_bg.wasm'), 'photon-wasm-fixture');
+    await put(join(runtime, 'node_modules/@silvia-odwyer/photon-node/LICENSE.md'), 'photon-license-fixture');
+    await put(join(runtime, 'node_modules/quickjs-wasi/package.json'), '{"exports":{"./quickjs.wasm":"./quickjs.wasm"}}');
+    await put(join(runtime, 'node_modules/quickjs-wasi/quickjs.wasm'), 'wasm-fixture');
     await put(join(npm, 'package.json'), '{"version":"11.6.2"}');
     await put(join(npm, 'bin/npm-cli.js'), 'console.log("npm");');
     await symlink(join(root, 'pi-runtime/node_modules/esbuild'), join(runtime, 'node_modules/esbuild'), process.platform === 'win32' ? 'junction' : 'dir');
     const build = () => runNode(runtime, 'build.js');
     build();
     assert.equal(runNode(runtime, bundle).trim(), 'first-bundle');
+    assert.match(await read(join(assets, 'codemode-worker.js')), /worker-fixture/);
+    assert.equal(await read(join(assets, 'pi-sdk/quickjs.wasm')), 'wasm-fixture');
     const firstMarker = await read(marker);
     const firstTime = (await stat(marker)).mtimeMs;
     const firstPayloadTime = (await stat(join(payload, 'bin/npm-cli.js'))).mtimeMs;
@@ -67,10 +76,20 @@ test('runtime build reuses complete npm only and repairs changed/deleted assets'
     await rm(join(payload, 'bin/npm-cli.js'));
     await rm(bundle);
     await rm(join(assets, 'pi-sdk/README.md'));
+    await rm(join(assets, 'codemode-worker.js'));
+    await rm(join(assets, 'pi-sdk/quickjs.wasm'));
+    await rm(join(assets, 'image-resize-worker.js'));
+    await rm(join(assets, 'photon_rs_bg.wasm'));
     build();
     assert.equal(runNode(runtime, bundle).trim(), 'updated-bundle');
     assert.equal(await read(join(payload, 'bin/npm-cli.js')), await read(join(npm, 'bin/npm-cli.js')));
     assert.equal(await read(join(assets, 'pi-sdk/README.md')), 'README.md');
+    assert.match(await read(join(assets, 'image-resize-worker.js')), /resize-worker-fixture/);
+    assert.equal(await read(join(assets, 'photon_rs_bg.wasm')), 'photon-wasm-fixture');
+    assert.equal(await read(join(assets, 'pi-sdk/PHOTON_LICENSE.md')), 'photon-license-fixture');
+    assert.equal(await read(join(assets, 'pi-sdk/examples/sdk/example.ts')), 'examples/sdk/example.ts');
+    assert.match(await read(join(assets, 'codemode-worker.js')), /worker-fixture/);
+    assert.equal(await read(join(assets, 'pi-sdk/quickjs.wasm')), 'wasm-fixture');
     await put(join(payload, 'unwanted.txt'), 'stale');
     build();
     await assert.rejects(stat(join(payload, 'unwanted.txt')), { code: 'ENOENT' });

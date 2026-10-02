@@ -53,7 +53,8 @@ def buildPiRuntime = tasks.register('buildPiRuntime', Exec) {
     commandLine npmCommand + ['run', 'build:android']
     inputs.files rootProject.fileTree('pi-runtime') { exclude 'build/**', 'node_modules/.cache/**' }
     inputs.file file('build.gradle')
-    outputs.file file('src/main/assets/pi-runtime.cjs')
+    outputs.files file('src/main/assets/pi-runtime.cjs'), file('src/main/assets/codemode-worker.js'),
+            file('src/main/assets/image-resize-worker.js'), file('src/main/assets/photon_rs_bg.wasm')
     outputs.dirs file('src/main/assets/pi-sdk'), file('src/main/assets/npm')
 }
 tasks.named('preBuild') { dependsOn copyWebAssets, buildPiRuntime }

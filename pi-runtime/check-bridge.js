@@ -58,6 +58,8 @@ const api = http.createServer((req, res) => {
       res.on("close", () => held.delete(res));
     } else if (prompt === "shower") {
       tool("shower", { action:"screenshot", maxWidth:360, maxHeight:640 });
+    } else if (prompt === "codemode-check" && !called.includes("codemode")) {
+      tool("codemode", { code: 'text(await tools.read({ path: "codemode-fixture.txt" }));' });
     } else if (prompt === "search-apps" && !called.includes("search_apps")) {
       tool("search_apps", { query:"SETTINGS" });
     } else if (prompt === "list-apps" && !called.includes("list_apps")) {
@@ -347,6 +349,20 @@ try {
   assert.equal(await readFile(path.join(cwdB.cwd, "bash-marker.txt"), "utf8"), cwdB.cwd);
   assert(events.filter((event) => ["cwd-a", "cwd-b"].includes(event.id) && event.type === "tool_end"
     && event.name === "read").every((event) => event.result.content[0].text.includes(event.id.endsWith("a") ? "A" : "B")));
+
+  const codemodeConfig = structuredClone(config);
+  codemodeConfig.selection = { provider: "local", model: "sdk-mock", thinkingLevel: "off" };
+  codemodeConfig.settings.defaultTools = ["+codemode"];
+  codemodeConfig.settings.codemode = { mode: "only" };
+  await writeFile(path.join(config.cwd, "codemode-fixture.txt"), "codemode-read-ok");
+  send({ id: "sdk-codemode", conversationId: "sdk-codemode", type: "prompt", sdk: true,
+    prompt: "codemode-check", config: codemodeConfig });
+  assert.equal((await waitFor(event => event.id === "sdk-codemode" && event.type === "end")).status, "completed");
+  const codemodeEnd = events.find(event => event.id === "sdk-codemode" && event.type === "tool_end");
+  assert.equal(codemodeEnd.isError, false, JSON.stringify(codemodeEnd));
+  assert.match(codemodeEnd.result.content[0].text, /codemode-read-ok/);
+  assert.deepEqual(requests.at(-1).tools.map(tool => tool.function.name), ["codemode"]);
+  console.log("PASS: shipped codemode WASM/worker executes a real nested read in only mode");
 
   const timeoutA = structuredClone(config), timeoutB = structuredClone(config);
   timeoutA.settings.httpIdleTimeoutMs = 1_000; timeoutA.settings.defaultTools = ["delay"];

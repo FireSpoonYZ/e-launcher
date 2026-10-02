@@ -8,6 +8,28 @@ const key = Type.Union([
 ].map((value) => Type.Literal(value)));
 const modifier = Type.Union(["SHIFT", "ALT", "CTRL", "META"].map((value) => Type.Literal(value)));
 const coordinate = (description) => Type.Integer({ minimum: 0, description });
+const screenshotImage = Type.Object({
+  type: Type.Literal("image"),
+  data: Type.String({ minLength: 1, description: "PNG base64。只传给 image()，不要放进 text() 或 return。" }),
+  mimeType: Type.Literal("image/png"),
+}, { additionalProperties: false });
+// Codemode reads structuredContent only when outputSchema is set. Screenshot is an object whose
+// image block is accepted by image(); every other success stays the JSON string scripts already get.
+const showerOutputSchema = Type.Union([
+  Type.Object({
+    ok: Type.Boolean(),
+    action: Type.Literal("screenshot"),
+    displayId: Type.Integer(),
+    width: Type.Integer(),
+    height: Type.Integer(),
+    dpi: Type.Integer(),
+    idleTimeoutMs: Type.Optional(Type.Integer()),
+    imageWidth: Type.Integer(),
+    imageHeight: Type.Integer(),
+    image: screenshotImage,
+  }, { additionalProperties: false }),
+  Type.String({ description: "非截图成功结果的 JSON 文本，与直接调用返回的文字相同。" }),
+]);
 
 /** Pi tool backed by the Android host's conversation-owned Operit Shower virtual display. */
 export function createShowerTool({ request }) {
@@ -15,7 +37,8 @@ export function createShowerTool({ request }) {
   return defineTool({
     name: "shower",
     label: "Operit Shower",
-    description: "只操作宿主分配给当前聊天的 Operit Shower 虚拟屏，不操作手机主屏或其他聊天的屏幕；每个聊天各自一块屏。先 create（默认采用手机主屏当前完整分辨率和密度，会自动启动 Shower），再 launch；同一聊天 create 可复用现有屏幕。每次动作后用 screenshot 核实。屏幕可跨回复保留，5 分钟没有工具操作且用户未在任务详情观看时会自动回收。用户手动接管时本聊天的工具调用会等待；接管结束后，已等待的非截图操作会返回未执行错误，先 screenshot 重新定位，不要盲目重放旧动作；确定不再使用时 release，仅释放本聊天的屏幕。最后一块屏幕关闭后 Shower 空闲 15 秒自动退出。同一应用不能同时由不同聊天的虚拟屏占用，launch 冲突会报错。tap/swipe 坐标始终使用 create 返回的虚拟屏尺寸。截图可能按 maxWidth/maxHeight 等比缩小，返回文字会同时给出虚拟尺寸和图片尺寸；不要把缩小后的图片坐标直接当虚拟坐标。先点击目标输入框再 text：通过系统剪贴板粘贴中文等 Unicode 文本，并全选替换原内容；text 为空或 clear 清空整个输入框。copy(text) 把给定文字写入系统剪贴板；paste 在当前光标处粘贴，替换选中部分。key COPY/CUT 操作当前选区，key A 配合 CTRL 全选。系统剪贴板与主屏应用共享，text/copy 会覆盖剪贴板；按键被系统接受不代表输入框已改变，必须截图确认。服务断开或屏幕空闲超时后先 create，再 launch 和截图重新定位，不要盲目重放旧坐标或动作。",
+    description: "只操作宿主分配给当前聊天的 Operit Shower 虚拟屏，不操作手机主屏或其他聊天的屏幕；每个聊天各自一块屏。先 create（默认采用手机主屏当前完整分辨率和密度，会自动启动 Shower），再 launch；同一聊天 create 可复用现有屏幕。每次动作后用 screenshot 核实。屏幕可跨回复保留，5 分钟没有工具操作且用户未在任务详情观看时会自动回收。用户手动接管时本聊天的工具调用会等待；接管结束后，已等待的非截图操作会返回未执行错误，先 screenshot 重新定位，不要盲目重放旧动作；确定不再使用时 release，仅释放本聊天的屏幕。最后一块屏幕关闭后 Shower 空闲 15 秒自动退出。同一应用不能同时由不同聊天的虚拟屏占用，launch 冲突会报错。tap/swipe 坐标始终使用 create 返回的虚拟屏尺寸。截图可能按 maxWidth/maxHeight 等比缩小，返回文字会同时给出虚拟尺寸和图片尺寸；不要把缩小后的图片坐标直接当虚拟坐标。codemode 中 screenshot 返回对象而不是这段文字：const shot = await tools.shower({ action: \"screenshot\" }); image(shot.image);。只把 shot.image 传给 image()。不要 text(shot)、return shot，也不要输出 shot.image.data。其他 action 仍返回 JSON 字符串。失败会 reject，没有截图对象。先点击目标输入框再 text：通过系统剪贴板粘贴中文等 Unicode 文本，并全选替换原内容；text 为空或 clear 清空整个输入框。copy(text) 把给定文字写入系统剪贴板；paste 在当前光标处粘贴，替换选中部分。key COPY/CUT 操作当前选区，key A 配合 CTRL 全选。系统剪贴板与主屏应用共享，text/copy 会覆盖剪贴板；按键被系统接受不代表输入框已改变，必须截图确认。服务断开或屏幕空闲超时后先 create，再 launch 和截图重新定位，不要盲目重放旧坐标或动作。",
+    outputSchema: showerOutputSchema,
     parameters: Type.Union([
       Type.Object({
         action: Type.Literal("create"),
@@ -55,16 +78,20 @@ export function createShowerTool({ request }) {
       const result = await request(arguments_, signal);
       if (!result || typeof result !== "object") throw new Error("Shower 原生响应无效");
       if (arguments_.action !== "screenshot") {
-        return { content: [{ type: "text", text: JSON.stringify(result) }],
-          details: { engine: "operit-shower", action: arguments_.action, displayId: result.displayId } };
+        const text = JSON.stringify(result);
+        return { content: [{ type: "text", text }],
+          details: { engine: "operit-shower", action: arguments_.action, displayId: result.displayId },
+          structuredContent: text };
       }
       const { data, mimeType, ...metadata } = result;
       if (mimeType !== "image/png" || typeof data !== "string" || data.length === 0) {
         throw new Error("Shower 截图响应无效");
       }
       const text = `虚拟屏 ${result.width}×${result.height}；返回图片 ${result.imageWidth}×${result.imageHeight}。`;
-      return { content: [{ type: "text", text }, { type: "image", data, mimeType }],
-        details: { engine: "operit-shower", ...metadata } };
+      const image = { type: "image", data, mimeType };
+      return { content: [{ type: "text", text }, image],
+        details: { engine: "operit-shower", ...metadata },
+        structuredContent: { ...metadata, image } };
     },
   });
 }

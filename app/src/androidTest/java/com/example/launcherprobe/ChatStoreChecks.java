@@ -77,6 +77,11 @@ public final class ChatStoreChecks extends Instrumentation {
                 finish(Activity.RESULT_OK, result);
                 return;
             }
+            if ("shower-create".equals(featureCheck)) {
+                result.putString("stream", ShowerPreviewChecks.createCheck(this) + "\n");
+                finish(Activity.RESULT_OK, result);
+                return;
+            }
             if (showerPreviewOnly) {
                 result.putString("stream", ShowerPreviewChecks.run(this) + "\n");
                 finish(Activity.RESULT_OK, result);

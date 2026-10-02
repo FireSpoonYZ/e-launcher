@@ -1,12 +1,22 @@
 import net from "node:net";
+import { join } from "node:path";
+import { VERSION, getPackageDir, setEmbeddedQuickJSWasmPath } from "./node_modules/@earendil-works/pi-coding-agent/dist/config.js";
 import { randomUUID } from "node:crypto";
 import { createPiRuntime } from "./index.js";
 import { createSdkRuntime, sdkQuery } from "./sdk.js";
 import { createEventBus } from "@earendil-works/pi-coding-agent";
+import { registerBunOAuthFlows } from "@earendil-works/pi-ai/bun-oauth";
+import { bedrockProviderModule } from "@earendil-works/pi-ai/bedrock-provider";
+import { setBedrockProviderModule } from "@earendil-works/pi-ai/api/bedrock-converse-stream.lazy";
 import phoneControl from "./extensions/phone-control/index.js";
 import scheduleTool from "./extensions/schedule-tool/index.js";
 import showerContext from "./extensions/shower-context/index.js";
 import conversationTitle from "./extensions/conversation-title/index.js";
+
+setEmbeddedQuickJSWasmPath(join(getPackageDir(), "quickjs.wasm"));
+// Reuse upstream standalone loaders: variable-specifier imports cannot follow a CJS bundle.
+registerBunOAuthFlows();
+setBedrockProviderModule(bedrockProviderModule);
 
 // cross-spawn otherwise changes the process cwd temporarily while resolving cwd-bound commands.
 // That is unsafe when independent session runtimes execute concurrently in this process.
@@ -30,7 +40,7 @@ socket.on("data", (chunk) => {
     catch { socket.destroy(); }
   }
 });
-socket.on("connect", () => send({ type: "ready", node: process.version }));
+socket.on("connect", () => send({ type: "ready", node: process.version, piVersion: VERSION }));
 socket.on("error", (error) => console.error(`pi bridge socket: ${error.message}`));
 socket.on("close", () => {
   for (const operation of operations.values()) {

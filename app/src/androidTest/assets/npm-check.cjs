@@ -8,12 +8,23 @@ const os = require('node:os');
 const { createHash } = require('node:crypto');
 const { spawn } = require('node:child_process');
 const { once } = require('node:events');
+const { Worker } = require('node:worker_threads');
+
+// Photon-generated 2400x2 PNG: exceeds the default 2000px inline-image limit.
+const imageData = 'iVBORw0KGgoAAAANSUhEUgAACWAAAAACCAYAAADc6efsAAAAoElEQVR4Ae3AA6AkWZbG8f937o3IzKdyS2Oubdu2bdu2bdu2bWmMnpZKr54yMyLu+Xa3anqmhztr1a/aNlddddVVV1111VVXXXXVVVddddVVV1111VVXXXXVVVddddVVV1111VVXXXXVVVf9a1G56qqrrrrqqquuuuqqq6666qqrrrrqqquuuuqqq6666qqrrrrqqquuuuqqq6666t+CfwTwpAQFRMfFhgAAAABJRU5ErkJggg==';
 
 async function main() {
   const npmCli = path.resolve(process.argv[2]);
-  const bundle = path.resolve(process.argv[3]);
+  const sourceBundle = path.resolve(process.argv[3]);
   await fs.mkdir(os.tmpdir(), { recursive: true });
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'npm-sdk-check-'));
+  const runtimeDir = path.join(root, 'runtime');
+  await fs.mkdir(runtimeDir);
+  // Run outside the repo: an omitted dependency must not resolve through developer node_modules.
+  for (const name of ['pi-runtime.cjs','codemode-worker.js','image-resize-worker.js','photon_rs_bg.wasm','pi-sdk']) {
+    await fs.cp(path.join(path.dirname(sourceBundle), name), path.join(runtimeDir, name), {recursive:true});
+  }
+  const bundle = path.join(runtimeDir, 'pi-runtime.cjs');
   const registry = new Map(), requests = [], children = new Set();
   const api = http.createServer(async (req, res) => {
     const url = decodeURIComponent(req.url);
@@ -21,10 +32,31 @@ async function main() {
       let body = ''; for await (const chunk of req) body += chunk;
       const request = JSON.parse(body); requests.push(request);
       const last = request.messages.at(-1);
-      const useTool = last.role === 'user' && JSON.stringify(last.content).includes('use probe');
+      const prompt = JSON.stringify(last.content);
+      const tool = last.role !== 'user' || !request.tools?.length ? undefined :
+        prompt.includes('use probe') ? ['npm_probe', {}] :
+        prompt.includes('runtime codemode') ? ['codemode', { code: `
+          const ok = await tools.bash({command:'node -e "process.stdout.write(String.fromCharCode(98,97,115,104,45,111,107))"'});
+          const bad = await tools.bash({command:'node -e "process.exit(7)"'});
+          if (ok.exit_code !== 0 || ok.output !== 'bash-ok' || bad.exit_code !== 7) throw Error('bash structured result');
+          text('bash-structured-ok'); text(await tools.read({path:'runtime-image.png'}));
+        ` }] :
+        prompt.includes('generate fixture image') ? ['codemode', { code: `
+          const available = await models.getAvailableOfType('image', 'fixture-images');
+          if (available.length !== 1) throw Error('image credentials/catalog');
+          const result = await models.generateImages(available[0], {input:[{type:'text',text:'paint fixture'}]});
+          if (result.stopReason !== 'stop') throw Error(result.errorMessage);
+          for (const block of result.output) if (block.type === 'image') image(block); else text(block.text);
+        ` }] :
+        prompt.includes('runtime read image') ? ['read', { path:'runtime-image.png' }] :
+        prompt.includes('runtime list apps') ? ['list_apps', {}] :
+        prompt.includes('runtime search apps') ? ['search_apps', { query:'settings' }] :
+        prompt.includes('runtime schedule') ? ['schedule_task', { action:'list' }] :
+        prompt.includes('runtime screenshot') ? ['shower', { action:'screenshot' }] : undefined;
+      const useTool = !!tool;
       res.writeHead(200, { 'content-type': 'text/event-stream' });
       const delta = useTool ? { role: 'assistant', tool_calls: [{ index: 0, id: 'fixture-call', type: 'function',
-        function: { name: 'npm_probe', arguments: '{}' } }] } : { role: 'assistant', content: 'fixture reply' };
+        function: { name: tool[0], arguments: JSON.stringify(tool[1]) } }] } : { role: 'assistant', content: 'fixture reply' };
       res.end(`data: ${JSON.stringify({ id: 'fixture', object: 'chat.completion.chunk', model: 'fixture',
         choices: [{ index: 0, delta, finish_reason: useTool ? 'tool_calls' : 'stop' }] })}\n\ndata: [DONE]\n\n`);
       return;
@@ -87,6 +119,11 @@ require('node:fs').writeFileSync('installed.txt',require('fixture-dep')+':'+chil
       for (let end; (end = input.indexOf('\n')) >= 0;) {
         const event = JSON.parse(input.slice(0, end)); input = input.slice(end + 1);
         events.push(event); for (const waiter of waiters) waiter(event);
+        const result = event.type === 'apps_request' ? [{label:'Settings',packageName:'com.android.settings'}]
+          : event.type === 'schedule_request' ? {tasks:[],records:[],exactAlarmGranted:false,schedulingError:'',timeZone:'UTC'}
+          : event.type === 'shower_request' ? {ok:true,action:'screenshot',displayId:7,width:2400,height:2,dpi:320,
+            imageWidth:2400,imageHeight:2,mimeType:'image/png',data:imageData} : undefined;
+        if (result) socket.write(JSON.stringify({type:event.type.replace('_request','_response'),id:event.id,callId:event.callId,result}) + '\n');
       }
     });
     function waitFor(predicate) {
@@ -97,10 +134,24 @@ require('node:fs').writeFileSync('installed.txt',require('fixture-dep')+':'+chil
         waiters.add(check);
       });
     }
-    await waitFor(event => event.type === 'ready');
+    const ready = await waitFor(event => event.type === 'ready');
+    assert.equal(ready.piVersion, '1.0.0', 'shipped SDK version');
+    assert.equal(JSON.parse(await fs.readFile(path.join(path.dirname(bundle), 'pi-sdk/package.json'))).version, ready.piVersion);
+    assert.equal((await fs.readFile(path.join(path.dirname(bundle), 'photon_rs_bg.wasm'))).subarray(0,4).toString('hex'), '0061736d');
+    const worker = new Worker(path.join(path.dirname(bundle), 'image-resize-worker.js'));
+    try {
+      const response = once(worker, 'message', {signal:AbortSignal.timeout(20000)});
+      worker.postMessage({inputBytes:new Uint8Array(Buffer.from(imageData,'base64')),mimeType:'image/png',options:{maxWidth:1200}});
+      const [message] = await response;
+      assert(!message.error, message.error);
+      assert(message.result, 'packaged Photon worker must not return null');
+      assert.equal(message.result.width, 1200); assert.equal(message.result.height, 1);
+      assert.equal(message.result.wasResized, true);
+    } finally { await worker.terminate(); }
     const config = { agentDir: path.join(root, 'agent'), cwd: path.join(root, 'workspace'), cacheDir: path.join(root, 'cache'),
-      models: { providers: { fixture: { baseUrl: base + '/v1', api: 'openai-completions', models: [{ id: 'fixture', name: 'Fixture' }] } } },
-      auth: { fixture: { type: 'api_key', key: 'synthetic-only' } } };
+      models: { providers: { fixture: { baseUrl: base + '/v1', api: 'openai-completions', models: [{ id: 'fixture', name: 'Fixture', input:['text','image'] }] } } },
+      chatAttachmentRoot: path.join(root, 'attachments'),
+      auth: { fixture: { type: 'api_key', key: 'synthetic-only' }, 'fixture-images': {type:'api_key',key:'synthetic-image-key'} } };
     await fs.mkdir(config.agentDir, { recursive: true }); await fs.mkdir(path.join(config.cwd, '.pi'), { recursive: true });
     const globalFile = path.join(config.agentDir, 'settings.json'), projectFile = path.join(config.cwd, '.pi/settings.json');
     await fs.writeFile(globalFile, JSON.stringify({ npmCommand: [process.execPath, npmCli], defaultProvider: 'fixture',
@@ -109,6 +160,7 @@ require('node:fs').writeFileSync('installed.txt',require('fixture-dep')+':'+chil
     async function query(type, args = {}, succeeds = true) {
       const id = String(++sequence);
       const snapshot = { ...config, globalSettings: JSON.parse(await fs.readFile(globalFile)), projectSettings: JSON.parse(await fs.readFile(projectFile)) };
+      snapshot.settings = {...snapshot.globalSettings, ...snapshot.projectSettings};
       socket.write(JSON.stringify({ type, id, config: snapshot, ...args }) + '\n');
       const end = await waitFor(event => event.id === id && event.type === 'end');
       const current = events.filter(event => event.id === id);
@@ -157,6 +209,115 @@ require('node:fs').writeFileSync('installed.txt',require('fixture-dep')+':'+chil
     assert.equal(await fs.readFile(globalFile, 'utf8'), before, 'failed npm install does not persist a source');
     await query('remove', { source });
     assert(!(await query('resources')).result.packageExtensions.some(item => item.source === source));
+    // These operations use disposable settings, attachments and native replies, never user data.
+    await fs.writeFile(path.join(config.cwd, 'runtime-image.png'), Buffer.from(imageData, 'base64'));
+    const extensions = path.join(config.agentDir, 'extensions');
+    await fs.mkdir(extensions, {recursive:true});
+    await fs.writeFile(path.join(extensions, 'fixture-images.ts'), `
+export default function(pi) {
+  const model = {type:'image',provider:'fixture-images',id:'paint',name:'Fixture image',api:'openrouter-images',
+    input:['text'],output:['image'],baseUrl:'http://127.0.0.1'};
+  pi.registerProvider({id:'fixture-images',name:'Fixture images',
+    auth:{apiKey:{name:'Fixture key',resolve:async ({credential})=>credential?.key ? {auth:{apiKey:credential.key}} : undefined}},
+    getModels:()=>[],getAllModels:()=>[model],
+    stream:()=>{throw Error('image-only')},streamSimple:()=>{throw Error('image-only')},
+    generateImages:async (selected,context,options)=>{
+      if (options.apiKey !== 'synthetic-image-key' || context.input[0].text !== 'paint fixture') throw Error('image request auth/input');
+      return {api:selected.api,provider:selected.provider,model:selected.id,stopReason:'stop',timestamp:Date.now(),
+        output:[{type:'image',mimeType:'image/png',data:${JSON.stringify(imageData)}}],
+        usage:{input:1,output:2,totalTokens:3,cost:{total:0.01}}};
+    }});
+}
+`);
+    const settings = JSON.parse(await fs.readFile(globalFile));
+    settings.defaultTools = ['read','list_apps','search_apps','schedule_task','shower'];
+    settings.conversationTitle = {model:'fixture/fixture'};
+    await fs.writeFile(globalFile, JSON.stringify(settings));
+    for (const [prompt, name, requestType] of [
+      ['runtime list apps','list_apps','apps_request'], ['runtime search apps','search_apps','apps_request'],
+      ['runtime schedule','schedule_task','schedule_request'], ['runtime read image','read',undefined],
+    ]) {
+      const turn = await query('prompt', {sdk:true,prompt});
+      assert(turn.events.some(event=>event.type==='tool_end' && event.name===name && !event.isError), JSON.stringify(turn.events));
+      if (requestType) assert.equal(turn.events.filter(event=>event.type===requestType).length, 1);
+      assert.equal(turn.events.find(event=>event.type==='context').entries.findLast(entry=>entry.type==='session_info')?.name, 'fixture reply',
+        'conversation-title uses the 1.0.0 agent_end/agent_settled lifecycle: ' + JSON.stringify(turn.events) + stderr);
+      if (name === 'read') {
+        const message = turn.events.find(event=>event.type==='message' && event.message.role==='tool').message;
+        assert.match(message.content, /original 2400x2, displayed at 2000x2/);
+        assert.equal(message.attachments.length, 1, 'bundled read processes and attaches a resized image');
+      }
+    }
+    config.bundledShower = true;
+    let screenshotHistory;
+    for (let i=0; i<2; i++) {
+      const turn = await query('prompt', {sdk:true,prompt:'runtime screenshot',sdkHistory:screenshotHistory});
+      screenshotHistory = turn.events.find(event=>event.type==='context').entries;
+      assert.equal(screenshotHistory.filter(entry=>entry.message?.role==='toolResult' && entry.message.toolName==='shower').length, i+1);
+      const modelImages = JSON.stringify(requests.findLast(request=>request.tools?.length).messages).match(/data:image\/png;base64,/g) ?? [];
+      assert.equal(modelImages.length, 1, 'shower-context keeps only the latest screenshot for the model');
+      assert.equal(turn.events.find(event=>event.type==='message' && event.message.role==='tool').message.attachments.length, 1);
+    }
+    delete config.bundledShower;
+    settings.defaultTools = ['+codemode']; settings.codemode = {mode:'only'}; delete settings.conversationTitle;
+    await fs.writeFile(globalFile, JSON.stringify(settings));
+    const coded = await query('prompt', {sdk:true,prompt:'runtime codemode'});
+    const codeEnd = coded.events.find(event=>event.type==='tool_end' && event.name==='codemode');
+    assert.equal(codeEnd.isError, false, JSON.stringify(codeEnd));
+    const codeText = codeEnd.result.content.filter(part=>part.type==='text').map(part=>part.text).join('\n');
+    assert.match(codeText, /bash-structured-ok/);
+    assert.match(codeText, /original 2400x2, displayed at 2000x2/);
+    const painted = await query('prompt', {sdk:true,prompt:'generate fixture image'});
+    const paintEnd = painted.events.find(event=>event.type==='tool_end' && event.name==='codemode');
+    assert.equal(paintEnd.isError, false, JSON.stringify(paintEnd));
+    const attachment = painted.events.find(event=>event.type==='message' && event.message.role==='tool').message.attachments[0];
+    assert.equal(attachment.mimeType, 'image/png');
+    const generated = paintEnd.result.content.find(part=>part.type==='image');
+    assert(generated, 'generateImages output survives codemode image() processing');
+    const savedImage = await fs.readFile(attachment.path);
+    assert.deepEqual(savedImage, Buffer.from(generated.data,'base64'));
+    assert.equal(savedImage.readUInt32BE(16), 2000, 'generated image is resized, not silently omitted');
+    assert(painted.events.find(event=>event.type==='context').entries.some(entry=>entry.message?.role==='toolResult'
+      && entry.message.content.some(part=>part.type==='image')), 'generated image remains in native history');
+    assert(JSON.stringify(requests.at(-1).messages).includes('data:image/png;base64,'), 'generated image reaches the follow-up chat request');
+    let installationId;
+    for (const [providerId, previous, finish] of [
+      ['anthropic',undefined,'abort'], ['openai',undefined,'abort'],
+      ['openai','reuse','fail'], ['openai','','abort'],
+    ]) {
+      const globalSettings = JSON.parse(await fs.readFile(globalFile));
+      if (previous === '') { globalSettings.deviceId = ''; await fs.writeFile(globalFile, JSON.stringify(globalSettings)); }
+      const id = String(++sequence);
+      const snapshot = {...config,globalSettings,projectSettings:{deviceId:'11111111-1111-4111-8111-111111111111'}};
+      socket.write(JSON.stringify({type:'login',id,providerId,authType:'oauth',config:snapshot}) + '\n');
+      const prompt = await waitFor(event=>event.id===id && (event.type==='auth_prompt' || event.type==='end'));
+      assert.equal(prompt.type, 'auth_prompt', JSON.stringify(events.filter(event=>event.id===id)) + stderr);
+      assert.equal(prompt.prompt.type, providerId === 'anthropic' ? 'select' : 'manual_code');
+      const current = events.filter(event=>event.id===id);
+      const changes = current.filter(event=>event.type==='setting');
+      if (providerId === 'openai') {
+        if (previous === 'reuse') assert.equal(changes.length, 0, 'existing installation ID is not rewritten');
+        else {
+          assert.equal(changes.length, 1);
+          const change = changes[0];
+          assert.equal(change.key, 'deviceId'); assert.equal(change.previous, previous ?? null); assert.equal(change.project, false);
+          assert.match(change.value, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+          assert.equal(current[0], change, 'deviceId setting precedes auth and prompt');
+          installationId = change.value;
+          assert.equal(globalSettings.deviceId ?? null, change.previous);
+          globalSettings.deviceId = change.value; await fs.writeFile(globalFile, JSON.stringify(globalSettings));
+        }
+        const authUrl = new URL(current.find(event=>event.type==='auth' && event.event.type==='auth_url').event.url);
+        assert.equal(authUrl.searchParams.get('ext_agent_host_id'), 'urn:uuid:' + installationId, 'only global installation ID is used');
+      } else assert.equal(changes.length, 0, 'flows not requesting a device ID leave settings unchanged');
+      socket.write(JSON.stringify(finish === 'abort' ? {type:'abort',id}
+        : {type:'auth_reply',id,promptId:prompt.promptId,value:'invalid-redirect-fixture'}) + '\n');
+      assert.equal((await waitFor(event=>event.id===id && event.type==='end')).status, finish === 'abort' ? 'aborted' : 'error');
+      if (providerId === 'openai') assert.equal(JSON.parse(await fs.readFile(globalFile)).deviceId, installationId,
+        'cancel/failure does not lose the durable installation ID');
+      assert(!events.some(event=>event.id===id && event.type==='credential'), 'cancel/failure does not mutate credentials');
+    }
+    console.log('PASS: Pi 1.0.0; Photon WASM + real resize worker/read; four bundled factories; codemode worker/bash structured exits; generateImages credentials/native history/chat attachment; bundled OAuth loaders/deviceId reuse, ordered persistence, cancel/failure (no external requests)');
     console.log('PASS: npm 11.6.2; scoped registry install; dependencies/postinstall/node/execPath; durable settings; fresh TS extension load; same-chat next-turn tool; filters/scopes/non-extension/errors/repeat install/remove');
   } finally {
     socket?.destroy();
