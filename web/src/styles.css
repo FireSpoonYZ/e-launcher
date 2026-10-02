@@ -116,8 +116,18 @@ small, .secondary { font-size: .85rem; color: var(--muted); }
 .tool-details { border-top: 1px solid var(--line); padding: 12px 14px 14px; }
 .tool-details section + section { margin-top: 16px; }
 .tool-details small { font-size: .75rem; }
-.tool pre { margin: 6px 0 0; max-height: 280px; padding: 0; border-radius: 0; background: transparent; font-size: .875rem; }
+.tool-block { display: flex; flex-direction: column; min-width: 0; max-height: calc(var(--viewport-height, 100dvh) / 2); }
+.tool-block-bar { display: flex; align-items: center; flex: none; flex-wrap: wrap; gap: 0 4px; min-height: 44px; }
+.tool-block-bar small { flex: 1; min-width: 0; }
+.tool-block-actions { display: flex; align-items: center; flex: none; margin-left: auto; color: var(--muted); }
+.tool-fullscreen { white-space: nowrap; }
+.tool pre { flex: 0 1 auto; margin: 0; max-width: 100%; min-width: 0; min-height: 0; padding: 0; border-radius: 0; background: transparent; font-size: .875rem; white-space: pre-wrap; overflow-wrap: anywhere; overflow-x: hidden; overflow-y: hidden; overscroll-behavior: contain; }
+.tool pre.is-overflow { overflow-y: auto; }
 .tool pre:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.dialog-content.tool-reader { left: 0; top: 0; right: 0; bottom: 0; transform: none; width: auto; height: auto; max-height: none; border-radius: 0; padding-top: var(--top); padding-bottom: var(--bottom); }
+.tool-reader .dialog-body { display: flex; flex-direction: column; flex: 1; overflow: hidden; }
+.tool-reader-text { flex: 1; min-height: 0; margin: 0; overflow: auto; overscroll-behavior: contain; white-space: pre-wrap; overflow-wrap: anywhere; font: .875rem/1.65 ui-monospace, Consolas, monospace; }
+.tool-reader-text:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .tool-empty { color: var(--muted); font-size: .8rem; margin: 6px 0 0; }
 @media (hover: hover) { .tool summary:hover { background: color-mix(in srgb, var(--surface) 45%, transparent); } }
 @keyframes tool-pulse { 50% { opacity: .3; } }

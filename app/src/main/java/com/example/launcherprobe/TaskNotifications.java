@@ -30,16 +30,21 @@ final class TaskNotifications {
         activity.requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, 3108);
     }
 
-    void show(String id, String title, boolean question, String status) {
+    void show(String id, String title, boolean question, String status, boolean scheduled) {
         try {
             NotificationManager manager = context.getSystemService(NotificationManager.class);
             manager.createNotificationChannel(new NotificationChannel(CHANNEL, "任务提醒", NotificationManager.IMPORTANCE_DEFAULT));
             if (!manager.areNotificationsEnabled()) return;
             String text = question ? "需要你回答" : "error".equals(status) ? "执行失败"
                     : "aborted".equals(status) ? "任务已中断" : "任务已完成";
-            Intent intent = new Intent(context, TaskDetailActivity.class)
+            boolean openScheduledResult = scheduled && !question;
+            if (scheduled) title = "定时任务提醒";
+            if (openScheduledResult) text += "，点击查看本次执行会话";
+            Intent intent = new Intent(context, openScheduledResult ? MainActivity.class : TaskDetailActivity.class)
                     .setData(new Uri.Builder().scheme("launcher-task").authority("conversation").appendPath(id).build())
-                    .putExtra(TaskDetailActivity.EXTRA_CONVERSATION_ID, id);
+                    .putExtra(openScheduledResult ? TaskDetailActivity.EXTRA_OPEN_CHAT
+                            : TaskDetailActivity.EXTRA_CONVERSATION_ID, id);
+            if (openScheduledResult) intent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP);
             PendingIntent open = PendingIntent.getActivity(context, 0, intent,
                     PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
             manager.notify(id, ID, new Notification.Builder(context, CHANNEL)

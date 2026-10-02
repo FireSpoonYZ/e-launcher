@@ -45,7 +45,8 @@ public final class ScheduledTasksPlugin extends Plugin {
     @PluginMethod public void preview(PluginCall call) {
         try {
             resolve(call, tasks.preview(call.getData()));
-            if (ScheduleRule.fromJson(call.getData()).isStatutory()) tasks.refreshCalendar(null);
+            if ("statutoryWorkday".equals(call.getData().optString("repeat"))
+                    || "statutoryHoliday".equals(call.getData().optString("repeat"))) tasks.refreshCalendar(null);
         }
         catch (Exception failure) { reject(call, failure); }
     }
@@ -53,7 +54,8 @@ public final class ScheduledTasksPlugin extends Plugin {
     @PluginMethod public void save(PluginCall call) {
         try {
             resolve(call, tasks.save(call.getData()));
-            if (ScheduleRule.fromJson(call.getData()).isStatutory()) tasks.refreshCalendar(null);
+            if ("statutoryWorkday".equals(call.getData().optString("repeat"))
+                    || "statutoryHoliday".equals(call.getData().optString("repeat"))) tasks.refreshCalendar(null);
         }
         catch (Exception failure) { reject(call, failure); }
     }

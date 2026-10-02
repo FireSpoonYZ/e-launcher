@@ -15,6 +15,7 @@ import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 
+import java.time.Instant;
 import java.time.ZoneId;
 import java.util.HashSet;
 import java.util.Set;
@@ -107,6 +108,8 @@ final class ScheduledTasks {
         for (int i = runs.length() - 1; i >= 0; i--) {
             JSONObject run = runs.getJSONObject(i);
             run.put("conversationAvailable", conversations.contains(run.optString("conversationId")));
+            run.put("sourceConversationAvailable", conversations.contains(run.optString("sourceConversationId")));
+            if (!run.has("sourceConversationId")) run.put("sourceConversationId", JSONObject.NULL);
             history.put(run);
         }
         JSONArray tasks = state.getJSONArray("tasks");
@@ -115,24 +118,33 @@ final class ScheduledTasks {
         for (int i = 0; i < tasks.length(); i++) {
             JSONObject task = tasks.getJSONObject(i);
             ScheduleRule rule = ScheduleRule.fromJson(task);
+            task.put("sourceConversationAvailable", conversations.contains(task.optString("sourceConversationId")));
+            if (!task.has("sourceConversationId")) task.put("sourceConversationId", JSONObject.NULL);
             calendar.describe(task, rule, now, rule.nextAfter(now, zone, calendar), zone);
         }
         return new JSONObject().put("tasks", tasks).put("records", history)
                 .put("exactAlarmGranted", exactAlarmGranted()).put("schedulingError", schedulingError)
-                .put("timeZone", ZoneId.systemDefault().getId()).put("calendarVersion", calendar.version());
+                .put("timeZone", zone.getId()).put("now", now)
+                .put("localNow", Instant.ofEpochMilli(now).atZone(zone).toOffsetDateTime().toString())
+                .put("calendarVersion", calendar.version());
     }
 
     synchronized JSONObject preview(JSONObject input) throws Exception {
         ZoneId zone = ZoneId.systemDefault();
         long now = clock.getAsLong();
-        ScheduleRule rule = ScheduleRule.fromJson(input);
+        JSONObject previous = input.has("id") ? requireTask(read().getJSONArray("tasks"),
+                ScheduleRule.text(input, "id"), ScheduleRule.integer(input, "revision")) : null;
+        ScheduleRule rule = inputRule(input, previous, now, zone);
         long next = rule.nextAfter(now, zone, calendar);
         JSONObject result = new JSONObject().put("nextRunAt", next).put("timeZone", zone.getId());
+        if (rule.runAt > 0) result.put("runAt", rule.runAt);
         calendar.describe(result, rule, now, next, zone);
         return result;
     }
 
-    synchronized JSONObject save(JSONObject input) throws Exception {
+    synchronized JSONObject save(JSONObject input) throws Exception { return save(input, null); }
+
+    private JSONObject save(JSONObject input, String sourceConversationId) throws Exception {
         String title = ScheduleRule.text(input, "title").trim();
         String prompt = ScheduleRule.text(input, "prompt").trim();
         if (title.isEmpty() || title.length() > 80) throw new IllegalArgumentException("备注需为 1–80 个字符");
@@ -146,15 +158,21 @@ final class ScheduledTasks {
         if (previous != null && "weekly".equals(input.optString("repeat"))
                 && "weekly".equals(previous.optString("repeat")) && !input.has("weekdays") && !input.has("weekday")
                 && previous.has("weekdays")) ruleInput.put("weekdays", previous.getJSONArray("weekdays"));
-        ScheduleRule rule = ScheduleRule.fromJson(ruleInput);
+        long now = clock.getAsLong();
+        ScheduleRule rule = inputRule(ruleInput, previous, now, ZoneId.systemDefault());
+        if (rule.runAt > 0 && rule.runAt <= now
+                && !(previous != null && !previous.getBoolean("enabled") && rule.runAt == previous.optLong("runAt")))
+            throw new IllegalArgumentException("执行时间已过，请重新设置未来日期和时间");
         boolean vibrate = ScheduleRule.bool(input, "vibrate", previous != null && previous.optBoolean("vibrate"));
         boolean deleteAfterRun = ScheduleRule.bool(input, "deleteAfterRun", previous != null && previous.optBoolean("deleteAfterRun"));
-        long now = clock.getAsLong();
         boolean enabled = previous == null || previous.getBoolean("enabled");
         JSONObject task = rule.json().put("id", id).put("title", title).put("prompt", prompt)
                 .put("vibrate", vibrate).put("deleteAfterRun", deleteAfterRun)
                 .put("enabled", enabled).put("revision", previous == null ? 1 : previous.getInt("revision") + 1)
                 .put("createdAt", previous == null ? now : previous.getLong("createdAt"))
+                .put("sourceConversationId", previous == null
+                        ? sourceConversationId == null || sourceConversationId.isEmpty() ? JSONObject.NULL : sourceConversationId
+                        : previous.opt("sourceConversationId") == null ? JSONObject.NULL : previous.get("sourceConversationId"))
                 .put("nextRunAt", enabled ? rule.nextAfter(now, ZoneId.systemDefault(), calendar) : 0);
         if (index < 0) tasks.put(task); else tasks.put(index, task);
         write(state);
@@ -163,11 +181,36 @@ final class ScheduledTasks {
         return snapshot();
     }
 
+    /** Explicit date/delay replaces runAt; unchanged date+time round-trips preserve the original instant. */
+    private ScheduleRule inputRule(JSONObject input, JSONObject previous, long now, ZoneId zone) throws Exception {
+        JSONObject value = new JSONObject(input.toString());
+        if (previous != null && "once".equals(value.optString("repeat"))
+                && "once".equals(previous.optString("repeat")) && !value.has("delayMinutes")) {
+            long original = previous.optLong("runAt", previous.optLong("nextRunAt"));
+            boolean sameTime = previous.getString("time").equals(value.optString("time"));
+            if (value.has("date") && value.has("runAt") && original > 0
+                    && ScheduleRule.positiveLong(value, "runAt") == original && sameTime
+                    && Instant.ofEpochMilli(original).atZone(zone).toLocalDate().toString()
+                            .equals(ScheduleRule.text(value, "date")))
+                value.remove("date");
+            else if (!value.has("date") && !value.has("runAt") && sameTime && original > 0)
+                value.put("runAt", original);
+        }
+        ScheduleRule rule = ScheduleRule.fromJson(value, now, zone);
+        if ("once".equals(rule.repeat) && rule.runAt == 0)
+            rule = ScheduleRule.fromJson(rule.json().put("runAt", rule.nextAfter(now, zone, calendar)), now, zone);
+        return rule;
+    }
+
     synchronized JSONObject setEnabled(String id, int revision, boolean enabled) throws Exception {
         JSONObject state = read();
         JSONObject task = requireTask(state.getJSONArray("tasks"), id, revision);
+        ScheduleRule rule = ScheduleRule.fromJson(task);
+        long now = clock.getAsLong();
+        if (enabled && rule.runAt > 0 && rule.runAt <= now)
+            throw new IllegalArgumentException("执行时间已过，请重新设置未来日期和时间");
         task.put("enabled", enabled).put("revision", revision + 1).put("nextRunAt", enabled
-                ? ScheduleRule.fromJson(task).nextAfter(clock.getAsLong(), ZoneId.systemDefault(), calendar) : 0);
+                ? rule.nextAfter(now, ZoneId.systemDefault(), calendar) : 0);
         write(state);
         scheduleAlarm(state);
         changed();
@@ -187,18 +230,26 @@ final class ScheduledTasks {
     }
 
     /** Model tool actions. Partial updates merge under the task lock, then reuse save(). */
-    synchronized JSONObject applyTool(JSONObject input) throws Exception {
+    synchronized JSONObject applyTool(JSONObject input) throws Exception { return applyTool(input, null); }
+
+    synchronized JSONObject applyTool(JSONObject input, String sourceConversationId) throws Exception {
         if (input == null) throw new IllegalArgumentException("定时任务参数无效");
+        if (input.has("sourceConversationId")) throw new IllegalArgumentException("任务来源只能由宿主绑定");
         String action = ScheduleRule.text(input, "action");
         if ("list".equals(action)) return snapshot();
         if ("create".equals(action)) {
             if (input.has("id") || input.has("revision")) throw new IllegalArgumentException("创建任务不能指定 id 或 revision");
             JSONObject created = new JSONObject(input.toString());
             created.remove("action");
-            return save(created);
+            return save(created, sourceConversationId);
         }
         if ("update".equals(action)) return save(mergeUpdate(input));
         if ("delete".equals(action)) return delete(ScheduleRule.text(input, "id"), ScheduleRule.integer(input, "revision"));
+        if ("setEnabled".equals(action)) {
+            if (!input.has("enabled")) throw new IllegalArgumentException("必须提供 enabled");
+            return setEnabled(ScheduleRule.text(input, "id"), ScheduleRule.integer(input, "revision"),
+                    ScheduleRule.bool(input, "enabled", false));
+        }
         throw new IllegalArgumentException("不支持的定时任务操作");
     }
 
@@ -225,6 +276,8 @@ final class ScheduledTasks {
             else if (!repeatChanged) merged.put("monthDay", current.getInt("monthDay"));
             else throw new IllegalArgumentException("改为每月时必须提供 monthDay");
         }
+        for (String key : new String[]{"date", "delayMinutes", "runAt"})
+            if (input.has(key)) merged.put(key, input.get(key));
         for (String key : new String[]{"vibrate", "deleteAfterRun"})
             merged.put(key, ScheduleRule.bool(input, key, current.optBoolean(key)));
         return merged;
@@ -244,13 +297,15 @@ final class ScheduledTasks {
         for (int i = 0; i < tasks.length(); i++) {
             JSONObject task = tasks.getJSONObject(i);
             if (!task.getBoolean("enabled")) continue;
-            long due = task.getLong("nextRunAt");
-            if (due <= now || recalculate || ScheduleRule.fromJson(task).isStatutory()) {
-                if (due > 0 && due <= now && !recalculate)
-                    addRecord(state, task, due, "skipped", "missed", null);
-                if ("once".equals(task.getString("repeat")) && due > 0 && due <= now && !recalculate)
+            ScheduleRule rule = ScheduleRule.fromJson(task);
+            long due = rule.runAt > 0 ? rule.runAt : task.getLong("nextRunAt");
+            boolean missed = due > 0 && due <= now && (rule.runAt > 0 || !recalculate);
+            if (missed || recalculate || due <= 0 || rule.isStatutory()
+                    || due != task.getLong("nextRunAt")) {
+                if (missed) addRecord(state, task, due, "skipped", "missed", null);
+                if ("once".equals(rule.repeat) && missed)
                     task.put("enabled", false).put("nextRunAt", 0).put("revision", task.getInt("revision") + 1);
-                else task.put("nextRunAt", ScheduleRule.fromJson(task).nextAfter(now, zone, calendar));
+                else task.put("nextRunAt", rule.nextAfter(now, zone, calendar));
                 modified = true;
             }
         }
@@ -266,20 +321,20 @@ final class ScheduledTasks {
     synchronized void onAlarm() throws Exception {
         if (!exactAlarmGranted()) { restore(); return; }
         JSONObject state = read();
-        if (!ZoneId.systemDefault().getId().equals(state.optString("timeZone", ZoneId.systemDefault().getId()))) {
-            restore(true);
-            return;
-        }
+        ZoneId zone = ZoneId.systemDefault();
+        boolean zoneChanged = !zone.getId().equals(state.optString("timeZone", zone.getId()));
         recoverRuns(state);
         long now = clock.getAsLong();
         JSONArray tasks = state.getJSONArray("tasks");
         JSONArray pending = new JSONArray();
         for (int i = 0; i < tasks.length(); i++) {
             JSONObject task = tasks.getJSONObject(i);
-            long due = task.getLong("nextRunAt");
-            if (!task.getBoolean("enabled") || due <= 0 || due > now) continue;
+            if (!task.getBoolean("enabled")) continue;
             ScheduleRule rule = ScheduleRule.fromJson(task);
-            ZoneId zone = ZoneId.systemDefault();
+            // A time-zone change moves wall-clock recurrences, never an absolute one-time instant.
+            if (zoneChanged && rule.runAt == 0) task.put("nextRunAt", rule.nextAfter(now, zone, calendar));
+            long due = rule.runAt > 0 ? rule.runAt : task.getLong("nextRunAt");
+            if (due <= 0 || due > now) continue;
             if (rule.isStatutory() && calendar.isWorkday(java.time.Instant.ofEpochMilli(due).atZone(zone).toLocalDate(), zone)
                     != "statutoryWorkday".equals(rule.repeat)) {
                 task.put("nextRunAt", rule.nextAfter(now, zone, calendar));
@@ -296,6 +351,7 @@ final class ScheduledTasks {
                 pending.put(new JSONObject().put("task", task).put("run", run));
             }
         }
+        state.put("timeZone", zone.getId());
         write(state);
         scheduleAlarm(state);
         for (int i = 0; i < pending.length(); i++) {
@@ -362,6 +418,7 @@ final class ScheduledTasks {
         long now = clock.getAsLong();
         JSONObject run = new JSONObject().put("id", UUID.randomUUID().toString())
                 .put("taskId", task.getString("id")).put("title", task.getString("title"))
+                .put("sourceConversationId", task.has("sourceConversationId") ? task.get("sourceConversationId") : JSONObject.NULL)
                 .put("scheduledAt", due).put("startedAt", "running".equals(status) ? now : 0)
                 .put("finishedAt", "running".equals(status) ? 0 : now).put("status", status)
                 .put("reason", reason).put("message", "").put("owner", processId)

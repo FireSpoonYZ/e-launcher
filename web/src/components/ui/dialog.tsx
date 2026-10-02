@@ -3,12 +3,12 @@ import { ArrowLeft, X } from 'lucide-react';
 import type { ReactNode } from 'react';
 import { useText } from '../../ui';
 
-export function Dialog({ open, onOpenChange, title, children, sheet = false, drawer = false, className = '', onBack, actions }: { open: boolean; onOpenChange(open: boolean): void; title: string; children: ReactNode; sheet?: boolean; drawer?: boolean; className?: string; onBack?(): void; actions?: ReactNode }) {
+export function Dialog({ open, onOpenChange, title, children, sheet = false, drawer = false, className = '', onBack, actions, onCloseAutoFocus }: { open: boolean; onOpenChange(open: boolean): void; title: string; children: ReactNode; sheet?: boolean; drawer?: boolean; className?: string; onBack?(): void; actions?: ReactNode; onCloseAutoFocus?(event: Event): void }) {
   const t = useText();
   return <DialogPrimitive.Root open={open} onOpenChange={onOpenChange}>
     <DialogPrimitive.Portal>
       <DialogPrimitive.Overlay className="dialog-overlay" />
-      <DialogPrimitive.Content className={`dialog-content ${sheet ? 'sheet' : drawer ? 'drawer' : ''} ${className}`} onEscapeKeyDown={event => { if (onBack) { event.preventDefault(); onBack(); } }} onOpenAutoFocus={event => { event.preventDefault(); requestAnimationFrame(() => document.querySelector<HTMLElement>('[role="dialog"]')?.focus()); }}>
+      <DialogPrimitive.Content className={`dialog-content ${sheet ? 'sheet' : drawer ? 'drawer' : ''} ${className}`} onEscapeKeyDown={event => { if (onBack) { event.preventDefault(); onBack(); } }} onCloseAutoFocus={onCloseAutoFocus} onOpenAutoFocus={event => { event.preventDefault(); requestAnimationFrame(() => document.querySelector<HTMLElement>('[role="dialog"]')?.focus()); }}>
         {sheet && <div className="sheet-handle" />}
         <header className="dialog-header">{onBack && <button className="icon-button dialog-back" aria-label={t('返回','Back')} onClick={onBack}><ArrowLeft/></button>}<DialogPrimitive.Title>{title}</DialogPrimitive.Title>{actions}<DialogPrimitive.Close className="icon-button" aria-label={t('关闭','Close')}><X /></DialogPrimitive.Close></header>
         <DialogPrimitive.Description className="sr-only">{title}</DialogPrimitive.Description>

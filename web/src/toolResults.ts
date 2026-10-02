@@ -28,6 +28,11 @@ export function toolOutputPreview(output: string): string {
   return output.trim().slice(0, 600).split(/\r?\n/, 3).join('\n');
 }
 
+/** Visible wrapped text only; closed or subpixel boxes are not overflow. */
+export function toolTextOverflows(scrollHeight: number, clientHeight: number) {
+  return clientHeight > 0 && scrollHeight - clientHeight > 1;
+}
+
 export function toolResultAttachments(results: ConversationNode[]): Attachment[] {
   return results.flatMap(result => result.message.attachments);
 }

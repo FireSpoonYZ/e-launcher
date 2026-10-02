@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import {pairToolResults, toolCallKey, summarizeToolArgs, toolOutputPreview, toolResultAttachments} from '../src/toolResults.ts';
+import {pairToolResults, toolCallKey, summarizeToolArgs, toolOutputPreview, toolResultAttachments, toolTextOverflows} from '../src/toolResults.ts';
 
 const node = (id, role, {toolCalls = [], toolCallId = null, content = id, attachments = []} = {}) => ({
   id,
@@ -45,6 +45,14 @@ test('summarizes actual arguments and bounds result previews without changing th
   assert.ok(output.endsWith('fourth'));
   assert.equal(toolOutputPreview('  \n'), '');
   assert.equal(toolOutputPreview('x'.repeat(1000)).length, 600);
+});
+
+test('treats only a visible wrapped block as overflow', () => {
+  assert.equal(toolTextOverflows(0, 0), false);
+  assert.equal(toolTextOverflows(400, 0), false);
+  assert.equal(toolTextOverflows(100, 100), false);
+  assert.equal(toolTextOverflows(101, 100), false);
+  assert.equal(toolTextOverflows(102, 100), true);
 });
 
 test('returns persisted tool result attachments for the production tool view', () => {

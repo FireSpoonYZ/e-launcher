@@ -80,7 +80,7 @@ final class ChatCoordinator {
     }
 
     String sendVoice(String conversationId, String text, java.util.function.Consumer<String> registered) throws Exception {
-        return send(conversationId, text, Collections.emptyList(), null, true, registered);
+        return send(conversationId, text, Collections.emptyList(), null, true, registered, false);
     }
 
     /** Explicit voice targets may be inactive, but never missing or archived. */
@@ -115,7 +115,7 @@ final class ChatCoordinator {
 
     String sendScheduled(String conversationId, String title, String prompt) throws Exception {
         store.createBackgroundConversation(conversationId, title);
-        return send(conversationId, prompt, Collections.emptyList(), null, true);
+        return send(conversationId, prompt, Collections.emptyList(), null, true, null, true);
     }
 
     private String send(String conversationId, String text, List<ChatAttachment> attachments,
@@ -125,11 +125,12 @@ final class ChatCoordinator {
 
     private String send(String conversationId, String text, List<ChatAttachment> attachments,
             String submissionId, boolean background) throws Exception {
-        return send(conversationId, text, attachments, submissionId, background, null);
+        return send(conversationId, text, attachments, submissionId, background, null, false);
     }
 
     private synchronized String send(String conversationId, String text, List<ChatAttachment> attachments,
-            String submissionId, boolean background, java.util.function.Consumer<String> voiceRegistered) throws Exception {
+            String submissionId, boolean background, java.util.function.Consumer<String> voiceRegistered,
+            boolean scheduled) throws Exception {
         String prompt = text == null ? "" : text.trim();
         if (prompt.isEmpty() && attachments.isEmpty()) throw new IllegalArgumentException("消息不能为空");
         AttachmentStore attachmentStore = new AttachmentStore(context);
@@ -139,6 +140,7 @@ final class ChatCoordinator {
             if (voiceRegistered != null) voiceConversationTitle(conversationId);
             run = registerRun(conversationId, submissionId, background);
             if (run == null) return null;
+            run.scheduled = scheduled;
             run.preserveDraft = voiceRegistered != null;
             if (voiceRegistered != null) voiceRegistered.accept(run.requestId);
         }
@@ -408,7 +410,7 @@ final class ChatCoordinator {
         String title = "任务提醒";
         for (ChatStore.Conversation conversation : store.conversations())
             if (conversation.id.equals(run.conversationId)) { title = conversation.title; break; }
-        new TaskNotifications(context).show(run.conversationId, title, question, run.status);
+        new TaskNotifications(context).show(run.conversationId, title, question, run.status, run.scheduled);
     }
 
     /** Attention first, retaining recent-activity order within each group. */
@@ -763,6 +765,7 @@ final class ChatCoordinator {
 
     static final class SessionRun {
         boolean preserveDraft;
+        boolean scheduled;
         final String conversationId;
         final String requestId;
         final AgentLoop.CancelToken cancellation = new AgentLoop.CancelToken();

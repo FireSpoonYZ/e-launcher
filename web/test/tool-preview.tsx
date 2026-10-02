@@ -6,7 +6,7 @@ import { ArrowUp, Menu, Plus } from 'lucide-react';
 import { ToolCallView } from '../src/ToolCallView';
 import '../src/styles.css';
 
-const result = (id: string, content: string) => ({id, parentId: null, message: {id, role: 'tool' as const, content, toolCallId: id, toolCalls: [], incomplete: false}});
+const result = (id: string, content: string) => ({id, parentId: null, message: {id, role: 'tool' as const, content, toolCallId: id, toolCalls: [], attachments: [], incomplete: false}});
 function Preview() {
   const [output, setOutput] = useState<string | null>(null);
   const [running, setRunning] = useState(true);

@@ -393,7 +393,10 @@ final class PiAgentBridge {
         String callId = event.optString("callId");
         JSONObject arguments = event.optJSONObject("arguments");
         if (requestId.isEmpty() || callId.isEmpty()) return;
-        if (closed || !requests.containsKey(requestId) || scheduleCalls.containsKey(callId)) return;
+        Request request = requests.get(requestId);
+        if (closed || request == null || scheduleCalls.containsKey(callId)) return;
+        // The source belongs to the host prompt, never to model-supplied arguments or events.
+        String conversationId = request.conversationId;
         ShowerCall call = new ShowerCall(requestId);
         FutureTask<Void> task = new FutureTask<>(() -> {
             synchronized (PiAgentBridge.this) {
@@ -403,7 +406,7 @@ final class PiAgentBridge {
                     .put("id", requestId).put("callId", callId);
             try {
                 if (arguments == null) throw new IllegalArgumentException("定时任务参数无效");
-                response.put("result", scheduledTasks.applyTool(arguments));
+                response.put("result", scheduledTasks.applyTool(arguments, conversationId));
             } catch (Exception exception) {
                 response.put("error", exception.getMessage() == null
                         ? exception.getClass().getSimpleName() : exception.getMessage());
