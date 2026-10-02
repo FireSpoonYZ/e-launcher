@@ -20,6 +20,41 @@ import static org.junit.Assert.*;
 @RunWith(RobolectricTestRunner.class)
 @Config(sdk = 34, shadows = HostAtomicFile.class)
 public class PiSettingsUiTest {
+    @Test public void nativeCredentialAliasNeedsConsentAndMcpJsonHasAccessibleLabel() throws Exception {
+        Context context = RuntimeEnvironment.getApplication();
+        context.getSharedPreferences("ui", 0).edit().clear().putString("language", "zh").commit();
+        PiConfigStore store = new PiConfigStore(context);
+        store.save(false, "mcp-auth.json", "{\"token\":\"fixture-private\"}", null);
+        assertTrue(store.isCredentialFile(false, "./mcp-auth.json"));
+        assertTrue(store.isCredentialFile(false, "./mcp-auth.json.previous"));
+        assertTrue(store.isCredentialFile(false, "./auth.json"));
+        assertTrue(store.isMcpConfigFile(false, "./mcp.json"));
+        ActivityController<PiSettingsActivity> controller = Robolectric.buildActivity(PiSettingsActivity.class).create().start().resume().visible();
+        try {
+            org.robolectric.util.ReflectionHelpers.callInstanceMethod(controller.get(), "openFile",
+                    org.robolectric.util.ReflectionHelpers.ClassParameter.from(String.class, "./mcp-auth.json"));
+            android.app.AlertDialog consent = org.robolectric.shadows.ShadowAlertDialog.getLatestAlertDialog();
+            assertTrue(consent.isShowing());
+            assertEquals("设置", org.robolectric.util.ReflectionHelpers.<String>getField(controller.get(), "page"));
+            consent.dismiss();
+            org.robolectric.util.ReflectionHelpers.callInstanceMethod(controller.get(), "mcpForm",
+                    org.robolectric.util.ReflectionHelpers.ClassParameter.from(String.class, ""),
+                    org.robolectric.util.ReflectionHelpers.ClassParameter.from(String.class, "global"),
+                    org.robolectric.util.ReflectionHelpers.ClassParameter.from(String.class, "fixture-revision"),
+                    org.robolectric.util.ReflectionHelpers.ClassParameter.from(org.json.JSONObject.class, new org.json.JSONObject()));
+            View dialog = org.robolectric.shadows.ShadowAlertDialog.getLatestAlertDialog().getWindow().getDecorView();
+            assertNotNull(findDescription(dialog, "MCP JSON: env / headers / oauth / timeout / cwd"));
+        } finally { controller.pause().stop().destroy(); }
+    }
+
+    private static View findDescription(View view, String description) {
+        if (description.contentEquals(view.getContentDescription() == null ? "" : view.getContentDescription())) return view;
+        if (view instanceof ViewGroup) for (int i = 0; i < ((ViewGroup) view).getChildCount(); i++) {
+            View found = findDescription(((ViewGroup) view).getChildAt(i), description); if (found != null) return found;
+        }
+        return null;
+    }
+
     @Test public void changingLanguageAndThemePreservesInvalidDraftAndSavedValues() throws Exception {
         Context context = RuntimeEnvironment.getApplication();
         context.getSharedPreferences("ui", 0).edit().clear().putString("language", "en").putString("theme", "light").commit();
@@ -29,7 +64,10 @@ public class PiSettingsUiTest {
         Files.createDirectories(store.directory(false).toPath());
         String saved = "{\"customText\":\"保存\",\"customNumber\":1e+02}\n";
         Files.write(store.directory(false).toPath().resolve("settings.json"), saved.getBytes(StandardCharsets.UTF_8));
-        Bundle state = new Bundle(); state.putString("page", "file:settings.json");
+        String legacyProject = "{\"customText\":\"旧项目配置\"}\n";
+        Files.createDirectories(store.directory(true).toPath());
+        Files.write(store.directory(true).toPath().resolve("settings.json"), legacyProject.getBytes(StandardCharsets.UTF_8));
+        Bundle state = new Bundle(); state.putString("page", "file:settings.json"); state.putBoolean("project", true);
         ActivityController<PiSettingsActivity> controller = Robolectric.buildActivity(PiSettingsActivity.class).create(state).start().resume().visible();
         try {
             View root = controller.get().getWindow().getDecorView();
@@ -44,6 +82,8 @@ public class PiSettingsUiTest {
             assertTrue(hasButton(root, "保存"));
             assertEquals(draft, findEditor(root).getText().toString());
             assertEquals(saved, store.read(false, "settings.json"));
+            assertEquals(legacyProject, store.read(true, "settings.json"));
+            assertFalse(hasButton(root, "工作区 ▾"));
             assertEquals(0, root.getSystemUiVisibility() & View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR);
         } finally { controller.pause().stop().destroy(); }
     }

@@ -46,12 +46,11 @@ export function Row({icon, title, detail, onClick, children}: {icon?: ReactNode;
 export function SearchField({value, onChange, placeholder}: {value: string; onChange(value: string): void; placeholder: string}) {
   return <label className="search-field"><Search/><input aria-label={placeholder} placeholder={placeholder} value={value} onChange={e => onChange(e.target.value)}/></label>;
 }
-export function Scope({project, onChange}: {project: boolean; onChange(value: boolean): void}) { const t = useText(); return <div className="segments scope" aria-label={t('配置作用域','Configuration scope')}><button aria-pressed={!project} onClick={() => onChange(false)}>{t('全局','Global')}</button><button aria-pressed={project} onClick={() => onChange(true)}>{t('工作区','Workspace')}</button></div>; }
 
 // Subscribe first. Buffered events belong to this returned request ID, including fast completions.
 export async function query<T>(operation: QueryOperation, args: Record<string, unknown> = {}, onEvent?: (event: NativeEvent) => void, signal?: AbortSignal): Promise<T> {
   // Package mutations must finish even if their caller goes away.
-  if (['install', 'update', 'remove'].includes(operation)) signal = undefined;
+  if (['install', 'update', 'remove', 'mcp_file_save'].includes(operation)) signal = undefined;
   let id: string | undefined, settled = false, cancelled = false;
   let listener: Awaited<ReturnType<typeof NativeSettings.addListener>> | undefined;
   const buffered: NativeEvent[] = [];

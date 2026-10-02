@@ -35,10 +35,65 @@ public class SettingsPluginQueryTest {
         BridgeShadow.fastEnd = false;
         BridgeShadow.failStart = false;
         BridgeShadow.duringStart = null;
+        BridgeShadow.fileArguments = null;
         plugin = new SettingsPlugin();
     }
 
     @After public void destroy() { plugin.handleOnDestroy(); }
+
+    @Test public void mcpOperationsUseSettingsWireAndOAuthOwnsItsPrompt() throws Exception {
+        for (String operation : new String[]{"mcp_list", "mcp_edit", "mcp_save", "mcp_toggle", "mcp_remove", "mcp_check", "mcp_logout"}) {
+            RecordingCall call = query(operation);
+            assertNull(call.error);
+            assertTrue(call.result.getBoolean("cancellable"));
+        }
+        String login = start("mcp_login");
+        BridgeShadow.prompt(login, "mcp-redirect", "auth_prompt");
+        assertNull(reply(login, "mcp-redirect").error);
+        assertNotNull(reply(login, "mcp-redirect").error);
+        cancel(login);
+        assertTrue(BridgeShadow.aborted.contains(login));
+    }
+
+    @Test public void wholeMcpFileAliasSaveUsesTheNodeQueryInsteadOfJavaWrite() throws Exception {
+        PiConfigStore store = new PiConfigStore(RuntimeEnvironment.getApplication());
+        store.save(false, "mcp.json", "{}", null);
+        String original = store.read(false, "mcp.json");
+        RecordingCall call = new RecordingCall(new JSObject().put("name", "./mcp.json")
+                .put("source", "{\"number\":1e+02}").put("expected", original));
+        plugin.saveFile(call);
+        assertTrue(call.finished.await(5, java.util.concurrent.TimeUnit.SECONDS));
+        assertNull(call.error);
+        assertEquals("./mcp.json", BridgeShadow.fileArguments.getString("name"));
+        assertEquals(original, BridgeShadow.fileArguments.getString("expected"));
+        assertTrue(BridgeShadow.fileArguments.getString("source").contains("1e+02"));
+        assertEquals(original, store.read(false, "mcp.json"));
+    }
+
+    @Test public void legacyProjectWriteRequestsAreRejectedWithoutChangingEitherScope() throws Exception {
+        PiConfigStore store = new PiConfigStore(RuntimeEnvironment.getApplication());
+        store.save(false, "settings.json", "{\"theme\":\"dark\"}", null);
+        store.save(true, "settings.json", "{\"theme\":\"legacy-project\"}", null);
+        String global = store.read(false, "settings.json"), project = store.read(true, "settings.json");
+        for (String operation : new String[]{"install", "update", "remove"}) {
+            RecordingCall call = new RecordingCall(new JSObject().put("operation", operation).put("arguments",
+                    new JSObject().put("source", "npm:test").put("project", true)));
+            plugin.query(call); assertTrue(call.error.contains("全局"));
+        }
+        RecordingCall file = new RecordingCall(new JSObject().put("project", true).put("name", "settings.json")
+                .put("source", "{}").put("expected", project));
+        plugin.saveFile(file); assertTrue(file.error.contains("全局"));
+        RecordingCall update = new RecordingCall(new JSObject().put("project", true).put("key", "theme").put("value", "\"light\"").put("previous", "\"legacy-project\""));
+        plugin.updateSetting(update); assertTrue(update.error.contains("全局"));
+        RecordingCall reset = new RecordingCall(new JSObject().put("project", true).put("key", "theme").put("revision", "ignored"));
+        plugin.resetSetting(reset); assertTrue(reset.error.contains("全局"));
+        RecordingCall mcp = new RecordingCall(new JSObject().put("operation", "mcp_file_save").put("arguments",
+                new JSObject().put("scope", "project").put("name", "./mcp.json").put("source", "{}").put("expected", "{}")));
+        plugin.query(mcp); assertTrue(mcp.error.contains("全局"));
+        assertEquals(global, store.read(false, "settings.json"));
+        assertEquals(project, store.read(true, "settings.json"));
+        assertTrue(BridgeShadow.listeners.isEmpty());
+    }
 
     @Test public void parallelRequestsCancelOnlySpecifiedIdAndOldEndDoesNotClearNewRequest() throws Exception {
         String old = start("catalog"), login = start("login");
@@ -68,7 +123,7 @@ public class SettingsPluginQueryTest {
     }
 
     @Test public void packageMutationsCannotBeCancelledEvenOnDestroy() throws Exception {
-        for (String operation : new String[]{"install", "update", "remove"}) {
+        for (String operation : new String[]{"install", "update", "remove", "mcp_file_save"}) {
             RecordingCall call = query(operation);
             assertFalse(call.result.getBoolean("cancellable"));
             cancel(call.result.getString("requestId"));
@@ -157,6 +212,7 @@ public class SettingsPluginQueryTest {
         static final List<String> aborted = new ArrayList<>(), replies = new ArrayList<>();
         static boolean fastEnd, failStart;
         static Runnable duringStart;
+        static JSONObject fileArguments;
         @Implementation protected void __constructor__(Context context) { }
         @Implementation protected static PiAgentBridge get(Context context) {
             if (instance == null) instance = ReflectionHelpers.callConstructor(PiAgentBridge.class,
@@ -167,6 +223,13 @@ public class SettingsPluginQueryTest {
                 PiConfigStore store, PiAgentBridge.Listener listener) throws Exception {
             String id = "q" + (listeners.size() + 1);
             listeners.put(id, listener);
+            if ("mcp_file_save".equals(type)) {
+                fileArguments = arguments;
+                listener.event(new JSONObject().put("id", id).put("type", "result")
+                        .put("result", new JSONObject().put("source", arguments.getString("source"))));
+                emit(id, "end");
+                return id;
+            }
             if (duringStart != null) duringStart.run();
             if (fastEnd || failStart) emit(id, "end");
             if (failStart) throw new IllegalStateException("send failed");
@@ -188,9 +251,10 @@ public class SettingsPluginQueryTest {
         JSObject result;
         boolean resolved;
         String error;
+        final java.util.concurrent.CountDownLatch finished = new java.util.concurrent.CountDownLatch(1);
         RecordingCall(JSObject data) { super(null, "Settings", "test", "query", data); }
-        @Override public void resolve(JSObject value) { result = value; resolved = true; }
+        @Override public void resolve(JSObject value) { result = value; resolved = true; finished.countDown(); }
         @Override public void resolve() { resolved = true; }
-        @Override public void reject(String message, Exception exception) { error = message; }
+        @Override public void reject(String message, Exception exception) { error = message; finished.countDown(); }
     }
 }

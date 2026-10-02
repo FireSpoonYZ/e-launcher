@@ -4,12 +4,14 @@ import { randomUUID } from "node:crypto";
 import { join, resolve, relative, dirname } from "node:path";
 import {
   AgentSessionRuntime, createAgentSessionServices, createAgentSessionFromServices, ModelRuntime, SettingsManager, SessionManager,
-  DefaultPackageManager, createCodemodeExtension,
+  DefaultPackageManager, ModelRegistry, createCodemodeExtension, createMcpExtension, createToolSearchExtension,
 } from "@earendil-works/pi-coding-agent";
 import { InMemoryCredentialStore, getSupportedThinkingLevels } from "@earendil-works/pi-ai";
 import undici from "./node_modules/@earendil-works/pi-coding-agent/node_modules/undici/index.js";
 import { getThemeByName } from "./node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/theme.js";
 import { toAgentHistory } from "./index.js";
+import { mcpOptions, mcpQuery } from "./mcp.js";
+import { clearExtensionCache } from "./node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/loader.js";
 import {
   ExtensionUiBridge,
   findRpivAskUserQuestionTool,
@@ -50,6 +52,9 @@ async function services(config, signal, resourceLoaderOptions) {
   await mkdir(cacheDir, { recursive: true });
   const temporary = await mkdtemp(join(cacheDir, "pi-request-"));
   let dispatcher;
+  const lifetime = new AbortController();
+  const runtimeSignal = signal ? AbortSignal.any([signal, lifetime.signal]) : lifetime.signal;
+  const mcp = mcpOptions(config, runtimeSignal, url => resourceLoaderOptions?.eventBus?.emit("mcp:auth-url", url));
   try {
     // Native models.json parsing/composition, with the immutable send-time snapshot.
     const modelsPath = join(temporary, "models.json");
@@ -59,11 +64,11 @@ async function services(config, signal, resourceLoaderOptions) {
       await credentials.modify(id, () => credential);
     }
     const scoped = { global: JSON.stringify(config.globalSettings ?? config.settings ?? {}),
-      project: JSON.stringify(config.projectSettings ?? {}) };
+      project: "{}" };
     const settingsManager = SettingsManager.fromStorage({ withLock(scope, update) {
       const next = update(scoped[scope]);
       if (next !== undefined) scoped[scope] = next;
-    } }, { projectTrusted: true });
+    } }, { projectTrusted: false });
     const timeout = settingsManager.getHttpIdleTimeoutMs();
     const proxy = settingsManager.getGlobalSettings().httpProxy?.trim();
     const agent = quietDispatcher(new undici.EnvHttpProxyAgent({
@@ -78,7 +83,9 @@ async function services(config, signal, resourceLoaderOptions) {
       }, handler),
       close: () => agent.close(),
     };
-    const fetch = (input, init) => undici.fetch(input, { ...init, dispatcher: init?.dispatcher ?? dispatcher });
+    const fetch = (input, init) => undici.fetch(input, { ...init,
+      signal: init?.signal ? AbortSignal.any([runtimeSignal, init.signal]) : runtimeSignal,
+      dispatcher: init?.dispatcher ?? dispatcher });
     const native = await sessionHttp.run(fetch, async () => {
       const modelRuntime = await ModelRuntime.create({ credentials, modelsPath,
         modelsStorePath: join(agentDir, "models-store.json"), allowModelNetwork: false, signal });
@@ -87,17 +94,20 @@ async function services(config, signal, resourceLoaderOptions) {
         modelRuntimeSignal: signal, resourceLoaderOptions: {
           ...resourceLoaderOptions,
           extensionFactories: [
-            { name: "codemode", builtin: true, factory: createCodemodeExtension() },
+            { name: "codemode", builtin: true, replaceable: true, factory: createCodemodeExtension() },
+            { name: "tool_search", builtin: true, replaceable: true, factory: createToolSearchExtension() },
+            { name: "mcp", builtin: true, replaceable: true, factory: createMcpExtension(mcp) },
             ...(resourceLoaderOptions?.extensionFactories ?? []),
           ],
         } });
     });
-    return { ...native, credentials, fetch, withHttp: (task) => sessionHttp.run(fetch, task), dispose: async () => {
-      try { await dispatcher.close(); }
+    const closeMcp = async () => { lifetime.abort(); await mcp.dispose(); };
+    return { ...native, credentials, fetch, closeMcp, withHttp: (task) => sessionHttp.run(fetch, task), dispose: async () => {
+      try { await closeMcp(); await dispatcher.close(); }
       finally { await rm(temporary, { recursive: true, force: true }); }
     } };
   } catch (error) {
-    try { await dispatcher?.close(); }
+    try { lifetime.abort(); await mcp.dispose(); await dispatcher?.close(); }
     catch { /* Preserve the initialization error. */ }
     await rm(temporary, { recursive: true, force: true });
     throw error;
@@ -199,6 +209,7 @@ export async function createSdkRuntime(command, signal, resourceLoaderOptions) {
     disposed = true;
     uiBridge?.suspend();
     try {
+      await s.closeMcp();
       if (lifecycle) await s.withHttp(() => lifecycle.dispose());
       else session?.dispose();
     } finally {
@@ -337,9 +348,17 @@ export async function createSdkRuntime(command, signal, resourceLoaderOptions) {
 
 /** Settings reads use the same native registry as chat, not a separate model catalog. */
 export async function sdkQuery(command, signal, emit = () => {}, interact = async () => { throw new Error("登录需要用户输入"); }, resourceLoaderOptions) {
+  if (command.project === true) throw new Error("Pi 设置仅支持全局配置；旧工作区配置保留但不再生效");
   const s = await services(command.config, signal, resourceLoaderOptions);
   try {
     return await s.withHttp(async () => {
+    if (command.type.startsWith("mcp_")) {
+      const result = await mcpQuery(command, command.config, signal, emit, interact,
+        provider => new ModelRegistry(s.modelRuntime).getApiKeyForProvider(provider));
+      const chatEnabled = s.resourceLoader.getExtensions().extensions.some(extension => extension.path === "builtin:mcp");
+      return { ...result, chatEnabled, chatNote: chatEnabled ? undefined
+        : "builtin:mcp 已停用或被第三方 /mcp 扩展替代；此处检查使用官方客户端，但聊天不会加载这些内置 MCP 服务器。" };
+    }
     if (["packages", "install", "remove", "update", "resource_paths", "resource_toggle"].includes(command.type)) {
       const manager = new DefaultPackageManager(s);
       manager.setProgressCallback((event) => emit({ type: "status", message: event.message ?? `${event.action}: ${event.source}` }));
@@ -351,7 +370,8 @@ export async function sdkQuery(command, signal, emit = () => {}, interact = asyn
         const paths = await manager.resolve(async () => "skip");
         const item = paths[kind].find((entry) => entry.path === command.path);
         if (!item || item.metadata.scope === "temporary") throw new Error("资源已变化，请重新读取");
-        const project = item.metadata.scope === "project";
+        if (item.metadata.scope === "project") throw new Error("Pi 资源仅支持全局配置");
+        const project = false;
         const settings = project ? s.settingsManager.getProjectSettings() : s.settingsManager.getGlobalSettings();
         const packaged = item.metadata.origin === "package";
         const key = packaged ? "packages" : kind;
@@ -379,7 +399,7 @@ export async function sdkQuery(command, signal, emit = () => {}, interact = asyn
         return { enabled: command.enabled };
       }
       if (typeof command.source !== "string" || !command.source.trim()) throw new Error("请输入包来源");
-      const local = Boolean(command.project);
+      const local = false;
       const before = (local ? s.settingsManager.getProjectSettings() : s.settingsManager.getGlobalSettings()).packages;
       if (command.type === "install") await manager.installAndPersist(command.source, { local });
       if (command.type === "remove") {
@@ -387,6 +407,7 @@ export async function sdkQuery(command, signal, emit = () => {}, interact = asyn
       }
       if (command.type === "update") await manager.update(command.source);
       await s.settingsManager.flush();
+      clearExtensionCache();
       const after = (local ? s.settingsManager.getProjectSettings() : s.settingsManager.getGlobalSettings()).packages;
       if (JSON.stringify(before) !== JSON.stringify(after)) {
         emit({ type: "setting", project: local, key: "packages", previous: before ?? null, value: after ?? [] });

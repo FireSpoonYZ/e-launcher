@@ -14,6 +14,7 @@ const { Worker } = require('node:worker_threads');
 const imageData = 'iVBORw0KGgoAAAANSUhEUgAACWAAAAACCAYAAADc6efsAAAAoElEQVR4Ae3AA6AkWZbG8f937o3IzKdyS2Oubdu2bdu2bdu2bWmMnpZKr54yMyLu+Xa3anqmhztr1a/aNlddddVVV1111VVXXXXVVVddddVVV1111VVXXXXVVVddddVVV1111VVXXXXVVVf9a1G56qqrrrrqqquuuuqqq6666qqrrrrqqquuuuqqq6666qqrrrrqqquuuuqqq6666t+CfwTwpAQFRMfFhgAAAABJRU5ErkJggg==';
 
 async function main() {
+  const mcpOnly=process.argv.includes('--mcp-only');
   const npmCli = path.resolve(process.argv[2]);
   const sourceBundle = path.resolve(process.argv[3]);
   await fs.mkdir(os.tmpdir(), { recursive: true });
@@ -33,7 +34,12 @@ async function main() {
       const request = JSON.parse(body); requests.push(request);
       const last = request.messages.at(-1);
       const prompt = JSON.stringify(last.content);
-      const tool = last.role !== 'user' || !request.tools?.length ? undefined :
+      if(prompt.includes('MCP idle'))await new Promise(resolve=>setTimeout(resolve,250));
+      const tool = last.role === 'tool' && last.tool_call_id === 'fixture-call' && prompt.includes('mcp__fixture__ping')
+        ? ['mcp__fixture__ping', {}] : last.role !== 'user' || !request.tools?.length ? undefined :
+        prompt.includes('MCP deferred') ? ['tool_search', {query:'ping'}] :
+        prompt.includes('MCP codemode') ? ['codemode', {code:'const found=await searchTools(\"ping\",{namespace:\"mcp__fixture\"}); if(!found.length)throw Error(\"not found\"); text(await tools.mcp__fixture__ping({}));'}] :
+        prompt.includes('MCP direct') ? ['mcp__fixture__ping', {}] :
         prompt.includes('use probe') ? ['npm_probe', {}] :
         prompt.includes('runtime codemode') ? ['codemode', { code: `
           const ok = await tools.bash({command:'node -e "process.stdout.write(String.fromCharCode(98,97,115,104,45,111,107))"'});
@@ -83,9 +89,9 @@ async function main() {
   try {
     api.listen(0, '127.0.0.1'); await once(api, 'listening');
     const base = `http://127.0.0.1:${api.address().port}`; env.npm_config_registry = base;
-    assert.equal(await npm(['--version'], root), '11.6.2');
+    if(!mcpOnly)assert.equal(await npm(['--version'], root), '11.6.2');
     async function publish(name, files, manifest = {}) {
-      const dir = path.join(root, name.replace(/[@/]/g, '-')); await fs.mkdir(dir);
+      const dir = path.join(root, name.replace(/[@/]/g, '-') + '-' + (manifest.version || '1.0.0')); await fs.mkdir(dir);
       const pkg = { name, version: '1.0.0', ...manifest };
       await fs.writeFile(path.join(dir, 'package.json'), JSON.stringify(pkg));
       for (const [file, text] of Object.entries(files)) await fs.writeFile(path.join(dir, file), text);
@@ -94,8 +100,10 @@ async function main() {
       const bytes = await fs.readFile(path.join(dir, archive));
       registry.set(`/tar/${archive}`, bytes);
       pkg.dist = { tarball: `${base}/tar/${archive}`, integrity: 'sha512-' + createHash('sha512').update(bytes).digest('base64') };
-      registry.set('/' + name, { name, 'dist-tags': { latest: '1.0.0' }, versions: { '1.0.0': pkg } });
+      const prior=registry.get('/'+name);
+      registry.set('/' + name, { name, 'dist-tags': { latest: pkg.version }, versions: { ...prior?.versions, [pkg.version]: pkg } });
     }
+    if(!mcpOnly){
     await publish('fixture-dep', { 'index.js': "module.exports = 'dependency-ok';" }, { main: 'index.js' });
     await publish('@fixture/pi-probe', {
       'probe.ts': `import { Type } from 'typebox';
@@ -107,6 +115,7 @@ if(child.status!==0 || child.stdout!=='child-ok') throw Error('execPath child fa
 require('node:fs').writeFileSync('installed.txt',require('fixture-dep')+':'+child.stdout);`,
     }, { pi: { extensions: ['probe.ts'] }, dependencies: { 'fixture-dep': '1.0.0' }, scripts: { postinstall: 'node postinstall.cjs' } });
     await publish('@fixture/broken', { 'broken.ts': "export default function() { throw Error('fixture-load-error'); }" }, { pi: { extensions: ['broken.ts'] } });
+    }
     const endpoint = process.platform === 'win32' ? `\\\\.\\pipe\\npm-sdk-${process.pid}` : `@npm-sdk-${process.pid}`;
     bridge.listen(endpoint.startsWith('@') ? '\0' + endpoint.slice(1) : endpoint); await once(bridge, 'listening');
     const connection = once(bridge, 'connection', { signal: AbortSignal.timeout(20000) });
@@ -137,7 +146,8 @@ require('node:fs').writeFileSync('installed.txt',require('fixture-dep')+':'+chil
     const ready = await waitFor(event => event.type === 'ready');
     assert.equal(ready.piVersion, '1.0.0', 'shipped SDK version');
     assert.equal(JSON.parse(await fs.readFile(path.join(path.dirname(bundle), 'pi-sdk/package.json'))).version, ready.piVersion);
-    assert.equal((await fs.readFile(path.join(path.dirname(bundle), 'photon_rs_bg.wasm'))).subarray(0,4).toString('hex'), '0061736d');
+    if(!mcpOnly)assert.equal((await fs.readFile(path.join(path.dirname(bundle), 'photon_rs_bg.wasm'))).subarray(0,4).toString('hex'), '0061736d');
+    if(!mcpOnly){
     const worker = new Worker(path.join(path.dirname(bundle), 'image-resize-worker.js'));
     try {
       const response = once(worker, 'message', {signal:AbortSignal.timeout(20000)});
@@ -148,6 +158,7 @@ require('node:fs').writeFileSync('installed.txt',require('fixture-dep')+':'+chil
       assert.equal(message.result.width, 1200); assert.equal(message.result.height, 1);
       assert.equal(message.result.wasResized, true);
     } finally { await worker.terminate(); }
+    }
     const config = { agentDir: path.join(root, 'agent'), cwd: path.join(root, 'workspace'), cacheDir: path.join(root, 'cache'),
       models: { providers: { fixture: { baseUrl: base + '/v1', api: 'openai-completions', models: [{ id: 'fixture', name: 'Fixture', input:['text','image'] }] } } },
       chatAttachmentRoot: path.join(root, 'attachments'),
@@ -157,14 +168,23 @@ require('node:fs').writeFileSync('installed.txt',require('fixture-dep')+':'+chil
     await fs.writeFile(globalFile, JSON.stringify({ npmCommand: [process.execPath, npmCli], defaultProvider: 'fixture',
       defaultModel: 'fixture', defaultTools: [], retry: { enabled: false }, compaction: { enabled: false } }));
     await fs.writeFile(projectFile, '{}');
-    async function query(type, args = {}, succeeds = true) {
+    async function query(type, args = {}, succeeds = true, options = {}) {
       const id = String(++sequence);
       const snapshot = { ...config, globalSettings: JSON.parse(await fs.readFile(globalFile)), projectSettings: JSON.parse(await fs.readFile(projectFile)) };
       snapshot.settings = {...snapshot.globalSettings, ...snapshot.projectSettings};
+      const auth = event => {
+        if (event.id !== id) return;
+        const value = options.auth?.(event);
+        if (event.type === 'auth_prompt' && options.auth) socket.write(JSON.stringify(value === null
+          ? {type:'abort',id} : {type:'auth_reply',id,promptId:event.promptId,value}) + '\n');
+      };
+      waiters.add(auth);
       socket.write(JSON.stringify({ type, id, config: snapshot, ...args }) + '\n');
-      const end = await waitFor(event => event.id === id && event.type === 'end');
+      const timer=options.abortAfter?setTimeout(()=>socket.write(JSON.stringify({type:'abort',id})+'\n'),options.abortAfter):undefined;
+      let end;
+      try { end = await waitFor(event => event.id === id && event.type === 'end'); } finally { waiters.delete(auth);clearTimeout(timer); }
       const current = events.filter(event => event.id === id);
-      assert.equal(end.status, succeeds ? 'completed' : 'error', JSON.stringify(current) + stderr);
+      assert.equal(end.status, succeeds ? 'completed' : options.cancelled ? 'aborted' : 'error', JSON.stringify(current) + stderr);
       // Same persistence boundary as the native host: save settings before the next request snapshot.
       for (const event of current.filter(event => event.type === 'setting')) {
         const file = event.project ? projectFile : globalFile;
@@ -174,9 +194,15 @@ require('node:fs').writeFileSync('installed.txt',require('fixture-dep')+':'+chil
       }
       return { result: current.find(event => event.type === 'result')?.result, events: current };
     }
+    const originalSettings = await fs.readFile(globalFile, 'utf8');
+    await require('./mcp-check.cjs')({query,config,nodeCommand:process.execPath,npmCli,setSettings:async patch=>{
+      const settings=JSON.parse(await fs.readFile(globalFile));Object.assign(settings,patch);await fs.writeFile(globalFile,JSON.stringify(settings));
+    }});
+    await fs.writeFile(globalFile,originalSettings);
+    if(mcpOnly)return;
     const initial = await query('prompt', { sdk: true, prompt: 'hello' });
     const history = initial.events.find(event => event.type === 'context').entries;
-    const source = 'npm:@fixture/pi-probe@1.0.0';
+    const source = 'npm:@fixture/pi-probe';
     await query('install', { source }); await query('install', { source });
     let resources = (await query('resources')).result;
     const installed = resources.packages.find(item => item.source === source && item.scope === 'user');
@@ -197,11 +223,38 @@ require('node:fs').writeFileSync('installed.txt',require('fixture-dep')+':'+chil
     await query('resource_toggle', { kind: 'extensions', path: extension.path, enabled: false });
     assert((await query('resources')).result.packageExtensions.some(item => item.source === source && !item.enabled && !item.loaded));
     await query('resource_toggle', { kind: 'extensions', path: extension.path, enabled: null });
-    await query('install', { source, project: true });
+    const legacyProjectDir=path.join(config.cwd,'.pi/npm/node_modules/@fixture/pi-probe');
+    await fs.mkdir(legacyProjectDir,{recursive:true});
+    const legacyManifest=JSON.stringify({name:'@fixture/pi-probe',version:'1.0.0',pi:{extensions:['probe.ts']}});
+    await fs.writeFile(path.join(legacyProjectDir,'package.json'),legacyManifest);
+    await fs.writeFile(path.join(legacyProjectDir,'probe.ts'),'legacy-project-code');
+    const legacySettings=JSON.stringify({packages:[source],defaultModel:'ignored-project-model'});
+    await fs.writeFile(projectFile,legacySettings);
+    await query('install', { source, project: true }, false);
+    await query('remove', { source, project: true }, false);
+    await query('update', { source, project: true }, false);
     resources = (await query('resources')).result;
-    assert(resources.packageExtensions.some(item => item.source === source && item.scope === 'project' && item.loaded));
-    assert(!resources.packageExtensions.some(item => item.source === source && item.scope === 'user'), 'workspace override has explicit scope');
-    await query('remove', { source, project: true });
+    assert(resources.packageExtensions.some(item => item.source === source && item.scope === 'user' && item.loaded));
+    assert(!resources.packageExtensions.some(item => item.scope === 'project'),'legacy project packages are ignored');
+    await publish('@fixture/pi-pinned',{'probe.ts':'export default function() {}'},{pi:{extensions:['probe.ts']}});
+    const pinned='npm:@fixture/pi-pinned@1.0.0';await query('install',{source:pinned});
+    await publish('@fixture/pi-pinned',{'probe.ts':'export default function() {}'},{version:'2.0.0',pi:{extensions:['probe.ts']}});
+    await query('update',{source:pinned});
+    assert.equal((await query('resources')).result.packages.find(item=>item.source===pinned).version,'1.0.0','explicit pinned sources remain pinned');
+    await query('remove',{source:pinned});
+    await publish('@fixture/pi-probe',{'probe.ts':`import {Type} from 'typebox';
+export default function(pi){pi.registerTool({name:'npm_probe',label:'Npm probe v2',description:'Version 2 fixture',parameters:Type.Object({}),
+execute:async()=>({content:[{type:'text',text:'npm-probe-v2'}]})});}`},{version:'2.0.0',pi:{extensions:['probe.ts']}});
+    await query('update',{source});
+    resources=(await query('resources')).result;
+    assert.equal(resources.packages.find(item=>item.source===source).version,'2.0.0','unpinned source updates v1 to v2');
+    const updated=await query('prompt',{sdk:true,prompt:'use probe',sdkHistory:nextHistory});
+    assert(updated.events.some(event=>event.type==='tool_end'&&event.name==='npm_probe'&&!event.isError&&JSON.stringify(event.result).includes('npm-probe-v2')),'same-process next turn executes v2, not cached v1');
+    assert.equal(updated.events.find(event=>event.type==='context').entries[0].id,history[0].id,'update retains same conversation');
+    assert.equal(await fs.readFile(projectFile,'utf8'),legacySettings,'global operations preserve old project settings bytes');
+    assert.equal(await fs.readFile(path.join(legacyProjectDir,'package.json'),'utf8'),legacyManifest,'global update leaves old project package at v1');
+    assert.equal(await fs.readFile(path.join(legacyProjectDir,'probe.ts'),'utf8'),'legacy-project-code');
+    console.log('PASS: unpinned registry v1->v2; same-process same-chat next-turn v2 factory; explicit pin retained; old project package/settings bytes unchanged');
     await query('install', { source: 'npm:fixture-dep' });
     assert(!(await query('resources')).result.packageExtensions.some(item => item.source === 'npm:fixture-dep'), 'ordinary npm package is not a Pi extension');
     const before = await fs.readFile(globalFile, 'utf8');

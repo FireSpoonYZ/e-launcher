@@ -97,6 +97,22 @@ public class SettingsPluginProviderTest {
         }
     }
 
+    @Test public void mcpCredentialsRequireTheSameExplicitEditorConsentAsModelCredentials() throws Exception {
+        store.save(false, "mcp-auth.json", "{\"private\":\"fixture-token\"}", null);
+        for (String name : new String[]{"mcp-auth.json", "./mcp-auth.json", "./mcp-auth.json.previous", "./auth.json"}) {
+            RecordingCall hidden = new RecordingCall("readFile", new JSObject().put("name", name));
+            plugin.readFile(hidden);
+            assertNotNull(hidden.error);
+            assertNull(hidden.result);
+        }
+        RecordingCall opened = new RecordingCall("readFile", new JSObject().put("name", "mcp-auth.json")
+                .put("allowSecrets", true).put("warningAccepted", true));
+        plugin.readFile(opened);
+        assertNull(opened.error);
+        assertTrue(opened.result.getBoolean("containsSecrets"));
+        assertTrue(opened.result.getString("source").contains("fixture-token"));
+    }
+
     private static void assertName(JSONObject definition, String name) throws Exception {
         if (name == null || name.trim().isEmpty()) assertFalse("Optional blank name must be omitted", definition.has("name"));
         else assertEquals(name, definition.getString("name"));

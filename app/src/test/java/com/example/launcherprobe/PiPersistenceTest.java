@@ -37,11 +37,14 @@ public class PiPersistenceTest {
         assertEquals("custom-npm", new JSONObject(store.snapshot()).getJSONObject("globalSettings")
                 .getJSONArray("npmCommand").getString(0));
         store.save(true, "settings.json", "{\"npmCommand\":[\"workspace-npm\"]}", null);
-        assertEquals("workspace-npm", new JSONObject(store.snapshot()).getJSONObject("projectSettings")
-                .getJSONArray("npmCommand").getString(0));
+        String legacyProject = store.read(true, "settings.json");
+        snapshot = new JSONObject(store.snapshot());
+        assertEquals(0, snapshot.getJSONObject("projectSettings").length());
+        assertEquals("custom-npm", snapshot.getJSONObject("settings").getJSONArray("npmCommand").getString(0));
+        assertEquals(legacyProject, store.read(true, "settings.json"));
         store.save(true, "settings.json", "{\"npmCommand\":[]}", null);
         snapshot = new JSONObject(store.snapshot());
-        assertTrue(snapshot.getJSONObject("globalSettings").getJSONArray("npmCommand").getString(0).endsWith("libnode_launcher.so"));
+        assertEquals("custom-npm", snapshot.getJSONObject("globalSettings").getJSONArray("npmCommand").getString(0));
         assertFalse(snapshot.getJSONObject("projectSettings").has("npmCommand"));
         assertEquals("[]", new JSONObject(store.read(true, "settings.json")).getJSONArray("npmCommand").toString());
     }
@@ -527,6 +530,31 @@ public class PiPersistenceTest {
                 .getJSONArray("entries").toString());
     }
 
+    @Test public void globalSnapshotRestoresLegacyWorkspaceWithoutProjectRead() throws Exception {
+        java.io.File legacy = new java.io.File(context.getFilesDir(), "pi-workspace");
+        PiConfigStore.write(new java.io.File(legacy, "AGENTS.md"), "legacy workspace instructions");
+        PiConfigStore.write(new java.io.File(legacy, "owned.txt"), "legacy work file");
+        String oldSettings = "{\"defaultModel\":\"legacy-model\"}\n";
+        PiConfigStore.write(new java.io.File(legacy, ".pi/settings.json"), oldSettings);
+        ChatStore chats = new ChatStore(context);
+        chats.save(Collections.singletonList(new AgentLoop.Message("user", "legacy session")));
+        PiConfigStore config = new PiConfigStore(context, chats.activeId());
+        config.save(false, "settings.json", "{\"defaultModel\":\"global-model\"}", null);
+        assertFalse(config.workspaceRoot().exists());
+
+        JSONObject snapshot = new JSONObject(config.snapshot());
+        java.io.File cwd = new java.io.File(snapshot.getString("cwd"));
+        assertTrue(new java.io.File(cwd, "owned.txt").isFile());
+        assertEquals("legacy work file", new String(java.nio.file.Files.readAllBytes(
+                new java.io.File(cwd, "owned.txt").toPath()), java.nio.charset.StandardCharsets.UTF_8));
+        assertEquals("legacy workspace instructions", new String(java.nio.file.Files.readAllBytes(
+                new java.io.File(cwd, "AGENTS.md").toPath()), java.nio.charset.StandardCharsets.UTF_8));
+        assertEquals(oldSettings, new String(java.nio.file.Files.readAllBytes(
+                new java.io.File(cwd, ".pi/settings.json").toPath()), java.nio.charset.StandardCharsets.UTF_8));
+        assertEquals("global-model", snapshot.getJSONObject("settings").getString("defaultModel"));
+        assertEquals(0, snapshot.getJSONObject("projectSettings").length());
+    }
+
     @Test public void workspacesAreStableIsolatedLazyAndDeletedWithTheirSession() throws Exception {
         java.io.File legacyRoot = new java.io.File(context.getFilesDir(), "pi-workspace");
         assertTrue(legacyRoot.mkdirs() || legacyRoot.isDirectory());
@@ -536,6 +564,7 @@ public class PiPersistenceTest {
         store.save(Collections.singletonList(new AgentLoop.Message("user", "old session")));
         String old = store.activeId();
         PiConfigStore oldConfig = new PiConfigStore(context, old);
+        oldConfig.save(false, "settings.json", "{\"defaultModel\":\"shared-model\",\"defaultThinkingLevel\":\"medium\"}", null);
         oldConfig.save(true, "settings.json",
                 "{\"defaultModel\":\"model-a\",\"defaultThinkingLevel\":\"low\"}",
                 oldConfig.read(true, "settings.json"));
@@ -551,9 +580,11 @@ public class PiPersistenceTest {
                 "{\"defaultModel\":\"model-b\",\"defaultThinkingLevel\":\"high\"}",
                 freshConfig.read(true, "settings.json"));
         String freshCwd = new JSONObject(freshConfig.snapshot()).getString("cwd");
-        assertEquals("model-a", new PiConfigStore(context, old).effectiveSettings().get("defaultModel"));
-        assertEquals("model-b", freshConfig.effectiveSettings().get("defaultModel"));
-        assertEquals("low", new PiConfigStore(context, old).effectiveSettings().get("defaultThinkingLevel"));
+        assertEquals("shared-model", new PiConfigStore(context, old).effectiveSettings().get("defaultModel"));
+        assertEquals("shared-model", freshConfig.effectiveSettings().get("defaultModel"));
+        assertEquals("medium", new PiConfigStore(context, old).effectiveSettings().get("defaultThinkingLevel"));
+        assertEquals("model-a", new JSONObject(oldConfig.read(true, "settings.json")).getString("defaultModel"));
+        assertEquals("model-b", new JSONObject(freshConfig.read(true, "settings.json")).getString("defaultModel"));
         assertNotEquals(oldCwd, freshCwd);
         assertFalse(new java.io.File(freshCwd, "legacy-fixture.txt").exists());
         java.nio.file.Files.write(new java.io.File(oldCwd, "owned.txt").toPath(),

@@ -45,7 +45,8 @@ public final class PiSettingsActivity extends Activity {
     private TextView status;
     private EditText editor;
     private String page = "设置", fileName, expected, cleanBuffer;
-    private boolean project, updatingEditor;
+    private static final boolean project = false;
+    private boolean updatingEditor;
     private final ArrayDeque<String> back = new ArrayDeque<>();
     private String exportText;
     private int renderVersion;
@@ -83,7 +84,6 @@ public final class PiSettingsActivity extends Activity {
                 fields = new JSONArray(readText(input));
             }
             if (state != null) {
-                project = state.getBoolean("project");
                 communityQuery = state.getString("communityQuery", "");
                 communityKind = state.getString("communityKind", "");
                 communitySort = state.getString("communitySort", "downloads");
@@ -106,7 +106,6 @@ public final class PiSettingsActivity extends Activity {
     @Override protected void onSaveInstanceState(Bundle out) {
         retainDraft();
         out.putString("page", page);
-        out.putBoolean("project", project);
         out.putString("communityQuery", communityQuery);
         out.putString("communityKind", communityKind);
         out.putString("communitySort", communitySort);
@@ -200,9 +199,9 @@ public final class PiSettingsActivity extends Activity {
         try {
             if (page.startsWith("file:")) { fileEditor(page.substring(5)); return; }
             if (page.equals("设置")) {
+                note(t("所有 Pi 设置全局共享；旧工作区配置保留但不再生效。会话工作文件与 AGENTS 上下文不受影响。"));
                 for (String category : CATEGORIES) link(t(category), category.equals("高级配置") ? t("Pi 文件、作用域与运行环境") : "", () -> go(category));
             } else if (page.equals("高级配置")) {
-                scope();
                 EditText search = input(t("搜索名称或配置键"), "");
                 LinearLayout entries = column(); content.addView(entries);
                 for (String group : ADVANCED) {
@@ -235,7 +234,6 @@ public final class PiSettingsActivity extends Activity {
                         android.net.Uri.parse("package:" + getPackageName()))));
             } else if (page.equals("服务商")) providers();
             else if (page.equals("配置文件")) {
-                scope();
                 for (String name : store.files(project)) link(name, name.equals("auth.json") ? t("凭据文件，打开后可能包含密钥") : "", () -> openFile(name));
                 action(t("新建文件"), () -> {
                     EditText name = new EditText(this); name.setHint("extensions/example.json");
@@ -243,15 +241,16 @@ public final class PiSettingsActivity extends Activity {
                 });
             } else if (page.equals("模型专家配置")) {
                 note(t("在 models.json 中编辑服务商、模型定义、费用、采样参数、thinkingLevelMap、modelOverrides 与 compat。协议与模型能力由 Pi SDK 解析。"));
-                link(t("完整模型配置"), "models.json", () -> { project = false; openFile("models.json"); });
+                link(t("完整模型配置"), "models.json", () -> { openFile("models.json"); });
             } else if (page.equals("环境与凭据")) {
                 note(t("服务商环境变量使用 auth.json 中的 env。Pi SDK 解析凭据引用并刷新 OAuth。账号登录通过服务商目录发起，授权页面使用系统浏览器。"));
-                link(t("账号与服务商环境变量"), "auth.json", () -> { project = false; openFile("auth.json"); });
-                link(t("系统提示词"), "SYSTEM.md", () -> { project = false; openFile("SYSTEM.md"); });
-                link(t("追加系统提示词"), "APPEND_SYSTEM.md", () -> { project = false; openFile("APPEND_SYSTEM.md"); });
-            } else if (page.equals("技能") || page.equals("扩展") || page.equals("MCP")) {
-                note(page.equals("MCP") ? t("通用 MCP 通过扩展接入；Operit Shower 是内置虚拟屏工具，不使用 MCP。") : t("Pi SDK 按全局与工作区资源配置加载。"));
-                scope();
+                link(t("账号与服务商环境变量"), "auth.json", () -> { openFile("auth.json"); });
+                link(t("系统提示词"), "SYSTEM.md", () -> { openFile("SYSTEM.md"); });
+                link(t("追加系统提示词"), "APPEND_SYSTEM.md", () -> { openFile("APPEND_SYSTEM.md"); });
+            } else if (page.equals("MCP")) {
+                mcp();
+            } else if (page.equals("技能") || page.equals("扩展")) {
+                note(t("Pi SDK 仅加载全局资源配置。"));
                 if (page.equals("扩展")) npmInstaller();
                 action(t("启用或停用资源"), this::resourceControls);
                 action(t("管理已配置的包"), this::packages);
@@ -396,7 +395,7 @@ public final class PiSettingsActivity extends Activity {
     private JSONArray configuredPackages() throws Exception {
         if (packageSnapshot != null) return packageSnapshot;
         JSONArray result = new JSONArray();
-        for (boolean local : new boolean[]{false, true}) {
+        for (boolean local : new boolean[]{false}) {
             Object configured = store.settings(local).get("packages");
             if (!(configured instanceof List)) continue;
             for (Object value : (List<?>) configured) {
@@ -415,7 +414,6 @@ public final class PiSettingsActivity extends Activity {
     }
 
     private void community() throws Exception {
-        scope();
         note(t("目录来自 pi.dev，按官网排序；安装来源为 npm。"));
         EditText query = input(t("搜索包名称或描述"), communityQuery);
         query.addTextChangedListener(watcher(() -> communityQuery = query.getText().toString()));
@@ -468,7 +466,7 @@ public final class PiSettingsActivity extends Activity {
                 }
                 if (!found) details.append("\n").append(t("未配置（不推断其他位置的安装状态）"));
                 results.addView(text(details.toString(), 14, MUTED));
-                results.addView(button(t("安装此版本"), () -> {
+                results.addView(button(t("安装最新版本"), () -> {
                     final String source;
                     try { source = SettingsCatalog.installSource(item); }
                     catch (Exception exception) { toast(t("包数据无效，无法安装")); return; }
@@ -486,18 +484,9 @@ public final class PiSettingsActivity extends Activity {
         });
     }
 
-    private void scope() {
-        Button scope = button(project ? t("工作区 ▾") : t("全局 ▾"), () -> new AlertDialog.Builder(this).setTitle(t("配置范围"))
-                .setSingleChoiceItems(new String[]{t("全局"), t("默认工作区")}, project ? 1 : 0, (dialog, which) -> {
-                    project = which == 1; dialog.dismiss(); render();
-                }).show());
-        toolbar.addView(scope);
-    }
-
     private void fieldGroup(String group) throws Exception {
-        scope();
         note(group.equals("终端与渲染") ? t("终端字段仅在 Pi CLI / TUI 中生效。Android 渲染不会自动采用这些配置。")
-                : t("修改保存到 settings.json，下一次 Pi 请求读取。长按配置项可恢复继承。应用管理的工作区默认受信任，终端启动选项不控制 Android 权限。"));
+                : t("修改保存到 settings.json，下一次 Pi 请求读取。长按配置项可恢复继承。设置全局共享；旧工作区配置不再生效，终端启动选项不控制 Android 权限。"));
         Map<String, Object> local = store.settings(project);
         Map<String, Object> effective = store.effectiveSettings();
         for (int i = 0; i < fields.length(); i++) {
@@ -620,8 +609,7 @@ public final class PiSettingsActivity extends Activity {
             action(t("选择当前会话模型"), () -> catalog(false));
             return;
         }
-        scope();
-        note(t("服务商与凭据为全局配置；默认模型保存到当前所选范围。以下为自定义服务商。"));
+        note(t("服务商与凭据为全局配置；默认模型保存到全局设置。以下为自定义服务商。"));
         action(t("内置与自定义模型目录"), () -> catalog(false));
         action(t("联网刷新模型目录"), () -> catalog(true));
         Map<String, Object> root = ConfigJson.object(store.read(false, "models.json"));
@@ -639,8 +627,8 @@ public final class PiSettingsActivity extends Activity {
             actions.addView(button(t("删除"), () -> deleteProvider(id)));
         }
         action(t("添加自定义服务商"), this::addProvider);
-        link(t("配置凭据"), "auth.json", () -> { project = false; openFile("auth.json"); });
-        link(t("编辑完整模型定义"), "models.json", () -> { project = false; openFile("models.json"); });
+        link(t("配置凭据"), "auth.json", () -> { openFile("auth.json"); });
+        link(t("编辑完整模型定义"), "models.json", () -> { openFile("models.json"); });
     }
 
     private void runQuery(String operation, JSONObject arguments, java.util.function.Consumer<Object> completed) {
@@ -651,7 +639,7 @@ public final class PiSettingsActivity extends Activity {
         queryRunning = true;
         authUrl = ""; authInstructions = "";
         java.util.concurrent.atomic.AtomicBoolean cancelled = new java.util.concurrent.atomic.AtomicBoolean();
-        boolean cancellable = !operation.equals("install") && !operation.equals("update") && !operation.equals("remove");
+        boolean cancellable = !operation.equals("install") && !operation.equals("update") && !operation.equals("remove") && !operation.equals("mcp_file_save");
         android.app.ProgressDialog progress = android.app.ProgressDialog.show(this, "Pi", t("正在处理…"), true, cancellable);
         queryProgress = progress;
         if (cancellable) progress.setOnCancelListener(dialog -> {
@@ -913,13 +901,120 @@ public final class PiSettingsActivity extends Activity {
         });
     }
 
+    private void mcp() {
+        note(t("真实 MCP：stdio / Streamable HTTP，不支持旧 SSE。状态只代表最近检查，检查后释放；聊天发送时重新连接。"));
+        action(t("刷新配置"), this::render);
+        link(t("编辑完整 MCP 配置文件"), "mcp.json", () -> openFile("mcp.json"));
+        runQuery("mcp_list", new JSONObject(), result -> {
+            JSONObject listing = (JSONObject) result;
+            if (!listing.optString("chatNote").isEmpty()) note(listing.optString("chatNote"));
+            JSONArray errors = listing.optJSONArray("errors");
+            for (int i = 0; errors != null && i < errors.length(); i++) note(errors.optString(i));
+            String scope = project ? "project" : "global";
+            String revision = listing.optJSONObject("revisions").optString(scope);
+            action(t("新增服务器"), () -> mcpForm("", scope, revision, new JSONObject()));
+            JSONArray servers = listing.optJSONArray("servers");
+            for (int i = 0; servers != null && i < servers.length(); i++) {
+                JSONObject server = servers.optJSONObject(i);
+                if (!server.optString("scope").equals(scope)) continue;
+                link(server.optString("name"), server.optString("transport") + " · " + server.optString("exposure")
+                        + " · " + server.optString("state") + "\n" + server.optString("source"), () -> mcpServer(server, revision));
+            }
+        });
+    }
+
+    private JSONObject mcpArgs(String name, String scope, String revision) {
+        try { return new JSONObject().put("name", name).put("scope", scope).put("revision", revision); }
+        catch (Exception exception) { throw new IllegalArgumentException(exception); }
+    }
+
+    private void mcpServer(JSONObject server, String revision) {
+        String name = server.optString("name"), scope = server.optString("scope");
+        new AlertDialog.Builder(this).setTitle(name).setItems(new String[]{t("检查 / 重连与工具列表"),
+                t("编辑（可能显示凭据）"), server.optBoolean("enabled") ? t("停用") : t("启用"),
+                t("OAuth 登录"), t("退出 OAuth"), t("删除")}, (dialog, which) -> {
+            JSONObject args = mcpArgs(name, scope, revision);
+            if (which == 0) runQuery("mcp_check", args, result -> {
+                JSONObject checked = (JSONObject) result;
+                StringBuilder details = new StringBuilder(checked.optString("state"));
+                if (checked.has("checkedAt")) details.append("\n").append(new java.util.Date(checked.optLong("checkedAt")));
+                details.append("\n").append(checked.optString("error")).append("\n").append(checked.optString("chatNote"));
+                JSONArray tools = checked.optJSONArray("tools");
+                for (int i = 0; tools != null && i < tools.length(); i++) {
+                    JSONObject tool = tools.optJSONObject(i);
+                    details.append("\n\n").append(tool.optString("name")).append("\n").append(tool.optString("description"));
+                }
+                new AlertDialog.Builder(this).setTitle(name + " · " + t("最近检查（已释放连接）"))
+                        .setMessage(details).setPositiveButton(t("关闭"), null).show();
+            });
+            else if (which == 1) runQuery("mcp_edit", args, result -> {
+                JSONObject data = (JSONObject) result;
+                mcpForm(name, scope, data.optString("revision"), data.optJSONObject("config"));
+            });
+            else if (which == 2) {
+                try { args.put("enabled", !server.optBoolean("enabled")); } catch (Exception exception) { toast(exception.getMessage()); return; }
+                runQuery("mcp_toggle", args, result -> render());
+            } else if (which == 3 || which == 4) runQuery(which == 3 ? "mcp_login" : "mcp_logout", args, result -> {
+                JSONObject data = (JSONObject) result;
+                toast(data.optString("state", t("操作完成")) + " " + data.optString("error")); render();
+            });
+            else new AlertDialog.Builder(this).setTitle(t("删除服务器？")).setMessage(name)
+                    .setPositiveButton(t("删除"), (d, w) -> runQuery("mcp_remove", args, result -> render()))
+                    .setNegativeButton(t("取消"), null).show();
+        }).setNegativeButton(t("关闭"), null).show();
+    }
+
+    private android.widget.Spinner mcpPicker(LinearLayout body, String label, String[] values, int position) {
+        body.addView(text(label, 14, MUTED));
+        android.widget.Spinner picker = new android.widget.Spinner(this);
+        picker.setContentDescription(label);
+        picker.setAdapter(new android.widget.ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item, values));
+        picker.setSelection(position); body.addView(picker); return picker;
+    }
+
+    private void mcpForm(String originalName, String scope, String revision, JSONObject definition) {
+        LinearLayout body = column(); body.setPadding(dp(20), dp(8), dp(20), dp(8));
+        body.addView(text(scope + " · " + t("只运行可信服务器；高级字段保留。基础字段优先于 JSON。"), 14, MUTED));
+        EditText name = new EditText(this); name.setHint(t("名称（字母、数字、_、-）")); name.setText(originalName); name.setEnabled(originalName.isEmpty()); body.addView(name);
+        android.widget.Spinner transport = mcpPicker(body, t("传输"), new String[]{"Streamable HTTP", "stdio"}, definition.has("command") ? 1 : 0);
+        EditText endpoint = new EditText(this); endpoint.setHint("URL / Command"); endpoint.setText(definition.optString("url", definition.optString("command"))); body.addView(endpoint);
+        EditText args = new EditText(this); args.setHint("Args (JSON array)"); args.setText(definition.optJSONArray("args") == null ? "[]" : definition.optJSONArray("args").toString()); body.addView(args);
+        String[] exposures = {"codemode", "direct", "deferred", "hidden"};
+        int index = java.util.Arrays.asList(exposures).indexOf(definition.optString("exposure", "codemode"));
+        android.widget.Spinner exposure = mcpPicker(body, t("脚本发现 / 直接给模型 / 搜索后提供 / 不可调用"), exposures, Math.max(0, index));
+        android.widget.CheckBox enabled = new android.widget.CheckBox(this); enabled.setText(t("启用")); enabled.setChecked(definition.optBoolean("enabled", true)); body.addView(enabled);
+        body.addView(text("JSON: env / headers / oauth / timeout / cwd", 14, MUTED));
+        EditText json = new EditText(this); json.setMinLines(5); json.setMaxLines(10);
+        json.setContentDescription("MCP JSON: env / headers / oauth / timeout / cwd");
+        json.setInputType(android.text.InputType.TYPE_CLASS_TEXT | android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE | android.text.InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
+        try { json.setText(definition.toString(2)); } catch (Exception exception) { toast(exception.getMessage()); return; }
+        body.addView(json);
+        ScrollView scroll = new ScrollView(this); scroll.addView(body);
+        AlertDialog dialog = new AlertDialog.Builder(this).setTitle(t("MCP 服务器")).setView(scroll)
+                .setPositiveButton(t("保存"), null).setNegativeButton(t("取消"), null).create();
+        dialog.setOnShowListener(d -> dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
+            try {
+                JSONObject value = new JSONObject(json.getText().toString());
+                if (transport.getSelectedItemPosition() == 0) {
+                    value.remove("command"); value.remove("args"); value.put("type", "http").put("url", endpoint.getText().toString());
+                } else {
+                    value.remove("url"); value.put("type", "stdio").put("command", endpoint.getText().toString()).put("args", new JSONArray(args.getText().toString()));
+                }
+                value.put("exposure", exposures[exposure.getSelectedItemPosition()]).put("enabled", enabled.isChecked());
+                JSONObject request = mcpArgs(name.getText().toString(), scope, revision).put("definition", value);
+                runQuery("mcp_save", request, result -> { dialog.dismiss(); render(); });
+            } catch (Exception exception) { toast(exception.getMessage()); }
+        }));
+        dialog.show();
+    }
+
     private void resourceControls() {
         runQuery("resource_paths", new JSONObject(), result -> {
             JSONObject paths = (JSONObject) result;
             List<JSONObject> items = new ArrayList<>(); List<String> kinds = new ArrayList<>(); List<String> labels = new ArrayList<>();
             for (String kind : new String[]{"skills", "extensions", "prompts", "themes"}) {
                 if (page.equals("技能") && !kind.equals("skills")) continue;
-                if ((page.equals("扩展") || page.equals("MCP")) && !kind.equals("extensions")) continue;
+                if (page.equals("扩展") && !kind.equals("extensions")) continue;
                 JSONArray values = paths.optJSONArray(kind);
                 if (values == null) continue;
                 for (int i = 0; i < values.length(); i++) {
@@ -1106,8 +1201,11 @@ public final class PiSettingsActivity extends Activity {
     }
 
     private void openFile(String name) {
-        if (name.equals("auth.json")) new AlertDialog.Builder(this).setTitle(t("打开凭据文件"))
-                .setMessage(t("文件可能含 API Key。内容仅在本应用私有目录保存，导出时也会包含密钥。"))
+        final boolean credential;
+        try { credential = store.isCredentialFile(project, name); }
+        catch (Exception exception) { toast(exception.getMessage()); return; }
+        if (credential) new AlertDialog.Builder(this).setTitle(t("打开凭据文件"))
+                .setMessage(t("文件可能含 API Key 或登录令牌。内容仅在本应用私有目录保存，导出时也会包含凭据。"))
                 .setPositiveButton(t("打开"), (dialog, which) -> go("file:" + name)).setNegativeButton(t("取消"), null).show();
         else go("file:" + name);
     }
@@ -1161,13 +1259,22 @@ public final class PiSettingsActivity extends Activity {
         try {
             String source = editor.getText().toString();
             String formatted = fileName.endsWith(".json") ? ConfigJson.format(source) : source;
+            if (store.isMcpConfigFile(project, fileName)) {
+                JSONObject arguments = new JSONObject().put("scope", project ? "project" : "global").put("name", fileName)
+                        .put("source", formatted).put("expected", expected);
+                runQuery("mcp_file_save", arguments, result -> editorSaved(((JSONObject) result).optString("source")));
+                return;
+            }
             store.save(project, fileName, formatted, expected);
-            expected = formatted; cleanBuffer = formatted;
-            updatingEditor = true; editor.setText(formatted); updatingEditor = false;
-            clearDraft();
-            status.setTextColor(TEAL);
-            status.setText(t("已保存。下一次 Pi 请求读取；终端专用设置不改变 Android 界面。"));
+            editorSaved(formatted);
         } catch (Exception exception) { editorError(exception); }
+    }
+
+    private void editorSaved(String formatted) {
+        expected = formatted; cleanBuffer = formatted;
+        updatingEditor = true; editor.setText(formatted); updatingEditor = false;
+        clearDraft(); status.setTextColor(TEAL);
+        status.setText(t("已保存。下一次 Pi 请求读取；终端专用设置不改变 Android 界面。"));
     }
 
     private void editorError(Exception exception) {

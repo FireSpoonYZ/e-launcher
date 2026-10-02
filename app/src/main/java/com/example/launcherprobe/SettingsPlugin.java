@@ -28,7 +28,8 @@ import java.util.concurrent.Executors;
 @CapacitorPlugin(name = "Settings")
 public final class SettingsPlugin extends Plugin {
     private static final Set<String> QUERIES = new java.util.HashSet<>(Arrays.asList("catalog", "test_provider", "login", "logout",
-            "packages", "install", "update", "remove", "resources", "resource_paths", "resource_toggle"));
+            "packages", "install", "update", "remove", "resources", "resource_paths", "resource_toggle",
+            "mcp_file_save", "mcp_list", "mcp_edit", "mcp_save", "mcp_toggle", "mcp_remove", "mcp_check", "mcp_login", "mcp_logout"));
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private PiConfigStore store;
     private final Map<String, PendingQuery> queries = new java.util.concurrent.ConcurrentHashMap<>();
@@ -87,7 +88,7 @@ public final class SettingsPlugin extends Plugin {
             String name = required(call, "name");
             boolean secret = secretFile(project, name);
             if (secret && !(call.getBoolean("allowSecrets", false) && call.getBoolean("warningAccepted", false)))
-                throw new SecurityException("打开 auth.json 必须明确确认其可能包含凭据");
+                throw new SecurityException("打开凭据文件必须明确确认其可能包含密钥或登录令牌");
             String source = store.read(project, name);
             JSONObject result = new JSONObject().put("source", source).put("containsSecrets", secret);
             EditorDraft draft = draft(project, name);
@@ -98,9 +99,34 @@ public final class SettingsPlugin extends Plugin {
 
     @PluginMethod public void saveFile(PluginCall call) {
         try {
+            requireGlobalSettings(call);
             initialize();
             boolean project = call.getBoolean("project", false);
             String name = required(call, "name");
+            if (store.isMcpConfigFile(project, name)) {
+                JSONObject arguments = new JSONObject().put("scope", project ? "project" : "global").put("name", name)
+                        .put("source", ConfigJson.format(string(call, "source"))).put("expected", string(call, "expected"));
+                PiConfigStore queryStore = store;
+                String key = draftKey(project, name);
+                String snapshot = queryStore.snapshot();
+                worker.execute(() -> {
+                    try {
+                        Object[] result = {null}; String[] error = {""};
+                        PiAgentBridge.get(getContext()).query("mcp_file_save", snapshot, arguments, queryStore, event -> {
+                            if ("result".equals(event.optString("type"))) result[0] = event.opt("result");
+                            if ("error".equals(event.optString("type"))) error[0] = event.optString("message");
+                            if ("end".equals(event.optString("type"))) {
+                                if (!error[0].isEmpty()) reject(call, new java.io.IOException(error[0]));
+                                else {
+                                    drafts().edit().remove(key).remove(key + "/base").apply();
+                                    call.resolve(js((JSONObject) result[0]));
+                                }
+                            }
+                        });
+                    } catch (Exception exception) { reject(call, exception); }
+                });
+                return;
+            }
             store.save(project, name, string(call, "source"), string(call, "expected"));
             clearDraft(project, name);
             call.resolve(js(new JSONObject().put("source", store.read(project, name))));
@@ -118,7 +144,7 @@ public final class SettingsPlugin extends Plugin {
             boolean project = call.getBoolean("project", false);
             String name = required(call, "name");
             if (secretFile(project, name) && !(call.getBoolean("allowSecrets", false) && call.getBoolean("warningAccepted", false)))
-                throw new SecurityException("打开 auth.json 必须明确确认其可能包含凭据");
+                throw new SecurityException("打开凭据文件必须明确确认其可能包含密钥或登录令牌");
             call.resolve(js(new JSONObject().put("source", store.previous(project, name))));
         }
         catch (Exception exception) { reject(call, exception); }
@@ -199,6 +225,7 @@ public final class SettingsPlugin extends Plugin {
 
     @PluginMethod public void updateSetting(PluginCall call) {
         try {
+            requireGlobalSettings(call);
             initialize();
             String source = required(call, "value");
             JSONObject field = null;
@@ -216,6 +243,7 @@ public final class SettingsPlugin extends Plugin {
 
     @PluginMethod public void resetSetting(PluginCall call) {
         try {
+            requireGlobalSettings(call);
             initialize();
             boolean project = call.getBoolean("project", false);
             String original = store.read(project, "settings.json");
@@ -326,11 +354,11 @@ public final class SettingsPlugin extends Plugin {
 
     @PluginMethod public void query(PluginCall call) {
         try {
-            initialize();
             String operation = required(call, "operation");
             if (!QUERIES.contains(operation)) throw new IllegalArgumentException("不支持的 Pi 操作");
             JSONObject arguments = call.getObject("arguments", new JSObject());
             validateQuery(operation, arguments);
+            initialize();
             PiAgentBridge bridge = PiAgentBridge.get(getContext());
             PiConfigStore queryStore = store;
             synchronized (bridge) {
@@ -427,8 +455,8 @@ public final class SettingsPlugin extends Plugin {
         String promptId;
         PendingQuery(PiAgentBridge bridge, String operation) {
             this.bridge = bridge;
-            cancellable = !Arrays.asList("install", "update", "remove").contains(operation);
-            login = "login".equals(operation);
+            cancellable = !Arrays.asList("install", "update", "remove", "mcp_file_save").contains(operation);
+            login = "login".equals(operation) || "mcp_login".equals(operation);
         }
     }
     private SharedPreferences drafts() { return getContext().getSharedPreferences("settings_editor_drafts", Context.MODE_PRIVATE); }
@@ -463,11 +491,7 @@ public final class SettingsPlugin extends Plugin {
         edit.putBoolean("migrated", true).apply();
     }
     private boolean secretFile(boolean project, String name) throws Exception {
-        java.io.File target = new java.io.File(store.directory(project), name).getCanonicalFile();
-        java.io.File auth = new java.io.File(store.directory(false), "auth.json").getCanonicalFile();
-        java.io.File projectAuth = new java.io.File(store.directory(true), "auth.json").getCanonicalFile();
-        return target.getPath().equals(auth.getPath()) || target.getPath().startsWith(auth.getPath() + ".")
-                || target.getPath().equals(projectAuth.getPath()) || target.getPath().startsWith(projectAuth.getPath() + ".");
+        return store.isCredentialFile(project, name);
     }
     private static JSONObject safeDefinition(JSONObject provider) throws Exception {
         JSONObject result = new JSONObject();
@@ -489,7 +513,12 @@ public final class SettingsPlugin extends Plugin {
         for (java.util.Iterator<String> ids = auth.keys(); ids.hasNext();) { String id = ids.next(); result.put(id, NativeJson.object("configured", !auth.isNull(id))); }
         return result;
     }
+    private static void requireGlobalSettings(PluginCall call) {
+        if (call.getBoolean("project", false)) throw new IllegalArgumentException("Pi 设置仅支持全局配置；旧工作区配置保留但不再生效");
+    }
     private static void validateQuery(String operation, JSONObject arguments) {
+        if (arguments.optBoolean("project", false) || "project".equals(arguments.optString("scope")))
+            throw new IllegalArgumentException("Pi 设置仅支持全局配置；旧工作区配置保留但不再生效");
         if (Arrays.asList("test_provider", "login", "logout").contains(operation) && arguments.optString("providerId").isEmpty())
             throw new IllegalArgumentException("providerId is required");
         if (Arrays.asList("install", "update", "remove").contains(operation) && arguments.optString("source").trim().isEmpty())

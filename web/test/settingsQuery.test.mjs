@@ -136,7 +136,7 @@ test('startup failures, buffered errors, and throwing event handlers reject and 
 });
 
 test('package mutations remain non-cancellable', async () => {
-  for (const operation of ['install', 'update', 'remove']) {
+  for (const operation of ['install', 'update', 'remove', 'mcp_file_save']) {
     const h = harness(), controller = new AbortController();
     const pending = h.ui.query(operation, {}, undefined, controller.signal);
     await tick();
@@ -150,7 +150,7 @@ test('package mutations remain non-cancellable', async () => {
 });
 
 test('LoginFlow close and effect cleanup cancel only their own late login, not concurrent queries', async () => {
-  for (const dismiss of ['close', 'unmount']) {
+  for (const [dismiss,operation] of [['close','login'], ['unmount','login'], ['close','mcp_login'], ['unmount','mcp_login']]) {
     const h = harness(), effects = [], cleanups = [];
     let closed = 0;
     const react = {
@@ -158,16 +158,19 @@ test('LoginFlow close and effect cleanup cancel only their own late login, not c
       useEffect: effect => effects.push(effect),
     };
     const { LoginFlow } = loadSource('../src/Resources.tsx', {
-      react, './native': { NativeSettings: h.native }, './Settings': {}, './components/ui/dialog': {},
+      react, './native': { NativeSettings: h.native }, './Settings': {}, './Mcp': {}, './components/ui/dialog': {},
       './ui': { ...h.ui, useText: () => (_, en) => en, useAction: () => ({ setError: assert.fail }) },
-    }, '\nexport { LoginFlow };');
-    const dialog = LoginFlow({ provider: { id: 'provider' }, method: 'oauth', close: () => closed++ });
+    });
+    const dialog = LoginFlow({ provider: { id: 'provider' }, method: 'oauth', operation,
+      arguments_: operation==='mcp_login'?{name:'server',scope:'project'}:{}, close: () => closed++ });
     for (const effect of effects) cleanups.push(effect());
     const catalog = h.ui.query('catalog');
     await tick();
     if (dismiss === 'close') dialog.props.onOpenChange(false);
     for (const cleanup of cleanups) cleanup();
     await tick();
+    assert.equal(h.starts[0].options.operation,operation);
+    if(operation==='mcp_login')assert.equal(h.starts[0].options.arguments.name,'server');
     h.starts[0].resolve({ requestId: 'login', cancellable: true });
     h.starts[1].resolve({ requestId: 'catalog', cancellable: true });
     h.end('catalog', []);
@@ -176,5 +179,22 @@ test('LoginFlow close and effect cleanup cancel only their own late login, not c
     assert.deepEqual(h.cancels, ['login']);
     assert.equal(closed, dismiss === 'close' ? 1 : 0);
     assert.equal(h.listeners.size, 0);
+  }
+});
+
+test('MCP resolved needs-auth and failed reconnects never report Signed in; provider login is unchanged', async () => {
+  for(const [operation,result] of [['mcp_login',{state:'needs-auth',error:'needs-auth-detail'}],['mcp_login',{state:'failed',error:'failed-detail'}],['login',{}]]){
+    const effects=[],state=[],errors=[];let index=0;
+    const {LoginFlow}=loadSource('../src/Resources.tsx',{
+      react:{useState:initial=>{const slot=index++;state[slot]=initial;return[initial,value=>{state[slot]=value;}];},useRef:current=>({current}),useEffect:effect=>effects.push(effect)},
+      './native':{},'./Settings':{},'./Mcp':{},'./components/ui/dialog':{},
+      './ui':{record:value=>value||{},query:async()=>result,useText:()=>(_,en)=>en,useAction:()=>({setError:error=>errors.push(error)})},
+    });
+    LoginFlow({provider:{id:'fixture'},method:'oauth',operation,close(){}});
+    const cleanups=effects.map(effect=>effect());
+    await tick();
+    if(operation==='mcp_login'){assert.equal(state[0],result.state);assert.deepEqual(errors,[result.error]);assert(!state.includes('Signed in'));}
+    else{assert.equal(state[0],'Signed in');assert.deepEqual(errors,[]);}
+    for(const cleanup of cleanups)cleanup();
   }
 });

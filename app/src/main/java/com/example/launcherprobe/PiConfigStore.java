@@ -58,6 +58,19 @@ final class PiConfigStore {
         return target;
     }
 
+    boolean isMcpConfigFile(boolean project, String name) throws IOException {
+        return file(project, name).equals(file(project, "mcp.json"));
+    }
+
+    boolean isCredentialFile(boolean project, String name) throws IOException {
+        String target = file(project, name).getPath();
+        for (boolean scope : new boolean[]{false, true}) for (String credential : new String[]{"auth.json", "mcp-auth.json"}) {
+            String path = file(scope, credential).getPath();
+            if (target.equals(path) || target.startsWith(path + ".")) return true;
+        }
+        return false;
+    }
+
     String read(boolean project, String name) throws IOException {
         synchronized (LOCK) { return readFile(file(project, name), name.endsWith(".json") ? "{}\n" : ""); }
     }
@@ -223,11 +236,7 @@ final class PiConfigStore {
     }
 
     Map<String, Object> effectiveSettings() throws IOException {
-        Map<String, Object> project = settings(true);
-        // These two settings are explicitly global-only in Pi's contract.
-        project.remove("httpProxy");
-        project.remove("defaultProjectTrust");
-        return ConfigJson.merge(settings(false), project);
+        return settings(false);
     }
 
     void initialize(SharedPreferences legacy) throws IOException {
@@ -274,8 +283,9 @@ final class PiConfigStore {
 
     String snapshot() throws IOException {
         synchronized (LOCK) {
+            ensureWorkspace();
             Map<String, Object> globalSettings = settings(false);
-            Map<String, Object> projectSettings = settings(true);
+            Map<String, Object> projectSettings = new LinkedHashMap<>();
             Map<String, Object> effective = effectiveSettings();
             Object configuredNpm = effective.get("npmCommand");
             if (configuredNpm == null || (configuredNpm instanceof java.util.List && ((java.util.List<?>) configuredNpm).isEmpty())) {
@@ -326,6 +336,7 @@ final class PiConfigStore {
     }
 
     void updateSetting(boolean project, String key, String next, String previous) throws IOException {
+        if (project) throw new IOException("Pi 设置仅支持全局配置；旧工作区配置保留但不再生效");
         synchronized (LOCK) {
             String source = read(project, "settings.json");
             Map<String, Object> settings = ConfigJson.object(source);
@@ -340,7 +351,7 @@ final class PiConfigStore {
     String[] files(boolean project) throws IOException {
         File root = directory(project);
         java.util.Set<String> names = new java.util.TreeSet<>();
-        java.util.Collections.addAll(names, "settings.json", "models.json", "auth.json", "SYSTEM.md", "APPEND_SYSTEM.md", "AGENTS.md", "keybindings.json");
+        java.util.Collections.addAll(names, "settings.json", "models.json", "auth.json", "mcp.json", "SYSTEM.md", "APPEND_SYSTEM.md", "AGENTS.md", "keybindings.json");
         if (root.isDirectory()) try (java.util.stream.Stream<java.nio.file.Path> paths = Files.walk(root.toPath())) {
             paths.filter(Files::isRegularFile).forEach(path -> {
                 String name = root.toPath().relativize(path).toString().replace(File.separatorChar, '/');

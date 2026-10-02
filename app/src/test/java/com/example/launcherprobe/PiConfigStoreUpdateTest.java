@@ -23,7 +23,7 @@ import static org.junit.Assert.assertThrows;
 @RunWith(RobolectricTestRunner.class)
 @Config(sdk = 34, shadows = HostAtomicFile.class)
 public class PiConfigStoreUpdateTest {
-    @Test public void titleModelUsesSettingsSnapshotAndWorkspaceOverride() throws Exception {
+    @Test public void titleModelUsesSharedGlobalSnapshotAndRejectsWorkspaceOverride() throws Exception {
         PiConfigStore store = new PiConfigStore(RuntimeEnvironment.getApplication());
         store.save(false, "settings.json", "{\"defaultModel\":\"chat-model\"}", null);
         store.save(true, "settings.json", "{}", null);
@@ -35,9 +35,12 @@ public class PiConfigStoreUpdateTest {
         assertEquals("titles/small-model", snapshot.getJSONObject("settings")
                 .getJSONObject("conversationTitle").getString("model"));
         assertEquals("chat-model", snapshot.getJSONObject("settings").getString("defaultModel"));
-        store.updateSetting(true, "conversationTitle.model", "\"\"", "null");
+        store.save(true, "settings.json", "{\"conversationTitle\":{\"model\":\"legacy/title\"}}", null);
+        String legacyProject = store.read(true, "settings.json");
+        assertThrows(java.io.IOException.class, () -> store.updateSetting(true, "conversationTitle.model", "\"\"", "null"));
         snapshot = new org.json.JSONObject(store.snapshot());
-        assertEquals("", snapshot.getJSONObject("settings").getJSONObject("conversationTitle").getString("model"));
+        assertEquals("titles/small-model", snapshot.getJSONObject("settings").getJSONObject("conversationTitle").getString("model"));
+        assertEquals(legacyProject, store.read(true, "settings.json"));
         assertEquals("titles/small-model", snapshot.getJSONObject("globalSettings")
                 .getJSONObject("conversationTitle").getString("model"));
     }

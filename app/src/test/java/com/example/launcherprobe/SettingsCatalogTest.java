@@ -16,7 +16,7 @@ import static org.junit.Assert.*;
 public class SettingsCatalogTest {
     @Test public void registryMetadataCannotBecomeAnArbitraryInstallSource() throws Exception {
         JSONObject item = new JSONObject("{\"name\":\"@author/demo\",\"version\":\"1.2.3-beta.1\",\"keywords\":[\"pi-package\",\"skill\"]}");
-        assertEquals("npm:@author/demo@1.2.3-beta.1", SettingsCatalog.installSource(item));
+        assertEquals("npm:@author/demo", SettingsCatalog.installSource(item));
         assertTrue(SettingsCatalog.keyword(item, "skill"));
         assertFalse(SettingsCatalog.keyword(item, "extension"));
         assertTrue(SettingsCatalog.matchesSource("npm:@author/demo@^1.0.0", "@author/demo"));
@@ -75,9 +75,10 @@ public class SettingsCatalogTest {
         assertEquals(2, result.getJSONArray("objects").length());
         JSONObject first = result.getJSONArray("objects").getJSONObject(0);
         assertEquals("z-package", first.getJSONObject("package").getString("name"));
+        assertEquals("npm:z-package", SettingsCatalog.installSource(first.getJSONObject("package")));
         assertEquals(300, first.getJSONObject("downloads").getLong("monthly"));
         JSONObject item = result.getJSONArray("objects").getJSONObject(1).getJSONObject("package");
-        assertEquals("npm:@author/a-package@1.2.3-beta.1", SettingsCatalog.installSource(item));
+        assertEquals("npm:@author/a-package", SettingsCatalog.installSource(item));
         assertEquals("Tools & memory <safe>", item.getString("description"));
         assertEquals("Author & co", item.getJSONObject("publisher").getString("username"));
         assertTrue(SettingsCatalog.keyword(item, "extension"));

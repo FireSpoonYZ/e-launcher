@@ -138,6 +138,6 @@ final class SettingsCatalog {
         if (!name.matches("(?:@[a-z0-9][a-z0-9._-]*/)?[a-z0-9][a-z0-9._-]*")
                 || !version.matches("[0-9]+\\.[0-9]+\\.[0-9]+(?:-[A-Za-z0-9.-]+)?(?:\\+[A-Za-z0-9.-]+)?"))
             throw new IllegalArgumentException("Invalid npm package name/version");
-        return "npm:" + name + "@" + version;
+        return "npm:" + name;
     }
 }

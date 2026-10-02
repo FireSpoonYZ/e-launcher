@@ -62,7 +62,7 @@ export interface ChatPlugin {
 }
 
 export type ConfigScope = { project?: boolean };
-export type QueryOperation = 'catalog'|'test_provider'|'login'|'logout'|'packages'|'install'|'update'|'remove'|'resources'|'resource_paths'|'resource_toggle';
+export type QueryOperation = 'catalog'|'test_provider'|'login'|'logout'|'packages'|'install'|'update'|'remove'|'resources'|'resource_paths'|'resource_toggle'|'mcp_file_save'|'mcp_list'|'mcp_edit'|'mcp_save'|'mcp_toggle'|'mcp_remove'|'mcp_check'|'mcp_login'|'mcp_logout';
 export interface SettingsPlugin {
   addListener(event: 'settingsEvent', listener: Listener): ListenerPromise;
   /** Credentials are represented only as {configured:boolean}; runtimeEnvironment is omitted. */

@@ -38,6 +38,7 @@ final class NpmRuntimeChecks {
             PiAgentBridge.copyAssets(context, "image-resize-worker.js", new File(home, "image-resize-worker.js"));
             PiAgentBridge.copyAssets(context, "photon_rs_bg.wasm", new File(home, "photon_rs_bg.wasm"));
             PiAgentBridge.copyAssets(tests, "npm-check.cjs", new File(home, "npm-check.cjs"));
+            PiAgentBridge.copyAssets(tests, "mcp-check.cjs", new File(home, "mcp-check.cjs"));
             JSONObject snapshot = new JSONObject(new PiConfigStore(isolated).snapshot());
             JSONArray npm = snapshot.getJSONObject("globalSettings").getJSONArray("npmCommand");
             File log = new File(root, "npm-check.log");

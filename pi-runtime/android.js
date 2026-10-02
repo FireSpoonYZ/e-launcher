@@ -226,6 +226,7 @@ async function handle(command) {
   if (conversationId) sessions.set(conversationId, operation);
   try {
     const eventBus = createEventBus();
+    eventBus.on("mcp:auth-url", url => sendEvent({ type: "auth", event: { type: "auth_url", url } }));
     eventBus.on("phone-control:bridge", (bridge) => {
       bridge.requestApps = (arguments_, signal) => requestApps(operation, arguments_, signal);
       if (command.type !== "prompt" || command.config?.bundledShower) {
