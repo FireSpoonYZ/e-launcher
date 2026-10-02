@@ -135,20 +135,19 @@ export interface DevicePlugin {
   close(): Promise<void>;
 }
 
-export type ScheduleRule = { repeat: 'once'|'daily'|'weekly'|'monthly'|'statutoryWorkday'|'statutoryHoliday'; time: string; weekday: number; weekdays?: number[]; monthDay: number; date?: string; delayMinutes?: number; runAt?: number };
-export type ScheduleDelayInput = Omit<ScheduleRule, 'repeat'|'time'|'date'|'runAt'|'delayMinutes'|'weekday'|'monthDay'> & { repeat: 'once'; delayMinutes: number; time?: string; weekday?: number; monthDay?: number };
+export type ScheduleRule = { repeat: 'once'|'daily'|'weekly'|'monthly'|'statutoryWorkday'|'statutoryHoliday'; time: string; weekday: number; weekdays?: number[]; monthDay: number };
 export type ScheduledTaskInput = ScheduleRule & { id?: string; revision?: number; title: string; prompt: string; vibrate?: boolean; deleteAfterRun?: boolean };
 export type ScheduleCalendarInfo = { calendarNotice?: string; calendarCoverage?: string; calendarFallback?: string };
 export type ScheduleSource = { sourceConversationId: string|null; sourceConversationAvailable: boolean };
 export type ScheduledTask = ScheduledTaskInput & ScheduleCalendarInfo & ScheduleSource & { id: string; revision: number; enabled: boolean; createdAt: number; nextRunAt: number };
 export type ScheduleRecord = ScheduleSource & { id: string; taskId: string; title: string; scheduledAt: number; startedAt: number; finishedAt: number; status: 'running'|'completed'|'error'|'aborted'|'skipped'; reason: string; message: string; conversationId: string|null; conversationAvailable: boolean };
 export type ScheduleSnapshot = { tasks: ScheduledTask[]; records: ScheduleRecord[]; exactAlarmGranted: boolean; schedulingError: string; timeZone: string; now: number; localNow: string; calendarVersion?: string };
-export type SchedulePreview = ScheduleCalendarInfo & { nextRunAt: number; timeZone: string; runAt?: number };
+export type SchedulePreview = ScheduleCalendarInfo & { nextRunAt: number; timeZone: string };
 export interface ScheduledTasksPlugin {
   addListener(event: 'scheduleEvent', listener: () => void): ListenerPromise;
   snapshot(): Promise<ScheduleSnapshot>;
-  preview(rule: ScheduleRule|ScheduleDelayInput): Promise<SchedulePreview>;
-  save(task: ScheduledTaskInput|(ScheduleDelayInput & Omit<ScheduledTaskInput, keyof ScheduleRule>)): Promise<ScheduleSnapshot>;
+  preview(rule: ScheduleRule): Promise<SchedulePreview>;
+  save(task: ScheduledTaskInput): Promise<ScheduleSnapshot>;
   setEnabled(options: {id: string; revision: number; enabled: boolean}): Promise<ScheduleSnapshot>;
   delete(options: {id: string; revision: number}): Promise<ScheduleSnapshot>;
   requestExactAlarm(): Promise<void>;

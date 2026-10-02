@@ -21,7 +21,7 @@ function installFixture() {
   const device = {language: 'zh', theme: 'light', launchRoute: '/schedules', background: 'solid', backgroundMask: 63, homeRole: true, gestureStatus: '', canWriteSecureSettings: false, accessibilityConnected: false};
   let conversationId = 'chat-a';
   const conversations = [{id: 'chat-a', title: '整理本周计划', updated: Date.now()}, {id: 'chat-b', title: '阅读笔记', updated: Date.now()}];
-  const state = {timeZone: 'Asia/Shanghai', exactAlarmGranted: true, schedulingError: '', tasks: [
+  const state = {timeZone: 'Asia/Shanghai', now: Date.now(), localNow: new Date(Date.now() + 8 * 3600000).toISOString().replace('Z', '+08:00'), exactAlarmGranted: true, schedulingError: '', tasks: [
     {id: 'task-a', revision: 1, title: '早间简报', prompt: '汇总今天的重要资讯，整理成一份简报。', repeat: 'daily', time: '08:00', weekday: 1, monthDay: 1, enabled: true, createdAt: 1, nextRunAt: date('2026-09-16T08:00:00')},
     {id: 'task-b', revision: 1, title: '每周复盘', prompt: '总结本周进展。', repeat: 'weekly', time: '18:00', weekday: 5, monthDay: 1, enabled: true, createdAt: 2, nextRunAt: date('2026-09-18T18:00:00')},
     {id: 'task-c', revision: 1, title: '月度总结', prompt: '总结本月进展。', repeat: 'monthly', time: '20:00', weekday: 1, monthDay: 31, enabled: false, createdAt: 3, nextRunAt: 0},
@@ -195,6 +195,7 @@ if (process.argv.includes('--serve')) {
     await wait('document.querySelector(".schedule-editor")');
     await fill('input[maxlength="80"]', '验证任务'); await fill('textarea', '整理阅读笔记');
     await screenshot('editor');
+    assert.equal(await evaluate('document.querySelectorAll(".schedule-editor input[type=date]").length'), 0, 'Once uses the next matching local time without an absolute date');
     assert.equal(await evaluate('document.querySelectorAll("[role=spinbutton]").length'), 2);
     await evaluate('document.querySelector("[aria-label=小时]").dispatchEvent(new KeyboardEvent("keydown",{key:"End",bubbles:true}));document.querySelector("[aria-label=分钟]").dispatchEvent(new KeyboardEvent("keydown",{key:"End",bubbles:true}))');
     await wait('document.querySelector("[aria-label=小时]").getAttribute("aria-valuenow")==="23" && document.querySelector("[aria-label=分钟]").getAttribute("aria-valuenow")==="59"');

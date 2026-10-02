@@ -355,6 +355,8 @@ public class ScheduledTasksTest {
         JSONObject note = tasks.applyTool(new JSONObject().put("action", "update").put("id", saved.getString("id"))
                 .put("revision", 5).put("title", "单次备注")).getJSONArray("tasks").getJSONObject(0);
         assertEquals("once", note.getString("repeat"));
+        assertFalse(once.has("runAt"));
+        assertFalse(note.has("runAt"));
         assertTrue(once.getBoolean("deleteAfterRun"));
         assertThrows(IllegalArgumentException.class, () -> tasks.save(input().put("vibrate", "true")));
         assertThrows(IllegalArgumentException.class, () -> tasks.save(input().put("deleteAfterRun", 1)));
@@ -426,6 +428,50 @@ public class ScheduledTasksTest {
         JSONObject enabled = tasks.setEnabled(task.getString("id"), task.getInt("revision"), true)
                 .getJSONArray("tasks").getJSONObject(0);
         assertTrue(enabled.getLong("nextRunAt") > System.currentTimeMillis());
+        assertNull(Shadows.shadowOf(application).getNextStartedService());
+    }
+
+    @Test public void legacyAbsolutePinsAreRetiredWithoutLosingDefinitionsOrMissedReceipts() throws Exception {
+        setNow("2026-09-15T08:00:00Z");
+        long future = java.time.Instant.parse("2026-12-31T08:00:00Z").toEpochMilli();
+        long overdue = java.time.Instant.parse("2026-09-14T08:00:00Z").toEpochMilli();
+        tasks.save(input().put("repeat", "once"));
+        JSONObject state = stored();
+        JSONObject base = state.getJSONArray("tasks").getJSONObject(0);
+        JSONArray definitions = new JSONArray();
+        for (int i = 0; i < 4; i++) {
+            definitions.put(new JSONObject(base.toString()).put("id", "legacy-" + i)
+                    .put("sourceConversationId", "source-chat").put("runAt", future)
+                    .put("enabled", i != 3).put("nextRunAt", i == 0 ? future : i == 1 ? overdue : 0));
+        }
+        state.put("tasks", definitions);
+        state.getJSONArray("runs").put(run("existing", "old-task", "old-chat").put("status", "completed"));
+        persist(state);
+
+        tasks.restore();
+        JSONObject snapshot = tasks.snapshot();
+        assertEquals(4, snapshot.getJSONArray("tasks").length());
+        for (int i = 0; i < 4; i++) {
+            JSONObject task = stored().getJSONArray("tasks").getJSONObject(i);
+            assertFalse(task.has("runAt"));
+            assertEquals("legacy-" + i, task.getString("id"));
+            assertEquals("source-chat", task.getString("sourceConversationId"));
+            assertEquals(base.getString("prompt"), task.getString("prompt"));
+            assertEquals(base.getLong("createdAt"), task.getLong("createdAt"));
+            assertEquals(i == 1 ? 2 : 1, task.getInt("revision"));
+            assertEquals(i == 0 || i == 2, task.getBoolean("enabled"));
+            assertEquals(i == 0 || i == 2
+                    ? java.time.Instant.parse("2026-09-16T08:00:00Z").toEpochMilli() : 0, task.getLong("nextRunAt"));
+        }
+        JSONArray records = snapshot.getJSONArray("records");
+        assertEquals(2, records.length());
+        assertEquals("missed", records.getJSONObject(0).getString("reason"));
+        assertEquals("legacy-1", records.getJSONObject(0).getString("taskId"));
+        assertEquals(overdue, records.getJSONObject(0).getLong("scheduledAt"));
+        assertEquals("existing", records.getJSONObject(1).getString("id"));
+        assertEquals("completed", records.getJSONObject(1).getString("status"));
+        tasks.restore();
+        assertEquals(2, tasks.snapshot().getJSONArray("records").length());
         assertNull(Shadows.shadowOf(application).getNextStartedService());
     }
 

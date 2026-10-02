@@ -72,6 +72,12 @@ for (const repeat of ["once", "statutoryWorkday", "statutoryHoliday"]) {
 assert.equal(schemas[1].properties.weekdays.minItems, 1);
 assert.equal(schemas[1].properties.weekdays.uniqueItems, true);
 assert.equal(schemas[2].properties.deleteAfterRun.type, "boolean");
+assert.ok(schemas[1].required.includes("time"), "once uses the same required wall-clock time as other rules");
+for (const schema of [schemas[1], schemas[2]]) {
+  for (const removed of ["date", "delayMinutes", "runAt"]) {
+    assert.equal(Object.hasOwn(schema.properties, removed), false);
+  }
+}
 calls.length = 0;
 
 await assert.rejects(tool.execute("stale", { action: "update", id: "task-1", revision: 1, title: "过期" }),

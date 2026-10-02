@@ -56,10 +56,17 @@ public class ScheduleRuleTest {
     }
 
     @Test public void oneTimeAndMultiDayRulesHandleMidnightNextWeekAndLegacyWeekly() throws Exception {
-        ScheduleRule once = new ScheduleRule("once", "00:00", 1, 1);
+        JSONObject legacy = new JSONObject().put("repeat", "once").put("time", "00:00")
+                .put("runAt", at("2026-12-31T00:00:00Z"));
+        ScheduleRule once = ScheduleRule.fromJson(legacy);
+        assertFalse(once.json().has("runAt"));
         assertEquals(at("2026-09-16T00:00:00Z"), once.nextAfter(at("2026-09-15T23:59:59Z"), UTC));
         assertEquals(at("2026-09-17T00:00:00Z"), once.nextAfter(at("2026-09-16T00:00:00Z"), UTC));
-        JSONObject input = new JSONObject().put("repeat", "weekly").put("time", "08:00").put("weekday", 7);
+        legacy.put("runAt", at("2026-01-01T00:00:00Z"));
+        assertEquals(at("2026-09-16T00:00:00Z"),
+                ScheduleRule.fromJson(legacy).nextAfter(at("2026-09-15T23:59:59Z"), UTC));
+        JSONObject input = new JSONObject().put("repeat", "weekly").put("time", "08:00").put("weekday", 7)
+                .put("runAt", at("2026-12-31T00:00:00Z"));
         assertEquals(7, ScheduleRule.fromJson(input).weekday);
         input.put("weekdays", new JSONArray().put(5).put(1).put(3));
         ScheduleRule multi = ScheduleRule.fromJson(input);
