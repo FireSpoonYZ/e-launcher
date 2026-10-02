@@ -40,6 +40,34 @@ The pi.dev package catalog is parsed with [jsoup 1.21.2](https://jsoup.org/), Co
 
 The selected upstream source files contain no individual copyright headers. Attribution for retained derived sources is kept here and at their Java file headers; historical removed-source mappings are documented above; the Free Software Foundation copyright in the license text refers to that document, not authorship of Ogesture's code. No upstream license notice has been removed.
 
+## China mainland holiday arrangements
+
+The APK includes a transformed, manually verified **2026** snapshot from
+[NateScarlet/holiday-cn](https://github.com/NateScarlet/holiday-cn), pinned to
+commit `dcecbce230a57639cc8967ec9e2465e744880fd8` (2025-11-04).
+Copyright (c) 2019 NateScarlet; MIT license retained verbatim in
+[`app/src/main/assets/cn-holidays-LICENSE.txt`](app/src/main/assets/cn-holidays-LICENSE.txt).
+The snapshot retains the source commit, annual coverage, actual dates (including
+adjacent-year entries), and the State Council notice:
+https://www.gov.cn/zhengce/zhengceku/202511/content_7047091.htm .
+Only the verified annual coverage is treated as official; empty future-year
+placeholders are rejected. Unlisted dates use ordinary weekdays/weekends, while
+listed holiday and makeup-work dates override them. This is scheduling of all
+days off, not a wage-multiplier or statutory festival-day calculation.
+
+After verifying a new full annual notice, maintainers update the pinned snapshot
+with `node scripts/update-cn-holidays.mjs <commit> <year...> --verified` and ship an
+app update. The script checks format, dates, annual coverage, sources and conflicts;
+the explicit verification flag records the required human completeness check.
+The app additionally refreshes the current and next year in the background, at most
+once daily, from the same repository's GitHub HTTPS contents API. Valid annual data
+is atomically cached in private storage and takes precedence over the bundled year;
+the cache records the actual request URL, Git blob SHA (not a commit SHA), and fetch
+time. Empty placeholders and invalid responses never replace valid data. Opening or
+editing statutory schedules and statutory alarm delivery provide refresh opportunities.
+Alarm calculations never wait for HTTP; failed updates retain cached/bundled data,
+and unknown years remain explicitly downgraded to fixed weekdays/weekends.
+
 ## Pi runtime
 
 The Android Pi runtime bundles `@earendil-works/pi-coding-agent`, `pi-agent-core` and `pi-ai` at version **1.0.0**, together with their transitive dependencies. The Pi packages identify their license as **MIT** and their author as Mario Zechner; source is available at https://github.com/earendil-works/pi. Exact npm dependency versions and source locations are recorded in `pi-runtime/package-lock.json`. The build retains bundled legal comments and copies SDK resources from the pinned npm package. Generated SDK assets and the JavaScript bundle are reproduced by `pi-runtime/build.js`, not maintained as separate source copies. The runtime includes `@silvia-odwyer/photon-node` **0.3.4** (Rust/WASM image processing, **Apache-2.0**, https://github.com/silvia-odwyer/photon); its `photon_rs_bg.wasm` is packaged beside the runtime/resize worker and its license is copied to `assets/pi-sdk/PHOTON_LICENSE.md`. QuickJS WASM and the separate codemode worker are also packaged; exact dependency versions/licenses remain in the lockfile.

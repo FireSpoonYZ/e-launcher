@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { Check, ChevronRight, CircleAlert, Clock3, FileText, LoaderCircle, MoreHorizontal, Pencil, Plus, Trash2 } from 'lucide-react';
-import { Chat, ScheduledTasks, type SchedulePreview, type ScheduleRecord, type ScheduleRule, type ScheduleSnapshot, type ScheduledTask, type ScheduledTaskInput } from './native';
+import { Chat, ScheduledTasks, type ScheduleCalendarInfo, type SchedulePreview, type ScheduleRecord, type ScheduleRule, type ScheduleSnapshot, type ScheduledTask, type ScheduledTaskInput } from './native';
 import { Dialog } from './components/ui/dialog';
 import { Toggle } from './Settings';
 import { LatestRequest } from './latestRequest';
@@ -15,15 +15,21 @@ const ruleOf = (value: ScheduleRule): ScheduleRule => ({repeat: value.repeat, ti
 const daysOf = (rule: ScheduleRule) => rule.weekdays ?? [rule.weekday];
 function repeatLabel(rule: ScheduleRule, t: Text) {
   if (rule.repeat === 'once') return t('只执行一次', 'Once');
+  if (rule.repeat === 'statutoryWorkday') return t('法定工作日', 'Statutory workdays');
+  if (rule.repeat === 'statutoryHoliday') return t('法定节假日', 'Statutory days off');
   if (rule.repeat === 'weekly') {
     const days = daysOf(rule).slice().sort((a, b) => a - b);
-    if (days.join() === '1,2,3,4,5') return t('工作日', 'Weekdays');
-    if (days.join() === '6,7') return t('周末', 'Weekends');
+    if (days.join() === '1,2,3,4,5') return t('周一至周五', 'Monday–Friday');
+    if (days.join() === '6,7') return t('周六日', 'Saturday–Sunday');
     if (days.length === 7) return t('每天', 'Every day');
     return t(`每周 ${days.map(day => weekdays[day - 1]).join('、')}`, days.map(day => englishDays[day - 1].slice(0, 3)).join(', '));
   }
   if (rule.repeat === 'monthly') return t(`每月 ${rule.monthDay} 日`, `Monthly on day ${rule.monthDay}`);
   return t('每天', 'Every day');
+}
+function CalendarStatus({value}: {value?: ScheduleCalendarInfo}) {
+  return <>{value?.calendarCoverage && <p className="secondary">{value.calendarCoverage}</p>}
+    {value?.calendarNotice && <p className="secondary" role="status">{value.calendarNotice}；{value.calendarFallback}</p>}</>;
 }
 function ruleLabel(rule: ScheduleRule, t: Text) { return `${repeatLabel(rule, t)} ${rule.time}`; }
 function countdown(nextRunAt: number, now: number, t: Text) {
@@ -113,7 +119,7 @@ export function SchedulesPage() {
           : !visible.length ? <ScheduleEmpty title={t('没有符合条件的任务', 'No matching tasks')}/>
           : <div className="schedule-list">{visible.map(task => <article className={`schedule-row${task.enabled ? '' : ' is-paused'}`} key={task.id}>
             <button className="schedule-row-main" onClick={() => { action.setError(''); setEditing(task); }} aria-label={t(`编辑 ${task.title}`, `Edit ${task.title}`)}>
-              <span><time className="schedule-clock">{task.time}</time><span>{repeatLabel(task, t)}</span><strong>{task.title}</strong><small>{!task.enabled ? t('已暂停', 'Paused') : !state.data!.exactAlarmGranted ? t('等待闹钟与提醒权限', 'Waiting for alarm permission') : t('下次：', 'Next: ') + dateLabel(task.nextRunAt, state.data!.timeZone, t)}</small></span>
+              <span><time className="schedule-clock">{task.time}</time><span>{repeatLabel(task, t)}</span><strong>{task.title}</strong>{task.calendarNotice && <small>{task.calendarNotice}；{task.calendarFallback}</small>}<small>{!task.enabled ? t('已暂停', 'Paused') : !state.data!.exactAlarmGranted ? t('等待闹钟与提醒权限', 'Waiting for alarm permission') : t('下次：', 'Next: ') + dateLabel(task.nextRunAt, state.data!.timeZone, t)}</small></span>
             </button>
             <div className="schedule-toggle-target"><Toggle label={t(`启用 ${task.title}`, `Enable ${task.title}`)} checked={task.enabled} disabled={action.busy} onChange={checked => void mutateEnabled(task, checked)}/></div>
             <button className="icon-button" aria-label={t(`${task.title} 的更多操作`, `More actions for ${task.title}`)} disabled={action.busy} onClick={() => { action.setError(''); setMenu(task); }}><MoreHorizontal/></button>
@@ -122,7 +128,7 @@ export function SchedulesPage() {
       </>}
     </div>
     <footer className="schedule-page-footer"><button className="button full" disabled={!state.data} onClick={() => setEditing('new')}><Plus/>{t('新建任务', 'New task')}</button></footer>
-    {editing && <TaskEditor task={editing === 'new' ? undefined : editing} onClose={() => setEditing(null)} onSaved={next => {
+    {editing && <TaskEditor task={editing === 'new' ? undefined : editing} timeZone={state.data?.timeZone} calendarVersion={state.data?.calendarVersion} onClose={() => setEditing(null)} onSaved={next => {
       state.accept(next); setEditing(null); setFilter('all');
       setNotice(editing === 'new' ? t('定时任务已创建', 'Scheduled task created') : t('修改已保存', 'Changes saved'));
     }}/>}
@@ -141,7 +147,7 @@ export function SchedulesPage() {
   </main>;
 }
 
-function useNextRun(rule: ScheduleRule) {
+function useNextRun(rule: ScheduleRule, timeZone?: string, calendarVersion?: string) {
   const [value, setValue] = useState<SchedulePreview>(); const [error, setError] = useState(''); const [retry, setRetry] = useState(0);
   const days = JSON.stringify(rule.weekdays);
   useEffect(() => {
@@ -149,7 +155,7 @@ function useNextRun(rule: ScheduleRule) {
     if (!rule.time || (rule.repeat === 'weekly' && daysOf(rule).length === 0)) return () => { live = false; };
     void ScheduledTasks.preview(rule).then(next => { if (live) setValue(next); }).catch(e => { if (live) setError(errorText(e)); });
     return () => { live = false; };
-  }, [rule.repeat, rule.time, rule.weekday, rule.monthDay, days, retry]);
+  }, [rule.repeat, rule.time, rule.weekday, rule.monthDay, days, retry, timeZone, calendarVersion]);
   useEffect(() => {
     if (!value) return;
     const timer = window.setTimeout(() => setRetry(count => count + 1), Math.min(2147483647, Math.max(1, value.nextRunAt - Date.now() + 100)));
@@ -195,7 +201,7 @@ function TimeWheel({label, count, value, disabled, onChange, onMoving}: {
       onClick={() => { if (!disabled) { window.clearTimeout(timer.current); select(i); } }}>{String(i).padStart(2, '0')}</div>)}
   </div>;
 }
-function TaskEditor({task, onClose, onSaved}: {task?: ScheduledTask; onClose(): void; onSaved(value: ScheduleSnapshot): void}) {
+function TaskEditor({task, timeZone, calendarVersion, onClose, onSaved}: {task?: ScheduledTask; timeZone?: string; calendarVersion?: string; onClose(): void; onSaved(value: ScheduleSnapshot): void}) {
   const t = useText(); const action = useAction();
   const initial = useRef<ScheduledTaskInput>(task
     ? {id: task.id, revision: task.revision, title: task.title, prompt: task.prompt, ...ruleOf(task), vibrate: task.vibrate ?? false, deleteAfterRun: task.deleteAfterRun ?? false}
@@ -208,7 +214,7 @@ function TaskEditor({task, onClose, onSaved}: {task?: ScheduledTask; onClose(): 
   const [now, setNow] = useState(Date.now());
   useEffect(() => { const timer = window.setInterval(() => setNow(Date.now()), 1000); return () => window.clearInterval(timer); }, []);
   const activeRule = cycle ?? draft;
-  const preview = useNextRun(activeRule);
+  const preview = useNextRun(activeRule, timeZone, calendarVersion);
   const invalidDays = activeRule.repeat === 'weekly' && daysOf(activeRule).length === 0;
   const dirty = JSON.stringify(draft) !== JSON.stringify(initial) || (!!cycle && JSON.stringify(cycle) !== JSON.stringify(ruleOf(draft)));
   const requestClose = () => {
@@ -237,7 +243,8 @@ function TaskEditor({task, onClose, onSaved}: {task?: ScheduledTask; onClose(): 
             <div className="schedule-repeat-options" role="group" aria-label={t('重复周期', 'Repeat interval')}>
               {([
                 ['once', t('只执行一次', 'Once'), []], ['daily', t('每天', 'Every day'), []],
-                ['weekly', t('工作日', 'Weekdays'), [1, 2, 3, 4, 5]], ['weekly', t('周末', 'Weekends'), [6, 7]],
+                ['weekly', t('周一至周五', 'Monday–Friday'), [1, 2, 3, 4, 5]], ['weekly', t('周六日', 'Saturday–Sunday'), [6, 7]],
+                ['statutoryWorkday', t('法定工作日', 'Statutory workdays'), []], ['statutoryHoliday', t('法定节假日', 'Statutory days off'), []],
               ] as const).map(([repeat, label, days], i) => <button type="button" key={i}
                 aria-pressed={!custom && cycle.repeat === repeat && (repeat !== 'weekly' || daysOf(cycle).join() === days.join())}
                 onClick={() => { setCustom(false); setCycle({...cycle, repeat, weekdays: repeat === 'weekly' ? [...days] : undefined}); }}>{label}<Check aria-hidden="true"/></button>)}
@@ -281,6 +288,8 @@ function TaskEditor({task, onClose, onSaved}: {task?: ScheduledTask; onClose(): 
             <label className="schedule-field"><span>{t('任务内容', 'Task instructions')}</span><textarea required maxLength={8000} rows={3} placeholder={t('告诉 Pi，这个时间要做什么…', 'Tell Pi what to do at this time…')} value={draft.prompt} disabled={action.busy} onChange={e => setDraft({...draft, prompt: e.target.value})}/><small>{t('备注用于识别任务；这里的内容会原样交给 AI 执行。', 'The note identifies the task; these instructions are sent to AI.')}</small></label>
             <div className="schedule-destination"><div><span>{t('结果发送到', 'Results')}</span><span className="secondary">{t('新会话', 'New conversation')}</span></div><p className="secondary">{t('每次执行会新建会话，使用全局默认模型。只执行一次的任务发起后会停用，失败可重新启用。', 'Each run creates a conversation using the global default model. One-time tasks pause on start; re-enable to retry failures.')}</p></div>
           </>}
+          {(cycle || activeRule.repeat === 'statutoryWorkday' || activeRule.repeat === 'statutoryHoliday') && <p className="secondary">{t('法定工作日包含调休补班；法定节假日包含普通周末和公告放假，不含补班。', 'Statutory workdays include makeup shifts; statutory days off include ordinary weekends and official holidays, excluding makeup shifts.')}</p>}
+          <CalendarStatus value={preview.value}/>
           <ErrorNotice error={invalidDays ? t('请至少选择一个执行日。', 'Select at least one repeat day.') : action.error}/><FetchError error={preview.error} retry={preview.retry}/>
         </div>
       </form>}

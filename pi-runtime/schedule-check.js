@@ -34,6 +34,9 @@ const tool = extension.tools.get("schedule_task").definition;
 assert.equal(tool.name, "schedule_task");
 assert.match(tool.description, /exactAlarmGranted 为 false/);
 assert.match(tool.description, /不要立刻重复提交/);
+assert.match(tool.description, /全部休息日含普通周末/);
+assert.match(tool.description, /calendarNotice.*退化原因/);
+assert.match(tool.description, /不能将旧周一至五或周六日任务升级/);
 
 const listed = await tool.execute("list", { action: "list" });
 assert.equal(JSON.parse(listed.content[0].text).exactAlarmGranted, false);
@@ -54,14 +57,18 @@ assert.deepEqual(calls[0].params, { id: "task-1", revision: 2, time: "09:30" });
 assert.equal(calls.length, 1, "partial update is one request and does not invent the other fields");
 calls.length = 0;
 
-for (const rule of [{ repeat: "once" }, { repeat: "weekly", weekdays: [1, 3, 5] }]) {
+for (const rule of [{ repeat: "once" }, { repeat: "weekly", weekdays: [1, 3, 5] },
+    { repeat: "statutoryWorkday" }, { repeat: "statutoryHoliday" }]) {
   await tool.execute("clock", { action: "create", title: "备注", prompt: "任务内容", time: "00:00",
     ...rule, vibrate: true, deleteAfterRun: true });
   assert.deepEqual(calls.at(-1).params, { title: "备注", prompt: "任务内容", time: "00:00",
     ...rule, vibrate: true, deleteAfterRun: true });
 }
 const schemas = tool.parameters.anyOf;
-assert.ok(schemas[1].properties.repeat.anyOf.some(value => value.const === "once"));
+for (const repeat of ["once", "statutoryWorkday", "statutoryHoliday"]) {
+  assert.ok(schemas[1].properties.repeat.anyOf.some(value => value.const === repeat));
+  assert.ok(schemas[2].properties.repeat.anyOf.some(value => value.const === repeat));
+}
 assert.equal(schemas[1].properties.weekdays.minItems, 1);
 assert.equal(schemas[1].properties.weekdays.uniqueItems, true);
 assert.equal(schemas[2].properties.deleteAfterRun.type, "boolean");

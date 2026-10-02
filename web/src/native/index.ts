@@ -135,12 +135,13 @@ export interface DevicePlugin {
   close(): Promise<void>;
 }
 
-export type ScheduleRule = { repeat: 'once'|'daily'|'weekly'|'monthly'; time: string; weekday: number; weekdays?: number[]; monthDay: number };
+export type ScheduleRule = { repeat: 'once'|'daily'|'weekly'|'monthly'|'statutoryWorkday'|'statutoryHoliday'; time: string; weekday: number; weekdays?: number[]; monthDay: number };
 export type ScheduledTaskInput = ScheduleRule & { id?: string; revision?: number; title: string; prompt: string; vibrate?: boolean; deleteAfterRun?: boolean };
-export type ScheduledTask = ScheduledTaskInput & { id: string; revision: number; enabled: boolean; createdAt: number; nextRunAt: number };
+export type ScheduleCalendarInfo = { calendarNotice?: string; calendarCoverage?: string; calendarFallback?: string };
+export type ScheduledTask = ScheduledTaskInput & ScheduleCalendarInfo & { id: string; revision: number; enabled: boolean; createdAt: number; nextRunAt: number };
 export type ScheduleRecord = { id: string; taskId: string; title: string; scheduledAt: number; startedAt: number; finishedAt: number; status: 'running'|'completed'|'error'|'aborted'|'skipped'; reason: string; message: string; conversationId: string|null; conversationAvailable: boolean };
-export type ScheduleSnapshot = { tasks: ScheduledTask[]; records: ScheduleRecord[]; exactAlarmGranted: boolean; schedulingError: string; timeZone: string };
-export type SchedulePreview = { nextRunAt: number; timeZone: string };
+export type ScheduleSnapshot = { tasks: ScheduledTask[]; records: ScheduleRecord[]; exactAlarmGranted: boolean; schedulingError: string; timeZone: string; calendarVersion?: string };
+export type SchedulePreview = ScheduleCalendarInfo & { nextRunAt: number; timeZone: string };
 export interface ScheduledTasksPlugin {
   addListener(event: 'scheduleEvent', listener: () => void): ListenerPromise;
   snapshot(): Promise<ScheduleSnapshot>;

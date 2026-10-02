@@ -28,13 +28,40 @@ test('Schedules repeat summaries keep legacy weekly and monthly and distinguish 
   const {repeatLabel, countdown} = load();
   const rule = {repeat: 'weekly', weekday: 5, time: '08:00', monthDay: 31};
   assert.equal(repeatLabel(rule, translate), '每周 五');
-  assert.equal(repeatLabel({...rule, weekdays: [1, 2, 3, 4, 5]}, translate), '工作日');
-  assert.equal(repeatLabel({...rule, weekdays: [6, 7]}, translate), '周末');
+  assert.equal(repeatLabel({...rule, weekdays: [1, 2, 3, 4, 5]}, translate), '周一至周五');
+  assert.equal(repeatLabel({...rule, weekdays: [6, 7]}, translate), '周六日');
   assert.equal(repeatLabel({...rule, weekdays: [1, 2, 3, 4, 5, 6, 7]}, translate), '每天');
+  assert.equal(repeatLabel({...rule, repeat: 'statutoryWorkday'}, translate), '法定工作日');
+  assert.equal(repeatLabel({...rule, repeat: 'statutoryHoliday'}, translate), '法定节假日');
   assert.equal(repeatLabel({...rule, repeat: 'once'}, translate), '只执行一次');
   assert.equal(repeatLabel({...rule, repeat: 'monthly'}, translate), '每月 31 日');
   assert.equal(countdown(90061000, 0, translate), '距执行还有 1 天 1 小时 2 分钟');
   assert.equal(countdown(1000, 0, translate), '距执行还有 1 分钟');
+});
+
+test('Schedules preview refreshes on snapshot time-zone or calendar-version changes without changing the rule', () => {
+  const calls = [], previous = [];
+  let effectIndex = 0, stateIndex = 0;
+  const {useNextRun} = load({
+    useState() { return [[undefined, '', 0][stateIndex++], () => {}]; },
+    useEffect(effect, deps) {
+      const old = previous[effectIndex];
+      previous[effectIndex++] = deps;
+      if (!old || deps.some((value, i) => !Object.is(value, old[i]))) effect();
+    },
+  }, {preview(rule) { calls.push(rule); return Promise.resolve({nextRunAt: 1, timeZone: 'UTC'}); }});
+  const rule = {repeat: 'statutoryHoliday', time: '08:00', weekday: 1, monthDay: 1};
+  const render = (zone, version) => { effectIndex = 0; stateIndex = 0; useNextRun(rule, zone, version); };
+  render('Asia/Shanghai');
+  render('Asia/Shanghai');
+  assert.equal(calls.length, 1);
+  render('Asia/Singapore');
+  render('Asia/Shanghai');
+  assert.equal(calls.length, 3);
+  render('Asia/Shanghai', 'online-year-2027');
+  render('Asia/Shanghai', 'online-year-2027');
+  assert.equal(calls.length, 4);
+  assert.ok(calls.every(value => value === rule));
 });
 
 test('Schedules wheel keyboard wraps and scroll settles to a clamped integral value', () => {

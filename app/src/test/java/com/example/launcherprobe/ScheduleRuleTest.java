@@ -2,12 +2,15 @@ package com.example.launcherprobe;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertThrows;
+import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.assertFalse;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.robolectric.RobolectricTestRunner;
+import org.robolectric.RuntimeEnvironment;
 import org.robolectric.annotation.Config;
 
 import java.time.Instant;
@@ -72,6 +75,93 @@ public class ScheduleRuleTest {
         }
         input.put("weekdays", "bad");
         assertThrows(IllegalArgumentException.class, () -> ScheduleRule.fromJson(input));
+    }
+
+    @Test public void chinaRulesIncludeMakeupShiftsAndAllDaysOffWithoutChangingFixedWeekly() throws Exception {
+        ScheduleCalendar calendar = ScheduleCalendar.load(RuntimeEnvironment.getApplication());
+        ZoneId china = ZoneId.of("Asia/Shanghai");
+        ScheduleRule work = new ScheduleRule("statutoryWorkday", "08:00", 1, 1);
+        ScheduleRule off = new ScheduleRule("statutoryHoliday", "08:00", 1, 1);
+        assertEquals(at("2026-02-14T00:00:00Z"), work.nextAfter(at("2026-02-13T23:59:59Z"), china, calendar));
+        assertEquals(at("2026-02-24T00:00:00Z"), work.nextAfter(at("2026-02-14T00:00:00Z"), china, calendar));
+        assertEquals(at("2026-02-15T00:00:00Z"), off.nextAfter(at("2026-02-13T23:59:59Z"), china, calendar));
+        assertEquals(at("2026-02-28T00:00:00Z"), work.nextAfter(at("2026-02-27T00:00:00Z"), china, calendar));
+        assertEquals(at("2026-09-20T00:00:00Z"), work.nextAfter(at("2026-09-19T00:00:00Z"), china, calendar));
+        assertEquals(at("2026-09-26T00:00:00Z"), off.nextAfter(at("2026-09-25T00:00:00Z"), china, calendar));
+        assertEquals(at("2026-10-08T00:00:00Z"), work.nextAfter(at("2026-10-01T00:00:00Z"), china, calendar));
+        assertEquals(at("2026-10-10T00:00:00Z"), work.nextAfter(at("2026-10-09T00:00:00Z"), china, calendar));
+        assertEquals(at("2026-10-11T00:00:00Z"), off.nextAfter(at("2026-10-09T00:00:00Z"), china, calendar));
+        ScheduleRule fixed = ScheduleRule.fromJson(new JSONObject().put("repeat", "weekly").put("time", "08:00")
+                .put("weekdays", new JSONArray("[1,2,3,4,5]")));
+        assertEquals(at("2026-10-02T00:00:00Z"), fixed.nextAfter(at("2026-10-01T00:00:00Z"), china, calendar));
+        assertFalse(work.json().has("weekdays"));
+        assertEquals("statutoryWorkday", ScheduleRule.fromJson(work.json()).repeat);
+    }
+
+    @Test public void calendarFallbackIsExplicitForUnknownYearsUnavailableDataAndNonMainlandZones() throws Exception {
+        ScheduleCalendar calendar = ScheduleCalendar.load(RuntimeEnvironment.getApplication());
+        ScheduleRule work = new ScheduleRule("statutoryWorkday", "08:00", 1, 1);
+        ScheduleRule off = new ScheduleRule("statutoryHoliday", "08:00", 1, 1);
+        ZoneId china = ZoneId.of("Asia/Shanghai");
+        long after = at("2026-12-31T00:00:00Z");
+        long next = work.nextAfter(after, china, calendar);
+        assertEquals(at("2027-01-01T00:00:00Z"), next);
+        JSONObject info = new JSONObject();
+        calendar.describe(info, work, after, next, china);
+        assertTrue(info.getString("calendarCoverage").contains("2026"));
+        assertTrue(info.getString("calendarNotice").contains("2027"));
+        assertEquals("暂按周一至周五执行", info.getString("calendarFallback"));
+        assertEquals(at("2027-01-02T00:00:00Z"), off.nextAfter(after, china, calendar));
+        assertEquals(at("2026-10-02T00:00:00Z"), work.nextAfter(at("2026-10-01T00:00:00Z"), china, ScheduleCalendar.EMPTY));
+        info = new JSONObject();
+        ScheduleCalendar.EMPTY.describe(info, work, after, next, china);
+        assertTrue(info.has("calendarNotice"));
+        assertFalse(info.has("calendarCoverage"));
+        for (String id : new String[]{"Asia/Singapore", "Asia/Hong_Kong", "Asia/Macau", "Asia/Taipei", "UTC", "America/New_York"}) {
+            ZoneId zone = ZoneId.of(id);
+            long start = java.time.LocalDate.of(2026, 10, 1).atTime(8, 0).atZone(zone).toInstant().toEpochMilli();
+            assertEquals(java.time.LocalDate.of(2026, 10, 2).atTime(8, 0).atZone(zone).toInstant().toEpochMilli(),
+                    work.nextAfter(start, zone, calendar));
+            info = new JSONObject();
+            calendar.describe(info, work, start, work.nextAfter(start, zone, calendar), zone);
+            assertEquals(ScheduleCalendar.UNSUPPORTED, info.getString("calendarNotice"));
+            assertFalse(info.has("calendarCoverage"));
+        }
+        for (String id : new String[]{"Asia/Shanghai", "Asia/Urumqi", "Asia/Chongqing", "Asia/Harbin", "Asia/Kashgar", "PRC"}) {
+            ZoneId zone = ZoneId.of(id);
+            assertTrue(calendar.isWorkday(java.time.LocalDate.of(2026, 9, 20), zone));
+            assertFalse(calendar.isWorkday(java.time.LocalDate.of(2026, 10, 2), zone));
+        }
+    }
+
+    @Test public void snapshotBoundaryRejectsInvalidDatesEmptyCoverageAndConflictsAndRetainsAdjacentDates() throws Exception {
+        JSONObject day = new JSONObject().put("date", "2026-12-31").put("isOffDay", true);
+        JSONObject annual = new JSONObject().put("year", 2026).put("papers", new JSONArray().put("https://www.gov.cn/notice"))
+                .put("days", new JSONArray().put(day));
+        JSONObject data = new JSONObject().put("sourceCommit", "dcecbce230a57639cc8967ec9e2465e744880fd8")
+                .put("years", new JSONArray().put(annual));
+        assertFalse(ScheduleCalendar.parse(data).isWorkday(java.time.LocalDate.of(2026, 12, 31), ZoneId.of("Asia/Shanghai")));
+        annual.put("year", 2027); // Next year's announcement can adjust the preceding December.
+        assertFalse(ScheduleCalendar.parse(data).isWorkday(java.time.LocalDate.of(2026, 12, 31), ZoneId.of("Asia/Shanghai")));
+        JSONObject info = new JSONObject();
+        ScheduleRule work = new ScheduleRule("statutoryWorkday", "08:00", 1, 1);
+        ScheduleCalendar.parse(data).describe(info, work, at("2026-12-30T00:00:00Z"), at("2027-01-01T00:00:00Z"), ZoneId.of("Asia/Shanghai"));
+        assertTrue(info.getString("calendarNotice").contains("2026"));
+        data.getJSONArray("years").put(new JSONObject().put("year", 2026)
+                .put("papers", new JSONArray().put("https://www.gov.cn/notice"))
+                .put("days", new JSONArray().put(new JSONObject().put("date", "2026-01-01").put("isOffDay", true))));
+        assertFalse(ScheduleCalendar.parse(data).isWorkday(java.time.LocalDate.of(2026, 12, 31), ZoneId.of("Asia/Shanghai")));
+        day.put("date", "2026-02-30");
+        assertThrows(Exception.class, () -> ScheduleCalendar.parse(data));
+        day.put("date", "2026-12-31").put("isOffDay", "true");
+        assertThrows(Exception.class, () -> ScheduleCalendar.parse(data));
+        day.put("isOffDay", true);
+        annual.getJSONArray("days").put(new JSONObject(day.toString()).put("isOffDay", false));
+        assertThrows(Exception.class, () -> ScheduleCalendar.parse(data));
+        annual.put("days", new JSONArray());
+        assertThrows(Exception.class, () -> ScheduleCalendar.parse(data));
+        annual.put("days", new JSONArray().put(day)).put("papers", new JSONArray());
+        assertThrows(Exception.class, () -> ScheduleCalendar.parse(data));
     }
 
     @Test public void rejectsUnsupportedOrMalformedRules() {

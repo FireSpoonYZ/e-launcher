@@ -23,7 +23,8 @@ final class ScheduleRule {
     }
 
     private ScheduleRule(String repeat, String time, int[] weekdays, int monthDay) {
-        if (!("once".equals(repeat) || "daily".equals(repeat) || "weekly".equals(repeat) || "monthly".equals(repeat)))
+        if (!("once".equals(repeat) || "daily".equals(repeat) || "weekly".equals(repeat) || "monthly".equals(repeat)
+                || "statutoryWorkday".equals(repeat) || "statutoryHoliday".equals(repeat)))
             throw new IllegalArgumentException("请选择有效的重复方式");
         if (weekdays.length == 0 || weekdays.length > 7) throw new IllegalArgumentException("请至少选择一个执行日");
         weekdays = weekdays.clone();
@@ -65,11 +66,20 @@ final class ScheduleRule {
                 "monthly".equals(repeat) ? integer(value, "monthDay") : 1);
     }
 
+    boolean isStatutory() {
+        return "statutoryWorkday".equals(repeat) || "statutoryHoliday".equals(repeat);
+    }
+
     long nextAfter(long after, ZoneId zone) {
+        return nextAfter(after, zone, ScheduleCalendar.EMPTY);
+    }
+
+    long nextAfter(long after, ZoneId zone, ScheduleCalendar calendar) {
         Instant instant = Instant.ofEpochMilli(after);
         for (LocalDate day = instant.atZone(zone).toLocalDate(); ; day = day.plusDays(1)) {
             if ("weekly".equals(repeat) && Arrays.binarySearch(weekdays, day.getDayOfWeek().getValue()) < 0) continue;
             if ("monthly".equals(repeat) && day.getDayOfMonth() != monthDay) continue;
+            if (isStatutory() && calendar.isWorkday(day, zone) != "statutoryWorkday".equals(repeat)) continue;
             // java.time shifts DST gaps forward and chooses the first offset in an overlap.
             long candidate = day.atTime(time).atZone(zone).toInstant().toEpochMilli();
             if (candidate > after) return candidate;

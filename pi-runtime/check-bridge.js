@@ -85,6 +85,10 @@ const api = http.createServer((req, res) => {
       tool("schedule_task", { action:"list" });
     } else if (prompt === "schedule-create" && !called.includes("schedule_task")) {
       tool("schedule_task", { action:"create", title:"早间简报", prompt:"整理资讯", repeat:"daily", time:"08:00" });
+    } else if (prompt === "schedule-statutory" && !called.includes("schedule_task")) {
+      tool("schedule_task", { action:"create", title:"调休提醒", prompt:"整理资讯", repeat:"statutoryWorkday", time:"08:00" });
+    } else if (prompt === "schedule-holiday" && !called.includes("schedule_task")) {
+      tool("schedule_task", { action:"create", title:"休息提醒", prompt:"休息", repeat:"statutoryHoliday", time:"08:00" });
     } else if (prompt === "schedule-stale" && !called.includes("schedule_task")) {
       tool("schedule_task", { action:"update", id:"task-1", revision:1, title:"新名称" });
     } else if (prompt === "timeout-A" && !called.includes("delay")) {
@@ -286,6 +290,8 @@ try {
   for (const [id, promptText, expectedArguments] of [
     ["schedule-list", "schedule-list", { action:"list" }],
     ["schedule-create", "schedule-create", { action:"create", title:"早间简报", prompt:"整理资讯", repeat:"daily", time:"08:00" }],
+    ["schedule-statutory", "schedule-statutory", { action:"create", title:"调休提醒", prompt:"整理资讯", repeat:"statutoryWorkday", time:"08:00" }],
+    ["schedule-holiday", "schedule-holiday", { action:"create", title:"休息提醒", prompt:"休息", repeat:"statutoryHoliday", time:"08:00" }],
   ]) {
     send({ id, conversationId:id, type:"prompt", sdk:true, prompt:promptText, config });
     assert.equal((await waitFor((event) => event.id === id && event.type === "end")).status,

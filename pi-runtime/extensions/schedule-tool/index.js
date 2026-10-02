@@ -1,7 +1,7 @@
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
-const repeat = Type.Union(["once", "daily", "weekly", "monthly"].map((value) => Type.Literal(value)));
+const repeat = Type.Union(["once", "daily", "weekly", "monthly", "statutoryWorkday", "statutoryHoliday"].map((value) => Type.Literal(value)));
 const time = Type.String({ pattern: "^(?:[01][0-9]|2[0-3]):[0-5][0-9]$", description: "24 小时制 HH:mm" });
 const title = Type.String({ minLength: 1, maxLength: 80, description: "任务名称，1–80 个字符" });
 const prompt = Type.String({ minLength: 1, maxLength: 8000, description: "到点后发给助手执行的指令" });
@@ -25,7 +25,7 @@ export default function scheduleTool(pi) {
   pi.registerTool(defineTool({
     name: "schedule_task",
     label: "定时任务",
-    description: "管理本机定时任务。用户说每天、每周或每月在某时刻做某事（例如“每天早上8点总结新闻”）时，用 create 创建。title 是简短备注；prompt 是到点后原样交给助手执行的指令；repeat 为 once（下一次此时刻，仅一次；今天已过则明天）、daily、weekly 或 monthly；time 为 24 小时制 HH:mm。weekly 必须提供 weekday 或非空不重复的 weekdays（1 是周一，7 是周日）；vibrate 和 deleteAfterRun 可选，默认 false；monthly 必须提供 monthDay（1–31，当月没有该日则跳过，不顺延）。查看用 list。修改或删除前必须先 list，并带上返回的 id 和 revision；update 只传要改的字段，未传字段保持原值，启用或暂停也保持。revision 不匹配说明任务已被改过，需要重新 list。不要编造 id 或 revision，也不要改用户没有点名的任务。返回的 exactAlarmGranted 为 false 或 schedulingError 非空时，任务只是已保存，系统闹钟未排上，不要说已保证到点执行；请用户到系统「闹钟与提醒」授权。失败、取消或超时后先 list，不要立刻重复提交。",
+    description: "管理本机定时任务。用户说每天、每周或每月在某时刻做某事（例如“每天早上8点总结新闻”）时，用 create 创建。title 是简短备注；prompt 是到点后原样交给助手执行的指令；repeat 为 once（下一次此时刻，仅一次；今天已过则明天）、daily、weekly、monthly、statutoryWorkday（法定工作日，含调休补班）或 statutoryHoliday（法定节假日，全部休息日含普通周末和公告放假、不含补班）；这两个法定规则独立保存，不传 weekdays。目前仅支持大陆设备时区下中国大陆官方安排，内置2026年并后台在线更新当前年/次年已公布安排，有效缓存无网络也可用；其他时区或未知年份分别按周一至周五/周六日执行。返回 calendarNotice 时必须向用户说明退化原因和 calendarFallback，不要声称已成功查询官方安排；calendarCoverage 表示当前内置或缓存覆盖年份。weekly 的 weekdays 永远是固定星期，不能将旧周一至五或周六日任务升级成法定规则。time 为 24 小时制 HH:mm。weekly 必须提供 weekday 或非空不重复的 weekdays（1 是周一，7 是周日）；vibrate 和 deleteAfterRun 可选，默认 false；monthly 必须提供 monthDay（1–31，当月没有该日则跳过，不顺延）。查看用 list。修改或删除前必须先 list，并带上返回的 id 和 revision；update 只传要改的字段，未传字段保持原值，启用或暂停也保持。revision 不匹配说明任务已被改过，需要重新 list。不要编造 id 或 revision，也不要改用户没有点名的任务。返回的 exactAlarmGranted 为 false 或 schedulingError 非空时，任务只是已保存，系统闹钟未排上，不要说已保证到点执行；请用户到系统「闹钟与提醒」授权。失败、取消或超时后先 list，不要立刻重复提交。",
     parameters: Type.Union([
       Type.Object({ action: Type.Literal("list") }, { additionalProperties: false }),
       Type.Object({ action: Type.Literal("create"), title, prompt, repeat, time, weekday, weekdays, monthDay, vibrate, deleteAfterRun },

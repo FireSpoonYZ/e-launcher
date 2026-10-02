@@ -35,17 +35,26 @@ public final class ScheduledTasksPlugin extends Plugin {
     }
 
     @PluginMethod public void snapshot(PluginCall call) {
-        try { resolve(call, tasks.snapshot()); }
+        try {
+            resolve(call, tasks.snapshot());
+            if (tasks.hasStatutoryTasks()) tasks.refreshCalendar(null);
+        }
         catch (Exception failure) { reject(call, failure); }
     }
 
     @PluginMethod public void preview(PluginCall call) {
-        try { resolve(call, ScheduledTasks.preview(call.getData())); }
+        try {
+            resolve(call, tasks.preview(call.getData()));
+            if (ScheduleRule.fromJson(call.getData()).isStatutory()) tasks.refreshCalendar(null);
+        }
         catch (Exception failure) { reject(call, failure); }
     }
 
     @PluginMethod public void save(PluginCall call) {
-        try { resolve(call, tasks.save(call.getData())); }
+        try {
+            resolve(call, tasks.save(call.getData()));
+            if (ScheduleRule.fromJson(call.getData()).isStatutory()) tasks.refreshCalendar(null);
+        }
         catch (Exception failure) { reject(call, failure); }
     }
 

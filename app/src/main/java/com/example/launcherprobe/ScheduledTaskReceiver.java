@@ -11,7 +11,16 @@ public final class ScheduledTaskReceiver extends BroadcastReceiver {
     @Override public void onReceive(Context context, Intent intent) {
         String action = intent == null ? null : intent.getAction();
         try {
-            if (ScheduledTasks.ACTION_RUN.equals(action)) ScheduledTasks.get(context).onAlarm();
+            if (ScheduledTasks.ACTION_RUN.equals(action)) {
+                ScheduledTasks tasks = ScheduledTasks.get(context);
+                boolean statutory = tasks.hasStatutoryTasks();
+                tasks.onAlarm(); // Claim this run using local data; HTTP can only affect future occurrences.
+                if (statutory) {
+                    PendingResult pending = goAsync();
+                    try { tasks.refreshCalendar(pending::finish); }
+                    catch (RuntimeException failure) { pending.finish(); throw failure; }
+                }
+            }
             else if (Intent.ACTION_BOOT_COMPLETED.equals(action) || Intent.ACTION_MY_PACKAGE_REPLACED.equals(action)
                     || Intent.ACTION_TIME_CHANGED.equals(action) || Intent.ACTION_TIMEZONE_CHANGED.equals(action)
                     || AlarmManager.ACTION_SCHEDULE_EXACT_ALARM_PERMISSION_STATE_CHANGED.equals(action)) {

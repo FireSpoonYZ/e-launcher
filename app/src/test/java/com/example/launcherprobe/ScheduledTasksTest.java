@@ -61,6 +61,71 @@ public class ScheduledTasksTest {
         TimeZone.setDefault(previousZone);
     }
 
+    @Test public void statutoryPreviewSaveToolUpdateRestoreAndFireUseOneCalendarAndKeepIntent() throws Exception {
+        setNow("2026-09-19T00:00:00Z");
+        TimeZone.setDefault(TimeZone.getTimeZone("Asia/Shanghai"));
+        JSONObject input = input().put("repeat", "statutoryWorkday");
+        JSONObject preview = tasks.preview(input);
+        assertEquals(java.time.Instant.parse("2026-09-20T00:00:00Z").toEpochMilli(), preview.getLong("nextRunAt"));
+        assertEquals("中国大陆 · 2026 年节假日安排", preview.getString("calendarCoverage"));
+        assertFalse(preview.has("calendarNotice"));
+        JSONObject saved = tasks.applyTool(new JSONObject(input.toString()).put("action", "create")).getJSONArray("tasks").getJSONObject(0);
+        assertEquals(preview.getLong("nextRunAt"), saved.getLong("nextRunAt"));
+        assertFalse(saved.has("weekdays"));
+        assertFalse(stored().getJSONArray("tasks").getJSONObject(0).has("calendarCoverage"));
+        saved = tasks.applyTool(new JSONObject().put("action", "update").put("id", saved.getString("id"))
+                .put("revision", saved.getInt("revision")).put("title", "仅改备注")).getJSONArray("tasks").getJSONObject(0);
+        assertEquals("statutoryWorkday", saved.getString("repeat"));
+        assertEquals(preview.getLong("nextRunAt"), saved.getLong("nextRunAt"));
+        TimeZone.setDefault(TimeZone.getTimeZone("Asia/Singapore"));
+        new ScheduledTaskReceiver().onReceive(application, new Intent(Intent.ACTION_TIMEZONE_CHANGED));
+        JSONObject fallback = tasks.snapshot().getJSONArray("tasks").getJSONObject(0);
+        assertEquals("statutoryWorkday", fallback.getString("repeat"));
+        assertEquals(ScheduleCalendar.UNSUPPORTED, fallback.getString("calendarNotice"));
+        assertEquals(java.time.Instant.parse("2026-09-21T00:00:00Z").toEpochMilli(), fallback.getLong("nextRunAt"));
+        TimeZone.setDefault(TimeZone.getTimeZone("Asia/Shanghai"));
+        // An old-zone alarm cannot launch before TIMEZONE_CHANGED has been delivered.
+        tasks.onAlarm();
+        assertEquals(preview.getLong("nextRunAt"), tasks.snapshot().getJSONArray("tasks").getJSONObject(0).getLong("nextRunAt"));
+        assertEquals(0, tasks.snapshot().getJSONArray("records").length());
+
+        JSONObject state = stored();
+        state.getJSONArray("tasks").getJSONObject(0).put("nextRunAt", preview.getLong("nextRunAt"));
+        persist(state);
+        ReflectionHelpers.setField(tasks, "clock", (java.util.function.LongSupplier) () -> preview.optLong("nextRunAt"));
+        tasks.onAlarm();
+        assertEquals(java.time.Instant.parse("2026-09-21T00:00:00Z").toEpochMilli(),
+                tasks.snapshot().getJSONArray("tasks").getJSONObject(0).getLong("nextRunAt"));
+        assertEquals(1, tasks.snapshot().getJSONArray("records").length());
+    }
+
+    @Test public void statutoryRecoveryRecalculatesFutureDataAndAlarmRejectsHolidayWorkdays() throws Exception {
+        setNow("2026-10-02T00:00:00Z");
+        TimeZone.setDefault(TimeZone.getTimeZone("Asia/Shanghai"));
+        tasks.save(input().put("repeat", "statutoryWorkday"));
+        JSONObject state = stored();
+        state.getJSONArray("tasks").getJSONObject(0).put("nextRunAt", java.time.Instant.parse("2026-10-02T00:00:00Z").toEpochMilli());
+        persist(state);
+        tasks.onAlarm(); // Stale degraded/old-data occurrence is a holiday: must not execute.
+        assertEquals(0, tasks.snapshot().getJSONArray("records").length());
+        assertEquals(java.time.Instant.parse("2026-10-08T00:00:00Z").toEpochMilli(),
+                tasks.snapshot().getJSONArray("tasks").getJSONObject(0).getLong("nextRunAt"));
+        state = stored();
+        state.getJSONArray("tasks").getJSONObject(0).put("nextRunAt", java.time.Instant.parse("2026-10-05T00:00:00Z").toEpochMilli());
+        persist(state);
+        tasks.restore(); // APK calendar updates also recalculate future statutory occurrences.
+        assertEquals(tasks.preview(input().put("repeat", "statutoryWorkday")).getLong("nextRunAt"),
+                tasks.snapshot().getJSONArray("tasks").getJSONObject(0).getLong("nextRunAt"));
+        setNow("2027-01-01T00:00:00Z");
+        tasks.restore(true);
+        JSONObject unknown = tasks.snapshot().getJSONArray("tasks").getJSONObject(0);
+        assertTrue(unknown.getString("calendarNotice").contains("2027"));
+        assertEquals("statutoryWorkday", unknown.getString("repeat"));
+        assertFalse(stored().getJSONArray("tasks").getJSONObject(0).has("calendarNotice"));
+        JSONObject holiday = tasks.save(input().put("repeat", "statutoryHoliday")).getJSONArray("tasks").getJSONObject(1);
+        assertEquals("暂按周六日执行", holiday.getString("calendarFallback"));
+    }
+
     @Test public void crudPersistsRulesAndControlsTheNativeAlarmWithoutLostUpdates() throws Exception {
         JSONObject task = tasks.save(input()).getJSONArray("tasks").getJSONObject(0);
         String id = task.getString("id");
@@ -375,6 +440,11 @@ public class ScheduledTasksTest {
         assertEquals(100, records.length());
         assertEquals("run-104", records.getJSONObject(0).getString("id"));
         assertEquals("run-5", records.getJSONObject(99).getString("id"));
+    }
+
+    private void setNow(String instant) {
+        long now = java.time.Instant.parse(instant).toEpochMilli();
+        ReflectionHelpers.setField(tasks, "clock", (java.util.function.LongSupplier) () -> now);
     }
 
     private static JSONObject input() throws Exception {
