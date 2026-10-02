@@ -135,8 +135,8 @@ export interface DevicePlugin {
   close(): Promise<void>;
 }
 
-export type ScheduleRule = { repeat: 'daily'|'weekly'|'monthly'; time: string; weekday: number; monthDay: number };
-export type ScheduledTaskInput = ScheduleRule & { id?: string; revision?: number; title: string; prompt: string };
+export type ScheduleRule = { repeat: 'once'|'daily'|'weekly'|'monthly'; time: string; weekday: number; weekdays?: number[]; monthDay: number };
+export type ScheduledTaskInput = ScheduleRule & { id?: string; revision?: number; title: string; prompt: string; vibrate?: boolean; deleteAfterRun?: boolean };
 export type ScheduledTask = ScheduledTaskInput & { id: string; revision: number; enabled: boolean; createdAt: number; nextRunAt: number };
 export type ScheduleRecord = { id: string; taskId: string; title: string; scheduledAt: number; startedAt: number; finishedAt: number; status: 'running'|'completed'|'error'|'aborted'|'skipped'; reason: string; message: string; conversationId: string|null; conversationAvailable: boolean };
 export type ScheduleSnapshot = { tasks: ScheduledTask[]; records: ScheduleRecord[]; exactAlarmGranted: boolean; schedulingError: string; timeZone: string };

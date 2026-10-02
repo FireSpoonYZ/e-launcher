@@ -25,6 +25,7 @@ import org.robolectric.RobolectricTestRunner;
 import org.robolectric.RuntimeEnvironment;
 import org.robolectric.Shadows;
 import org.robolectric.annotation.Config;
+import org.robolectric.android.util.concurrent.PausedExecutorService;
 import org.robolectric.util.ReflectionHelpers;
 
 import java.time.ZoneId;
@@ -148,11 +149,16 @@ public class ScheduledTasksTest {
         chat.save(Collections.singletonList(new AgentLoop.Message("kept", "user", "keep this chat", null, Collections.emptyList(), false)));
         chat.saveDraft("unsent draft");
         String active = chat.activeId();
-        tasks.save(input());
+        tasks.save(input().put("repeat", "once").put("deleteAfterRun", true).put("vibrate", true));
         JSONObject state = stored();
         state.getJSONArray("tasks").getJSONObject(0).put("nextRunAt", System.currentTimeMillis() - 1000);
         persist(state);
         tasks.onAlarm();
+        JSONObject kept = tasks.snapshot().getJSONArray("tasks").getJSONObject(0);
+        assertFalse(kept.getBoolean("enabled"));
+        assertEquals(0, kept.getLong("nextRunAt"));
+        assertEquals(2, kept.getInt("revision"));
+        assertFalse(Shadows.shadowOf(application.getSystemService(android.os.Vibrator.class)).isVibrating());
         JSONObject record = tasks.snapshot().getJSONArray("records").getJSONObject(0);
         assertEquals("error", record.getString("status"));
         assertTrue(record.getString("message").contains("fixture foreground start denied"));
@@ -167,7 +173,7 @@ public class ScheduledTasksTest {
     }
 
     @Test public void runningOccurrenceIsNotOverlappedAndFinalEventSurvivesDefinitionDeletion() throws Exception {
-        JSONObject task = tasks.save(input()).getJSONArray("tasks").getJSONObject(0);
+        JSONObject task = tasks.save(input().put("deleteAfterRun", true).put("vibrate", true)).getJSONArray("tasks").getJSONObject(0);
         ChatCoordinator coordinator = ChatCoordinator.get(application);
         ChatStore chat = coordinator.store();
         ChatCoordinator.SessionRun active = coordinator.registerRun(chat.activeId(), null);
@@ -179,6 +185,8 @@ public class ScheduledTasksTest {
         JSONObject snapshot = tasks.snapshot();
         assertEquals(2, snapshot.getJSONArray("records").length());
         assertEquals("overlap", snapshot.getJSONArray("records").getJSONObject(0).getString("reason"));
+        assertEquals(1, snapshot.getJSONArray("tasks").length());
+        assertFalse(Shadows.shadowOf(application.getSystemService(android.os.Vibrator.class)).isVibrating());
         tasks.delete(task.getString("id"), 1);
         coordinator.finish(active, "completed", "");
         Shadows.shadowOf(Looper.getMainLooper()).idle();
@@ -258,6 +266,102 @@ public class ScheduledTasksTest {
         assertTrue(kept.getBoolean("enabled"));
         assertEquals(2, kept.getInt("revision"));
         assertEquals(1, Shadows.shadowOf(alarms).getScheduledAlarms().size());
+    }
+
+    @Test public void optionalClockFieldsSurviveSaveAndToolUpdatesWithoutChangingPromptOrDays() throws Exception {
+        JSONObject created = tasks.save(input().put("repeat", "weekly").put("weekdays", new JSONArray().put(1).put(3).put(5))
+                .put("vibrate", true).put("deleteAfterRun", true)).getJSONArray("tasks").getJSONObject(0);
+        JSONObject saved = tasks.save(new JSONObject().put("id", created.getString("id")).put("revision", 1)
+                .put("title", "新的备注").put("prompt", created.getString("prompt"))
+                .put("repeat", "weekly").put("time", "09:00")).getJSONArray("tasks").getJSONObject(0);
+        assertEquals("[1,3,5]", saved.getJSONArray("weekdays").toString());
+        assertTrue(saved.getBoolean("vibrate"));
+        assertTrue(saved.getBoolean("deleteAfterRun"));
+        JSONObject renamed = tasks.applyTool(new JSONObject().put("action", "update").put("id", saved.getString("id"))
+                .put("revision", 2).put("title", "工具备注")).getJSONArray("tasks").getJSONObject(0);
+        assertEquals("[1,3,5]", renamed.getJSONArray("weekdays").toString());
+        assertEquals("整理今天的资讯", renamed.getString("prompt"));
+        assertTrue(renamed.getBoolean("vibrate"));
+        JSONObject single = tasks.applyTool(new JSONObject().put("action", "update").put("id", saved.getString("id"))
+                .put("revision", 3).put("weekday", 7)).getJSONArray("tasks").getJSONObject(0);
+        assertEquals("[7]", single.getJSONArray("weekdays").toString());
+        JSONObject once = tasks.applyTool(new JSONObject().put("action", "update").put("id", saved.getString("id"))
+                .put("revision", 4).put("repeat", "once")).getJSONArray("tasks").getJSONObject(0);
+        JSONObject note = tasks.applyTool(new JSONObject().put("action", "update").put("id", saved.getString("id"))
+                .put("revision", 5).put("title", "单次备注")).getJSONArray("tasks").getJSONObject(0);
+        assertEquals("once", note.getString("repeat"));
+        assertTrue(once.getBoolean("deleteAfterRun"));
+        assertThrows(IllegalArgumentException.class, () -> tasks.save(input().put("vibrate", "true")));
+        assertThrows(IllegalArgumentException.class, () -> tasks.save(input().put("deleteAfterRun", 1)));
+        JSONObject old = tasks.save(input()).getJSONArray("tasks").getJSONObject(1);
+        assertFalse(old.getBoolean("vibrate"));
+        assertFalse(old.getBoolean("deleteAfterRun"));
+    }
+
+    @Test public void successfulSubmissionVibratesAndDeletesOnlyTheDefinitionPreservingPromptAndReceipt() throws Exception {
+        PausedExecutorService executor = new PausedExecutorService();
+        ChatCoordinator coordinator = ChatCoordinator.get(application);
+        ((java.util.concurrent.ExecutorService) ReflectionHelpers.getField(coordinator, "executor")).shutdownNow();
+        ReflectionHelpers.setField(coordinator, "executor", executor);
+        Shadows.shadowOf(application.getSystemService(android.os.Vibrator.class)).setHasVibrator(true);
+        try {
+            String active = coordinator.store().activeId();
+            tasks.save(input().put("repeat", "once").put("deleteAfterRun", true).put("vibrate", true));
+            JSONObject state = stored();
+            state.getJSONArray("tasks").getJSONObject(0).put("nextRunAt", System.currentTimeMillis() - 1000);
+            persist(state);
+            tasks.onAlarm();
+            JSONObject snapshot = tasks.snapshot();
+            assertEquals(0, snapshot.getJSONArray("tasks").length());
+            assertEquals(1, snapshot.getJSONArray("records").length());
+            JSONObject receipt = snapshot.getJSONArray("records").getJSONObject(0);
+            assertEquals("running", receipt.getString("status"));
+            assertFalse(receipt.isNull("requestId"));
+            assertTrue(receipt.getBoolean("conversationAvailable"));
+            assertEquals(active, coordinator.store().activeId());
+            assertEquals("整理今天的资讯", coordinator.store().load(receipt.getString("conversationId")).get(0).content);
+            assertTrue(Shadows.shadowOf(application.getSystemService(android.os.Vibrator.class)).isVibrating());
+            assertEquals(0, Shadows.shadowOf(application.getSystemService(AlarmManager.class)).getScheduledAlarms().size());
+            tasks.onAlarm();
+            assertEquals(1, tasks.snapshot().getJSONArray("records").length());
+        } finally { executor.shutdownNow(); }
+    }
+
+    @Test public void successfulOneTimeStartWithoutDeletionKeepsPausedDefinitionAndDoesNotBuzzByDefault() throws Exception {
+        PausedExecutorService executor = new PausedExecutorService();
+        ChatCoordinator coordinator = ChatCoordinator.get(application);
+        ((java.util.concurrent.ExecutorService) ReflectionHelpers.getField(coordinator, "executor")).shutdownNow();
+        ReflectionHelpers.setField(coordinator, "executor", executor);
+        try {
+            tasks.save(input().put("repeat", "once"));
+            JSONObject state = stored();
+            state.getJSONArray("tasks").getJSONObject(0).put("nextRunAt", System.currentTimeMillis() - 1000);
+            persist(state);
+            tasks.onAlarm();
+            JSONObject snapshot = tasks.snapshot();
+            assertFalse(snapshot.getJSONArray("tasks").getJSONObject(0).getBoolean("enabled"));
+            assertEquals("running", snapshot.getJSONArray("records").getJSONObject(0).getString("status"));
+            assertFalse(Shadows.shadowOf(application.getSystemService(android.os.Vibrator.class)).isVibrating());
+        } finally { executor.shutdownNow(); }
+    }
+
+    @Test public void missedOneTimeTaskIsPausedKeptAndCanBeReenabled() throws Exception {
+        tasks.save(input().put("repeat", "once").put("deleteAfterRun", true));
+        JSONObject state = stored();
+        state.getJSONArray("tasks").getJSONObject(0).put("nextRunAt", System.currentTimeMillis() - 1000);
+        persist(state);
+        tasks.restore();
+        JSONObject snapshot = tasks.snapshot();
+        JSONObject task = snapshot.getJSONArray("tasks").getJSONObject(0);
+        assertFalse(task.getBoolean("enabled"));
+        assertEquals(0, task.getLong("nextRunAt"));
+        assertEquals("missed", snapshot.getJSONArray("records").getJSONObject(0).getString("reason"));
+        tasks.restore();
+        assertEquals(1, tasks.snapshot().getJSONArray("records").length());
+        JSONObject enabled = tasks.setEnabled(task.getString("id"), task.getInt("revision"), true)
+                .getJSONArray("tasks").getJSONObject(0);
+        assertTrue(enabled.getLong("nextRunAt") > System.currentTimeMillis());
+        assertNull(Shadows.shadowOf(application).getNextStartedService());
     }
 
     @Test public void recordsAreBoundedButActiveRunsAreKept() throws Exception {

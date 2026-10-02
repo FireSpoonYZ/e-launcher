@@ -30,7 +30,20 @@ function installFixture() {
     {id: 'run-c', taskId: 'task-c', title: '月度总结', scheduledAt: date('2026-08-31T20:00:00'), startedAt: 0, finishedAt: 2, status: 'skipped', reason: 'missed', message: '', conversationId: null, conversationAvailable: false},
   ]};
   const original = clone(state);
-  const preview = rule => ({timeZone: state.timeZone, nextRunAt: date(`${rule.repeat === 'monthly' ? '2026-10-31' : rule.repeat === 'weekly' ? '2026-09-18' : '2026-09-16'}T${rule.time}:00`)});
+  const preview = rule => {
+    if (!/^(?:[01][0-9]|2[0-3]):[0-5][0-9]$/.test(rule.time)) throw new Error('执行时间无效');
+    const days = rule.weekdays ?? [rule.weekday];
+    if (rule.repeat === 'weekly' && (!days.length || days.some(day => !Number.isInteger(day) || day < 1 || day > 7) || new Set(days).size !== days.length)) throw new Error('请选择执行日');
+    const now = Date.now(), local = new Date(now + 8 * 3600000);
+    const [hour, minute] = rule.time.split(':').map(Number);
+    for (let offset = 0; offset < 370; offset++) {
+      const candidate = new Date(Date.UTC(local.getUTCFullYear(), local.getUTCMonth(), local.getUTCDate() + offset, hour, minute));
+      if (rule.repeat === 'weekly' && !days.includes(candidate.getUTCDay() || 7)) continue;
+      if (rule.repeat === 'monthly' && candidate.getUTCDate() !== rule.monthDay) continue;
+      if (candidate.getTime() - 8 * 3600000 > now) return {timeZone: state.timeZone, nextRunAt: candidate.getTime() - 8 * 3600000};
+    }
+    throw new Error('无有效执行时间');
+  };
   const fixture = window.scheduleFixture = {
     calls: [], state, failNextSave: false,
     set(value) { Object.assign(state, clone(value)); emit('ScheduledTasks:scheduleEvent'); },
@@ -59,7 +72,9 @@ function installFixture() {
         if (!input.title.trim() || !input.prompt.trim()) throw new Error('不能为空');
         const index = state.tasks.findIndex(task => task.id === input.id);
         if (input.id && (index < 0 || state.tasks[index].revision !== input.revision)) throw new Error('任务已更改');
-        const saved = {...input, id: input.id ?? 'created-' + nextId++, revision: (input.revision ?? 0) + 1, enabled: index < 0 || state.tasks[index].enabled, createdAt: Date.now(), nextRunAt: preview(input).nextRunAt};
+        const saved = {...(index < 0 ? {vibrate: false, deleteAfterRun: false} : state.tasks[index]), ...input, id: input.id ?? 'created-' + nextId++, revision: (input.revision ?? 0) + 1, enabled: index < 0 || state.tasks[index].enabled, createdAt: Date.now(), nextRunAt: preview(input).nextRunAt};
+        if (saved.repeat === 'weekly' && saved.weekdays?.length === 7) { saved.repeat = 'daily'; delete saved.weekdays; }
+        if (!saved.enabled) saved.nextRunAt = 0;
         if (index < 0) state.tasks.push(saved); else state.tasks[index] = saved;
         emit('ScheduledTasks:scheduleEvent'); return state;
       },
@@ -150,9 +165,14 @@ if (process.argv.includes('--serve')) {
     const clickText = text => evaluate(`(()=>{const el=[...document.querySelectorAll('button')].find(e=>e.textContent.trim()===${JSON.stringify(text)});if(!el)throw new Error('Missing button '+${JSON.stringify(text)});el.scrollIntoView({block:'nearest'});el.click()})()`);
     const fill = (selector, value) => evaluate(`(()=>{const el=document.querySelector(${JSON.stringify(selector)});if(!el)throw new Error('Missing input');const proto=el.tagName==='TEXTAREA'?HTMLTextAreaElement.prototype:HTMLInputElement.prototype;Object.getOwnPropertyDescriptor(proto,'value').set.call(el,${JSON.stringify(value)});el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}))})()`);
     const screenshot = async name => { const result = await call('Page.captureScreenshot', {format: 'png'}); await writeFile(join(output, name + '.png'), Buffer.from(result.data, 'base64')); };
-    const resize = (width, height) => call('Emulation.setDeviceMetricsOverride', {width, height, deviceScaleFactor: 1, mobile: true});
+    const resize = async (width, height) => {
+      await call('Emulation.setDeviceMetricsOverride', {width, height, deviceScaleFactor: 1, mobile: true});
+      // App updates its viewport CSS from visualViewport asynchronously after CDP resize.
+      await evaluate('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');
+    };
     const noHorizontalOverflow = async () => assert.ok(await evaluate('document.documentElement.scrollWidth <= innerWidth'), 'Horizontal page overflow');
     await call('Page.enable'); await call('Runtime.enable');
+    await call('Emulation.setTouchEmulationEnabled', {enabled: true, maxTouchPoints: 1});
     await resize(390, 844);
     await call('Page.navigate', {url});
     await wait('document.querySelectorAll(".schedule-row").length===3');
@@ -168,39 +188,71 @@ if (process.argv.includes('--serve')) {
     await click('.schedule-page-footer button');
     await wait('document.querySelector(".schedule-editor")');
     await fill('input[maxlength="80"]', '验证任务'); await fill('textarea', '整理阅读笔记');
-    await screenshot('editor'); await click('.schedule-cycle-link');
-    await wait('document.querySelector("input[type=time]")');
-    await screenshot('daily'); await clickText('每周');
-    await click('[aria-label="周五"]'); await fill('input[type=time]', '18:00');
-    await wait('!document.querySelector(".schedule-editor-footer button").disabled');
+    await screenshot('editor');
+    assert.equal(await evaluate('document.querySelectorAll("[role=spinbutton]").length'), 2);
+    await evaluate('document.querySelector("[aria-label=小时]").dispatchEvent(new KeyboardEvent("keydown",{key:"End",bubbles:true}));document.querySelector("[aria-label=分钟]").dispatchEvent(new KeyboardEvent("keydown",{key:"End",bubbles:true}))');
+    await wait('document.querySelector("[aria-label=小时]").getAttribute("aria-valuenow")==="23" && document.querySelector("[aria-label=分钟]").getAttribute("aria-valuenow")==="59"');
+    await evaluate('document.querySelector("[aria-label=小时]").dispatchEvent(new KeyboardEvent("keydown",{key:"ArrowDown",bubbles:true}));document.querySelector("[aria-label=分钟]").dispatchEvent(new KeyboardEvent("keydown",{key:"ArrowDown",bubbles:true}))');
+    await wait('document.querySelector("[aria-label=小时]").getAttribute("aria-valuenow")==="0" && document.querySelector("[aria-label=分钟]").getAttribute("aria-valuenow")==="0"');
+    await evaluate('document.querySelector("[aria-label=小时]").scrollTop=18*48;document.querySelector("[aria-label=分钟]").scrollTop=30*48');
+    await wait('document.querySelector("[aria-label=小时]").getAttribute("aria-valuenow")==="18" && document.querySelector("[aria-label=分钟]").getAttribute("aria-valuenow")==="30" && !document.querySelector(".schedule-save").disabled');
+    await click('.schedule-cycle-link'); await screenshot('repeat-presets'); await clickText('自定义星期');
+    await wait('document.querySelector(".schedule-repeat-days")');
+    assert.ok(await evaluate('document.querySelector(".schedule-save").disabled'), 'Empty custom repeat cannot save');
+    await click('[aria-label="周五"]'); await click('[aria-label="周一"]');
+    await wait('!document.querySelector(".schedule-save").disabled');
     await screenshot('weekly'); await clickText('确定');
     await wait('document.querySelector(".schedule-cycle-link")');
-    assert.match(await evaluate('document.querySelector(".schedule-cycle-link").textContent'), /每周五 18:00/);
-    await evaluate('scheduleFixture.failNextSave=true'); await clickText('创建任务');
+    assert.match(await evaluate('document.querySelector(".schedule-cycle-link").textContent'), /每周 一、五/);
+    await click('[aria-label="执行后删除"]');
+    await wait('!document.querySelector(".schedule-save").disabled');
+    await evaluate('scheduleFixture.failNextSave=true'); await clickText('保存');
     await wait('document.querySelector(".schedule-editor .inline-error")');
     assert.equal(await evaluate('document.querySelector("input[maxlength]").value'), '验证任务', 'Failed save lost form');
-    await clickText('创建任务'); await wait('!document.querySelector(".schedule-sheet") && document.querySelectorAll(".schedule-row").length===4');
+    await clickText('保存'); await wait('!document.querySelector(".schedule-sheet") && document.querySelectorAll(".schedule-row").length===4');
     let saved = await evaluate('scheduleFixture.state.tasks.find(task=>task.title==="验证任务")');
-    assert.equal(saved.repeat, 'weekly'); assert.equal(saved.weekday, 5); assert.equal(saved.time, '18:00');
+    assert.equal(saved.repeat, 'weekly'); assert.deepEqual(saved.weekdays, [1, 5]); assert.equal(saved.time, '18:30');
+    assert.equal(saved.prompt, '整理阅读笔记'); assert.equal(saved.vibrate, true); assert.equal(saved.deleteAfterRun, true);
 
     await click('[aria-label="编辑 验证任务"]'); await wait('document.querySelector(".schedule-cycle-link")');
-    await click('.schedule-cycle-link'); await clickText('每月'); await click('[aria-label="31 日"]');
-    await fill('input[type=time]', '20:00'); await wait('!document.querySelector(".schedule-editor-footer button").disabled');
+    // Synthetic touch exercises actual scroll snap, not Android finger acceptance.
+    const wheel = await evaluate('document.querySelector("[aria-label=小时]").getBoundingClientRect().toJSON()');
+    const touchX = Math.round(wheel.x + wheel.width / 2), touchY = Math.round(wheel.y + wheel.height / 2);
+    await call('Input.dispatchTouchEvent', {type: 'touchStart', touchPoints: [{x: touchX, y: touchY}]});
+    for (let step = 1; step <= 12; step++) {
+      await call('Input.dispatchTouchEvent', {type: 'touchMove', touchPoints: [{x: touchX, y: touchY - step * 10}]});
+      await evaluate('new Promise(resolve=>setTimeout(resolve,20))');
+    }
+    await call('Input.dispatchTouchEvent', {type: 'touchEnd', touchPoints: []});
+    await evaluate('new Promise(resolve=>setTimeout(resolve,600))');
+    await wait('!document.querySelector(".schedule-save").disabled');
+    const touchTime = await evaluate('[...document.querySelectorAll("[role=spinbutton]")].map(el=>String(el.getAttribute("aria-valuenow")).padStart(2,"0")).join(":")');
+    assert.notEqual(touchTime, '18:30', 'Touch gesture must move the hour wheel');
+    assert.ok(await evaluate('[...document.querySelectorAll("[role=spinbutton]")].every(el=>Math.abs(el.scrollTop-Number(el.getAttribute("aria-valuenow"))*48)<1)'), 'Wheels snap to the selected time');
+    await click('.schedule-cycle-link'); await clickText('每月（高级）'); await click('[aria-label="31 日"]');
+    await wait('!document.querySelector(".schedule-save").disabled');
     assert.equal(await evaluate('document.querySelectorAll(".schedule-day-grid button").length'), 31);
-    await screenshot('monthly'); await resize(360, 640); await noHorizontalOverflow();
-    const footer = await evaluate('document.querySelector(".schedule-editor-footer button").getBoundingClientRect().toJSON()');
-    assert.ok(footer.bottom <= 640 && footer.height >= 44, 'Small-screen action must stay visible');
-    await screenshot('monthly-small'); await clickText('确定'); await wait('document.querySelector(".schedule-cycle-link")');
-    await clickText('保存修改'); await wait('!document.querySelector(".schedule-sheet")');
+    await screenshot('monthly'); await resize(320, 640); await noHorizontalOverflow();
+    for (const selector of ['.schedule-save', '.schedule-cancel']) {
+      const bounds = await evaluate('document.querySelector('+JSON.stringify(selector)+').getBoundingClientRect().toJSON()');
+      assert.ok(bounds.top >= 0 && bounds.bottom <= 640 && bounds.height >= 44 && bounds.right <= 320, 'Small-screen top action must stay visible');
+    }
+    await screenshot('monthly-small'); await clickText('确定'); await wait('document.querySelector(".schedule-cycle-link") && !document.querySelector(".schedule-save").disabled');
+    await clickText('保存'); await wait('!document.querySelector(".schedule-sheet")');
     saved = await evaluate('scheduleFixture.state.tasks.find(task=>task.title==="验证任务")');
-    assert.equal(saved.repeat, 'monthly'); assert.equal(saved.monthDay, 31); assert.equal(saved.time, '20:00');
+    assert.equal(saved.repeat, 'monthly'); assert.equal(saved.monthDay, 31); assert.equal(saved.time, touchTime);
+    assert.equal(saved.prompt, '整理阅读笔记'); assert.equal(saved.deleteAfterRun, true);
+    await click('[aria-label="编辑 月度总结"]'); await wait('document.querySelector(".schedule-cycle-link")');
+    assert.match(await evaluate('document.querySelector(".schedule-cycle-link").textContent'), /每月 31 日/);
+    await wait('!document.querySelector(".schedule-save").disabled');
+    await clickText('保存'); await wait('!document.querySelector(".schedule-sheet")');
+    assert.equal(await evaluate('scheduleFixture.state.tasks.find(task=>task.id==="task-c").repeat'), 'monthly');
     await resize(390, 844);
-
     await click('[aria-label="编辑 验证任务"]'); await fill('input[maxlength="80"]', '未保存');
-    await click('.schedule-sheet [aria-label="关闭"]'); await wait('document.querySelector(".schedule-discard")');
+    await click('.schedule-cancel'); await wait('document.querySelector(".schedule-discard")');
     await clickText('继续编辑'); await wait('document.querySelector("input[maxlength]")');
     assert.equal(await evaluate('document.querySelector("input[maxlength]").value'), '未保存');
-    await click('.schedule-sheet [aria-label="关闭"]'); await clickText('放弃修改');
+    await click('.schedule-cancel'); await clickText('放弃修改');
     await wait('!document.querySelector(".schedule-sheet")');
     assert.ok(await evaluate('scheduleFixture.state.tasks.some(task=>task.title==="验证任务")'));
     await click('[aria-label="验证任务 的更多操作"]'); await clickText('删除任务');
@@ -227,7 +279,7 @@ if (process.argv.includes('--serve')) {
     await wait('document.documentElement.lang==="en" && document.querySelectorAll(".schedule-row").length===3');
     await noHorizontalOverflow(); await screenshot('english-small');
     assert.deepEqual(browserErrors, [], 'Browser runtime exceptions');
-    const report = 'PASS: drawer navigation; filters; pause/resume; weekly create; native-save failure recovery; monthly editing; 31 date choices; discard/cancel; definition deletion preserves history; record filtering and conversation links; alarm-install retry; permission empty state; dark/English/small layouts.\nNative bridge is a fixture, not real Android scheduling.\nScreenshots: ' + output;
+    const report = 'PASS: navigation; filters; switches; keyboard wrap; scroll and touch snap/save consistency; empty custom repeat blocked; multi-day create; switches and prompt retained; save failure; monthly and legacy round-trip; 320px top actions; discard/delete; history; permission/retry; dark/English.\nNative bridge is a fixture, not real Android scheduling.\nScreenshots: ' + output;
     await writeFile(join(output, 'result.txt'), report); console.log(report);
   } finally { socket?.close(); browser.kill(); await server.close(); }
 }

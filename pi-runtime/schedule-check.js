@@ -54,6 +54,19 @@ assert.deepEqual(calls[0].params, { id: "task-1", revision: 2, time: "09:30" });
 assert.equal(calls.length, 1, "partial update is one request and does not invent the other fields");
 calls.length = 0;
 
+for (const rule of [{ repeat: "once" }, { repeat: "weekly", weekdays: [1, 3, 5] }]) {
+  await tool.execute("clock", { action: "create", title: "备注", prompt: "任务内容", time: "00:00",
+    ...rule, vibrate: true, deleteAfterRun: true });
+  assert.deepEqual(calls.at(-1).params, { title: "备注", prompt: "任务内容", time: "00:00",
+    ...rule, vibrate: true, deleteAfterRun: true });
+}
+const schemas = tool.parameters.anyOf;
+assert.ok(schemas[1].properties.repeat.anyOf.some(value => value.const === "once"));
+assert.equal(schemas[1].properties.weekdays.minItems, 1);
+assert.equal(schemas[1].properties.weekdays.uniqueItems, true);
+assert.equal(schemas[2].properties.deleteAfterRun.type, "boolean");
+calls.length = 0;
+
 await assert.rejects(tool.execute("stale", { action: "update", id: "task-1", revision: 1, title: "过期" }),
   /任务已更改，请刷新后重试/);
 await assert.rejects(tool.execute("missing", { action: "delete", id: "missing", revision: 2 }),

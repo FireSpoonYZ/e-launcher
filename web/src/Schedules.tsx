@@ -11,11 +11,26 @@ import './schedules.css';
 type Text = ReturnType<typeof useText>;
 const weekdays = ['一', '二', '三', '四', '五', '六', '日'];
 const englishDays = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
-const ruleOf = (value: ScheduleRule): ScheduleRule => ({repeat: value.repeat, time: value.time, weekday: value.weekday, monthDay: value.monthDay});
-function ruleLabel(rule: ScheduleRule, t: Text) {
-  if (rule.repeat === 'weekly') return t(`每周${weekdays[rule.weekday - 1]} ${rule.time}`, `Every ${englishDays[rule.weekday - 1]} at ${rule.time}`);
-  if (rule.repeat === 'monthly') return t(`每月 ${rule.monthDay} 日 ${rule.time}`, `Monthly on day ${rule.monthDay} at ${rule.time}`);
-  return t(`每天 ${rule.time}`, `Daily at ${rule.time}`);
+const ruleOf = (value: ScheduleRule): ScheduleRule => ({repeat: value.repeat, time: value.time, weekday: value.weekday, weekdays: value.weekdays, monthDay: value.monthDay});
+const daysOf = (rule: ScheduleRule) => rule.weekdays ?? [rule.weekday];
+function repeatLabel(rule: ScheduleRule, t: Text) {
+  if (rule.repeat === 'once') return t('只执行一次', 'Once');
+  if (rule.repeat === 'weekly') {
+    const days = daysOf(rule).slice().sort((a, b) => a - b);
+    if (days.join() === '1,2,3,4,5') return t('工作日', 'Weekdays');
+    if (days.join() === '6,7') return t('周末', 'Weekends');
+    if (days.length === 7) return t('每天', 'Every day');
+    return t(`每周 ${days.map(day => weekdays[day - 1]).join('、')}`, days.map(day => englishDays[day - 1].slice(0, 3)).join(', '));
+  }
+  if (rule.repeat === 'monthly') return t(`每月 ${rule.monthDay} 日`, `Monthly on day ${rule.monthDay}`);
+  return t('每天', 'Every day');
+}
+function ruleLabel(rule: ScheduleRule, t: Text) { return `${repeatLabel(rule, t)} ${rule.time}`; }
+function countdown(nextRunAt: number, now: number, t: Text) {
+  const minutes = Math.max(1, Math.ceil((nextRunAt - now) / 60000));
+  const days = Math.floor(minutes / 1440), hours = Math.floor(minutes % 1440 / 60), rest = minutes % 60;
+  return t(`距执行还有 ${days ? `${days} 天 ` : ''}${hours ? `${hours} 小时 ` : ''}${rest || (!days && !hours) ? `${rest} 分钟` : ''}`,
+    `Runs in ${days ? `${days}d ` : ''}${hours ? `${hours}h ` : ''}${rest || (!days && !hours) ? `${rest}m` : ''}`);
 }
 function dateLabel(timestamp: number, zone: string, t: Text) {
   return new Intl.DateTimeFormat(t('zh-CN', 'en-GB'), {
@@ -98,7 +113,7 @@ export function SchedulesPage() {
           : !visible.length ? <ScheduleEmpty title={t('没有符合条件的任务', 'No matching tasks')}/>
           : <div className="schedule-list">{visible.map(task => <article className={`schedule-row${task.enabled ? '' : ' is-paused'}`} key={task.id}>
             <button className="schedule-row-main" onClick={() => { action.setError(''); setEditing(task); }} aria-label={t(`编辑 ${task.title}`, `Edit ${task.title}`)}>
-              <Clock3 className="schedule-row-icon" aria-hidden="true"/><span><strong>{task.title}</strong><span>{ruleLabel(task, t)}</span><small>{!task.enabled ? t('已暂停', 'Paused') : !state.data!.exactAlarmGranted ? t('等待闹钟与提醒权限', 'Waiting for alarm permission') : t('下次：', 'Next: ') + dateLabel(task.nextRunAt, state.data!.timeZone, t)}</small></span>
+              <span><time className="schedule-clock">{task.time}</time><span>{repeatLabel(task, t)}</span><strong>{task.title}</strong><small>{!task.enabled ? t('已暂停', 'Paused') : !state.data!.exactAlarmGranted ? t('等待闹钟与提醒权限', 'Waiting for alarm permission') : t('下次：', 'Next: ') + dateLabel(task.nextRunAt, state.data!.timeZone, t)}</small></span>
             </button>
             <div className="schedule-toggle-target"><Toggle label={t(`启用 ${task.title}`, `Enable ${task.title}`)} checked={task.enabled} disabled={action.busy} onChange={checked => void mutateEnabled(task, checked)}/></div>
             <button className="icon-button" aria-label={t(`${task.title} 的更多操作`, `More actions for ${task.title}`)} disabled={action.busy} onClick={() => { action.setError(''); setMenu(task); }}><MoreHorizontal/></button>
@@ -128,71 +143,155 @@ export function SchedulesPage() {
 
 function useNextRun(rule: ScheduleRule) {
   const [value, setValue] = useState<SchedulePreview>(); const [error, setError] = useState(''); const [retry, setRetry] = useState(0);
+  const days = JSON.stringify(rule.weekdays);
   useEffect(() => {
     let live = true; setValue(undefined); setError('');
-    if (!rule.time) return () => { live = false; };
+    if (!rule.time || (rule.repeat === 'weekly' && daysOf(rule).length === 0)) return () => { live = false; };
     void ScheduledTasks.preview(rule).then(next => { if (live) setValue(next); }).catch(e => { if (live) setError(errorText(e)); });
     return () => { live = false; };
-  }, [rule.repeat, rule.time, rule.weekday, rule.monthDay, retry]);
+  }, [rule.repeat, rule.time, rule.weekday, rule.monthDay, days, retry]);
+  useEffect(() => {
+    if (!value) return;
+    const timer = window.setTimeout(() => setRetry(count => count + 1), Math.min(2147483647, Math.max(1, value.nextRunAt - Date.now() + 100)));
+    return () => window.clearTimeout(timer);
+  }, [value]);
   return {value, error, retry: () => setRetry(value => value + 1)};
+}
+
+function TimeWheel({label, count, value, disabled, onChange, onMoving}: {
+  label: string; count: number; value: number; disabled: boolean; onChange(value: number): void; onMoving(value: boolean): void;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  const timer = useRef<number>(undefined);
+  const callbacks = useRef({onChange, onMoving}); callbacks.current = {onChange, onMoving};
+  const select = (next: number) => {
+    ref.current?.scrollTo({top: next * 48, behavior: 'instant'});
+    callbacks.current.onChange(next);
+    callbacks.current.onMoving(false);
+  };
+  useEffect(() => { if (ref.current) ref.current.scrollTop = value * 48; }, [value]);
+  useEffect(() => () => window.clearTimeout(timer.current), []);
+  return <div className="schedule-wheel" ref={ref} role="spinbutton" tabIndex={disabled ? -1 : 0}
+    aria-label={label} aria-valuemin={0} aria-valuemax={count - 1} aria-valuenow={value}
+    aria-valuetext={String(value).padStart(2, '0')} aria-disabled={disabled}
+    onKeyDown={event => {
+      if (disabled) return;
+      const next = event.key === 'ArrowUp' ? (value + count - 1) % count : event.key === 'ArrowDown' ? (value + 1) % count
+        : event.key === 'Home' ? 0 : event.key === 'End' ? count - 1 : event.key === 'PageUp' ? Math.max(0, value - 5)
+        : event.key === 'PageDown' ? Math.min(count - 1, value + 5) : undefined;
+      if (next !== undefined) { event.preventDefault(); window.clearTimeout(timer.current); select(next); }
+    }}
+    onScroll={() => {
+      if (disabled || !ref.current) return;
+      window.clearTimeout(timer.current);
+      // Initial/controlled positioning is already settled; only user movement blocks saving.
+      if (Math.abs(ref.current.scrollTop - value * 48) < 1) { callbacks.current.onMoving(false); return; }
+      callbacks.current.onMoving(true);
+      timer.current = window.setTimeout(() => {
+        if (ref.current) select(Math.max(0, Math.min(count - 1, Math.round(ref.current.scrollTop / 48))));
+      }, 140);
+    }}>
+    {Array.from({length: count}, (_, i) => <div aria-hidden="true" className={i === value ? 'is-selected' : ''} key={i}
+      onClick={() => { if (!disabled) { window.clearTimeout(timer.current); select(i); } }}>{String(i).padStart(2, '0')}</div>)}
+  </div>;
 }
 function TaskEditor({task, onClose, onSaved}: {task?: ScheduledTask; onClose(): void; onSaved(value: ScheduleSnapshot): void}) {
   const t = useText(); const action = useAction();
   const initial = useRef<ScheduledTaskInput>(task
-    ? {id: task.id, revision: task.revision, title: task.title, prompt: task.prompt, ...ruleOf(task)}
-    : {title: '', prompt: '', repeat: 'daily', time: '08:00', weekday: 1, monthDay: 1}).current;
+    ? {id: task.id, revision: task.revision, title: task.title, prompt: task.prompt, ...ruleOf(task), vibrate: task.vibrate ?? false, deleteAfterRun: task.deleteAfterRun ?? false}
+    : {title: '', prompt: '', repeat: 'once', time: '08:00', weekday: 1, monthDay: 1, vibrate: true, deleteAfterRun: false}).current;
   const [draft, setDraft] = useState(initial);
   const [cycle, setCycle] = useState<ScheduleRule>();
+  const [custom, setCustom] = useState(false);
   const [discard, setDiscard] = useState(false);
+  const [moving, setMoving] = useState({hour: false, minute: false});
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => { const timer = window.setInterval(() => setNow(Date.now()), 1000); return () => window.clearInterval(timer); }, []);
   const activeRule = cycle ?? draft;
   const preview = useNextRun(activeRule);
+  const invalidDays = activeRule.repeat === 'weekly' && daysOf(activeRule).length === 0;
   const dirty = JSON.stringify(draft) !== JSON.stringify(initial) || (!!cycle && JSON.stringify(cycle) !== JSON.stringify(ruleOf(draft)));
   const requestClose = () => {
     if (action.busy) return;
-    if (discard) setDiscard(false); else if (dirty) setDiscard(true); else onClose();
+    if (discard) setDiscard(false); else if (cycle) setCycle(undefined); else if (dirty) setDiscard(true); else onClose();
   };
   const back = discard ? () => setDiscard(false) : cycle ? () => setCycle(undefined) : undefined;
   const submit = (event: FormEvent) => {
     event.preventDefault();
-    if (action.busy || !preview.value) return;
-    if (cycle) { setDraft({...draft, ...cycle}); setCycle(undefined); return; }
-    if (!draft.title.trim() || !draft.prompt.trim()) { action.setError(t('请填写任务名称和内容。', 'Enter a task name and instructions.')); return; }
+    if (action.busy || moving.hour || moving.minute || !preview.value || invalidDays) return;
+    if (cycle) {
+      const rule = cycle.repeat === 'weekly' && daysOf(cycle).length === 7 ? {...cycle, repeat: 'daily' as const, weekdays: undefined} : cycle;
+      setDraft({...draft, ...rule}); setCycle(undefined); return;
+    }
+    if (!draft.title.trim() || !draft.prompt.trim()) { action.setError(t('请填写备注和任务内容。', 'Enter a note and task instructions.')); return; }
     void action.run(async () => onSaved(await ScheduledTasks.save(draft)));
   };
-  return <Dialog open sheet className="schedule-sheet" title={discard ? t('放弃修改？', 'Discard changes?') : cycle ? t('执行周期', 'Repeat schedule') : task ? t('编辑定时任务', 'Edit scheduled task') : t('新建定时任务', 'New scheduled task')} onOpenChange={open => !open && requestClose()} onBack={back}>
+  const canSave = !action.busy && !moving.hour && !moving.minute && !!preview.value && !invalidDays;
+  return <Dialog open sheet className="schedule-sheet" title={discard ? t('放弃修改？', 'Discard changes?') : cycle ? t('重复', 'Repeat') : task ? t('编辑定时任务', 'Edit scheduled task') : t('新建定时任务', 'New scheduled task')}
+    actions={!discard && <><button type="button" className="quiet-button schedule-cancel" disabled={action.busy} onClick={requestClose}>{t('取消', 'Cancel')}</button><button className="quiet-button schedule-save" type="submit" form="schedule-editor-form" disabled={!canSave}>{action.busy ? <LoaderCircle className="spin"/> : cycle ? t('确定', 'Done') : t('保存', 'Save')}</button></>}
+    onOpenChange={open => !open && requestClose()} onBack={back}>
     {discard ? <div className="schedule-discard"><p className="secondary">{t('未保存的内容将丢失。', 'Unsaved changes will be lost.')}</p><div className="dialog-actions"><button className="button secondary-button" onClick={() => setDiscard(false)}>{t('继续编辑', 'Keep editing')}</button><button className="button danger-button" onClick={onClose}>{t('放弃修改', 'Discard')}</button></div></div>
-      : <form className="schedule-editor" onSubmit={submit}>
+      : <form id="schedule-editor-form" className="schedule-editor" onSubmit={submit}>
         <div className="schedule-editor-scroll">
           {cycle ? <>
-            <div className="segments schedule-filters" role="group" aria-label={t('重复周期', 'Repeat interval')}>
-              {(['daily', 'weekly', 'monthly'] as const).map((repeat, i) => <button type="button" key={repeat} aria-pressed={cycle.repeat === repeat} onClick={() => setCycle({...cycle, repeat})}>{[t('每天', 'Daily'), t('每周', 'Weekly'), t('每月', 'Monthly')][i]}</button>)}
+            <div className="schedule-repeat-options" role="group" aria-label={t('重复周期', 'Repeat interval')}>
+              {([
+                ['once', t('只执行一次', 'Once'), []], ['daily', t('每天', 'Every day'), []],
+                ['weekly', t('工作日', 'Weekdays'), [1, 2, 3, 4, 5]], ['weekly', t('周末', 'Weekends'), [6, 7]],
+              ] as const).map(([repeat, label, days], i) => <button type="button" key={i}
+                aria-pressed={!custom && cycle.repeat === repeat && (repeat !== 'weekly' || daysOf(cycle).join() === days.join())}
+                onClick={() => { setCustom(false); setCycle({...cycle, repeat, weekdays: repeat === 'weekly' ? [...days] : undefined}); }}>{label}<Check aria-hidden="true"/></button>)}
+              <button type="button" aria-pressed={custom} onClick={() => { setCustom(true); setCycle({...cycle, repeat: 'weekly', weekdays: cycle.repeat === 'weekly' ? daysOf(cycle) : []}); }}>{t('自定义星期', 'Custom days')}<Check aria-hidden="true"/></button>
+              <button type="button" aria-pressed={cycle.repeat === 'monthly'} onClick={() => { setCustom(false); setCycle({...cycle, repeat: 'monthly', weekdays: undefined}); }}>{t('每月（高级）', 'Monthly (advanced)')}<Check aria-hidden="true"/></button>
             </div>
-            {cycle.repeat === 'weekly' && <fieldset className="schedule-field"><legend>{t('执行日', 'Day of week')}</legend><div className="schedule-day-grid schedule-weekdays">{weekdays.map((label, i) => <button type="button" key={i} aria-label={t(`周${label}`, englishDays[i])} aria-pressed={cycle.weekday === i + 1} onClick={() => setCycle({...cycle, weekday: i + 1})}>{t(label, englishDays[i].slice(0, 2))}</button>)}</div><p className="secondary">{t(`每周${weekdays[cycle.weekday - 1]}执行`, `Runs every ${englishDays[cycle.weekday - 1]}`)}</p></fieldset>}
+            {custom && cycle.repeat === 'weekly' && <fieldset className="schedule-field"><legend>{t('选择执行日，可多选', 'Select repeat days')}</legend>
+              <div className="schedule-repeat-days">{weekdays.map((label, i) => {
+                const checked = daysOf(cycle).includes(i + 1);
+                return <button type="button" key={i} aria-label={t(`周${label}`, englishDays[i])} aria-pressed={checked}
+                  onClick={() => setCycle({...cycle, weekdays: (checked ? daysOf(cycle).filter(day => day !== i + 1) : [...daysOf(cycle), i + 1]).sort((a, b) => a - b)})}>
+                  {t(`星期${label}`, englishDays[i])}<Check aria-hidden="true"/></button>;
+              })}</div>
+            </fieldset>}
             {cycle.repeat === 'monthly' && <fieldset className="schedule-field"><legend>{t('每月几日', 'Day of month')}</legend><div className="schedule-day-grid">{Array.from({length: 31}, (_, i) => <button type="button" key={i} aria-label={t(`${i + 1} 日`, `Day ${i + 1}`)} aria-pressed={cycle.monthDay === i + 1} onClick={() => setCycle({...cycle, monthDay: i + 1})}>{i + 1}</button>)}</div><p className="secondary">{t('当月没有这一天时，跳过当月。', 'Months without this date are skipped.')}</p></fieldset>}
-            <label className="schedule-field"><span>{t('执行时间', 'Time')}</span><span className="schedule-time-field"><input type="time" step="60" required aria-label={t('执行时间', 'Time')} value={cycle.time} onChange={e => setCycle({...cycle, time: e.target.value})}/></span></label>
-            {cycle.repeat === 'daily' && <p className="secondary">{t('每天在指定时间执行。', 'Runs at this time every day.')}</p>}
           </> : <>
-            <label className="schedule-field"><span>{t('任务名称', 'Task name')}</span><input required maxLength={80} placeholder={t('例如：早间简报', 'e.g. Morning briefing')} value={draft.title} disabled={action.busy} onChange={e => setDraft({...draft, title: e.target.value})}/></label>
-            <label className="schedule-field"><span>{t('任务内容', 'Instructions')}</span><textarea required maxLength={8000} rows={3} placeholder={t('告诉 Pi，这个时间要做什么…', 'Tell Pi what to do at this time…')} value={draft.prompt} disabled={action.busy} onChange={e => setDraft({...draft, prompt: e.target.value})}/></label>
-            <div className="schedule-field"><span>{t('执行周期', 'Repeat schedule')}</span><button type="button" className="schedule-cycle-link" disabled={action.busy} onClick={() => setCycle(ruleOf(draft))}><Clock3/><span>{ruleLabel(draft, t)}</span><ChevronRight/></button></div>
-            <div className="schedule-destination"><div><span>{t('结果发送到', 'Results')}</span><span className="secondary">{t('新会话', 'New conversation')}</span></div><p className="secondary">{t('每次执行会新建会话，使用全局默认模型。', 'Each run creates a conversation using the global default model.')}</p></div>
+            <div className="schedule-preview" aria-live="polite">{preview.value ? <>
+              <strong>{countdown(preview.value.nextRunAt, now, t)}</strong>
+              <span>{task && !task.enabled ? t('启用后执行：', 'When enabled: ') : t('下次执行：', 'Next run: ')}{dateLabel(preview.value.nextRunAt, preview.value.timeZone, t)}</span>
+              <small>{t('按设备时区', 'Device time zone')} · {preview.value.timeZone}</small>
+            </> : <span className="secondary">{t('正在计算下次执行时间…', 'Calculating next run…')}</span>}</div>
+            <div className="schedule-wheels" role="group" aria-label={t('执行时间', 'Time')}>
+              <TimeWheel label={t('小时', 'Hours')} count={24} value={Number(draft.time.slice(0, 2))} disabled={action.busy}
+                onMoving={hour => setMoving(value => value.hour === hour ? value : {...value, hour})}
+                onChange={hour => setDraft(value => ({...value, time: String(hour).padStart(2, '0') + value.time.slice(2)}))}/>
+              <span aria-hidden="true">:</span>
+              <TimeWheel label={t('分钟', 'Minutes')} count={60} value={Number(draft.time.slice(3))} disabled={action.busy}
+                onMoving={minute => setMoving(value => value.minute === minute ? value : {...value, minute})}
+                onChange={minute => setDraft(value => ({...value, time: value.time.slice(0, 3) + String(minute).padStart(2, '0')}))}/>
+            </div>
+            <p className="schedule-wheel-hint secondary">{t('上下滑动选择时间，键盘可用方向键。', 'Scroll to choose; arrow keys also work.')}</p>
+            <div className="schedule-alarm-options">
+              <button type="button" className="schedule-cycle-link" disabled={action.busy} onClick={() => {
+                setCycle(ruleOf(draft)); setCustom(draft.repeat === 'weekly' && !['1,2,3,4,5', '6,7'].includes(daysOf(draft).join()));
+              }}><span>{t('重复', 'Repeat')}</span><small>{repeatLabel(draft, t)}</small><ChevronRight/></button>
+              <div className="schedule-option"><span>{t('执行时振动', 'Vibrate on start')}</span><Toggle label={t('执行时振动', 'Vibrate on start')} checked={draft.vibrate ?? false} disabled={action.busy} onChange={vibrate => setDraft({...draft, vibrate})}/></div>
+              <div className="schedule-option"><span>{t('执行后删除', 'Delete after start')}</span><Toggle label={t('执行后删除', 'Delete after start')} checked={draft.deleteAfterRun ?? false} disabled={action.busy} onChange={deleteAfterRun => setDraft({...draft, deleteAfterRun})}/></div>
+            </div>
+            <p className="secondary schedule-option-hint">{t('成功发起后删除定时任务，执行会话和记录保留；发起失败不会删除。', 'Deletes the schedule only after a successful start. Conversations and history remain; failed starts are not deleted.')}</p>
+            <label className="schedule-field"><span>{t('备注', 'Note')}</span><input required maxLength={80} placeholder={t('例如：早间简报', 'e.g. Morning briefing')} value={draft.title} disabled={action.busy} onChange={e => setDraft({...draft, title: e.target.value})}/></label>
+            <label className="schedule-field"><span>{t('任务内容', 'Task instructions')}</span><textarea required maxLength={8000} rows={3} placeholder={t('告诉 Pi，这个时间要做什么…', 'Tell Pi what to do at this time…')} value={draft.prompt} disabled={action.busy} onChange={e => setDraft({...draft, prompt: e.target.value})}/><small>{t('备注用于识别任务；这里的内容会原样交给 AI 执行。', 'The note identifies the task; these instructions are sent to AI.')}</small></label>
+            <div className="schedule-destination"><div><span>{t('结果发送到', 'Results')}</span><span className="secondary">{t('新会话', 'New conversation')}</span></div><p className="secondary">{t('每次执行会新建会话，使用全局默认模型。只执行一次的任务发起后会停用，失败可重新启用。', 'Each run creates a conversation using the global default model. One-time tasks pause on start; re-enable to retry failures.')}</p></div>
           </>}
-          <ErrorNotice error={action.error}/><FetchError error={preview.error} retry={preview.retry}/>
+          <ErrorNotice error={invalidDays ? t('请至少选择一个执行日。', 'Select at least one repeat day.') : action.error}/><FetchError error={preview.error} retry={preview.retry}/>
         </div>
-        <footer className="schedule-editor-footer">
-          <div className="schedule-preview" aria-live="polite">{preview.value ? <><span>{task && !task.enabled ? t('启用后执行：', 'When enabled: ') : t('下次执行：', 'Next run: ')}{dateLabel(preview.value.nextRunAt, preview.value.timeZone, t)}</span><small>{t('按设备时区', 'Device time zone')} · {preview.value.timeZone}</small></> : <span className="secondary">{activeRule.time ? t('正在计算下次执行时间…', 'Calculating next run…') : t('请选择执行时间', 'Choose a time')}</span>}</div>
-          <button className="button full" type="submit" disabled={action.busy || !preview.value}>{action.busy ? <><LoaderCircle className="spin"/>{t('正在保存…', 'Saving…')}</> : cycle ? t('确定', 'Confirm') : task ? t('保存修改', 'Save changes') : t('创建任务', 'Create task')}</button>
-        </footer>
       </form>}
   </Dialog>;
 }
-
 function recordStatus(status: ScheduleRecord['status'], t: Text) {
   return {running: t('执行中', 'Running'), completed: t('已完成', 'Completed'), error: t('失败', 'Failed'), aborted: t('已中断', 'Interrupted'), skipped: t('已跳过', 'Skipped')}[status];
 }
 function recordMessage(record: ScheduleRecord, t: Text) {
   if (record.message) return record.message;
-  if (record.reason === 'missed') return t('已跳过过期任务，将按下一次计划执行。', 'Missed run skipped. The next occurrence remains scheduled.');
+  if (record.reason === 'missed') return t('错过计划时间，本次未执行。可返回任务列表查看后续安排。', 'This run missed its scheduled time. Check the task list for future plans.');
   if (record.reason === 'overlap') return t('上一次任务仍在执行，已跳过本次。', 'The previous run is still active; this occurrence was skipped.');
   if (record.reason === 'interrupted') return t('应用进程已结束，本次执行已中断。', 'The app process ended before this run completed.');
   return {running: t('Pi 正在执行，可打开会话查看进度。', 'Pi is working. Open the conversation to follow progress.'), completed: t('任务已完成', 'Task completed'), error: t('执行失败，请查看会话。', 'Run failed. See the conversation for details.'), aborted: t('本次执行已停止', 'This run was stopped'), skipped: t('本次执行已跳过', 'This occurrence was skipped')}[record.status];

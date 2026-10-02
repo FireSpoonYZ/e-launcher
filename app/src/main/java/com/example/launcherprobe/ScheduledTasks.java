@@ -7,6 +7,8 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.os.Build;
+import android.os.VibrationEffect;
+import android.os.Vibrator;
 import android.util.Log;
 
 import org.json.JSONArray;
@@ -82,19 +84,26 @@ final class ScheduledTasks {
     }
 
     synchronized JSONObject save(JSONObject input) throws Exception {
-        ScheduleRule rule = ScheduleRule.fromJson(input);
         String title = ScheduleRule.text(input, "title").trim();
         String prompt = ScheduleRule.text(input, "prompt").trim();
-        if (title.isEmpty() || title.length() > 80) throw new IllegalArgumentException("任务名称需为 1–80 个字符");
+        if (title.isEmpty() || title.length() > 80) throw new IllegalArgumentException("备注需为 1–80 个字符");
         if (prompt.isEmpty() || prompt.length() > 8000) throw new IllegalArgumentException("任务内容需为 1–8000 个字符");
         JSONObject state = read();
         JSONArray tasks = state.getJSONArray("tasks");
         String id = input.has("id") ? ScheduleRule.text(input, "id") : UUID.randomUUID().toString();
         int index = indexOf(tasks, id);
         JSONObject previous = input.has("id") ? requireTask(tasks, id, ScheduleRule.integer(input, "revision")) : null;
+        JSONObject ruleInput = new JSONObject(input.toString());
+        if (previous != null && "weekly".equals(input.optString("repeat"))
+                && "weekly".equals(previous.optString("repeat")) && !input.has("weekdays") && !input.has("weekday")
+                && previous.has("weekdays")) ruleInput.put("weekdays", previous.getJSONArray("weekdays"));
+        ScheduleRule rule = ScheduleRule.fromJson(ruleInput);
+        boolean vibrate = ScheduleRule.bool(input, "vibrate", previous != null && previous.optBoolean("vibrate"));
+        boolean deleteAfterRun = ScheduleRule.bool(input, "deleteAfterRun", previous != null && previous.optBoolean("deleteAfterRun"));
         long now = System.currentTimeMillis();
         boolean enabled = previous == null || previous.getBoolean("enabled");
         JSONObject task = rule.json().put("id", id).put("title", title).put("prompt", prompt)
+                .put("vibrate", vibrate).put("deleteAfterRun", deleteAfterRun)
                 .put("enabled", enabled).put("revision", previous == null ? 1 : previous.getInt("revision") + 1)
                 .put("createdAt", previous == null ? now : previous.getLong("createdAt"))
                 .put("nextRunAt", enabled ? rule.nextAfter(now, ZoneId.systemDefault()) : 0);
@@ -156,15 +165,19 @@ final class ScheduledTasks {
                 .put("repeat", repeat)
                 .put("time", input.has("time") ? ScheduleRule.text(input, "time") : current.getString("time"));
         if ("weekly".equals(repeat)) {
-            if (input.has("weekday")) merged.put("weekday", ScheduleRule.integer(input, "weekday"));
+            if (input.has("weekdays")) merged.put("weekdays", input.get("weekdays"));
+            else if (input.has("weekday")) merged.put("weekday", ScheduleRule.integer(input, "weekday"));
+            else if (!repeatChanged && current.has("weekdays")) merged.put("weekdays", current.getJSONArray("weekdays"));
             else if (!repeatChanged) merged.put("weekday", current.getInt("weekday"));
-            else throw new IllegalArgumentException("改为每周时必须提供 weekday");
+            else throw new IllegalArgumentException("改为每周时必须提供 weekday 或 weekdays");
         }
         if ("monthly".equals(repeat)) {
             if (input.has("monthDay")) merged.put("monthDay", ScheduleRule.integer(input, "monthDay"));
             else if (!repeatChanged) merged.put("monthDay", current.getInt("monthDay"));
             else throw new IllegalArgumentException("改为每月时必须提供 monthDay");
         }
+        for (String key : new String[]{"vibrate", "deleteAfterRun"})
+            merged.put(key, ScheduleRule.bool(input, key, current.optBoolean(key)));
         return merged;
     }
 
@@ -186,7 +199,9 @@ final class ScheduledTasks {
             if (due <= now || recalculate) {
                 if (due > 0 && due <= now && !recalculate)
                     addRecord(state, task, due, "skipped", "missed", null);
-                task.put("nextRunAt", ScheduleRule.fromJson(task).nextAfter(now, zone));
+                if ("once".equals(task.getString("repeat")) && due > 0 && due <= now && !recalculate)
+                    task.put("enabled", false).put("nextRunAt", 0).put("revision", task.getInt("revision") + 1);
+                else task.put("nextRunAt", ScheduleRule.fromJson(task).nextAfter(now, zone));
                 modified = true;
             }
         }
@@ -210,7 +225,9 @@ final class ScheduledTasks {
             JSONObject task = tasks.getJSONObject(i);
             long due = task.getLong("nextRunAt");
             if (!task.getBoolean("enabled") || due <= 0 || due > now) continue;
-            task.put("nextRunAt", ScheduleRule.fromJson(task).nextAfter(now, ZoneId.systemDefault()));
+            if ("once".equals(task.getString("repeat")))
+                task.put("enabled", false).put("nextRunAt", 0).put("revision", task.getInt("revision") + 1);
+            else task.put("nextRunAt", ScheduleRule.fromJson(task).nextAfter(now, ZoneId.systemDefault()));
             if (hasRunningTask(state, task.getString("id"))) {
                 addRecord(state, task, due, "skipped", "overlap", null);
             } else {
@@ -225,12 +242,33 @@ final class ScheduledTasks {
             JSONObject item = pending.getJSONObject(i);
             JSONObject task = item.getJSONObject("task");
             JSONObject run = item.getJSONObject("run");
+            String request;
             try {
-                String request = coordinator.sendScheduled(run.getString("conversationId"),
+                request = coordinator.sendScheduled(run.getString("conversationId"),
                         task.getString("title"), task.getString("prompt"));
-                updateRecord(run.getString("id"), "running", "", "", request);
+                if (request == null || request.isEmpty()) throw new IllegalStateException("任务未成功发起");
             } catch (Exception failure) {
                 updateRecord(run.getString("id"), "error", "", detail(failure), null);
+                continue;
+            }
+            // Submission, not completion, is the boundary: failed starts must never delete definitions.
+            updateRecord(run.getString("id"), "running", "", "", request);
+            if (task.optBoolean("deleteAfterRun")) {
+                JSONObject latest = read();
+                JSONArray definitions = latest.getJSONArray("tasks");
+                int index = indexOf(definitions, task.getString("id"));
+                if (index >= 0) {
+                    definitions.remove(index);
+                    write(latest);
+                    scheduleAlarm(latest);
+                }
+            }
+            if (task.optBoolean("vibrate")) {
+                try {
+                    Vibrator vibrator = context.getSystemService(Vibrator.class);
+                    if (vibrator != null && vibrator.hasVibrator())
+                        vibrator.vibrate(VibrationEffect.createOneShot(200, VibrationEffect.DEFAULT_AMPLITUDE));
+                } catch (RuntimeException failure) { Log.w("ScheduledTasks", "Unable to vibrate", failure); }
             }
         }
         changed();
@@ -303,9 +341,10 @@ final class ScheduledTasks {
         for (int i = 0; i < runs.length(); i++) {
             JSONObject run = runs.getJSONObject(i);
             if (!id.equals(run.getString("id"))) continue;
-            run.put("status", status).put("reason", reason).put("message", message)
-                    .put("requestId", requestId == null ? JSONObject.NULL : requestId)
-                    .put("finishedAt", "running".equals(status) ? 0 : System.currentTimeMillis());
+            run.put("requestId", requestId == null ? JSONObject.NULL : requestId);
+            if (!"running".equals(status) || "running".equals(run.getString("status")))
+                run.put("status", status).put("reason", reason).put("message", message)
+                        .put("finishedAt", "running".equals(status) ? 0 : System.currentTimeMillis());
             write(state);
             return;
         }
