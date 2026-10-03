@@ -4,6 +4,9 @@ plugins {
 
 apply from: 'capacitor.build.gradle'
 
+// Opt-in emulator ABI; ordinary builds remain arm64-v8a.
+def launcherAbis = (findProperty("launcherAbis") ?: "arm64-v8a").split(",").toList()
+
 def npmCommand = System.getProperty('os.name').toLowerCase().contains('windows') ? ['cmd', '/c', 'npm'] : ['npm']
 def webDependencies = rootProject.fileTree('node_modules') {
     exclude '.cache/**', '.vite/**', '.vite-temp/**',
@@ -66,7 +69,7 @@ android {
 
     signingConfigs {
         debug {
-            storeFile rootProject.file('debug.keystore')
+            storeFile rootProject.file(findProperty('emulatorTestKeystore') ?: 'debug.keystore')
             if (!storeFile.isFile()) {
                 throw new GradleException('Missing debug.keystore in project root. Copy the shared development keystore from another development machine.')
             }
@@ -84,12 +87,12 @@ android {
 
     defaultConfig {
         applicationId 'com.example.launcherprobe'
-        minSdk 29
+        minSdk 33
         targetSdk 36
         versionCode 1
         versionName '1.0'
         testInstrumentationRunner 'com.example.launcherprobe.ChatStoreChecks'
-        ndk { abiFilters 'arm64-v8a' }
+        ndk { abiFilters.addAll(launcherAbis) }
         externalNativeBuild {
             cmake {
                 cppFlags '-std=c++20'
@@ -139,13 +142,15 @@ android {
         outputs.dir "$buildDir/generated/jniLibs/nodeLauncher/${buildType.toLowerCase()}"
         outputs.upToDateWhen { false }
         doLast {
-            def binaries = fileTree("$buildDir/intermediates/cxx/${cmakeBuildType}") { include '**/obj/arm64-v8a/node_launcher' }.files
-            if (binaries.isEmpty()) throw new GradleException('Missing arm64 node_launcher')
-            def binary = binaries.max { it.lastModified() }
-            copy {
-                from binary
-                into "$buildDir/generated/jniLibs/nodeLauncher/${buildType.toLowerCase()}/arm64-v8a"
-                rename { 'libnode_launcher.so' }
+            launcherAbis.each { abi ->
+                def binaries = fileTree("$buildDir/intermediates/cxx/${cmakeBuildType}") { include "**/obj/${abi}/node_launcher" }.files
+                if (binaries.isEmpty()) throw new GradleException("Missing ${abi} node_launcher")
+                def binary = binaries.max { it.lastModified() }
+                copy {
+                    from binary
+                    into "$buildDir/generated/jniLibs/nodeLauncher/${buildType.toLowerCase()}/${abi}"
+                    rename { 'libnode_launcher.so' }
+                }
             }
         }
     }

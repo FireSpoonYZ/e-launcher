@@ -25,8 +25,15 @@ export function encodeKey(binding: HardwareBinding, modes: InputModes, eventType
   if (key === 'enter' && (modifiers.includes('shift') || modifiers.includes('ctrl'))) {
     return '\x1b[13;' + (1 + (modifiers.includes('shift') ? 1 : 0) + (modifiers.includes('alt') ? 2 : 0) + (modifiers.includes('ctrl') ? 4 : 0)) + 'u';
   }
-  const bytes = buildTerminalShortcutKey(binding)?.bytes ?? (Array.from(key).length === 1 ? key : '');
+  const bytes = buildTerminalShortcutKey(binding)?.bytes ?? (!modifiers.length && !binding.metaKey && Array.from(key).length === 1 ? key : '');
   return modes.applicationCursor && modifiers.length === 0 && /^\x1b\[[ABCDHF]$/.test(bytes) ? bytes.replace('[', 'O') : bytes;
+}
+// Atomic encoding: never acknowledge an entire live draft after dropping an
+// unsupported character from a modified/IME payload.
+export function encodeModifiedText(text: string, modifiers: TerminalShortcutModifier[], modes: InputModes): string | null {
+  if (!modifiers.length) return encodeText(text,modes);
+  const encoded=Array.from(text).map(key=>encodeKey({key:key === '\x7f' ? 'backspace' : key,modifiers},modes));
+  return encoded.some(data=>!data) ? null : encoded.join('');
 }
 export function hardwareBinding(event: Pick<KeyboardEvent, 'key' | 'ctrlKey' | 'altKey' | 'shiftKey'> & Partial<Pick<KeyboardEvent, 'code' | 'metaKey'>>): HardwareBinding {
   const key = Object.keys(domKeys).find(key => domKeys[key] === event.key) ?? (/^F\d+$/.test(event.key) ? event.key.toLowerCase() : event.key);

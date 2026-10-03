@@ -13,6 +13,8 @@ export type TerminalEvent = { hostId: string } & (
   | { event: 'terminal.listChanged' }
 );
 interface RemoteTerminalPlugin {
+  loadShortcuts(): Promise<{ value: string | null }>;
+  saveShortcuts(options: { value: string | null }): Promise<void>;
   listHosts(): Promise<{ hosts: Host[] }>;
   pair(options: { descriptor: string; address?: string; deviceName?: string }): Promise<{ host: Host }>;
   removeHost(options: { hostId: string }): Promise<void>;

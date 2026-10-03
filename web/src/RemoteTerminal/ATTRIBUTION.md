@@ -85,3 +85,13 @@ fidelity. Parent must test real Chinese IME candidate acceptance and soft Enter/
 hardware keyboard, keyboard-hide/reopen, long-press repeat cancellation, selection/copy,
 TUI mouse gestures, owner takeover, foreground resubscribe and host/client snapshot parity.
 Private xterm Kitty/mouse/Unicode seams are pinned to the exact dependency versions above.
+
+## Scrollable shortcut dock and combination editor
+
+Layout and interaction reference: Orca mobile/src/session/MobileSessionCommandDock.tsx,
+mobile/src/components/CustomKeyModal.tsx and TerminalShortcutSettings.tsx at the same
+pinned revision above (MIT, Copyright 2026 Lovecast Inc.). The DOM implementation
+uses the existing e-launcher palette, local preset schema and terminal encodeKey path. Android preset persistence uses an original, separate committed SharedPreferences adapter; browser preview uses localStorage.
+Unlike immediate press-in dispatch, accessory-press.ts waits for a stationary hold
+or release and cancels on movement, so scrolling cannot send its starting key.
+No new React Native code, network transport or dependency is included.

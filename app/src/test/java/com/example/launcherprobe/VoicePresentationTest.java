@@ -94,8 +94,8 @@ public class VoicePresentationTest {
         assertEquals(a.flowSpeed(), b.flowSpeed(), .01f);
     }
 
-    @Test @Config(sdk = 29) @GraphicsMode(GraphicsMode.Mode.NATIVE)
-    public void api29DrawsBlueWhiteFallbackWithoutRuntimeShader() throws Exception {
+    @Test @Config(sdk = 33) @GraphicsMode(GraphicsMode.Mode.NATIVE)
+    public void api33SoftwareCanvasDrawsBlueWhiteFallback() throws Exception {
         VoiceOrbView e = new VoiceOrbView(RuntimeEnvironment.getApplication());
         e.measure(View.MeasureSpec.makeMeasureSpec(240, View.MeasureSpec.EXACTLY),
                 View.MeasureSpec.makeMeasureSpec(240, View.MeasureSpec.EXACTLY));

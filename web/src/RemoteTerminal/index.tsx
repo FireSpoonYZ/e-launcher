@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { App as CapacitorApp } from '@capacitor/app';
-import { Monitor, ChevronRight, Plus, Ellipsis, RefreshCw } from 'lucide-react';
+import { Monitor, ChevronRight, Plus, Ellipsis, RefreshCw, TerminalSquare, Folder, Check, Link2 } from 'lucide-react';
 import { Dialog } from '../components/ui/dialog';
 import { createRecovery, recoveryStops } from './recovery';
 import { useNavigate } from 'react-router-dom';
@@ -64,12 +64,13 @@ export function TerminalsPage() {
   }, [hostId]);
   let addresses: string[]=[];
   try { const value=JSON.parse(descriptor); if(Array.isArray(value.addresses)) addresses=value.addresses.filter((v:unknown):v is string => typeof v === 'string'); } catch { /* Native validates the complete descriptor before pairing. */ }
+  const selected = hosts.find(host => host.id === hostId);
   return <main className="rt-hosts"><Header title={t('远程终端','Remote terminals')} onBack={() => nav('/chat')} actions={<button className="icon-button" aria-label={t('配对新主机','Pair a new host')} onClick={() => setPairing(true)}><Plus/></button>}/>
     <ErrorNotice error={action.error}/>
-    <section><div className="rt-section-heading"><h2>{t('主机','Hosts')}</h2>{hostId && <button className="icon-button" aria-label={t('主机选项','Host options')} onClick={() => setHostMenu(true)}><Ellipsis/></button>}</div>
-      <div className="rt-host-list">{hosts.map(host => <button className="rt-host-item" key={host.id} aria-pressed={hostId === host.id} onClick={() => setHostId(host.id)}><Monitor/><span><strong>{host.name}</strong><small>{host.address}:{host.port}</small></span><ChevronRight/></button>)}</div>
-      {!hosts.length && <div className="rt-empty"><Monitor size={28}/><h3>{t('连接你的电脑','Connect your computer')}</h3><p>{t('在桌面终端页面创建配对描述符，安全连接你的 Shell。','Create a pairing descriptor on the desktop to securely access your shell.')}</p><button className="rt-primary" onClick={() => setPairing(true)}>{t('配对新主机','Pair a new host')}</button></div>}
-      {hostId && <div className="rt-connection"><span role="status"><i data-connected={connected}/>{recovering ? t('正在连接…','Connecting…') : connected ? t('已连接','Connected') : t('离线','Offline')}</span><button className="icon-button" aria-label={t('重新连接 / 刷新','Reconnect / refresh')} onClick={() => void retry.current()}><RefreshCw size={18}/></button></div>}
+    <section className="rt-host-section" aria-label={t('已配对电脑','Paired computers')}>
+      <div className="rt-section-heading"><h2>{t('我的电脑','Computers')}</h2>{hostId && <button className="icon-button" aria-label={t('主机选项','Host options')} onClick={() => setHostMenu(true)}><Ellipsis/></button>}</div>
+      <div className="rt-host-list">{hosts.map(host => <button className="rt-host-item" key={host.id} aria-pressed={hostId === host.id} onClick={() => setHostId(host.id)}><Monitor/><span><strong>{host.name}</strong><small>{host.address}:{host.port}</small><span className="rt-host-state"><i className="rt-status-dot" data-state={hostId === host.id ? connected ? 'connected' : recovering ? 'connecting' : 'offline' : 'saved'}/>{hostId !== host.id ? t('已保存 · 点击连接','Saved · tap to connect') : recovering ? t('正在连接…','Connecting…') : connected ? t('已连接','Connected') : t('离线','Offline')}</span></span>{hostId === host.id ? <Check/> : <ChevronRight/>}</button>)}</div>
+      {!hosts.length && <div className="rt-empty"><Monitor size={32}/><h3>{t('先连接一台电脑','Connect your first computer')}</h3><p>{t('在 e-desktop 的「终端」中生成配对信息，再粘贴到这里。','Generate pairing info in e-desktop’s Terminal window, then paste it here.')}</p><button className="rt-primary" onClick={() => setPairing(true)}><Link2 size={18}/>{t('连接电脑','Pair a computer')}</button></div>}
     </section>
     <Dialog sheet className="rt-sheet" open={hostMenu} onOpenChange={setHostMenu} title={t('主机选项','Host options')}><div className="rt-menu"><button onClick={() => { setHostMenu(false); setPairing(true); }}>{t('配对新主机','Pair a new host')}</button><button className="rt-danger" onClick={() => { setHostMenu(false); setConfirm({kind:'host',id:hostId}); }}>{t('移除此主机','Remove host')}</button></div></Dialog>
     <Dialog sheet className="rt-sheet" open={pairing} onOpenChange={setPairing} title={t('配对新主机','Pair a new host')}><ErrorNotice error={action.error}/><form onSubmit={e => { e.preventDefault(); void action.run(async () => {
@@ -77,14 +78,15 @@ export function TerminalsPage() {
       setDescriptor(''); setAddress(''); await refreshHosts(); setHostId(result.host.id); setPairing(false);
     }); }}>
       <p>{t('仅通过可信渠道复制描述符；其中的证书指纹用于固定 TLS。配对码五分钟有效。','Copy the descriptor through a trusted channel. Its certificate fingerprint pins TLS. Pairing codes expire after five minutes.')}</p>
-      <label>{t('配对描述符 JSON','Pairing descriptor JSON')}<textarea required value={descriptor} onChange={e => setDescriptor(e.target.value)} autoCorrect="off" autoCapitalize="off"/></label>
-      <label>{t('地址（可选覆盖）','Address (optional override)')}<input list="rt-addresses" value={address} onChange={e => setAddress(e.target.value)} autoCapitalize="off"/></label><datalist id="rt-addresses">{addresses.map(a => <option key={a} value={a}/>)}</datalist>
-      <label>{t('设备名称','Device name')}<input value={deviceName} onChange={e => setDeviceName(e.target.value)} maxLength={100}/></label>
-      <button disabled={action.busy} type="submit">{t('安全配对','Pair securely')}</button>
+      <label>{t('配对信息','Pairing info')}<textarea required value={descriptor} onChange={e => setDescriptor(e.target.value)} autoCorrect="off" autoCapitalize="off"/></label>
+      <details className="rt-advanced"><summary>{t('连接选项','Connection options')}</summary><label>{t('地址（可选覆盖）','Address (optional override)')}<input list="rt-addresses" value={address} onChange={e => setAddress(e.target.value)} autoCapitalize="off"/></label><datalist id="rt-addresses">{addresses.map(a => <option key={a} value={a}/>)}</datalist>
+      <label>{t('设备名称','Device name')}<input value={deviceName} onChange={e => setDeviceName(e.target.value)} maxLength={100}/></label></details>
+      <button className="rt-primary" disabled={action.busy} type="submit">{action.busy ? t('正在配对…','Pairing…') : t('连接电脑','Pair computer')}</button>
     </form></Dialog>
-    {hostId && <section><div className="rt-section-heading"><h2>{t('会话','Sessions')}</h2><button className="rt-primary" disabled={!connected} onClick={() => setCreating(true)}><Plus size={16}/>{t('新建终端','New terminal')}</button></div>
-      {sessions.map(session => <div className="rt-session" key={session.id}><button onClick={() => nav('/terminals/'+encodeURIComponent(hostId)+'/'+encodeURIComponent(session.id))}><strong>{session.title}</strong><small>{session.status === 'running' ? t('运行中','Running') : t('已退出','Exited')} · {session.profileId} · {session.cwd}{session.ownerClientId ? t(' · 已有控制者',' · controlled') : ''}</small></button><button className="icon-button rt-session-menu" aria-label={session.status === 'exited' ? t('移除记录','Remove entry') : t('结束进程','Close process')} disabled={!connected} onClick={() => setConfirm({kind:'session',id:session.id})}><Ellipsis/></button></div>)}
-      {connected && !sessions.length && <p>{t('尚无会话。创建一个交互式 Shell。','No sessions yet. Create an interactive shell.')}</p>}
+    {hostId && <section className="rt-sessions-section"><div className="rt-section-heading"><div><h2>{t('会话','Sessions')} <span className="rt-count">{sessions.length}</span></h2><p>{connected ? selected?.name : t('连接恢复后刷新会话','Sessions refresh after reconnecting')}</p></div><button className="rt-primary" disabled={!connected} aria-label={t('新建终端','New terminal')} onClick={() => setCreating(true)}><Plus size={18}/>{t('新建','New')}</button><button className="icon-button" disabled={recovering} aria-label={t('重新连接 / 刷新','Reconnect / refresh')} onClick={() => void retry.current()}><RefreshCw size={18} className={recovering ? 'spin' : ''}/></button></div>
+      <div className="rt-session-list">{sessions.map(session => <div className="rt-session" key={session.id}><button onClick={() => nav('/terminals/'+encodeURIComponent(hostId)+'/'+encodeURIComponent(session.id))}><TerminalSquare className="rt-session-icon"/><span className="rt-session-copy"><strong>{session.title}</strong><span className="rt-session-path" title={session.cwd}><Folder size={13}/>{session.cwd}</span><small><i className="rt-status-dot" data-state={connected && session.status === 'running' ? 'connected' : 'offline'}/>{!connected ? t('上次状态','Last known') + ' · ' : ''}{session.status === 'running' ? t('运行中','Running') : t('已退出','Exited')}<span className="rt-meta-divider">·</span>{session.profileId}{session.ownerClientId ? t(' · 已有控制者',' · Controlled') : ''}</small></span><ChevronRight className="rt-session-chevron"/></button><button className="icon-button rt-session-menu" aria-label={session.status === 'exited' ? t('移除记录','Remove entry') : t('结束进程','Close process')} disabled={!connected} onClick={() => setConfirm({kind:'session',id:session.id})}><Ellipsis/></button></div>)}</div>
+      {!sessions.length && <div className="rt-empty rt-empty-session"><TerminalSquare/><h3>{recovering ? t('正在读取会话','Loading sessions') : connected ? t('从一个终端开始','Start with a terminal') : t('等待电脑连接','Waiting for your computer')}</h3><p>{connected ? t('选择 Shell 和工作目录，继续在电脑上运行。','Choose a shell and working directory. It runs on your computer.') : t('检查电脑上的 e-desktop 是否正在运行。','Check that e-desktop is running on your computer.')}</p></div>}
+      <p className="rt-lifetime-note">{t('离开页面不会结束电脑上的 Shell。','Leaving this page keeps your desktop shells running.')}</p>
       <Dialog sheet className="rt-sheet" open={creating} onOpenChange={setCreating} title={t('新建终端','New terminal')}><ErrorNotice error={action.error}/><form onSubmit={e => { e.preventDefault(); void action.run(async () => {
         const session=await request<Session>(hostId,'terminal.create',{profileId,...(cwd.trim()?{cwd:cwd.trim()}:{}),...(executable.trim()?{executable:executable.trim()}:{})});
         nav('/terminals/'+encodeURIComponent(hostId)+'/'+encodeURIComponent(session.id));
@@ -93,7 +95,7 @@ export function TerminalsPage() {
         <p>{profiles.find(p => p.id === profileId)?.reason}</p>
         <label>{t('工作目录（可选）','Working directory (optional)')}<input value={cwd} onChange={e => setCwd(e.target.value)} autoCapitalize="off"/></label>
         {!profiles.find(p => p.id === profileId)?.available && <label>{t('Shell 可执行文件绝对路径','Absolute shell executable path')}<input required value={executable} onChange={e => setExecutable(e.target.value)} autoCapitalize="off"/></label>}
-        <button disabled={!connected || !profileId || action.busy} type="submit">{t('创建','Create')}</button>
+        <button className="rt-primary" disabled={!connected || !profileId || action.busy} type="submit">{action.busy ? t('正在创建…','Creating…') : t('创建终端','Create terminal')}</button>
       </form></Dialog>
     </section>}
     <Dialog sheet className="rt-sheet" open={!!confirm} onOpenChange={open => { if(!open) setConfirm(undefined); }} title={t('确认操作','Confirm action')}>{confirm && <><ErrorNotice error={action.error}/><p>{confirm.kind === 'session' ? t('关闭此会话？运行中的 Shell 将结束；已退出的会话将移除记录。仅离开页面不会关闭。','Close this session? Running shells will stop; exited entries will be removed. Leaving a view does not close it.') : t('移除本机配对？桌面会话继续运行。若要吊销令牌，请在桌面操作。','Remove this saved pairing? Desktop sessions keep running. Revoke the token on the desktop if needed.')}</p>

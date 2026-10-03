@@ -12,6 +12,15 @@ export const DEFAULT_PRESETS: Preset[] = [
   { id: 'agent-pi', label: 'Pi example', kind: 'text', text: 'pi', appendEnter: false },
   { id: 'agent-claude', label: 'Claude example', kind: 'text', text: 'claude', appendEnter: false },
 ];
+// Keep bindings editable even when only an enhanced keyboard protocol can encode them.
+export function describeShortcut(binding: TerminalShortcutBinding): {label:string;accessibilityLabel:string} | null {
+  if (!binding || typeof binding.key !== 'string' || !Array.isArray(binding.modifiers) || !binding.modifiers.every(m => typeof m === 'string' && ['ctrl','alt','shift'].includes(m))) return null;
+  const base = buildTerminalShortcutKey({key:binding.key,modifiers:[]});
+  if (!base) return null;
+  const modifiers = (['ctrl','alt','shift'] as const).filter(m => binding.modifiers.includes(m)).map(m => m === 'ctrl' ? 'Ctrl' : m === 'alt' ? 'Alt' : 'Shift');
+  const label = [...modifiers,base.label].join('+');
+  return {label,accessibilityLabel:[...modifiers,base.accessibilityLabel].join(' ')};
+}
 export function normalizePresets(input: unknown): Preset[] {
   if (!Array.isArray(input)) throw new Error('Invalid shortcut list');
   const normalized: Preset[] = [];
@@ -24,8 +33,8 @@ export function normalizePresets(input: unknown): Preset[] {
     const base = { id, label: item.label.slice(0, 80) };
     if (item.kind === 'text' && typeof item.text === 'string' && typeof item.appendEnter === 'boolean') {
       normalized.push({ ...base, kind: 'text', text: item.text.slice(0, 4000), appendEnter: item.appendEnter });
-    } else if (item.kind === 'chord' && item.chord && typeof item.chord.key === 'string' && Array.isArray(item.chord.modifiers) && item.chord.modifiers.every((m: unknown) => ['ctrl','alt','shift'].includes(String(m))) && buildTerminalShortcutKey(item.chord)) {
-      normalized.push({ ...base, kind: 'chord', chord: { key: item.chord.key, modifiers: [...new Set(item.chord.modifiers)] as TerminalShortcutBinding['modifiers'] } });
+    } else if (item.kind === 'chord' && item.chord && typeof item.chord.key === 'string' && Array.isArray(item.chord.modifiers) && item.chord.modifiers.every((m: unknown) => typeof m === 'string' && ['ctrl','alt','shift'].includes(m)) && describeShortcut(item.chord)) {
+      normalized.push({ ...base, kind: 'chord', chord: { key: /^[A-Z]$/.test(item.chord.key) ? item.chord.key.toLowerCase() : item.chord.key, modifiers: (['ctrl','alt','shift'] as const).filter(m => item.chord.modifiers.includes(m)) } });
     } else throw new Error('Invalid shortcut body');
     if (normalized.length > 40) throw new Error('At most 40 shortcuts');
   }

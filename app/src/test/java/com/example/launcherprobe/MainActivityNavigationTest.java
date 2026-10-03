@@ -139,7 +139,7 @@ public class MainActivityNavigationTest {
         TestMainActivity activity = open(new Intent(context, MainActivity.class)
                 .putExtra(TaskDetailActivity.EXTRA_OPEN_CHAT, first));
         assertEquals(Arrays.asList(ChatPlugin.class, ScheduledTasksPlugin.class,
-                SettingsPlugin.class, DevicePlugin.class), activity.registered);
+                SettingsPlugin.class, DevicePlugin.class, RemoteTerminalPlugin.class), activity.registered);
         assertEquals(first, store.activeId());
         assertEquals("/chat/" + first, activity.launchRoute());
         assertFalse(activity.getIntent().hasExtra(TaskDetailActivity.EXTRA_OPEN_CHAT));

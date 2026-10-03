@@ -2,7 +2,7 @@
 
 `RemoteTerminalPlugin` implements wire v1 from the parent contract. It is registered
 by `MainActivity`; no manifest, npm, or dependency changes are required. Existing
-OkHttp 3.14.9 provides WSS. The Android minimum SDK is already 29.
+OkHttp 3.14.9 provides WSS. The Android minimum SDK is 33 (Android 13), matching the host and bundled Shower service.
 
 ## API and lifecycle
 
@@ -164,3 +164,15 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+## Phone shortcut row
+
+The dock has one horizontally scrollable key row with a fixed customization action.
+Ctrl/Alt/Shift remain toggles; an active-modifier indicator stays visible when scrolling.
+Custom key combinations and text macros retain the v1 preset schema. On Android, loadShortcuts/saveShortcuts use a separate private SharedPreferences store and acknowledge writes only after commit; existing localStorage data migrates on first load. Web preview retains localStorage. These local preference methods never call the remote host.
+The editor supports a live combination preview, editing, deletion and array-order changes.
+Bindings, not precomputed bytes, are stored: application-cursor and negotiated Kitty modes
+remain authoritative. Invalid keys/modifiers cannot be saved. Combinations requiring Kitty can be saved; the active protocol decides encoding, and unsupported combinations are not sent. Some combinations,
+such as Ctrl+Shift+C, are indistinguishable from Ctrl+C without an enhanced protocol;
+the editor explains this. Text macros append Enter only when explicitly enabled.
+Touch presses wait for release, or a stationary hold, before dispatch; swipes send nothing.

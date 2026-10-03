@@ -46,6 +46,27 @@ public final class RemoteTerminalPlugin extends Plugin {
         return RemoteTerminalProtocol.text(call.getData(), "hostId", 256);
     }
 
+    @PluginMethod public void loadShortcuts(PluginCall call) {
+        run(call, () -> {
+            try {
+                String value = TerminalShortcutStore.read(getContext());
+                resolve(call, new JSONObject().put("value", value == null ? JSONObject.NULL : value));
+            } catch (Exception failure) { call.reject("Could not read saved terminal shortcuts", "STORAGE_ERROR"); }
+        });
+    }
+
+    @PluginMethod public void saveShortcuts(PluginCall call) {
+        run(call, () -> {
+            try {
+                if (!call.getData().has("value")) throw new IllegalArgumentException("Missing shortcut value");
+                Object value = call.getData().get("value");
+                if (value != JSONObject.NULL && !(value instanceof String)) throw new IllegalArgumentException("Invalid shortcut value");
+                TerminalShortcutStore.write(getContext(), value == JSONObject.NULL ? null : (String) value);
+                call.resolve();
+            } catch (Exception failure) { call.reject("Could not save terminal shortcuts", "STORAGE_ERROR"); }
+        });
+    }
+
     @PluginMethod public void listHosts(PluginCall call) {
         run(call, () -> resolve(call, new JSONObject().put("hosts", store.hosts())));
     }

@@ -5,7 +5,7 @@ import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { Unicode11Addon } from '@xterm/addon-unicode11';
 import '@xterm/xterm/css/xterm.css';
-import { ArrowLeft, Ellipsis, Keyboard } from 'lucide-react';
+import { ArrowLeft, ArrowRight, ArrowUp, ArrowDown, CornerDownLeft, Delete, Ellipsis, Keyboard } from 'lucide-react';
 import { Dialog } from '../components/ui/dialog';
 import { createRecovery, recoveryErrorCode, recoveryStops } from './recovery';
 import { ErrorNotice, useText } from '../ui';
@@ -18,9 +18,12 @@ import { createTerminalAccessoryRepeatController } from './orca/terminal-accesso
 import { bindTerminalTextFieldSubmit } from './orca/terminal-text-field-submit-binding.web';
 import { isTerminalGestureInput } from './orca/terminal-gesture-input';
 import { routeScrollLines, buildMouseClickInput, type GestureScope } from './gestures';
-import { encodeKey, encodeText, encodePaste, hardwareBinding, hardwareKeyDown, isTerminalSendWithinLimit, terminalInputByteLength, LiveInput, type LiveInputDelivery, type HardwareBinding, type InputModes } from './input';
+import { encodeKey, encodeText, encodeModifiedText, encodePaste, hardwareBinding, hardwareKeyDown, isTerminalSendWithinLimit, terminalInputByteLength, LiveInput, type LiveInputDelivery, type HardwareBinding, type InputModes } from './input';
 import { Presets } from './PresetPanel';
+import { AccessoryButton } from './AccessoryButton';
 import { presetInput } from './presets';
+import { SessionTabs } from './SessionTabs';
+import { terminalDraftNeedsGuard } from './session-navigation';
 
 type KittyCore = { _core?: { coreService?: { kittyKeyboard?: { flags: number } } } };
 export function TerminalPage() {
@@ -120,11 +123,14 @@ function TerminalView({hostId, sessionId}: {hostId: string; sessionId: string}) 
     if (!field.current) return true;
     const mirror = live.current;
     const sticky = modifierState.current;
-    const encode = (text: string) => sticky.length ? Array.from(text).map(key => encodeKey({key:key === '' ? 'backspace' : key,modifiers:sticky},modes())).join('') : encodeText(text,modes());
-    const text = mirror.change(field.current.value, (payload, delivery) => admitSend(encode(payload), {
-      cancelled: () => { delivery.cancelled(); if (live.current === mirror) { rejectedDraft.current = true; if (mirror.uncertain) inputUncertain(); else inputHeld(); } },
-      uncertain: () => { delivery.uncertain(); if (live.current === mirror) rejectedDraft.current = true; },
-    }) !== null);
+    const text = mirror.change(field.current.value, (payload, delivery) => {
+      const encoded=encodeModifiedText(payload,sticky,modes());
+      if(encoded === null) { setInputError(t('当前修饰键无法编码部分输入，草稿已保留。请关闭修饰键或启用 Kitty 键盘协议后重试。','Some input cannot be encoded with these modifiers. Draft kept; turn off the modifiers or enable Kitty keyboard support and retry.')); return false; }
+      return admitSend(encoded, {
+        cancelled: () => { delivery.cancelled(); if (live.current === mirror) { rejectedDraft.current = true; if (mirror.uncertain) inputUncertain(); else inputHeld(); } },
+        uncertain: () => { delivery.uncertain(); if (live.current === mirror) rejectedDraft.current = true; },
+      }) !== null;
+    });
     rejectedDraft.current = text === null;
     if (mirror.uncertain) inputUncertain();
     else if (text !== null) setInputError('');
@@ -168,6 +174,7 @@ function TerminalView({hostId, sessionId}: {hostId: string; sessionId: string}) 
       return sendChain.current;
     }
     const data = encodeKey(binding, modes(), eventType);
+    if (!data && eventType !== 3) { setInputError(t('当前终端协议无法表示此组合键；请启用 Kitty 键盘协议或选择其他组合。','The current terminal protocol cannot encode this combination. Enable Kitty keyboard support or choose another shortcut.')); return Promise.resolve(false); }
     if (binding.key === 'enter') return sendAfterText(data);
     if (live.current.composing || !acceptInput(data) || !changeText()) return Promise.resolve(false);
     return send(data);
@@ -214,7 +221,7 @@ function TerminalView({hostId, sessionId}: {hostId: string; sessionId: string}) 
     term.open(element.current!);
     // No onData/onBinary bridge: parser DA/CPR replies and xterm's hidden textarea can never reach the PTY.
     const applyTheme = () => {
-      const style = getComputedStyle(document.documentElement);
+      const style = getComputedStyle(element.current!);
       term.options.theme = {background:style.getPropertyValue('--bg').trim() || '#111318',foreground:style.getPropertyValue('--text').trim() || '#e6e9ef'};
     };
     applyTheme();
@@ -347,25 +354,53 @@ function TerminalView({hostId, sessionId}: {hostId: string; sessionId: string}) 
       send: bytes => { if (isTerminalGestureInput(bytes)) void send(bytes); }};
   };
   const touch = useRef<{x:number;y:number;startX:number;startY:number;moved:boolean;at:number} | null>(null);
+  const [keyboardOpen, setKeyboardOpen] = useState(false);
+  useEffect(() => {
+    const resize = () => setKeyboardOpen(window.screen.height - (window.visualViewport?.height ?? window.innerHeight) > 140);
+    resize(); window.visualViewport?.addEventListener('resize',resize);
+    return () => window.visualViewport?.removeEventListener('resize',resize);
+  }, []);
+  const [leaveTo, setLeaveTo] = useState<string>();
+  const [controlBusy, setControlBusy] = useState(false);
+  const controlPending = useRef(false);
+  const hasUnsentInput = () => terminalDraftNeedsGuard({composing:live.current.composing, uncertain:live.current.uncertain, rejected:rejectedDraft.current, queuedBytes:queuedInputBytes.current, pending:boundaryPending.current, value:field.current?.value || '', sentText:live.current.sentText});
+  const leave = (path: string) => {if (hasUnsentInput()) setLeaveTo(path); else nav(path);};
+  useEffect(() => {
+    const back = (event: Event) => {if (hasUnsentInput()) {event.preventDefault(); setLeaveTo('/terminals');}};
+    window.addEventListener('app-back',back);
+    return () => window.removeEventListener('app-back',back);
+  }, []);
+  const control = async () => {
+    if (!connected || controlPending.current || session?.status !== 'running') return;
+    controlPending.current = true; setControlBusy(true);
+    try {await run(() => request(hostId,owner ? 'terminal.release' : 'terminal.claim',{sessionId}));}
+    finally {controlPending.current = false; setControlBusy(false);}
+  };
+  const keyButton = (k: (typeof TERMINAL_ACCESSORY_KEYS)[number]) => {
+    const binding={key:k.id === 'shiftTab' ? 'tab' : k.id,modifiers:k.id === 'shiftTab' ? [...new Set([...modifiers,'shift' as const])] : modifiers};
+    const glyph = k.id === 'arrowUp' ? <ArrowUp/> : k.id === 'arrowDown' ? <ArrowDown/> : k.id === 'arrowLeft' ? <ArrowLeft/> : k.id === 'arrowRight' ? <ArrowRight/> : k.id === 'backspace' ? <Delete/> : k.id === 'enter' ? <CornerDownLeft/> : k.label;
+    return <AccessoryButton key={k.id} disabled={!owner} label={k.accessibilityLabel || k.label}
+      onPress={() => {void special(binding);}}
+      onHold={k.repeatable ? () => repeat.current.start(binding, input => special(input)) : undefined}
+      onRelease={() => repeat.current.stop()}>{glyph}</AccessoryButton>;
+  };
   return <main className="rt-terminal">
     <header className="rt-header">
-      <button className="icon-button" aria-label={t('返回会话','Back to sessions')} onClick={() => nav('/terminals')}><ArrowLeft/></button>
-      <div className="rt-heading"><strong>{session?.title || t('终端','Terminal')}</strong><small role="status">{hostName} · {missing ? t('会话已结束','Session ended') : recovering ? t('正在重连…','Reconnecting…') : !connected ? t('离线','Offline') : session?.status === 'exited' ? t('已退出','Exited') : owner ? t('正在控制','Controlling') : t('只读','Read only')}</small></div>
-      <button className="rt-control" disabled={!connected || session?.status === 'exited'} onClick={() => void run(async () => {
-        if (owner) await request(hostId,'terminal.release',{sessionId});
-        else await request(hostId,'terminal.claim',{sessionId});
-      })}>{owner ? t('释放','Release') : t('接管','Take control')}</button>
+      <button className="icon-button" aria-label={t('返回会话','Back to sessions')} onClick={() => leave('/terminals')}><ArrowLeft/></button>
+      <div className="rt-heading"><strong>{hostName || t('远程终端','Remote terminal')}</strong><small role="status"><i className="rt-status-dot" data-state={recovering ? 'connecting' : connected ? 'connected' : 'offline'}/>{missing ? t('会话已结束','Session ended') : recovering ? t('正在重连…','Reconnecting…') : !connected ? t('离线 · 保留终端内容','Offline · output retained') : session?.status === 'exited' ? t('已退出','Exited') : owner ? t('正在控制','Controlling') : t('只读','Read only')}</small></div>
       <button className="icon-button" aria-label={t('终端选项','Terminal options')} onClick={() => setMenu(true)}><Ellipsis/></button>
     </header>
+    <SessionTabs hostId={hostId} sessionId={sessionId} session={session} connected={connected} navigate={leave}/>
     <ErrorNotice error={inputError || error}/>
     <Dialog sheet className="rt-sheet" open={menu} onOpenChange={setMenu} title={t('终端选项','Terminal options')}>
       <div className="rt-menu">
+        {owner && <button disabled={controlBusy} onClick={() => {setMenu(false); void control();}}>{t('释放控制','Release control')}</button>}
         <button onClick={() => { setMenu(false); void reconnect.current(); }}>{connected ? t('重新同步','Resync') : t('重新连接','Reconnect')}</button>
         <button disabled={!owner} onClick={() => { setMenu(false); void run(updateViewport); }}>{t('适应屏幕','Fit to screen')}</button>
         <div className="rt-size"><span>{t('文字大小','Text size')} · {fontSize}</span><button aria-label={t('缩小字体','Smaller text')} onClick={() => setFontSize(v => Math.max(8,v-2))}>A−</button><button aria-label={t('放大字体','Larger text')} onClick={() => setFontSize(v => Math.min(30,v+2))}>A+</button></div>
         <button aria-pressed={selecting} onClick={() => { setSelecting(!selecting); field.current?.blur(); setMenu(false); }}>{selecting ? t('结束选择','Finish selecting') : t('选择终端文本','Select terminal text')}</button>
         <button onClick={() => { const term=terminal.current; if (term) setSelectionText(term.getSelection() || Array.from({length:term.rows},(_,i) => term.buffer.active.getLine(term.buffer.active.viewportY+i)?.translateToString(true) ?? '').join('\n')); setMenu(false); }}>{t('复制终端文本','Copy terminal text')}</button>
-        <p className="secondary">{t('文本终端 · 无图片协议 · 离开页面不会关闭 Shell','Text terminal · no image protocols · leaving does not close the shell')}</p>
+        <p className="secondary">{t('离开页面不会结束电脑上的 Shell。终端目前仅支持文本。','Leaving keeps your desktop shell running. Text terminals are supported.')}</p>
       </div>
     </Dialog>
     <Dialog sheet className="rt-sheet" open={selectionText !== undefined} onOpenChange={open => { if (!open) setSelectionText(undefined); }} title={t('复制文本','Copy text')}>
@@ -385,22 +420,15 @@ function TerminalView({hostId, sessionId}: {hostId: string; sessionId: string}) 
       if (!point || point.moved || selecting || Date.now()-point.at>500) return;
       const current=scope(); if(current) { const bytes=buildMouseClickInput(current,e.clientX,e.clientY); if(bytes) current.send(bytes); else if(owner) field.current?.focus(); }
     }} onPointerCancel={() => {touch.current=null;}}/>
-    <Presets disabled={!owner || live.current.composing} send={preset => { if (preset.kind === 'chord') void special(preset.chord); else void sendAfterText(presetInput(preset,modes())); }}/>
-    <div className="rt-row rt-accessory">
-      {(['ctrl','alt','shift'] as TerminalShortcutModifier[]).map(m => <button key={m} disabled={!owner} aria-pressed={modifiers.includes(m)} onPointerDown={e => e.preventDefault()} onClick={() => setModifiers(v => v.includes(m) ? v.filter(x => x !== m) : [...v,m])}>{m}</button>)}
-    </div>
-    <div className="rt-row rt-accessory rt-keys">
-      {TERMINAL_ACCESSORY_KEYS.filter(k => ['escape','tab','shiftTab','arrowUp','arrowDown','arrowLeft','arrowRight','backspace','enter'].includes(k.id)).map(k => {
-        const binding={key:k.id === 'shiftTab' ? 'tab' : k.id,modifiers:k.id === 'shiftTab' ? [...new Set([...modifiers,'shift' as const])] : modifiers};
-        return <button key={k.id} disabled={!owner} aria-label={k.accessibilityLabel} onPointerDown={e => {
-          e.preventDefault(); e.currentTarget.setPointerCapture(e.pointerId);
-          if(k.repeatable) repeat.current.start(binding, input => special(input)); else void special(binding);
-        }} onPointerUp={() => repeat.current.stop()} onPointerCancel={() => repeat.current.stop()} onLostPointerCapture={() => repeat.current.stop()}
-          onClick={e => { if(e.detail === 0) void special(binding); }}>{k.label}</button>;
-      })}
-    </div>
+    <footer className="rt-dock" data-keyboard-open={keyboardOpen}>
+    <Presets disabled={!owner || live.current.composing} activeModifiers={modifiers}
+      send={preset => {if (preset.kind === 'chord') void special(preset.chord); else void sendAfterText(presetInput(preset,modes()));}}
+      accessoryKeys={<>
+        {(['ctrl','alt','shift'] as TerminalShortcutModifier[]).map(m => <AccessoryButton key={m} disabled={!owner} label={m === 'ctrl' ? 'Ctrl' : m === 'alt' ? 'Alt' : 'Shift'} pressed={modifiers.includes(m)} onPress={() => setModifiers(v => v.includes(m) ? v.filter(x => x !== m) : [...v,m])}>{m === 'ctrl' ? 'Ctrl' : m === 'alt' ? 'Alt' : 'Shift'}</AccessoryButton>)}
+        {['escape','tab','arrowUp','arrowDown','arrowLeft','arrowRight','shiftTab','backspace','enter'].map(id => TERMINAL_ACCESSORY_KEYS.find(k => k.id === id)!).map(keyButton)}
+      </>}/>
     <div className="rt-live-row"><textarea ref={field} className="rt-live-input" disabled={!owner} rows={1} aria-busy={inputBusy}
-      aria-label={t('实时终端输入（支持中文输入法）','Live terminal input (IME supported)')} placeholder={inputBusy ? t('正在发送…','Sending…') : t('实时输入…','Type live…')}
+      aria-label={t('实时终端输入（支持中文输入法）','Live terminal input (IME supported)')} placeholder={inputBusy ? t('正在发送…','Sending…') : !owner ? t('接管后即可输入','Take control to type') : t('实时输入…','Type live…')}
       autoCapitalize="off" autoCorrect="off" spellCheck={false} enterKeyHint="send"
       onCompositionStart={() => { live.current.composing=true; }}
       onCompositionEnd={() => { live.current.composing=false; changeText(); }}
@@ -416,6 +444,8 @@ function TerminalView({hostId, sessionId}: {hostId: string; sessionId: string}) 
       }}
       onKeyUp={e => { const binding=pressed.current.get(e.code); if(!binding) return; pressed.current.delete(e.code); const release=hardwareBinding(e.nativeEvent); release.modifiers=[...new Set([...release.modifiers,...modifiers])]; void send(encodeKey(release,modes(),3)); }}
       onBlur={() => { repeat.current.stop(); pressed.current.clear(); }}
-    /><button disabled={!owner} onPointerDown={e => e.preventDefault()} onClick={() => { if(document.activeElement === field.current) field.current?.blur(); else field.current?.focus(); }} aria-label={t('显示或隐藏键盘','Show or hide keyboard')}><Keyboard size={20}/></button></div>
+    />{!owner && session?.status !== 'exited' ? <button className="rt-primary rt-control" disabled={!connected || controlBusy || missing} onClick={() => void control()}>{controlBusy ? t('请稍候…','Wait…') : t('接管输入','Take control')}</button> : <button className="rt-keyboard-toggle" disabled={!owner} onPointerDown={e => e.preventDefault()} onClick={() => { if(document.activeElement === field.current) field.current?.blur(); else field.current?.focus(); }} aria-label={t('显示或隐藏键盘','Show or hide keyboard')}><Keyboard size={20}/></button>}</div>
+    </footer>
+    <Dialog sheet className="rt-sheet" open={!!leaveTo} onOpenChange={open => {if (!open) setLeaveTo(undefined);}} title={t('保留当前输入？','Keep this input?')}><p>{t('部分输入尚未确认送达。离开将丢弃本机草稿，已送出的输入不会撤回。','Some input has not been confirmed. Leaving discards this local draft; input already sent cannot be recalled.')}</p><div className="rt-dialog-actions"><button className="rt-primary" onClick={() => setLeaveTo(undefined)}>{t('留在会话','Stay here')}</button><button className="rt-danger" onClick={() => {if (leaveTo) nav(leaveTo);}}>{t('丢弃草稿并离开','Discard draft and leave')}</button></div></Dialog>
   </main>;
 }
