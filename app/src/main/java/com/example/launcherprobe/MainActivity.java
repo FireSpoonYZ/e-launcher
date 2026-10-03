@@ -63,6 +63,7 @@ public class MainActivity extends BridgeActivity {
         registerPlugin(ScheduledTasksPlugin.class);
         registerPlugin(SettingsPlugin.class);
         registerPlugin(DevicePlugin.class);
+        registerPlugin(RemoteTerminalPlugin.class);
         bridgeBuilder.addWebViewListener(new WebViewListener() {
             @Override public void onPageStarted(WebView view) { webReady = false; }
             @Override public void onPageLoaded(WebView view) {

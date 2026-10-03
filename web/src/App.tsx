@@ -1,14 +1,16 @@
-import { useEffect, useState } from 'react';
+import { lazy, Suspense, useEffect, useState } from 'react';
 import { SystemBars, SystemBarsStyle } from '@capacitor/core';
 import { App as CapacitorApp } from '@capacitor/app';
 import { HashRouter, Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import { Device, type DeviceState } from './native';
-import { Environment, useBack } from './ui';
+import { Environment, Loading, useBack } from './ui';
 import { ArchivedPage, ChatPage, HistoryPage } from './Chat';
 import { SettingsHome, GeneralPage, AppearancePage, DevicePage, AboutPage, VoicePage } from './Settings';
 import { ProvidersPage, ResourcesPage } from './Resources';
 import { AdvancedPage, EditorPage } from './Editor';
 import { SchedulesPage, ScheduleHistoryPage } from './Schedules';
+const TerminalsPage = lazy(() => import('./RemoteTerminal').then(module => ({default: module.TerminalsPage})));
+const TerminalPage = lazy(() => import('./RemoteTerminal').then(module => ({default: module.TerminalPage})));
 
 function Navigation() {
   const back = useBack(); const location = useLocation();
@@ -70,6 +72,8 @@ function Shell({initialDevice}: {initialDevice: DeviceState}) {
     <Route path="/chat/:conversationId?" element={<ChatPage/>}/>
     <Route path="/history/:conversationId" element={<HistoryPage/>}/>
     <Route path="/archived" element={<ArchivedPage/>}/>
+    <Route path="/terminals" element={<Suspense fallback={<Loading/>}><TerminalsPage/></Suspense>}/>
+    <Route path="/terminals/:hostId/:sessionId" element={<Suspense fallback={<Loading/>}><TerminalPage/></Suspense>}/>
     <Route path="/schedules" element={<SchedulesPage/>}/>
     <Route path="/schedules/history" element={<ScheduleHistoryPage/>}/>
     <Route path="/settings" element={<SettingsHome/>}/>

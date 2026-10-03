@@ -88,3 +88,10 @@ and composites the material through this application's lowercase e mask.
 ## Distribution
 
 When conveying this APK, satisfy AGPLv3's corresponding-source requirements, including these modifications and the material needed to build them. A link to the unmodified upstream repository alone is not corresponding source for this APK. Preserve this notice and the complete license; consult `LICENSE` for the applicable source-delivery options and the network-interaction provisions if functionality later changes. This project makes no warranty of compatibility with a particular ROM.
+
+## Orca remote-terminal components
+
+Source: https://github.com/stablyai/orca, commit `de8bffe24045b396212f4f63de8960ec8380ea07`.
+MIT License, Copyright (c) 2026 Lovecast Inc. Adapted terminal input, key encoding, IME composition, gestures, Unicode width handling, shortcut mutations and native request tracking. Exact paths and changes: [ATTRIBUTION.md](web/src/RemoteTerminal/ATTRIBUTION.md) and [native adaptation](docs/remote-terminal-android.md). Full license: [LICENSE.orca](web/src/RemoteTerminal/LICENSE.orca).
+
+The extracted xterm.js Kitty keyboard encoder uses the pinned `@xterm/xterm@6.1.0-beta.303` source and retains its [MIT license](web/src/RemoteTerminal/xterm/LICENSE).
