@@ -28,7 +28,7 @@ export function RecoveryNotice({prepared, disabled, onPrepare, onHistory}: {prep
   const t = useText();
   return <div className="archive-banner" role="status">
     <p>{t('运行已中断。外部操作可能已完成，请勿直接重发原请求。','The run was interrupted. External actions may already have completed. Avoid resending the original request.')}</p>
-    {prepared && <small>{t('上下文已准备好。请输入新的要求并手动发送；模型会先检查当前状态。','Context is ready. Enter new instructions and send manually; the model will first inspect current state.')}</small>}
+    {prepared && <small>{t('上下文已准备好。请输入新的要求并手动发送；下一次请求会要求模型先只读检查当前状态。','Context is ready. Enter new instructions and send manually; the next request asks the model to inspect current state read-only.')}</small>}
     <div className="archive-banner-actions">{!prepared && <button className="button" disabled={disabled} onClick={onPrepare}>{t('准备续接','Prepare continuation')}</button>}<button className="quiet-button" onClick={onHistory}>{t('查看历史','Review history')}</button></div>
   </div>;
 }

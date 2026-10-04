@@ -50,9 +50,19 @@ Pi Agent 是聊天的唯一执行路径。内置 `shower` 工具使用 Operit Sh
 
 聊天、任务详情和 Widget 使用同一轮的 Pi 事件显示思考、回复、工具名称、重试次数与等待时间、上下文压缩、问卷等待和 Shower 手动接管等待。重试等待仅展示 Pi SDK 已安排的模型请求重试，不新增工具动作重放；停止后迟到的状态不会恢复成运行中。Widget 普通变化仍采用至少 1000ms 尾沿节流，冷启动仍只读私有展示快照。
 
-应用进程重建会把未结束的持久运行标记显示为“运行已中断”，不会自动启动 Pi、重发原请求或恢复工具队列。已保存的消息、工具记录、附件、分支、原生上下文和工作区保留；中断前外部动作可能已经完成，但结果尚未保存。Pi 连接关闭时须重新打开应用。
+应用进程重建会把未结束的持久运行标记显示为“运行已中断”，不会自动启动 Pi、重发原请求或恢复工具队列。已保存的消息、工具记录、附件、分支、原生上下文和工作区保留；中断前外部动作可能已经完成，但结果尚未保存。若提示 Pi 连接已关闭，请在 Android 应用信息中强行停止本应用后重新打开；不要清除数据。仅退出并重新进入界面不一定会重启进程。
 
 缺少完整上下文的分支显示“准备续接”。确认只允许当前选中节点使用最近已保存的原生上下文，加上作为历史文本的中断尾部；不会删除原分支、清除未完成标记或修改现有草稿及附件，也不会发送请求。随后由用户输入新的要求并手动发送，首轮附带“先只读检查状态、说明不确定性、等待确认、不得重放外部操作”的恢复提示。未确认的分支仍保留缺少原生上下文时的阻止保护。也可以查看历史并选择另一个节点；选择历史不代表过去的外部操作已撤销。
+
+可在测试设备上运行两阶段合成恢复检查（安装对应的应用与 instrumentation APK 后）：
+
+```sh
+adb shell am instrument -w -e checks task-recovery-seed com.example.launcherprobe.test/com.example.launcherprobe.ChatStoreChecks
+adb shell am force-stop com.example.launcherprobe
+adb shell am instrument -w -e checks task-recovery-verify com.example.launcherprobe.test/com.example.launcherprobe.ChatStoreChecks
+```
+
+检查使用独立的 `instrumentation_task_recovery_` 偏好前缀和缓存目录，要求两阶段 PID 不同；验证中断提示、无 Node／任务自动启动、准备续接仍空闲，以及草稿、附件、历史、原生检查点和分支边界。成功后只清理该测试命名空间。它植入的是合成未完成回合，不发模型请求、不执行外部工具，不能据此宣称真实外部动作中断／Shower 接管已经通过验收。
 
 ### 标准任务 Widget
 

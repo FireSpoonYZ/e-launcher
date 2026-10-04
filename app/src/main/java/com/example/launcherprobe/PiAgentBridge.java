@@ -41,7 +41,7 @@ final class PiAgentBridge {
 
     static synchronized PiAgentBridge get(Context context) throws Exception {
         if (instance != null) return instance;
-        if (attempted) throw new IllegalStateException("pi 启动曾失败，请重新启动应用进程");
+        if (attempted) throw new IllegalStateException("pi 启动曾失败，请在 Android 应用信息中强行停止本应用后重新打开（不要清除数据）");
         // Node cannot be restarted in the same process, even if bridge construction failed.
         attempted = true;
         instance = new PiAgentBridge(context.getApplicationContext());
@@ -217,7 +217,7 @@ final class PiAgentBridge {
 
     private synchronized void sendRequest(JSONObject command, PiConfigStore configStore,
             Listener nextListener) throws Exception {
-        if (closed) throw new IllegalStateException("Pi 连接已关闭，请重新启动应用进程");
+        if (closed) throw new IllegalStateException("Pi 连接已关闭，请在 Android 应用信息中强行停止本应用后重新打开（不要清除数据）");
         String id = command.getString("id");
         if (requests.containsKey(id)) throw new IllegalStateException("Pi 请求 ID 重复");
         requests.put(id, new Request(configStore, nextListener, command.optString("conversationId", null)));
@@ -322,7 +322,7 @@ final class PiAgentBridge {
             }
         } catch (Exception ignored) {
             // EOF and read failures have the same terminal semantics.
-        } finally { fail("pi Node 连接已结束，请重新启动应用进程"); }
+        } finally { fail("pi Node 连接已结束，请在 Android 应用信息中强行停止本应用后重新打开（不要清除数据）"); }
     }
 
     static void applySettingEvent(PiConfigStore store, JSONObject event) throws Exception {
