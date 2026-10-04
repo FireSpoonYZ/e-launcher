@@ -85,6 +85,9 @@ jobs:
       - name: Assemble APK
         run: ./gradlew --no-daemon --console=plain :app:testDebugUnitTest :app:lintDebug :shower-server:lintDebug :app:assembleDebug ${{ github.ref == 'refs/heads/main' && ':app:assembleRelease' || '' }}
 
+      - name: Verify restored backup with real SDK
+        run: node scripts/check-conversation-backup-sdk.mjs app/build/backup-sdk-fixture
+
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:

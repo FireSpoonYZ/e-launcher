@@ -8,7 +8,7 @@ import java.nio.file.Files;
 import java.util.*;
 import java.util.zip.*;
 
-/** Standalone ZIP security/roundtrip checks; requires org.json (Android-all works on the host). */
+/** Standalone ZIP checks; requires Android JsonReader and org.json (Android-all on the host). */
 public final class ConversationBackupArchiveChecks {
     public static void main(String[] args) throws Exception {
         File root = Files.createTempDirectory("conversation-backup-checks").toFile();

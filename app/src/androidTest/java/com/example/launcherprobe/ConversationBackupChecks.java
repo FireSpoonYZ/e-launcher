@@ -30,12 +30,9 @@ final class ConversationBackupChecks {
         store.saveDraft("unsent draft"); store.saveDraftAttachments(Collections.singletonList(attachment));
         store.setPiSelection("test-provider", "test-model", "high");
         store.beginPiTurn(original, "root", "second");
-        JSONArray entries = new JSONArray().put(new JSONObject().put("type", "session").put("cwd", "/previous/workspace"))
-                .put(new JSONObject().put("type", "message").put("attachments", AttachmentStore.json(Collections.singletonList(attachment))));
-        String notice = "read attachment\n\n[用户附件已安全复制到应用私有工作区。请使用 read 工具实际读取，不要声称已读取而未读取。]\n"
+        String notice = "question\n\n[用户附件已安全复制到应用私有工作区。请使用 read 工具实际读取，不要声称已读取而未读取。]\n"
                 + "- \"fixture.txt\" (text/plain, " + attachment.size + " bytes): " + attachmentFile.getCanonicalPath();
-        entries.put(new JSONObject().put("type", "message").put("message", new JSONObject().put("role", "user")
-                .put("content", new JSONArray().put(new JSONObject().put("type", "text").put("text", notice)))));
+        JSONArray entries = nativeSessionEntries(notice, "branch two", new PiConfigStore(context, original).workspaceRoot().getAbsolutePath());
         store.savePiTurn(original, "root", "second", store.load(), "second", entries, new JSONObject());
         File workspace = new PiConfigStore(context, original).workspaceRoot(); workspace.mkdirs();
         writeUtf8(new File(workspace, "work.txt").toPath(), "workspace contents");
@@ -56,7 +53,7 @@ final class ConversationBackupChecks {
             ChatAttachment copy = store.draftAttachments(restored).get(0);
             require(!fileId.equals(copy.id) && "fixture attachment".equals(readUtf8(new AttachmentStore(context).requireFile(copy).toPath())), "attachment clone");
             JSONArray resumed = new JSONObject(store.piResume(restored, store.load(restored))).getJSONArray("entries");
-            require(copy.path.equals(resumed.getJSONObject(1).getJSONArray("attachments").getJSONObject(0).getString("path")), "context attachment remap");
+            require(resumed.getJSONObject(1).getJSONObject("message").getJSONArray("content").getJSONObject(0).getString("text").endsWith(" bytes): " + copy.path), "context attachment remap");
             File restoredWorkspace = new PiConfigStore(context, restored).workspaceRoot();
             require(restoredWorkspace.getAbsolutePath().equals(resumed.getJSONObject(0).getString("cwd")), "context workspace remap");
             require("workspace contents".equals(readUtf8(new File(restoredWorkspace, "work.txt").toPath())), "workspace");
@@ -74,7 +71,7 @@ final class ConversationBackupChecks {
             store.clear(original);
             require(!attachmentFile.exists(), "original fixture intentionally deleted");
             JSONArray continued = new JSONObject(store.piResume(restored, store.load(restored))).getJSONArray("entries");
-            String restoredNotice = continued.getJSONObject(2).getJSONObject("message").getJSONArray("content").getJSONObject(0).getString("text");
+            String restoredNotice = continued.getJSONObject(1).getJSONObject("message").getJSONArray("content").getJSONObject(0).getString("text");
             require(restoredNotice.endsWith(" bytes): " + copy.path), "native SDK fileNotice path remap");
             require("fixture attachment".equals(readUtf8(new File(copy.path).toPath())), "clone remains readable after original deletion");
             return "PASS: isolated backup roundtrip; all branches, drafts, selection, attachments, Pi contexts, workspace remap, exclusions, original preservation and adversarial validation";
@@ -84,6 +81,23 @@ final class ConversationBackupChecks {
             for (ChatStore.Conversation item : new ArrayList<>(store.conversations())) store.clear(item.id);
             context.getSharedPreferences("chat", Context.MODE_PRIVATE).edit().clear().commit();
         }
+    }
+
+    private static JSONArray nativeSessionEntries(String notice, String answer, String cwd) throws Exception {
+        String stamp = "2026-10-04T00:00:00.000Z";
+        JSONObject usage = new JSONObject().put("input", 0).put("output", 0).put("cacheRead", 0).put("cacheWrite", 0)
+                .put("totalTokens", 0).put("cost", new JSONObject().put("input", 0).put("output", 0)
+                        .put("cacheRead", 0).put("cacheWrite", 0).put("total", 0));
+        return new JSONArray()
+                .put(new JSONObject().put("type", "session").put("version", 3)
+                        .put("id", "11111111-2222-4333-8444-555555555555").put("timestamp", stamp).put("cwd", cwd))
+                .put(new JSONObject().put("type", "message").put("id", "a1b2c3d4").put("parentId", JSONObject.NULL)
+                        .put("timestamp", stamp).put("message", new JSONObject().put("role", "user").put("timestamp", 1791072000000L)
+                                .put("content", new JSONArray().put(new JSONObject().put("type", "text").put("text", notice)))))
+                .put(new JSONObject().put("type", "message").put("id", "b2c3d4e5").put("parentId", "a1b2c3d4")
+                        .put("timestamp", stamp).put("message", new JSONObject().put("role", "assistant").put("timestamp", 1791072000001L)
+                                .put("content", new JSONArray().put(new JSONObject().put("type", "text").put("text", answer)))
+                                .put("api", "openai-completions").put("provider", "local").put("model", "mock").put("stopReason", "stop").put("usage", usage)));
     }
 
     private static void writeUtf8(java.nio.file.Path path, String text) throws IOException {

@@ -201,3 +201,5 @@ Kokoro 路径请求流式 PCM（24 kHz、单声道、16 位小端），使用 Au
 - 准备时拒绝仍运行或正在落盘的会话；元数据短暂加锁读取，文件遍历、暂存复制、SHA-256、ZIP 压缩和文档提供方 I/O 均不持有会话／协调器锁。暂存后重新比对源文件哈希及会话元数据；变化则报错重试。它不是对独立进程写入的文件系统事务，外部程序持续写工作区时应先停止写入再备份。
 
 回归：ConversationBackupsTest 覆盖分支／草稿／附件／Pi 上下文／可选工作区往返、ID 与路径重写、原件及归档保留、AtomicFile 已提交 .bak 与未提交 .new 边界、真实 SDK 附件通知的重映射和删除原件后的续接、发布失败回滚、越界路径、符号链接、清单错误、损坏与解压限额。Android SAF 选择／取消、外部文档提供方失败及进程终止仍需设备验证。
+
+跨层回归：先运行 :app:testDebugUnitTest，再运行 node scripts/check-conversation-backup-sdk.mjs app/build/backup-sdk-fixture。Java 测试将实际 ZIP 恢复后的合成原生会话与附件写到忽略的 build 目录；脚本使用真实 Pi SDK 和仅绑定 127.0.0.1 的模拟模型续接，只调用 read 读取副本。已删除原件，跨 JVM/Node 仅映射测试产物路径，不替代生产恢复逻辑。CI 在 Gradle 后运行该检查；不访问付费模型或外部工具。

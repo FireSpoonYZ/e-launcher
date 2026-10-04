@@ -105,9 +105,7 @@ public class ConversationBackupsTest {
         String prose = "Quoted historic path stays unchanged: " + file.path;
         String notice = prose + "\n\n[用户附件已安全复制到应用私有工作区。请使用 read 工具实际读取，不要声称已读取而未读取。]\n"
                 + "- \"note.txt\" (text/plain, " + file.size + " bytes): " + new File(file.path).getCanonicalPath();
-        JSONArray entries = new JSONArray().put(new JSONObject().put("type", "message").put("id", "sdk-user-entry")
-                .put("message", new JSONObject().put("role", "user").put("content",
-                        new JSONArray().put(new JSONObject().put("type", "text").put("text", notice)))));
+        JSONArray entries = nativeSessionEntries(notice, "ready", new PiConfigStore(context, original).workspaceRoot().getAbsolutePath());
         store.savePiContext("answer", entries);
         ConversationBackups.Prepared exported = backups.prepareExport(original, false);
         ConversationBackups.Prepared imported = backups.prepareImport(new FileInputStream(exported.archive));
@@ -116,10 +114,17 @@ public class ConversationBackupsTest {
         store.clear(original);
         assertFalse(new File(file.path).exists());
         JSONArray resumed = new JSONObject(store.piResume(restored, store.load(restored))).getJSONArray("entries");
-        String text = resumed.getJSONObject(0).getJSONObject("message").getJSONArray("content").getJSONObject(0).getString("text");
+        String text = resumed.getJSONObject(1).getJSONObject("message").getJSONArray("content").getJSONObject(0).getString("text");
         assertTrue(text.startsWith(prose + "\n\n"));
         assertTrue(text.endsWith(" bytes): " + copy.path));
         assertEquals("native attachment", readUtf8(new File(copy.path).toPath()));
+        // Reusable synthetic artifact for the real SDK/loopback regression; no app/user data.
+        File artifact = new File(System.getProperty("backupSdkFixtureDir", "build/backup-sdk-fixture")); artifact.mkdirs();
+        Files.copy(new File(copy.path).toPath(), new File(artifact, "attachment.txt").toPath(),
+                java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+        writeUtf8(new File(artifact, "context.json").toPath(), new JSONObject().put("entries", resumed)
+                .put("attachmentPath", copy.path).put("originalPath", file.path)
+                .put("originalDeleted", !new File(file.path).exists()).toString());
         exported.close(); imported.close();
     }
 
@@ -423,6 +428,23 @@ public class ConversationBackupsTest {
         assertThrows(IOException.class, () -> backups.prepareImport(new FileInputStream(zip)));
         assertEquals(1, store.conversations().size());
         ConversationBackupArchive.deleteTree(directory);
+    }
+
+    private static JSONArray nativeSessionEntries(String notice, String answer, String cwd) throws Exception {
+        String stamp = "2026-10-04T00:00:00.000Z";
+        JSONObject usage = new JSONObject().put("input", 0).put("output", 0).put("cacheRead", 0).put("cacheWrite", 0)
+                .put("totalTokens", 0).put("cost", new JSONObject().put("input", 0).put("output", 0)
+                        .put("cacheRead", 0).put("cacheWrite", 0).put("total", 0));
+        return new JSONArray()
+                .put(new JSONObject().put("type", "session").put("version", 3)
+                        .put("id", "11111111-2222-4333-8444-555555555555").put("timestamp", stamp).put("cwd", cwd))
+                .put(new JSONObject().put("type", "message").put("id", "a1b2c3d4").put("parentId", JSONObject.NULL)
+                        .put("timestamp", stamp).put("message", new JSONObject().put("role", "user").put("timestamp", 1791072000000L)
+                                .put("content", new JSONArray().put(new JSONObject().put("type", "text").put("text", notice)))))
+                .put(new JSONObject().put("type", "message").put("id", "b2c3d4e5").put("parentId", "a1b2c3d4")
+                        .put("timestamp", stamp).put("message", new JSONObject().put("role", "assistant").put("timestamp", 1791072000001L)
+                                .put("content", new JSONArray().put(new JSONObject().put("type", "text").put("text", answer)))
+                                .put("api", "openai-completions").put("provider", "local").put("model", "mock").put("stopReason", "stop").put("usage", usage)));
     }
 
     private static void writeUtf8(java.nio.file.Path path, String text) throws IOException {
