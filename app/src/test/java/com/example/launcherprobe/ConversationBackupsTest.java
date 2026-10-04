@@ -40,7 +40,7 @@ public class ConversationBackupsTest {
     private ChatAttachment attachment(String text) throws Exception {
         String id = UUID.randomUUID().toString();
         File root = new File(context.getFilesDir(), "chat-attachments"); root.mkdirs();
-        File file = new File(root, id); Files.writeString(file.toPath(), text);
+        File file = new File(root, id); writeUtf8(file.toPath(), text);
         return new ChatAttachment(id, "note.txt", "text/plain", "file", file.length(), file.getAbsolutePath());
     }
 
@@ -61,9 +61,9 @@ public class ConversationBackupsTest {
                 new JSONObject().put("askUser", new JSONObject().put("id", "expired")).put("todo", new JSONObject().put("tasks", new JSONArray())));
         String originalId = store.activeId(), originalHistory = store.backupSnapshot(originalId).toString();
         File workspace = new PiConfigStore(context, originalId).workspaceRoot(); workspace.mkdirs();
-        Files.writeString(new File(workspace, "report.txt").toPath(), "workspace report");
-        Files.writeString(new File(workspace, ".env").toPath(), "SECRET=excluded");
-        File pi = new File(workspace, ".pi"); pi.mkdir(); Files.writeString(new File(pi, "auth.json").toPath(), "secret");
+        writeUtf8(new File(workspace, "report.txt").toPath(), "workspace report");
+        writeUtf8(new File(workspace, ".env").toPath(), "SECRET=excluded");
+        File pi = new File(workspace, ".pi"); pi.mkdir(); writeUtf8(new File(pi, "auth.json").toPath(), "secret");
         File dependency = new File(workspace, "node_modules"); dependency.mkdir();
         Files.createSymbolicLink(new File(workspace, "escape-link").toPath(), context.getCacheDir().toPath());
 
@@ -81,18 +81,89 @@ public class ConversationBackupsTest {
         assertEquals("model", new JSONObject(store.piSelection(restoredId)).getString("model"));
         ChatAttachment restoredFile = store.draftAttachments(restoredId).get(0);
         assertNotEquals(file.id, restoredFile.id);
-        assertEquals("important content", Files.readString(new AttachmentStore(context).requireFile(restoredFile).toPath()));
+        assertEquals("important content", readUtf8(new AttachmentStore(context).requireFile(restoredFile).toPath()));
         JSONObject resume = new JSONObject(store.piResume(restoredId, store.load(restoredId)));
         JSONObject restoredReference = resume.getJSONArray("entries").getJSONObject(1).getJSONArray("attachments").getJSONObject(0);
         assertEquals(restoredFile.path, restoredReference.getString("path"));
         File restoredWorkspace = new PiConfigStore(context, restoredId).workspaceRoot();
-        assertEquals("workspace report", Files.readString(new File(restoredWorkspace, "report.txt").toPath()));
+        assertEquals("workspace report", readUtf8(new File(restoredWorkspace, "report.txt").toPath()));
         assertFalse(new File(restoredWorkspace, ".env").exists());
         assertFalse(new File(restoredWorkspace, ".pi/auth.json").exists());
         assertFalse(new File(restoredWorkspace, "escape-link").exists());
         assertFalse(store.isArchived(restoredId));
         assertFalse(context.getSharedPreferences("chat", Context.MODE_PRIVATE).contains("run_status_" + restoredId));
         assertFalse(new JSONObject(store.extensionUi(restoredId, store.load(restoredId))).has("askUser"));
+        exported.close(); imported.close();
+    }
+
+    @Test public void remapsRealSdkFileNoticeAndResumesAfterOriginalIsDeleted() throws Exception {
+        ChatAttachment file = attachment("native attachment");
+        AgentLoop.Message user = message("user", "user", "use attached file", Collections.singletonList(file));
+        AgentLoop.Message answer = message("answer", "assistant", "ready", Collections.emptyList());
+        store.save(Arrays.asList(user, answer));
+        String original = store.activeId();
+        String prose = "Quoted historic path stays unchanged: " + file.path;
+        String notice = prose + "\n\n[用户附件已安全复制到应用私有工作区。请使用 read 工具实际读取，不要声称已读取而未读取。]\n"
+                + "- \"note.txt\" (text/plain, " + file.size + " bytes): " + new File(file.path).getCanonicalPath();
+        JSONArray entries = new JSONArray().put(new JSONObject().put("type", "message").put("id", "sdk-user-entry")
+                .put("message", new JSONObject().put("role", "user").put("content",
+                        new JSONArray().put(new JSONObject().put("type", "text").put("text", notice)))));
+        store.savePiContext("answer", entries);
+        ConversationBackups.Prepared exported = backups.prepareExport(original, false);
+        ConversationBackups.Prepared imported = backups.prepareImport(new FileInputStream(exported.archive));
+        String restored = backups.restore(imported, false);
+        ChatAttachment copy = store.tree(restored).node("user").message.attachments.get(0);
+        store.clear(original);
+        assertFalse(new File(file.path).exists());
+        JSONArray resumed = new JSONObject(store.piResume(restored, store.load(restored))).getJSONArray("entries");
+        String text = resumed.getJSONObject(0).getJSONObject("message").getJSONArray("content").getJSONObject(0).getString("text");
+        assertTrue(text.startsWith(prose + "\n\n"));
+        assertTrue(text.endsWith(" bytes): " + copy.path));
+        assertEquals("native attachment", readUtf8(new File(copy.path).toPath()));
+        exported.close(); imported.close();
+    }
+
+    @Test public void pendingTurnsRemainBlockedWithoutImportingRetryConsent() throws Exception {
+        store.save(Collections.singletonList(message("pending-user", "user", "possibly consequential", Collections.emptyList())));
+        String source = store.activeId();
+        store.beginPiTurn(source, "pending-user", "not-yet-observed-assistant");
+        context.getSharedPreferences("chat", Context.MODE_PRIVATE).edit().putString("pi_recovery_" + source, "old consent").commit();
+        ConversationBackups.Prepared exported = backups.prepareExport(source, false);
+        assertEquals(1, exported.preview().getInt("pendingTurns"));
+        ConversationBackups.Prepared imported = backups.prepareImport(new FileInputStream(exported.archive));
+        String restored = backups.restore(imported, false);
+        assertTrue(context.getSharedPreferences("chat", Context.MODE_PRIVATE).getBoolean("pi_pending_" + restored + "_pending-user", false));
+        assertFalse(context.getSharedPreferences("chat", Context.MODE_PRIVATE).contains("pi_recovery_" + restored));
+        assertThrows(IOException.class, () -> store.piResume(restored, store.load(restored)));
+        exported.close(); imported.close();
+    }
+
+    @Test public void rejectsExportThatItsOwnImporterCannotRestore() throws Exception {
+        List<AgentLoop.Message> messages = new ArrayList<>();
+        for (int i = 0; i < 10001; i++) messages.add(message("node-" + i, "user", "", Collections.emptyList()));
+        store.save(messages);
+        assertThrows(IllegalArgumentException.class, () -> backups.prepareExport(store.activeId(), false));
+        assertEquals(0, Objects.requireNonNull(new File(context.getCacheDir(), "conversation-backups").list()).length);
+    }
+
+    @Test public void exportsCommittedAtomicContextBackupAndIgnoresUncommittedSidecar() throws Exception {
+        store.save(Collections.singletonList(message("user", "user", "atomic context", Collections.emptyList())));
+        JSONArray committed = new JSONArray().put(new JSONObject().put("type", "message").put("value", "committed"));
+        store.savePiContext("user", committed);
+        String sourceId = store.activeId();
+        File contexts = new File(new File(context.getFilesDir(), "pi-contexts"),
+                UUID.nameUUIDFromBytes(sourceId.getBytes(StandardCharsets.UTF_8)).toString());
+        File primary = new File(contexts, UUID.nameUUIDFromBytes("user".getBytes(StandardCharsets.UTF_8)) + ".json");
+        Files.move(primary.toPath(), new File(primary + ".bak").toPath());
+        writeUtf8(new File(primary + ".new").toPath(), "[{\"type\":\"message\",\"value\":\"uncommitted\"}]");
+        ConversationBackups.Prepared exported = backups.prepareExport(sourceId, false);
+        ConversationBackups.Prepared imported = backups.prepareImport(new FileInputStream(exported.archive));
+        String restored = backups.restore(imported, false);
+        assertEquals(committed.toString(), new JSONObject(store.piResume(restored, store.load(restored))).getJSONArray("entries").toString());
+        assertEquals(committed.toString(), store.piContext("user"));
+        for (String path : imported.unpacked.files.keySet()) {
+            assertFalse(path.endsWith(".bak")); assertFalse(path.endsWith(".new"));
+        }
         exported.close(); imported.close();
     }
 
@@ -118,7 +189,7 @@ public class ConversationBackupsTest {
         store.save(Collections.singletonList(new AgentLoop.Message("user", "keep")));
         String original = store.activeId(); store.archive(original); long archivedAt = store.archivedAt(original);
         File workspace = new PiConfigStore(context, original).workspaceRoot(); workspace.mkdirs();
-        Files.writeString(new File(workspace, "report.txt").toPath(), "report");
+        writeUtf8(new File(workspace, "report.txt").toPath(), "report");
         ConversationBackups.Prepared exported = backups.prepareExport(original, true);
         ConversationBackups.Prepared imported = backups.prepareImport(new FileInputStream(exported.archive));
         String restored = backups.restore(imported, false);
@@ -134,15 +205,15 @@ public class ConversationBackupsTest {
         context.getSharedPreferences("chat", Context.MODE_PRIVATE).edit()
                 .putStringSet("pi_legacy_workspace_sessions", Collections.singleton(id)).commit();
         File legacy = new File(context.getFilesDir(), "pi-workspace"); legacy.mkdirs();
-        Files.writeString(new File(legacy, "legacy.txt").toPath(), "legacy contents");
+        writeUtf8(new File(legacy, "legacy.txt").toPath(), "legacy contents");
         File current = new PiConfigStore(context, id).workspaceRoot();
         assertFalse(current.exists());
         ConversationBackups.Prepared exported = backups.prepareExport(id, true);
         ConversationBackups.Prepared imported = backups.prepareImport(new FileInputStream(exported.archive));
         String restored = backups.restore(imported, true);
         assertFalse(current.exists());
-        assertEquals("legacy contents", Files.readString(new File(legacy, "legacy.txt").toPath()));
-        assertEquals("legacy contents", Files.readString(new File(new PiConfigStore(context, restored).workspaceRoot(), "legacy.txt").toPath()));
+        assertEquals("legacy contents", readUtf8(new File(legacy, "legacy.txt").toPath()));
+        assertEquals("legacy contents", readUtf8(new File(new PiConfigStore(context, restored).workspaceRoot(), "legacy.txt").toPath()));
         exported.close(); imported.close();
         ConversationBackupArchive.deleteTree(legacy);
     }
@@ -157,7 +228,7 @@ public class ConversationBackupsTest {
         // Force publication failure after the cloned attachment was written.
         File contextRoot = new File(context.getFilesDir(), "pi-contexts");
         File moved = new File(context.getFilesDir(), "saved-test-contexts");
-        Files.move(contextRoot.toPath(), moved.toPath()); Files.writeString(contextRoot.toPath(), "blocking file");
+        Files.move(contextRoot.toPath(), moved.toPath()); writeUtf8(contextRoot.toPath(), "blocking file");
         try {
             assertThrows(IOException.class, () -> backups.restore(imported, false));
             assertEquals(before, store.backupSnapshot(id).toString());
@@ -202,6 +273,15 @@ public class ConversationBackupsTest {
         assertEquals(1, store.conversations().size());
         assertEquals(1, new File(context.getFilesDir(), "chat-attachments").listFiles().length);
         exported.close(); imported.close();
+    }
+
+    @Test public void boundsWorkspaceScanEvenWhenEveryEntryIsExcluded() throws Exception {
+        store.save(Collections.singletonList(new AgentLoop.Message("user", "bounded scan")));
+        File workspace = new PiConfigStore(context, store.activeId()).workspaceRoot(); workspace.mkdirs();
+        for (int i = 0; i <= ConversationBackupArchive.MAX_FILES; i++) Files.createFile(new File(workspace, ".hidden-" + i).toPath());
+        assertThrows(IOException.class, () -> backups.prepareExport(store.activeId(), true));
+        File cache = new File(context.getCacheDir(), "conversation-backups");
+        assertEquals(0, Objects.requireNonNull(cache.list()).length);
     }
 
     @Test public void rejectsTraversalUnknownPathsExclusionsAndSymlinkSources() throws Exception {
@@ -265,6 +345,42 @@ public class ConversationBackupsTest {
         rejectZip(manifest, files);
     }
 
+    @Test public void missingMimeCannotAliasAnExistingAttachmentInDraftOrMessageSlots() throws Exception {
+        ChatAttachment file = attachment("private original");
+        store.save(Collections.singletonList(message("user", "user", "original", Collections.singletonList(file))));
+        store.saveDraftAttachments(Collections.singletonList(file));
+        for (boolean draft : Arrays.asList(false, true)) for (boolean decoy : Arrays.asList(false, true)) {
+            JSONObject snapshot = store.backupSnapshot(store.activeId());
+            JSONObject broken = draft ? snapshot.getJSONArray("draftAttachments").getJSONObject(0)
+                    : snapshot.getJSONObject("tree").getJSONArray("nodes").getJSONObject(0).getJSONArray("attachments").getJSONObject(0);
+            broken.remove("mimeType");
+            if (decoy) {
+                JSONObject metadata = file.toJson().put("path", "attachments/" + file.id);
+                Iterator<String> keys = metadata.keys();
+                while (keys.hasNext()) { String key = keys.next(); snapshot.put(key, metadata.get(key)); }
+            }
+            if (draft) snapshot.getJSONObject("tree").getJSONArray("nodes").getJSONObject(0).remove("attachments");
+            else snapshot.put("draftAttachments", new JSONArray());
+            File directory = new File(context.getCacheDir(), UUID.randomUUID().toString()); directory.mkdir();
+            File conversation = new File(directory, "conversation.json"); writeUtf8(conversation.toPath(), snapshot.toString());
+            Map<String, File> sources = new LinkedHashMap<>(); sources.put("conversation.json", conversation);
+            if (decoy) sources.put("attachments/" + file.id, new File(file.path));
+            File archive = new File(directory, "forged.zip");
+            ConversationBackupArchive.pack(archive, sources, new JSONObject().put("title", "forged").put("workspace", false).put("nodes", 1));
+            assertThrows(IOException.class, () -> backups.prepareImport(new FileInputStream(archive)));
+            assertEquals(1, store.conversations().size());
+            assertEquals("private original", readUtf8(new File(file.path).toPath()));
+            ConversationBackupArchive.deleteTree(directory);
+        }
+    }
+
+    @Test public void rejectsLenientJsonDepthBypassAndDuplicateKeys() throws Exception {
+        String attack = "{'x':'\"', 'deep':" + "[".repeat(1000) + "0" + "]".repeat(1000) + ", 'y':'\"'}";
+        assertThrows(IOException.class, () -> ConversationBackupArchive.object(attack.getBytes(StandardCharsets.UTF_8)));
+        for (String json : Arrays.asList("{unquoted:1}", "{\"x\":1, \"x\":2}", "{\"x\":/*comment*/1}", "{'x':1}"))
+            assertThrows(IOException.class, () -> ConversationBackupArchive.object(json.getBytes(StandardCharsets.UTF_8)));
+    }
+
     @Test public void rejectsForgedAttachmentReferencesEvenWithValidHashes() throws Exception {
         ChatAttachment file = attachment("hello");
         store.save(Collections.singletonList(message("user", "user", "hi", Collections.singletonList(file))));
@@ -272,7 +388,7 @@ public class ConversationBackupsTest {
         snapshot.getJSONObject("tree").getJSONArray("nodes").getJSONObject(0).getJSONArray("attachments")
                 .getJSONObject(0).put("path", "/outside/private");
         File directory = new File(context.getCacheDir(), UUID.randomUUID().toString()); directory.mkdir();
-        File conversation = new File(directory, "conversation.json"); Files.writeString(conversation.toPath(), snapshot.toString());
+        File conversation = new File(directory, "conversation.json"); writeUtf8(conversation.toPath(), snapshot.toString());
         Map<String, File> sources = new LinkedHashMap<>(); sources.put("conversation.json", conversation);
         sources.put("attachments/" + file.id, new File(file.path));
         File zip = new File(directory, "forged.zip");
@@ -280,6 +396,13 @@ public class ConversationBackupsTest {
         assertThrows(IOException.class, () -> backups.prepareImport(new FileInputStream(zip)));
         assertEquals(1, store.conversations().size());
         ConversationBackupArchive.deleteTree(directory);
+    }
+
+    private static void writeUtf8(java.nio.file.Path path, String text) throws IOException {
+        Files.write(path, text.getBytes(StandardCharsets.UTF_8));
+    }
+    private static String readUtf8(java.nio.file.Path path) throws IOException {
+        return new String(Files.readAllBytes(path), StandardCharsets.UTF_8);
     }
 
     private JSONObject manifest(Map<String, byte[]> files) throws Exception {

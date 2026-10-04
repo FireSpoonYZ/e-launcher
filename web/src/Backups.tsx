@@ -5,7 +5,7 @@ import { Archive, Download, Upload } from 'lucide-react';
 import { Chat, type ConversationSummary } from './native';
 import { ErrorNotice, Header, Section, useAction, useText } from './ui';
 
-type Preview = { token: string; title: string; bytes: number; files: number; nodes: number; workspace: boolean; excluded: number; missingContexts: number; encrypted: false };
+type Preview = { token: string; title: string; bytes: number; files: number; nodes: number; workspace: boolean; excluded: number; pendingTurns: number; missingContexts: number; encrypted: false };
 interface BackupPlugin {
   prepareExport(options: {conversationId: string; workspace: boolean}): Promise<Preview>;
   saveExport(options: {token: string}): Promise<{cancelled: boolean}>;
@@ -52,12 +52,15 @@ export function BackupsPage() {
   });
   const save = () => action.run(async () => {
     const result = await Backup.saveExport({token: preview!.token});
-    if (!result.cancelled) { reset(); setMessage(t('备份已保存。请保管好这个未加密文件。', 'Backup saved. Keep this unencrypted file private.')); }
+    if (mounted.current && !result.cancelled) { reset(); setMessage(t('备份已保存。请保管好这个未加密文件。', 'Backup saved. Keep this unencrypted file private.')); }
   });
   const restore = () => action.run(async () => {
     const result = await Backup.restoreImport({token: preview!.token, workspace: restoreWorkspace});
+    if (!mounted.current) return;
     reset(); setMessage(t('已恢复为新会话，原会话保留。', 'Restored as a new conversation. Existing conversations are preserved.'));
-    nav('/chat/' + result.conversationId);
+    try { await Chat.selectConversation({conversationId: result.conversationId}); }
+    catch { throw new Error(t('副本已恢复，但打开失败。请从会话列表打开；不需要再次导入。', 'The copy was restored, but could not be opened. Open it from the conversation list; do not import again.')); }
+    if (mounted.current) nav('/chat/' + result.conversationId);
   });
   return <main className="page backups-page">
     <Header title={t('会话备份', 'Conversation backups')} onBack={() => nav('/chat')}/>
@@ -81,9 +84,10 @@ export function BackupsPage() {
       <p><Archive/> {preview.title}</p>
       <p>{preview.nodes} {t('节点', 'nodes')} · {preview.files} {t('文件', 'files')} · {(preview.bytes / 1048576).toFixed(2)} MiB</p>
       <p>{preview.workspace ? t('备份包括工作区', 'Backup includes workspace files') : t('不包括工作区', 'No workspace files')} · {t('已排除的文件或目录：', 'Excluded files or directories: ')}{preview.excluded}</p>
+      {!!preview.pendingTurns && <p role="alert">{t('含未确认完成的回合。恢复会保留中断标记，必须重新核查或选择之前的分支后再继续，不会继承重试许可。', 'Contains turns whose completion is uncertain. Interruption markers are preserved. Review them or choose an earlier branch before continuing; retry consent is never restored.')}</p>}
       {!!preview.missingContexts && <p role="alert">{t(`原会话有 ${preview.missingContexts} 个节点缺少 Pi 原生上下文；其记录会保留，但可能无法从这些节点继续。`, `${preview.missingContexts} original nodes lack Pi contexts. Their history is preserved, but continuing from them may be unavailable.`)}</p>}
       {mode === 'import' && preview.workspace && <label className="settings-row"><span className="row-copy">{t('同时恢复工作区文件', 'Also restore workspace files')}</span><input type="checkbox" checked={restoreWorkspace} disabled={action.busy} onChange={event => setRestoreWorkspace(event.target.checked)}/></label>}
-      {mode === 'import' && <p className="secondary">{t('仅恢复可信来源。工作文件和历史工具输出仍是不可信内容，文本中的旧绝对路径不会改写。', 'Restore only trusted backups. Work files and historical tool output remain untrusted. Old absolute paths in historical text are not rewritten.')}</p>}
+      {mode === 'import' && <p className="secondary">{t('仅恢复可信来源。工作文件和历史工具输出仍是不可信内容。仅自动映射生成的附件通知；其他历史文本中的旧绝对路径保留。', 'Restore only trusted backups. Work files and historical tool output remain untrusted. Generated attachment notices are remapped; other historical paths are kept.')}</p>}
       <button className="button full" disabled={action.busy} onClick={() => void (mode === 'export' ? save() : restore())}>{mode === 'export' ? t('保存未加密备份…', 'Save unencrypted backup…') : t('确认恢复为新会话', 'Confirm restore as new conversation')}</button>
       <button className="quiet-button full" disabled={action.busy} onClick={() => void action.run(async () => { await Backup.discard(); reset(); })}>{t('取消', 'Cancel')}</button>
     </Section>}

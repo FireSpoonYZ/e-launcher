@@ -30,7 +30,7 @@ final class ConversationBackups {
             return new JSONObject().put("token", token).put("title", manifest.getString("title"))
                     .put("bytes", manifest.getLong("bytes")).put("files", manifest.getJSONArray("files").length())
                     .put("nodes", manifest.getInt("nodes")).put("workspace", manifest.getBoolean("workspace"))
-                    .put("excluded", manifest.optInt("excluded")).put("missingContexts", manifest.optInt("missingContexts")).put("encrypted", false);
+                    .put("excluded", manifest.optInt("excluded")).put("pendingTurns", manifest.optInt("pendingTurns")).put("missingContexts", manifest.optInt("missingContexts")).put("encrypted", false);
         }
         void close() throws IOException { ConversationBackupArchive.deleteTree(directory); }
     }
@@ -48,9 +48,10 @@ final class ConversationBackups {
         boolean finished = false;
         try {
                 JSONObject snapshot = store.backupSnapshot(id);
+                ChatStore.validateBackupSnapshot(snapshot);
                 String snapshotVersion = snapshot.toString();
                 Map<File, String> observed = new LinkedHashMap<>();
-                Map<String, File> sources = new LinkedHashMap<>();
+                Map<String, File> sources = new BoundedSources();
                 Map<String, String> attachmentPaths = new HashMap<>();
                 collectExportAttachments(snapshot, sources, attachmentPaths);
                 JSONObject portable = (JSONObject) rewriteAttachments(snapshot, attachmentPaths, null);
@@ -75,13 +76,16 @@ final class ConversationBackups {
                     observed.put(original, ConversationBackupArchive.hex(java.security.MessageDigest.getInstance("SHA-256").digest(bytes)));
                     String json = ConversationBackupArchive.jsonText(bytes);
                     Object value = new org.json.JSONTokener(json).nextValue();
-                    if (!(value instanceof JSONObject) && !(value instanceof JSONArray)) throw new IOException("Invalid Pi context");
+                    if (name.endsWith(".ui.json") ? !(value instanceof JSONObject) : !(value instanceof JSONArray)) throw new IOException("Invalid Pi context type");
                     collectExportAttachments(value, sources, attachmentPaths);
                     File copied = new File(directory, name);
-                    writeJson(copied, rewriteAttachments(value, attachmentPaths, null).toString());
+                    Object portableContext = rewriteAttachments(value, attachmentPaths, null);
+                    rewriteFileNotices(portableContext, attachmentPaths);
+                    if (name.endsWith(".ui.json")) ((JSONObject) portableContext).remove("askUser");
+                    writeJson(copied, portableContext.toString());
                     sources.put("contexts/" + name, copied);
                 }
-                int[] excluded = {0};
+                int[] excluded = {0, 0};
                 if (workspace) collectWorkspace(new PiConfigStore(context, id).backupWorkspaceRoot(), "", sources, excluded, 0);
                 // Copy into private staging without holding coordinator/store monitors.
                 // Recheck originals and metadata after the copy; never silently accept a moving source.
@@ -112,7 +116,7 @@ final class ConversationBackups {
                 }
                 if (!snapshotVersion.equals(store.backupSnapshot(id).toString())) throw new IOException("Conversation changed during snapshot; retry");
                 int missingContexts = missingContexts(snapshot, sources.keySet());
-                JSONObject details = new JSONObject().put("missingContexts", missingContexts).put("title", snapshot.getString("title"))
+                JSONObject details = new JSONObject().put("pendingTurns", snapshot.getJSONArray("pendingNodes").length()).put("missingContexts", missingContexts).put("title", snapshot.getString("title"))
                         .put("nodes", snapshot.getJSONObject("tree").getJSONArray("nodes").length())
                         .put("workspace", workspace).put("excluded", excluded[0]).put("createdAt", System.currentTimeMillis());
                 File archive = new File(directory, "conversation.zip");
@@ -134,7 +138,8 @@ final class ConversationBackups {
             // Derive user-visible scope from validated payload, not untrusted descriptive fields.
             unpacked.manifest.put("title", snapshot.getString("title"))
                     .put("nodes", snapshot.getJSONObject("tree").getJSONArray("nodes").length())
-                    .put("missingContexts", missingContexts(snapshot, unpacked.files.keySet()));
+                    .put("missingContexts", missingContexts(snapshot, unpacked.files.keySet()))
+                    .put("pendingTurns", snapshot.optJSONArray("pendingNodes") == null ? 0 : snapshot.getJSONArray("pendingNodes").length());
             finished = true;
             return new Prepared(directory, null, unpacked.manifest, unpacked);
         } finally { if (!finished) ConversationBackupArchive.deleteTree(directory); }
@@ -173,6 +178,7 @@ final class ConversationBackups {
                     String text = ConversationBackupArchive.jsonText(ConversationBackupArchive.readJson(item.getValue()));
                     Object value = new org.json.JSONTokener(text).nextValue();
                     Object rewritten = rewriteAttachments(value, paths, ids);
+                    rewriteFileNotices(rewritten, paths);
                     if (path.endsWith(".ui.json")) ((JSONObject) rewritten).remove("askUser");
                     else if (rewritten instanceof JSONArray entries) for (int i = 0; i < entries.length(); i++) {
                         JSONObject entry = entries.optJSONObject(i);
@@ -249,6 +255,9 @@ final class ConversationBackups {
                 if (name.endsWith(".ui.json") ? !(value instanceof JSONObject) : !(value instanceof JSONArray))
                     throw new IOException("Invalid Pi context type");
                 validateAttachments(value, unpacked, referenced);
+                Map<String, String> noticePaths = new HashMap<>();
+                for (String attachment : unpacked.files.keySet()) if (attachment.startsWith("attachments/")) noticePaths.put(attachment, attachment);
+                rewriteFileNotices(value, noticePaths);
             } else if (path.startsWith("workspace/")) hasWorkspace = true;
         }
         if (hasWorkspace && !unpacked.manifest.getBoolean("workspace")) throw new IOException("Workspace scope mismatch");
@@ -258,6 +267,7 @@ final class ConversationBackups {
 
     private void collectExportAttachments(Object value, Map<String, File> sources, Map<String, String> paths) throws Exception {
         walkAttachments(value, attachment -> {
+            requireAttachmentMetadata(attachment);
             ChatAttachment item = ChatAttachment.fromJson(attachment);
             if (!ConversationBackupArchive.uuid(item.id)) throw new IOException("Invalid attachment ID");
             File source = new AttachmentStore(context).requireFile(item);
@@ -265,7 +275,7 @@ final class ConversationBackups {
             ConversationBackupArchive.requireRegular(new File(item.path));
             if (source.length() != item.size) throw new IOException("Attachment size changed");
             String path = "attachments/" + item.id;
-            sources.put(path, source); paths.put(item.path, path);
+            sources.put(path, source); paths.put(item.path, path); paths.put(source.getCanonicalPath(), path);
         });
     }
 
@@ -283,12 +293,75 @@ final class ConversationBackups {
     interface AttachmentVisitor { void visit(JSONObject value) throws Exception; }
     private static void walkAttachments(Object value, AttachmentVisitor visitor) throws Exception {
         if (value instanceof JSONObject object) {
-            if (object.has("id") && object.has("path") && object.has("mimeType")) visitor.visit(object);
+            if (object.has("id") && object.has("path") && object.has("mimeType")) {
+                visitor.visit(object);
+            }
             Iterator<String> keys = object.keys();
-            while (keys.hasNext()) walkAttachments(object.get(keys.next()), visitor);
+            while (keys.hasNext()) {
+                String key = keys.next();
+                Object child = object.get(key);
+                // Attachment slots must be checked even when an attacker removes a duck-typing field.
+                if (key.equals("attachments") || key.equals("draftAttachments")) {
+                    if (!(child instanceof JSONArray array)) throw new IOException("Invalid attachment list");
+                    for (int i = 0; i < array.length(); i++) {
+                        if (!(array.get(i) instanceof JSONObject attachment)) throw new IOException("Invalid attachment metadata");
+                        visitor.visit(attachment);
+                    }
+                } else walkAttachments(child, visitor);
+            }
         } else if (value instanceof JSONArray array) {
             for (int i = 0; i < array.length(); i++) walkAttachments(array.get(i), visitor);
         }
+    }
+
+    private static void requireAttachmentMetadata(JSONObject value) throws IOException {
+        for (String key : Arrays.asList("id", "path", "name", "mimeType", "kind"))
+            if (!(value.opt(key) instanceof String)) throw new IOException("Missing or invalid attachment " + key);
+        String kind = value.optString("kind"), mime = value.optString("mimeType");
+        Object size = value.opt("size");
+        if ((!kind.equals("image") && !kind.equals("file")) || mime.isBlank() || mime.length() > 256
+                || mime.contains("\n") || mime.contains("\r") || !(size instanceof Number number)
+                || (kind.equals("image") && !mime.startsWith("image/"))
+                || number.doubleValue() != number.longValue() || number.longValue() < 1
+                || number.longValue() > AttachmentStore.MAX_BYTES)
+            throw new IOException("Invalid attachment kind, MIME type or size");
+    }
+
+    // Exact generated suffix from pi-runtime/sdk.js:fileNotice. Do not replace user prose or tool arguments.
+    private static final String FILE_NOTICE = "[用户附件已安全复制到应用私有工作区。请使用 read 工具实际读取，不要声称已读取而未读取。]\n";
+    private static void rewriteFileNotices(Object value, Map<String, String> paths) throws Exception {
+        if (!(value instanceof JSONArray entries)) return;
+        for (int i = 0; i < entries.length(); i++) {
+            JSONObject entry = entries.optJSONObject(i);
+            if (entry == null || !"message".equals(entry.optString("type"))) continue;
+            JSONObject message = entry.optJSONObject("message");
+            if (message == null || !"user".equals(message.optString("role"))) continue;
+            Object content = message.opt("content");
+            if (content instanceof String text) message.put("content", rewriteNotice(text, paths));
+            else if (content instanceof JSONArray blocks) for (int j = 0; j < blocks.length(); j++) {
+                JSONObject block = blocks.optJSONObject(j);
+                if (block != null && "text".equals(block.optString("type")) && block.opt("text") instanceof String text)
+                    block.put("text", rewriteNotice(text, paths));
+            }
+        }
+    }
+
+    private static String rewriteNotice(String text, Map<String, String> paths) throws IOException {
+        String marker = "\n\n" + FILE_NOTICE;
+        int start = text.lastIndexOf(marker);
+        if (start < 0) return text;
+        String[] lines = text.substring(start + marker.length()).split("\n", -1);
+        StringBuilder replacement = new StringBuilder(text.substring(0, start + marker.length()));
+        for (int i = 0; i < lines.length; i++) {
+            String line = lines[i];
+            int divider = line.lastIndexOf(" bytes): ");
+            if (!line.startsWith("- \"") || divider < 0) throw new IOException("Invalid native attachment notice");
+            String target = paths.get(line.substring(divider + 9));
+            if (target == null) throw new IOException("Native attachment notice references a missing or unsafe file");
+            if (i > 0) replacement.append('\n');
+            replacement.append(line, 0, divider + 9).append(target);
+        }
+        return replacement.toString();
     }
 
     private static Object rewriteAttachments(Object value, Map<String, String> paths, Map<String, String> ids) throws Exception {
@@ -338,17 +411,33 @@ final class ConversationBackups {
         if (Files.isSymbolicLink(root.toPath())) { excluded[0]++; return; }
         ConversationBackupArchive.requireInside(context.getFilesDir(), root);
         if (root.isDirectory()) {
-            File[] children = root.listFiles();
-            if (children == null) throw new IOException("Cannot list workspace");
-            Arrays.sort(children, Comparator.comparing(File::getName));
-            for (File child : children) {
-                if (ConversationBackupArchive.excluded(child.getName())) { excluded[0]++; continue; }
-                collectWorkspace(child, relative.isEmpty() ? child.getName() : relative + "/" + child.getName(), sources, excluded, depth + 1);
+            try (DirectoryStream<Path> children = Files.newDirectoryStream(root.toPath())) {
+                for (Path path : children) {
+                    if (++excluded[1] > ConversationBackupArchive.MAX_FILES) throw new IOException("Workspace scan exceeds 4096 entries");
+                    File child = path.toFile();
+                    if (ConversationBackupArchive.excluded(child.getName())) { excluded[0]++; continue; }
+                    collectWorkspace(child, relative.isEmpty() ? child.getName() : relative + "/" + child.getName(), sources, excluded, depth + 1);
+                }
             }
         } else {
             ConversationBackupArchive.requireRegular(root);
             if (sources.size() >= ConversationBackupArchive.MAX_FILES) throw new IOException("Too many workspace files");
             sources.put("workspace/" + relative, root);
+        }
+    }
+
+    /** Enforce collection limits before staging potentially thousands of native-context snapshots. */
+    private static final class BoundedSources extends LinkedHashMap<String, File> {
+        private final Map<String, Long> sizes = new HashMap<>();
+        private long bytes;
+        @Override public File put(String path, File file) {
+            long length = file.length(), next = bytes - sizes.getOrDefault(path, 0L) + length;
+            if ((!containsKey(path) && size() >= ConversationBackupArchive.MAX_FILES)
+                    || length > ConversationBackupArchive.MAX_FILE || next > ConversationBackupArchive.MAX_TOTAL)
+                throw new IllegalArgumentException("Backup collection limit exceeded");
+            File previous = super.put(path, file);
+            sizes.put(path, length); bytes = next;
+            return previous;
         }
     }
 

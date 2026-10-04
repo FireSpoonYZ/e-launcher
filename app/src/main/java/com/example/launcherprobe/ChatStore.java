@@ -832,9 +832,18 @@ public final class ChatStore {
             if (item == null) throw new IllegalArgumentException("会话不存在 / Conversation not found");
             ConversationTree tree = tree(id);
             JSONArray nativeNodes = new JSONArray();
-            for (String node : preferences.getStringSet("pi_nodes_" + id, java.util.Collections.emptySet()))
+            for (String node : new java.util.TreeSet<>(preferences.getStringSet("pi_nodes_" + id, java.util.Collections.emptySet())))
                 if (tree.node(node) != null) nativeNodes.put(node);
-            return new JSONObject().put("tree", encodeTree(tree)).put("title", item.optString("title", "新对话"))
+            java.util.Set<String> pendingSet = new java.util.TreeSet<>();
+            String prefix = "pi_pending_" + id + "_";
+            for (java.util.Map.Entry<String, ?> entry : preferences.getAll().entrySet()) {
+                if (!entry.getKey().startsWith(prefix) || !Boolean.TRUE.equals(entry.getValue())) continue;
+                String node = entry.getKey().substring(prefix.length());
+                if (tree.node(node) != null) pendingSet.add(node);
+            }
+            JSONArray pendingNodes = new JSONArray();
+            for (String node : pendingSet) pendingNodes.put(node);
+            return new JSONObject().put("pendingNodes", pendingNodes).put("tree", encodeTree(tree)).put("title", item.optString("title", "新对话"))
                     .put("created", item.optLong("created")).put("updated", item.optLong("updated"))
                     .put("sourceArchivedAt", item.optLong("archivedAt")).put("draft", draft(id))
                     .put("draftAttachments", AttachmentStore.json(draftAttachments(id)))
@@ -844,14 +853,15 @@ public final class ChatStore {
 
     static void validateBackupSnapshot(JSONObject snapshot) throws Exception {
         JSONObject envelope = snapshot.getJSONObject("tree");
-        if (envelope.getInt("version") != 1) throw new IllegalArgumentException("Unsupported conversation tree");
+        if (!(envelope.opt("version") instanceof Number version) || version.doubleValue() != 1) throw new IllegalArgumentException("Unsupported conversation tree");
         JSONArray values = envelope.getJSONArray("nodes");
         if (values.length() > 10000) throw new IllegalArgumentException("Too many conversation nodes");
         List<ConversationTree.Node> nodes = new ArrayList<>();
         for (int i = 0; i < values.length(); i++) {
             JSONObject value = values.getJSONObject(i);
             String id = value.getString("id");
-            if (id.isEmpty() || id.length() > 128) throw new IllegalArgumentException("Invalid node identity");
+            if (!(value.opt("id") instanceof String) || id.isBlank() || id.length() > 128
+                    || id.chars().anyMatch(c -> c < 32 || c == 127)) throw new IllegalArgumentException("Invalid node identity");
             AgentLoop.Message message = readMessage(value);
             if (!java.util.Arrays.asList("system", "user", "assistant", "tool").contains(message.role))
                 throw new IllegalArgumentException("Invalid message role");
@@ -865,6 +875,14 @@ public final class ChatStore {
         for (int i = 0; i < nativeNodes.length(); i++) {
             String id = nativeNodes.getString(i);
             if (tree.node(id) == null || !unique.add(id)) throw new IllegalArgumentException("Invalid Pi node");
+        }
+        JSONArray pendingNodes = snapshot.has("pendingNodes") ? snapshot.getJSONArray("pendingNodes") : new JSONArray();
+        if (pendingNodes.length() > values.length()) throw new IllegalArgumentException("Invalid pending Pi nodes");
+        java.util.Set<String> pending = new java.util.HashSet<>();
+        for (int i = 0; i < pendingNodes.length(); i++) {
+            String id = pendingNodes.getString(i);
+            if (tree.node(id) == null || !"user".equals(tree.node(id).message.role) || !pending.add(id))
+                throw new IllegalArgumentException("Invalid pending Pi node");
         }
         if (snapshot.getString("title").length() > 1000) throw new IllegalArgumentException("Title too long");
         snapshot.getString("draft");
@@ -894,15 +912,22 @@ public final class ChatStore {
             java.util.Set<String> nodes = new java.util.HashSet<>();
             JSONArray nativeNodes = snapshot.getJSONArray("piNodes");
             for (int i = 0; i < nativeNodes.length(); i++) nodes.add(nativeNodes.getString(i));
-            if (!preferences.edit().putString(historyKey(id), snapshot.getJSONObject("tree").toString())
+            JSONArray pendingNodes = snapshot.optJSONArray("pendingNodes");
+            if (pendingNodes == null) pendingNodes = new JSONArray();
+            SharedPreferences.Editor install = preferences.edit().putString(historyKey(id), snapshot.getJSONObject("tree").toString())
                     .putString("draft_" + id, snapshot.getString("draft"))
                     .putString("draft_attachments_" + id, snapshot.getJSONArray("draftAttachments").toString())
                     .putString("pi_selection_" + id, snapshot.getJSONObject("selection").toString())
                     .putStringSet("pi_nodes_" + id, nodes)
-                    .putString("conversations", index.toString()).commit()) {
-                boolean rolledBack = preferences.edit().putString("conversations", oldIndex)
+                    .putString("conversations", index.toString());
+            // Preserve interruption evidence, never an acknowledgment or consent to retry.
+            for (int i = 0; i < pendingNodes.length(); i++) install.putBoolean("pi_pending_" + id + "_" + pendingNodes.getString(i), true);
+            if (!install.commit()) {
+                SharedPreferences.Editor rollback = preferences.edit().putString("conversations", oldIndex)
                         .remove(historyKey(id)).remove("draft_" + id).remove("draft_attachments_" + id)
-                        .remove("pi_selection_" + id).remove("pi_nodes_" + id).commit();
+                        .remove("pi_selection_" + id).remove("pi_nodes_" + id);
+                for (int i = 0; i < pendingNodes.length(); i++) rollback.remove("pi_pending_" + id + "_" + pendingNodes.getString(i));
+                boolean rolledBack = rollback.commit();
                 if (!rolledBack) throw new BackupCommitUncertainException();
                 throw new java.io.IOException("无法提交恢复，已回滚 / Restore commit failed and was rolled back");
             }

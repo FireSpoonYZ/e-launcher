@@ -26,7 +26,8 @@ function harness(overrides = {}) {
     '@capacitor/core': {registerPlugin: name => { assert.equal(name, 'ConversationBackup'); return api; }},
     './native': {Chat: {listConversations: async () => ({conversations: [{id: 'active', title: 'Active'}]}),
       listArchivedConversations: async () => ({conversations: [{id: 'archived', title: 'Archived', archivedAt: 1}]}),
-      snapshot: async () => ({conversationId: 'active'})}},
+      snapshot: async () => ({conversationId: 'active'}),
+      selectConversation: async value => { calls.push(['select', value]); await overrides.selectConversation?.(value); }}},
     './ui': {Header: 'Header', Section: 'Section', ErrorNotice: 'ErrorNotice', useText: () => (_, en) => en, useAction: () => action},
   };
   const {outputText} = ts.transpileModule(readFileSync(new URL('../src/Backups.tsx', import.meta.url), 'utf8'), {
@@ -66,6 +67,7 @@ test('import is inspected before clone confirmation and workspace restore defaul
   assert.equal(h.nodes(h.render()).filter(node => node.type === 'input').at(-1).props.checked, false);
   h.button('Confirm restore as new conversation').props.onClick(); await h.ready();
   assert.deepEqual(h.calls[1], ['restore', {token: 'preview-1', workspace: false}]);
+  assert.deepEqual(h.calls[2], ['select', {conversationId: 'new-copy'}]);
   assert.deepEqual(h.navigation, [['/chat/new-copy']]);
 });
 
@@ -88,4 +90,23 @@ test('late backup preparation after unmount discards its staged preview', async 
   h.unmount(); finish(h.fixture); await h.ready();
   assert.equal(h.calls.filter(([kind]) => kind === 'discard').length, 2);
   assert.equal(h.button('Save unencrypted backup…'), undefined);
+});
+
+test('late restore completion never hijacks navigation after leaving the backup page', async () => {
+  let finish;
+  const h = harness({restoreImport: () => new Promise(resolve => { finish = resolve; })}); await h.ready();
+  h.button('Choose and inspect backup').props.onClick(); await h.ready();
+  h.button('Confirm restore as new conversation').props.onClick();
+  h.unmount(); finish({conversationId: 'authorized-copy'}); await h.ready();
+  assert.equal(h.navigation.length, 0);
+});
+
+test('failed opening after a successful restore cannot submit the import again', async () => {
+  const h = harness({selectConversation: async () => { throw Error('open failed'); }}); await h.ready();
+  h.button('Choose and inspect backup').props.onClick(); await h.ready();
+  h.button('Confirm restore as new conversation').props.onClick(); await h.ready();
+  assert.equal(h.navigation.length, 0);
+  assert.match(h.action.error, /copy was restored/);
+  assert.equal(h.button('Confirm restore as new conversation'), undefined);
+  assert.equal(h.calls.filter(([kind]) => kind === 'restore').length, 1);
 });

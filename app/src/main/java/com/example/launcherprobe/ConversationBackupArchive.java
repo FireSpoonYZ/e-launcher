@@ -77,7 +77,7 @@ final class ConversationBackupArchive {
             ByteArrayOutputStream header = new ByteArrayOutputStream();
             copy(zip, header, MAX_JSON, null); zip.closeEntry();
             JSONObject manifest = object(header.toByteArray());
-            if (!FORMAT.equals(manifest.optString("format")) || manifest.optInt("version", -1) != 1)
+            if (!FORMAT.equals(manifest.optString("format")) || !(manifest.opt("version") instanceof Number version) || version.doubleValue() != 1)
                 throw new IOException("不支持的备份版本 / Unsupported backup version");
             JSONArray list = manifest.getJSONArray("files");
             if (list.length() == 0 || list.length() > MAX_FILES) throw limit();
@@ -86,12 +86,12 @@ final class ConversationBackupArchive {
             for (int i = 0; i < list.length(); i++) {
                 JSONObject entry = list.getJSONObject(i);
                 String path = entry.getString("path"); validPath(path);
-                long size = entry.getLong("bytes");
+                long size = integer(entry, "bytes");
                 if (size < 0 || size > MAX_FILE || (total += size) > MAX_TOTAL) throw limit();
                 if (!entry.getString("sha256").matches("[0-9a-f]{64}") || expected.put(path, entry) != null)
                     throw new IOException("备份清单重复或校验值无效 / Invalid manifest");
             }
-            if (total != manifest.getLong("bytes") || !expected.containsKey("conversation.json"))
+            if (total != integer(manifest, "bytes") || !expected.containsKey("conversation.json"))
                 throw new IOException("备份清单不完整 / Incomplete manifest");
             LinkedHashMap<String, File> files = new LinkedHashMap<>();
             for (ZipEntry entry; (entry = zip.getNextEntry()) != null;) {
@@ -118,6 +118,13 @@ final class ConversationBackupArchive {
             finished = true;
             return new Unpacked(directory, manifest, files);
         } finally { if (!finished) deleteTree(directory); }
+    }
+
+    private static long integer(JSONObject object, String key) throws IOException {
+        Object value = object.opt(key);
+        if (!(value instanceof Number number) || number.doubleValue() != number.longValue())
+            throw new IOException("Invalid integer field: " + key);
+        return number.longValue();
     }
 
     static void validPath(String path) throws IOException {
@@ -164,19 +171,61 @@ final class ConversationBackupArchive {
     static String jsonText(byte[] bytes) throws Exception {
         if (bytes.length > MAX_JSON) throw limit();
         String json = StandardCharsets.UTF_8.newDecoder().decode(java.nio.ByteBuffer.wrap(bytes)).toString();
-        int depth = 0; boolean quoted = false, escaped = false;
+        validateStringLexemes(json);
+        // Android JSONTokener is lenient (single quotes/comments/unquoted names). Validate with
+        // the strict streaming reader before it sees the payload, and bound the same parsed nesting.
+        try (android.util.JsonReader reader = new android.util.JsonReader(new StringReader(json))) {
+            reader.setLenient(false);
+            validateJson(reader, 0);
+            if (reader.peek() != android.util.JsonToken.END_DOCUMENT) throw new IOException("Trailing JSON data");
+        } catch (IllegalStateException | NumberFormatException failure) {
+            throw new IOException("Invalid JSON", failure);
+        }
+        return json;
+    }
+
+    private static void validateStringLexemes(String json) throws IOException {
+        boolean quoted = false;
         for (int i = 0; i < json.length(); i++) {
             char c = json.charAt(i);
             if (quoted) {
-                if (escaped) escaped = false;
-                else if (c == '\\') escaped = true;
-                else if (c == '"') quoted = false;
+                if (c == '"') quoted = false;
+                else if (c == '\\') {
+                    if (++i >= json.length()) throw new IOException("Invalid JSON escape");
+                    char escape = json.charAt(i);
+                    if (escape == 'u') {
+                        if (i + 4 >= json.length()) throw new IOException("Invalid JSON Unicode escape");
+                        for (int n = 0; n < 4; n++)
+                            if ("0123456789abcdefABCDEF".indexOf(json.charAt(++i)) < 0) throw new IOException("Invalid JSON Unicode escape");
+                    } else if ("\"\\/bfnrt".indexOf(escape) < 0) throw new IOException("Invalid JSON escape");
+                } else if (c < 32) throw new IOException("Unescaped JSON control character");
             } else if (c == '"') quoted = true;
-            else if (c == '{' || c == '[') { if (++depth > 64) throw limit(); }
-            else if (c == '}' || c == ']') { if (--depth < 0) throw new IOException("Invalid JSON"); }
+            else if (" \t\r\n{}[]:,0123456789.-+eEtruefalsn".indexOf(c) < 0)
+                throw new IOException("Nonstandard JSON token");
         }
-        if (depth != 0 || quoted) throw new IOException("Invalid JSON");
-        return json;
+        if (quoted) throw new IOException("Unclosed JSON string");
+    }
+
+    private static void validateJson(android.util.JsonReader reader, int depth) throws IOException {
+        if (depth > 64) throw limit();
+        switch (reader.peek()) {
+            case BEGIN_OBJECT:
+                reader.beginObject();
+                Set<String> keys = new HashSet<>();
+                while (reader.hasNext()) {
+                    if (!keys.add(reader.nextName())) throw new IOException("Duplicate JSON key");
+                    validateJson(reader, depth + 1);
+                }
+                reader.endObject(); break;
+            case BEGIN_ARRAY:
+                reader.beginArray();
+                while (reader.hasNext()) validateJson(reader, depth + 1);
+                reader.endArray(); break;
+            case STRING: case NUMBER: reader.nextString(); break;
+            case BOOLEAN: reader.nextBoolean(); break;
+            case NULL: reader.nextNull(); break;
+            default: throw new IOException("Invalid JSON token");
+        }
     }
 
     static byte[] readJson(File file) throws Exception {
