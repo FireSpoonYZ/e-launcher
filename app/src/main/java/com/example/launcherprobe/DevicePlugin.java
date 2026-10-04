@@ -61,6 +61,12 @@ public final class DevicePlugin extends Plugin {
     }
 
     @PluginMethod public void state(PluginCall call) { call.resolve(stateObject()); }
+    @PluginMethod public void capabilities(PluginCall call) {
+        worker.execute(() -> {
+            try { call.resolve(CapabilityReadiness.device(getContext())); }
+            catch (Exception unavailable) { call.reject("Capability status unavailable"); }
+        });
+    }
     @PluginMethod public void apps(PluginCall call) {
         try { call.resolve(js(new JSONObject().put("apps", DeviceActions.appJson(getContext())))); }
         catch (Exception exception) { reject(call, exception); }

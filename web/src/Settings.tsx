@@ -11,6 +11,7 @@ import { Environment, ErrorNotice, Header, Row, Section, useAction, useText } fr
 export function SettingsHome() {
   const t = useText(); const nav = useNavigate();
   return <main className="page settings-home"><Header title={t('设置','Settings')}/><Section title={t('偏好','Preferences')}>
+    <Row icon={<Shield/>} title={t('配置就绪与能力检查','Setup & capability checks')} detail={t('聊天、操作手机与连接电脑','Chat, phone control & computers')} onClick={() => nav('/settings/readiness')}/>
     <Row icon={<Settings/>} title={t('通用','General')} detail={t('语言与权限规则','Language & permission rules')} onClick={() => nav('/settings/general')}/>
     <Row icon={<Palette/>} title={t('外观','Appearance')} detail={t('主题与背景','Theme & background')} onClick={() => nav('/settings/appearance')}/>
     <Row icon={<Shield/>} title={t('助手权限','Assistant permissions')} detail={t('Shizuku、系统权限与迁移状态','Shizuku, permissions & migration status')} onClick={() => nav('/settings/device')}/>

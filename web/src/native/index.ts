@@ -1,4 +1,5 @@
 import { registerPlugin, type PluginListenerHandle } from '@capacitor/core';
+import type { DeviceCapabilities, ModelReadiness } from '../readiness';
 
 export type ToolCall = { id: string; name: string; arguments: string };
 export type Attachment = { id: string; name: string; mimeType: string; kind: 'image'|'file'; size: number; path: string };
@@ -64,6 +65,8 @@ export interface ChatPlugin {
 export type ConfigScope = { project?: boolean };
 export type QueryOperation = 'catalog'|'test_provider'|'login'|'logout'|'packages'|'install'|'update'|'remove'|'resources'|'resource_paths'|'resource_toggle'|'mcp_file_save'|'mcp_list'|'mcp_edit'|'mcp_save'|'mcp_toggle'|'mcp_remove'|'mcp_check'|'mcp_login'|'mcp_logout';
 export interface SettingsPlugin {
+  /** Passive allowlisted configuration summary; never starts Pi or sends model requests. */
+  readiness(): Promise<ModelReadiness>;
   addListener(event: 'settingsEvent', listener: Listener): ListenerPromise;
   /** Credentials are represented only as {configured:boolean}; runtimeEnvironment is omitted. */
   snapshot(): Promise<Record<string, unknown>>;
@@ -101,6 +104,8 @@ export type VoiceEngine = 'system'|'remote';
 export type VoiceRemote = { baseUrl: string; model: string; voice: string; configured: boolean };
 export type VoiceState = { sttEngine: VoiceEngine; ttsEngine: VoiceEngine; speakMode: 'off'|'afterVoice'|'always'; language: string; speechRate: number; stt: VoiceRemote; tts: VoiceRemote; wakeEnabled: boolean; wakeWords: string; wakeWordsDetail: string; wakeSensitivity: 'low'|'medium'|'high'; wakeStatus: string; wakeListening: boolean; assistantDefault: boolean; microphoneGranted: boolean };
 export interface DevicePlugin {
+  /** Passive checks only, including an existing current-chat display. */
+  capabilities(): Promise<DeviceCapabilities>;
   addListener(event: 'deviceEvent', listener: (state: DeviceState) => void): ListenerPromise;
   addListener(event: 'keyboardEvent', listener: (state: {visible:boolean}) => void): ListenerPromise;
   keyboardState(): Promise<{visible:boolean}>;

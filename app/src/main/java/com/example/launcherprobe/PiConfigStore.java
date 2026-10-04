@@ -281,6 +281,30 @@ final class PiConfigStore {
         }
     }
 
+    /** A consistent read of existing global files, without migration or runtime startup. */
+    String[] readinessSources() throws IOException {
+        synchronized (LOCK) {
+            return new String[]{read(false, "settings.json"), read(false, "models.json"), read(false, "auth.json")};
+        }
+    }
+
+    static String readinessRevision(String[] sources) throws Exception {
+        String encoded = new org.json.JSONArray(java.util.Arrays.asList(sources)).toString();
+        byte[] digest = java.security.MessageDigest.getInstance("SHA-256").digest(encoded.getBytes(StandardCharsets.UTF_8));
+        StringBuilder value = new StringBuilder();
+        for (byte part : digest) value.append(String.format(java.util.Locale.ROOT, "%02x", part));
+        return value.toString();
+    }
+
+    /** Approval and the exact send-time snapshot share the same lock as configuration writes. */
+    String readinessSnapshot(String expectedRevision) throws Exception {
+        synchronized (LOCK) {
+            if (!readinessRevision(readinessSources()).equals(expectedRevision))
+                throw new IOException("Configuration changed; confirm the model test again");
+            return snapshot();
+        }
+    }
+
     String snapshot() throws IOException {
         synchronized (LOCK) {
             ensureWorkspace();

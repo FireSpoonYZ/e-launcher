@@ -41,6 +41,32 @@ public class SettingsPluginQueryTest {
 
     @After public void destroy() { plugin.handleOnDestroy(); }
 
+    @Test public void staleReadinessApprovalIsRejectedBeforeRuntimeStartupAndSnapshotIsImmutable() throws Exception {
+        Context context = RuntimeEnvironment.getApplication();
+        PiConfigStore store = new PiConfigStore(context);
+        store.initialize(context.getSharedPreferences("chat", Context.MODE_PRIVATE));
+        store.save(false, "settings.json", "{\"defaultProvider\":\"test\",\"defaultModel\":\"model\"}", null);
+        store.save(false, "auth.json", "{\"test\":{\"type\":\"api_key\",\"key\":\"approved-key\"}}", null);
+        String revision = PiConfigStore.readinessRevision(store.readinessSources());
+        String approved = store.readinessSnapshot(revision);
+        store.save(false, "auth.json", "{\"test\":{\"type\":\"api_key\",\"key\":\"changed-key\"}}", null);
+        assertTrue(approved.contains("approved-key"));
+        assertFalse(approved.contains("changed-key"));
+        assertThrows(java.io.IOException.class, () -> store.readinessSnapshot(revision));
+        RecordingCall stale = new RecordingCall(new JSObject().put("operation", "test_provider").put("arguments",
+                new JSObject().put("providerId", "test").put("expectedReadinessRevision", revision)));
+        plugin.query(stale);
+        assertNotNull(stale.error);
+        assertTrue(BridgeShadow.listeners.isEmpty());
+        assertNull(BridgeShadow.instance);
+        RecordingCall current = new RecordingCall(new JSObject().put("operation", "test_provider").put("arguments",
+                new JSObject().put("providerId", "test").put("expectedReadinessRevision",
+                        PiConfigStore.readinessRevision(store.readinessSources()))));
+        plugin.query(current);
+        assertNull(current.error);
+        assertNotNull(current.result);
+    }
+
     @Test public void mcpOperationsUseSettingsWireAndOAuthOwnsItsPrompt() throws Exception {
         for (String operation : new String[]{"mcp_list", "mcp_edit", "mcp_save", "mcp_toggle", "mcp_remove", "mcp_check", "mcp_logout"}) {
             RecordingCall call = query(operation);

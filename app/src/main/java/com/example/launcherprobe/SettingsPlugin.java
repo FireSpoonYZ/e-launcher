@@ -64,6 +64,26 @@ public final class SettingsPlugin extends Plugin {
         } catch (Exception exception) { reject(call, exception); }
     }
 
+    /** Never initializes/migrates settings, starts Pi, resolves credentials, or calls a provider. */
+    @PluginMethod public void readiness(PluginCall call) {
+        try {
+            if (store == null) store = new PiConfigStore(getContext());
+            String[] sources = store.readinessSources();
+            JSONObject settings = new JSONObject(sources[0]);
+            JSONObject models = new JSONObject(sources[1]);
+            JSONObject auth = new JSONObject(sources[2]);
+            String provider = settings.opt("defaultProvider") instanceof String ? settings.getString("defaultProvider").trim() : "";
+            String model = settings.opt("defaultModel") instanceof String ? settings.getString("defaultModel").trim() : "";
+            JSONObject providers = models.optJSONObject("providers");
+            JSONObject definition = providers == null ? null : providers.optJSONObject(provider);
+            boolean inlineKey = definition != null && !definition.optString("apiKey").trim().isEmpty();
+            call.resolve(new JSObject().put("provider", provider).put("model", model)
+                    .put("selectionConfigured", !provider.isEmpty() && !model.isEmpty())
+                    .put("credentialSaved", !provider.isEmpty() && (auth.has(provider) && !auth.isNull(provider) || inlineKey))
+                    .put("revision", PiConfigStore.readinessRevision(sources)));
+        } catch (Exception unavailable) { call.reject("Model configuration status unavailable"); }
+    }
+
     @PluginMethod public void schema(PluginCall call) {
         try (InputStream input = getContext().getAssets().open("pi-settings-fields.json")) {
             call.resolve(js(new JSONObject().put("fields", new JSONArray(read(input)))));
@@ -359,12 +379,17 @@ public final class SettingsPlugin extends Plugin {
             JSONObject arguments = call.getObject("arguments", new JSObject());
             validateQuery(operation, arguments);
             initialize();
-            PiAgentBridge bridge = PiAgentBridge.get(getContext());
             PiConfigStore queryStore = store;
+            String approvedSnapshot = "test_provider".equals(operation) && arguments.has("expectedReadinessRevision")
+                    ? queryStore.readinessSnapshot(arguments.getString("expectedReadinessRevision")) : null;
+            if (approvedSnapshot != null && !new JSONObject(approvedSnapshot).getJSONObject("settings")
+                    .optString("defaultProvider").trim().equals(arguments.optString("providerId")))
+                throw new IllegalArgumentException("Default provider changed; confirm the model test again");
+            PiAgentBridge bridge = PiAgentBridge.get(getContext());
             synchronized (bridge) {
                 if (destroyed) throw new IllegalStateException("设置页面已关闭");
                 PendingQuery pending = new PendingQuery(bridge, operation);
-                String id = bridge.query(operation, queryStore.snapshot(), arguments, queryStore, event -> {
+                String id = bridge.query(operation, approvedSnapshot == null ? queryStore.snapshot() : approvedSnapshot, arguments, queryStore, event -> {
                     String type = event.optString("type");
                     if ("auth_prompt".equals(type)) pending.promptId = event.optString("promptId");
                     if ("auth_prompt_end".equals(type) && event.optString("promptId").equals(pending.promptId)) pending.promptId = null;

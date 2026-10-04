@@ -116,6 +116,31 @@ public class RemoteTerminalPluginTest {
         return owner;
     }
 
+    @Test public void readinessDistinguishesSavedPendingAuthenticatedAndDisconnectedWithoutDialing() throws Exception {
+        android.content.Context context = RuntimeEnvironment.getApplication();
+        JSONObject host = new JSONObject().put("id", "host").put("name", "Fixture").put("address", "localhost")
+                .put("port", 7768).put("fingerprint", "host").put("clientId", "client")
+                .put("tokenCiphertext", "private-token").put("tokenIv", "private-iv");
+        Files.writeString(new java.io.File(context.getNoBackupFilesDir(), "remote_terminal_hosts_v1.json").toPath(),
+                new JSONObject().put("host", host).toString());
+        Call saved = new Call(); plugin.readiness(saved); shadowOf(Looper.getMainLooper()).idle();
+        assertEquals(1, saved.values.get(0).getInt("paired"));
+        assertEquals(0, saved.values.get(0).getInt("connected"));
+        assertTrue(owners.isEmpty());
+        Wire wire = new Wire(); install(wire);
+        Call pending = new Call(); plugin.readiness(pending); shadowOf(Looper.getMainLooper()).idle();
+        assertEquals(0, pending.values.get(0).getInt("connected")); assertTrue(wire.sent.isEmpty());
+        wire.open(); wire.auth(null);
+        Call connected = new Call(); plugin.readiness(connected); shadowOf(Looper.getMainLooper()).idle();
+        assertEquals(1, connected.values.get(0).getInt("connected"));
+        assertEquals(2, connected.values.get(0).length());
+        assertFalse(connected.values.get(0).toString().contains("private"));
+        assertEquals(1, wire.sent.size()); // Only the explicit fixture authentication, no readiness request.
+        plugin.handleOnStop();
+        Call stopped = new Call(); plugin.readiness(stopped); shadowOf(Looper.getMainLooper()).idle();
+        assertEquals(0, stopped.values.get(0).getInt("connected"));
+    }
+
     @Test public void eightConcurrentConnectsJoinOneAuthentication() throws Exception {
         Wire wire = new Wire();
         install(wire);
