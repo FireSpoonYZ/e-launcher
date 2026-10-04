@@ -823,6 +823,98 @@ public final class ChatStore {
         if (archivedAt != 0) target.put("archivedAt", archivedAt);
     }
 
+    /** The backup transaction shares the same lock as history and attachment garbage collection. */
+    static Object backupLock() { return STORE_LOCK; }
+
+    JSONObject backupSnapshot(String id) throws Exception {
+        synchronized (STORE_LOCK) {
+            JSONObject item = conversationIndex().optJSONObject(id);
+            if (item == null) throw new IllegalArgumentException("会话不存在 / Conversation not found");
+            ConversationTree tree = tree(id);
+            JSONArray nativeNodes = new JSONArray();
+            for (String node : preferences.getStringSet("pi_nodes_" + id, java.util.Collections.emptySet()))
+                if (tree.node(node) != null) nativeNodes.put(node);
+            return new JSONObject().put("tree", encodeTree(tree)).put("title", item.optString("title", "新对话"))
+                    .put("created", item.optLong("created")).put("updated", item.optLong("updated"))
+                    .put("sourceArchivedAt", item.optLong("archivedAt")).put("draft", draft(id))
+                    .put("draftAttachments", AttachmentStore.json(draftAttachments(id)))
+                    .put("selection", new JSONObject(piSelection(id))).put("piNodes", nativeNodes);
+        }
+    }
+
+    static void validateBackupSnapshot(JSONObject snapshot) throws Exception {
+        JSONObject envelope = snapshot.getJSONObject("tree");
+        if (envelope.getInt("version") != 1) throw new IllegalArgumentException("Unsupported conversation tree");
+        JSONArray values = envelope.getJSONArray("nodes");
+        if (values.length() > 10000) throw new IllegalArgumentException("Too many conversation nodes");
+        List<ConversationTree.Node> nodes = new ArrayList<>();
+        for (int i = 0; i < values.length(); i++) {
+            JSONObject value = values.getJSONObject(i);
+            String id = value.getString("id");
+            if (id.isEmpty() || id.length() > 128) throw new IllegalArgumentException("Invalid node identity");
+            AgentLoop.Message message = readMessage(value);
+            if (!java.util.Arrays.asList("system", "user", "assistant", "tool").contains(message.role))
+                throw new IllegalArgumentException("Invalid message role");
+            nodes.add(new ConversationTree.Node(value.optString("parent_id", null), message));
+        }
+        ConversationTree tree = new ConversationTree(nodes, envelope.optString("leaf", null));
+        AttachmentStore.parse(snapshot.getJSONArray("draftAttachments").toString());
+        JSONArray nativeNodes = snapshot.getJSONArray("piNodes");
+        if (nativeNodes.length() > values.length()) throw new IllegalArgumentException("Invalid Pi nodes");
+        java.util.Set<String> unique = new java.util.HashSet<>();
+        for (int i = 0; i < nativeNodes.length(); i++) {
+            String id = nativeNodes.getString(i);
+            if (tree.node(id) == null || !unique.add(id)) throw new IllegalArgumentException("Invalid Pi node");
+        }
+        if (snapshot.getString("title").length() > 1000) throw new IllegalArgumentException("Title too long");
+        snapshot.getString("draft");
+        JSONObject selection = snapshot.getJSONObject("selection");
+        java.util.Iterator<String> keys = selection.keys();
+        while (keys.hasNext()) {
+            String key = keys.next();
+            if (!java.util.Arrays.asList("provider", "model", "thinkingLevel").contains(key)
+                    || !(selection.get(key) instanceof String) || selection.getString(key).length() > 1000)
+                throw new IllegalArgumentException("Invalid model selection");
+        }
+    }
+
+    /** Files must already be complete. One index commit makes the entire clone visible. */
+    void commitRestoredBackup(String id, JSONObject snapshot) throws Exception {
+        synchronized (STORE_LOCK) {
+            validateBackupSnapshot(snapshot);
+            JSONObject index = conversationIndex();
+            if (index.has(id)) throw new IllegalStateException("Restore destination already exists");
+            String oldIndex = preferences.getString("conversations", null);
+            JSONObject item = new JSONObject().put("title", snapshot.getString("title"))
+                    .put("created", snapshot.optLong("created", System.currentTimeMillis()))
+                    .put("updated", snapshot.optLong("updated", System.currentTimeMillis()));
+            // A restored copy is active, never subject to an old archive deadline, and never auto-runs.
+            if (snapshot.getJSONObject("tree").getJSONArray("nodes").length() == 0) item.put("draft_only", true);
+            index.put(id, item);
+            java.util.Set<String> nodes = new java.util.HashSet<>();
+            JSONArray nativeNodes = snapshot.getJSONArray("piNodes");
+            for (int i = 0; i < nativeNodes.length(); i++) nodes.add(nativeNodes.getString(i));
+            if (!preferences.edit().putString(historyKey(id), snapshot.getJSONObject("tree").toString())
+                    .putString("draft_" + id, snapshot.getString("draft"))
+                    .putString("draft_attachments_" + id, snapshot.getJSONArray("draftAttachments").toString())
+                    .putString("pi_selection_" + id, snapshot.getJSONObject("selection").toString())
+                    .putStringSet("pi_nodes_" + id, nodes)
+                    .putString("conversations", index.toString()).commit()) {
+                boolean rolledBack = preferences.edit().putString("conversations", oldIndex)
+                        .remove(historyKey(id)).remove("draft_" + id).remove("draft_attachments_" + id)
+                        .remove("pi_selection_" + id).remove("pi_nodes_" + id).commit();
+                if (!rolledBack) throw new BackupCommitUncertainException();
+                throw new java.io.IOException("无法提交恢复，已回滚 / Restore commit failed and was rolled back");
+            }
+        }
+    }
+
+    static final class BackupCommitUncertainException extends java.io.IOException {
+        BackupCommitUncertainException() {
+            super("存储提交与回滚均失败，文件已保留，请重启检查 / Storage commit and rollback failed; files retained");
+        }
+    }
+
     private static String truncateArguments(String value) {
         return value.length() <= MAX_TOOL_ARGUMENTS ? value : value.substring(0, MAX_TOOL_ARGUMENTS);
     }

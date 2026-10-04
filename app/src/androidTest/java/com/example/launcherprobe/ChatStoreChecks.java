@@ -50,6 +50,11 @@ public final class ChatStoreChecks extends Instrumentation {
     @Override public void onStart() {
         Bundle result = new Bundle();
         try {
+            if ("conversation-backup".equals(featureCheck)) {
+                result.putString("stream", ConversationBackupChecks.run(storageContext()) + "\n");
+                finish(Activity.RESULT_OK, result);
+                return;
+            }
             if ("chat-persistence".equals(featureCheck)) {
                 result.putString("stream", ChatPersistenceChecks.run(this) + "\n");
                 finish(Activity.RESULT_OK, result);
