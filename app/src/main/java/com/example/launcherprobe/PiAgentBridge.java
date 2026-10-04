@@ -346,7 +346,13 @@ final class PiAgentBridge {
             JSONObject response = new JSONObject().put("type", "shower_response")
                     .put("id", requestId).put("callId", callId);
             try {
-                response.put("result", showerTools.execute(conversationId, arguments));
+                response.put("result", showerTools.execute(conversationId, arguments, waiting -> {
+                    try {
+                        // The request-owned listener posts to main; never take the bridge lock under the display lock.
+                        request.listener.event(new JSONObject().put("type", "shower_wait")
+                                .put("callId", callId).put("waiting", waiting));
+                    } catch (org.json.JSONException ignored) { }
+                }));
             } catch (Exception exception) {
                 response.put("error", exception.getMessage() == null
                         ? exception.getClass().getSimpleName() : exception.getMessage());
@@ -471,7 +477,8 @@ final class PiAgentBridge {
         requests.clear();
         for (Map.Entry<String, Request> item : failed.entrySet()) try {
             item.getValue().listener.event(new JSONObject().put("id", item.getKey()).put("type", "error")
-                    .put("message", message));
+                    .put("message", message + "。外部操作可能已完成，请勿重发原请求。")
+                    .put("reason", "runtime_disconnected"));
             item.getValue().listener.event(new JSONObject().put("id", item.getKey()).put("type", "end")
                     .put("status", "error"));
         } catch (Exception ignored) { }

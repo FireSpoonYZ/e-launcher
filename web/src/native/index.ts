@@ -6,7 +6,9 @@ export type Message = { id: string; role: 'system'|'user'|'assistant'|'tool'; co
 export type ConversationNode = { id: string; parentId: string|null; message: Message };
 export type Conversation = { id: string; leaf: string|null; nodes: ConversationNode[]; draft: string; draftAttachments: Attachment[]; piSelection: Record<string, unknown>; archivedAt?: number };
 export type ConversationSummary = { id: string; title: string; updated: number; snippet?: string; archivedAt?: number };
-export type ActiveRun = { conversationId: string; requestId: string; status: string; message: string };
+export type ExecutionState = {phase: string; message?: string; toolName?: string; attempt?: number; maxAttempts?: number; delayMs?: number};
+export type RecoveryState = {needed: boolean; prepared: boolean};
+export type ActiveRun = { conversationId: string; requestId: string; status: string; message: string; execution?: ExecutionState };
 export type ExtensionWidget = { key: string; placement: 'aboveEditor'|'belowEditor'; lines: string[] };
 export type ExtensionStatus = { key: string; text: string };
 export type ExtensionNotification = { id: number; type: string; message: string };
@@ -27,7 +29,7 @@ export type ExtensionUiState = {
   todo?: TodoSnapshot|null;
   askUser?: AskUserQuestionnaire|null;
 };
-export type ChatSnapshot = { error?: string; status?: string; sequence: number; running: boolean; requestId: string|null; conversationId: string; conversation: Conversation; activeRuns: ActiveRun[]; extensionUi: ExtensionUiState };
+export type ChatSnapshot = { execution?: ExecutionState; recovery?: RecoveryState; error?: string; status?: string; sequence: number; running: boolean; requestId: string|null; conversationId: string; conversation: Conversation; activeRuns: ActiveRun[]; extensionUi: ExtensionUiState };
 export type QuestionnaireReply = { questionnaireId: string; accepted: boolean; message?: string };
 export type NativeEvent<T = Record<string, unknown>> = { sequence?: number; type: string; conversationId?: string; requestId?: string|null; nodeId?: string|null; payload?: T; [key: string]: unknown };
 export type Listener = (event: NativeEvent) => void;
@@ -51,6 +53,8 @@ export interface ChatPlugin {
   /** UI node taps only preview locally. Call this only for explicit continue/edit. User edit selects its parent and copies text to draft. */
   selectNode(options: {conversationId: string; nodeId: string; edit?: boolean}): Promise<Conversation>;
   send(options: {conversationId: string; text: string; submissionId?: string}): Promise<{accepted: boolean; requestId: string|null}>;
+  /** Acknowledges only the selected interrupted history. Does not start Pi or send/replay a prompt. */
+  prepareRecovery(options: {conversationId: string; expectedLeaf: string}): Promise<ChatSnapshot>;
   cancel(options: {conversationId: string}): Promise<void>;
   /** Rejects immediately when the conversation, run, questionnaire, answer kind, or selected option is stale/invalid. */
   submitQuestionnaire(options: {conversationId: string; requestId: string; questionnaireId: string} & AskUserQuestionnaireResult): Promise<void>;

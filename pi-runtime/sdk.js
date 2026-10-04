@@ -10,6 +10,7 @@ import { InMemoryCredentialStore, getSupportedThinkingLevels } from "@earendil-w
 import undici from "./node_modules/@earendil-works/pi-coding-agent/node_modules/undici/index.js";
 import { getThemeByName } from "./node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/theme.js";
 import { toAgentHistory } from "./index.js";
+import { createExecutionStatus } from "./execution-status.js";
 import { mcpOptions, mcpQuery } from "./mcp.js";
 import { clearExtensionCache } from "./node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/loader.js";
 import {
@@ -270,8 +271,10 @@ export async function createSdkRuntime(command, signal, resourceLoaderOptions) {
     await s.withHttp(() => session.bindExtensions({ uiContext:uiBridge.ui }));
     uiReady = true;
     let eventQueue = Promise.resolve(), eventError;
+    const executionStatus = createExecutionStatus(emit);
     session.subscribe((event) => {
       eventQueue = eventQueue.then(async () => {
+        executionStatus(event);
         if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
           emit({ type: "text_delta", delta: event.assistantMessageEvent.delta });
         } else if (event.type === "message_end" && event.message.role === "assistant") {
@@ -297,8 +300,6 @@ export async function createSdkRuntime(command, signal, resourceLoaderOptions) {
         } else if (event.type === "tool_execution_end") {
           emit({ type: "tool_end", toolCallId: event.toolCallId, name: event.toolName,
             result: event.result, isError: event.isError });
-        } else if (event.type === "auto_retry_start" || event.type === "auto_compaction_start") {
-          emit({ type: "status", message: event.type === "auto_retry_start" ? "Pi 正在重试" : "Pi 正在压缩上下文" });
         }
       }).catch((error) => { eventError ??= error; });
     });
@@ -337,6 +338,7 @@ export async function createSdkRuntime(command, signal, resourceLoaderOptions) {
             await dispose();
           }
         }
+        executionStatus({ type: "end" });
         emit({ type: "end", status });
       },
     };

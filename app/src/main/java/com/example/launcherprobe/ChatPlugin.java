@@ -125,6 +125,13 @@ public final class ChatPlugin extends Plugin {
         } catch (Exception exception) { reject(call, exception); }
     }
 
+    @PluginMethod public void prepareRecovery(PluginCall call) {
+        try {
+            coordinator.prepareRecovery(required(call, "conversationId"), required(call, "expectedLeaf"));
+            resolve(call, coordinator.snapshot());
+        } catch (Exception exception) { reject(call, exception); }
+    }
+
     @PluginMethod public void cancel(PluginCall call) {
         try { coordinator.cancel(required(call, "conversationId")); call.resolve(); }
         catch (Exception exception) { reject(call, exception); }

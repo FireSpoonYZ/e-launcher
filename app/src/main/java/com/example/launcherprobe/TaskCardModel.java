@@ -26,8 +26,11 @@ final class TaskCardModel {
         String model = card.optString("modelState");
         if (HomeQuestionnaire.liveQuestion(card) != null)
             return card.optBoolean("questionnairePending") ? "正在提交…" : "需要回答";
-        if ("working".equals(model)) return "正在执行";
+        JSONObject execution = card.optJSONObject("execution");
+        if ("working".equals(model)) return execution == null ? "正在执行" : execution.optString("message", "正在执行");
         if ("stopping".equals(model)) return "正在停止…";
+        if ("interrupted".equals(card.optString("runStatus")) || execution != null
+                && "interrupted".equals(execution.optString("phase"))) return "运行已中断 · 查看对话恢复";
         if ("error".equals(card.optString("runStatus"))) return "执行失败";
         if ("aborted".equals(card.optString("runStatus"))) return "已停止";
         List<JSONObject> steps = tasks(card);

@@ -64,6 +64,20 @@ try {
     assert.equal(requests.at(-1).messages.filter((message) => ["system", "developer"].includes(message.role)).length, 1,
       "resumed history sends one system prompt");
   }
+  // An interrupted tail is historical text; the only new prompt is an explicit inspection request.
+  const beforeRecovery = requests.length, recoveryEvents = [];
+  const recovery = await createSdkRuntime({ config, sdkHistory:context, sdkHistoryTail:[
+    {role:"user",content:"Previously requested external action"},
+    {role:"assistant",content:"[历史工具调用（未重新执行）: pay; id=unknown]\\n结果未知，请先检查状态"},
+  ] });
+  recovery.subscribe(event => recoveryEvents.push(event));
+  await recovery.prompt("Inspect current state only; do not replay the previous request.");
+  assert.equal(requests.length, beforeRecovery + 1, "recovery starts only the explicit new prompt");
+  assert(!recoveryEvents.some(event => event.type === "tool_start"), "historical calls are never executed by recovery");
+  assert(JSON.stringify(requests.at(-1).messages.at(-1)).includes("Inspect current state only"));
+  assert(!requests.at(-1).messages.some(message => message.tool_calls?.length),
+    "unknown completed actions remain inert history rather than an executable tool queue");
+
   config.settings.defaultTools = ["+codemode"];
   config.settings.codemode = { mode: "only" };
   await (await createSdkRuntime({ config })).prompt("codemode only check");
