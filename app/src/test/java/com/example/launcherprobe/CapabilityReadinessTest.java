@@ -25,6 +25,20 @@ public class CapabilityReadinessTest {
         context = RuntimeEnvironment.getApplication();
         ShizukuState.running = false; ShizukuState.granted = false; ShizukuState.denied = false;
     }
+    @Test public void missingNodeExecutableNeverReportsPiInstalled() throws Exception {
+        java.io.File directory = java.nio.file.Files.createTempDirectory(context.getCacheDir().toPath(), "readiness-libraries").toFile();
+        assertTrue(new java.io.File(directory, "libnode.so").createNewFile());
+        assertTrue(new java.io.File(directory, "liblauncher_node.so").createNewFile());
+        String previous = context.getApplicationInfo().nativeLibraryDir;
+        try {
+            context.getApplicationInfo().nativeLibraryDir = directory.getAbsolutePath();
+            assertFalse(CapabilityReadiness.runtimeLibrariesPresent(directory.getAbsolutePath()));
+            assertFalse(CapabilityReadiness.device(context).getBoolean("piInstalled"));
+            assertTrue(new java.io.File(directory, "libnode_launcher.so").createNewFile());
+            assertTrue(CapabilityReadiness.runtimeLibrariesPresent(directory.getAbsolutePath()));
+        } finally { context.getApplicationInfo().nativeLibraryDir = previous; }
+    }
+
     @Test public void installedDoesNotImplyRunningGrantedOrTested() throws Exception {
         JSObject missing = CapabilityReadiness.device(context);
         assertFalse(missing.getBoolean("shizukuInstalled"));

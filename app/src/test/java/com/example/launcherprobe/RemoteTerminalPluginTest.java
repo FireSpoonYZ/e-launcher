@@ -121,8 +121,8 @@ public class RemoteTerminalPluginTest {
         JSONObject host = new JSONObject().put("id", "host").put("name", "Fixture").put("address", "localhost")
                 .put("port", 7768).put("fingerprint", "host").put("clientId", "client")
                 .put("tokenCiphertext", "private-token").put("tokenIv", "private-iv");
-        Files.writeString(new java.io.File(context.getNoBackupFilesDir(), "remote_terminal_hosts_v1.json").toPath(),
-                new JSONObject().put("host", host).toString());
+        Files.write(new java.io.File(context.getNoBackupFilesDir(), "remote_terminal_hosts_v1.json").toPath(),
+                new JSONObject().put("host", host).toString().getBytes(java.nio.charset.StandardCharsets.UTF_8));
         Call saved = new Call(); plugin.readiness(saved); shadowOf(Looper.getMainLooper()).idle();
         assertEquals(1, saved.values.get(0).getInt("paired"));
         assertEquals(0, saved.values.get(0).getInt("connected"));

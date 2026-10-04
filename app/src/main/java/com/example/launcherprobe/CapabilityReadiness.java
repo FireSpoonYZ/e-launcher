@@ -25,9 +25,7 @@ final class CapabilityReadiness {
                     ? "granted" : Shizuku.shouldShowRequestPermissionRationale() ? "denied" : "notGranted";
         } catch (RuntimeException unavailable) { permission = "unknown"; }
         String nativeDir = context.getApplicationInfo().nativeLibraryDir;
-        boolean runtime = nativeDir != null
-                && new File(nativeDir, "libnode.so").isFile()
-                && new File(nativeDir, "liblauncher_node.so").isFile()
+        boolean runtime = runtimeLibrariesPresent(nativeDir)
                 && asset(context, "pi-runtime.cjs")
                 && context.getAssets().list("pi-sdk").length > 0;
         String active = context.getSharedPreferences("chat", Context.MODE_PRIVATE).getString("active_chat", "legacy");
@@ -37,6 +35,12 @@ final class CapabilityReadiness {
         return new JSObject().put("piInstalled", runtime).put("showerInstalled", asset(context, "shower-server.jar"))
                 .put("shizukuInstalled", installed).put("shizukuRunning", running)
                 .put("shizukuPermission", permission).put("showerDisplayActive", display);
+    }
+
+    static boolean runtimeLibrariesPresent(String nativeDir) {
+        return nativeDir != null && new File(nativeDir, "libnode.so").isFile()
+                && new File(nativeDir, "liblauncher_node.so").isFile()
+                && new File(nativeDir, "libnode_launcher.so").isFile();
     }
 
     private static boolean asset(Context context, String name) {
