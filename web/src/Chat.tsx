@@ -9,6 +9,7 @@ import { pairToolResults, toolCallKey, type ToolResultPairs } from './toolResult
 import { ToolCallView } from './ToolCallView';
 import { ConfirmDialog, Dialog } from './components/ui/dialog';
 import { ThinkingControl } from './ThinkingControl';
+import { ExecutionStatus, RecoveryNotice } from './ExecutionStatus';
 import { ComposerPopover } from './ComposerPopover';
 import { useKeyboardVisible } from './useKeyboardVisible';
 import { ExtensionDock } from './ExtensionDock';
@@ -77,9 +78,10 @@ export function createChatStream(readSnapshot: () => Promise<ChatSnapshot>, upda
     } else if (event.type === 'extensionUi' && event.requestId === current.requestId) {
       commit({...current, sequence, extensionUi:event.payload as ExtensionUiState});
     } else {
-      if (event.type === 'error') update.error(String(event.payload?.message ?? ''));
-      if (event.type === 'runStatus') update.status(String(event.payload?.message ?? event.payload?.status ?? ''));
-      if (event.type === 'end') update.status('');
+      const currentRequest = !event.requestId || event.requestId === current.requestId;
+      if (currentRequest && event.type === 'error') update.error(String(event.payload?.message ?? ''));
+      if (currentRequest && event.type === 'runStatus') update.status(String(event.payload?.message ?? event.payload?.status ?? ''));
+      if (currentRequest && event.type === 'end') update.status('');
       void refresh();
     }
   };
@@ -172,6 +174,7 @@ export function ChatPage() {
   const [following, setFollowing] = useState(true);
   const [undo, setUndo] = useState<{id: string; title: string; reopen: boolean}|null>(null);
   const [removeCurrent, setRemoveCurrent] = useState(false);
+  const [recover, setRecover] = useState<{conversationId: string; expectedLeaf: string}>();
   const conversation = chat.snapshot?.conversation;
   useEffect(() => {
     if (!conversation) return;
@@ -215,12 +218,18 @@ export function ChatPage() {
     <footer className="composer-wrap">{!following && <button className="scroll-latest icon-button" aria-label={t('回到最新消息','Latest message')} onClick={() => setFollowing(true)}><ArrowDown/></button>}
       <ErrorNotice error={action.error || chat.error || configured.error}/>
       {archived && <ArchiveNotice archivedAt={conversation.archivedAt!} restoring={action.busy} onRestore={() => void restore(conversation.id)} onDelete={() => setRemoveCurrent(true)}/>}
-      {questionnaire && chat.snapshot.requestId ? <Questionnaire key={`${conversation.id}:${chat.snapshot.requestId}:${questionnaire.id}`} conversationId={conversation.id} requestId={chat.snapshot.requestId} questionnaire={questionnaire} reply={chat.questionnaireReply}/> : <>{running && <div className="run-status" role="status"><LoaderCircle className="spin" aria-hidden="true"/>Working</div>}
+      {questionnaire && chat.snapshot.requestId ? <Questionnaire key={`${conversation.id}:${chat.snapshot.requestId}:${questionnaire.id}`} conversationId={conversation.id} requestId={chat.snapshot.requestId} questionnaire={questionnaire} reply={chat.questionnaireReply}/> : <>{running && <ExecutionStatus execution={chat.snapshot.execution} fallback={chat.status}/>}
+      {!running && chat.snapshot.recovery?.needed && <RecoveryNotice prepared={chat.snapshot.recovery.prepared} disabled={archived || action.busy}
+        onPrepare={() => conversation.leaf && setRecover({conversationId:conversation.id, expectedLeaf:conversation.leaf})}
+        onHistory={() => navigate(`/history/${encodeURIComponent(conversation.id)}`)}/>}
+      {!running && !chat.snapshot.recovery?.needed && ['error','interrupted','aborted','truncated'].includes(chat.snapshot.execution?.phase ?? '') &&
+        <div className="run-status" role="status">{t('本轮未完成。检查记录和外部操作结果后，再输入新的要求。若提示 Pi 连接已关闭，请在 Android 应用信息中强行停止本应用后重新打开（不要清除数据）。','This run did not complete. Check the history and any external effects before sending new instructions. If the Pi connection is closed, force-stop this app in Android App info, then reopen it. Do not clear its data.')}</div>}
       <ExtensionDock conversationId={conversation.id} state={chat.snapshot.extensionUi} working={chat.snapshot.activeRuns.some(run => run.conversationId === conversation.id && run.status === 'running')}/>
       <ConversationComposer conversation={conversation} running={running} archived={archived} selection={selection} refresh={chat.refresh} showBranch onAccepted={() => setFollowing(true)}/></>}
       {undo && <div className="archive-undo" role="status"><span>{t(`“${undo.title}”已归档` , `“${undo.title}” archived`)}</span><button disabled={action.busy} onClick={() => void restore(undo.id, undo.reopen)}><Undo2/>{t('撤销','Undo')}</button></div>}
     </footer>
     <ConversationDrawer open={panel === 'conversations'} close={() => setPanel(null)} conversation={conversation} activeRuns={chat.snapshot.activeRuns} onChange={changed} onArchived={item => { offerUndo(item); void chat.refresh(); }}/>
+    <ConfirmDialog open={!!recover} title={t('准备中断恢复？','Prepare interrupted context?')} description={t('外部操作可能已完成，结果也可能未保存。已保存上下文和中断记录会保留；准备后请手动输入下一步并发送；下一次请求会要求模型先只读检查状态，并禁止重放原请求。现有草稿和附件不会改动。','External actions may already have completed without a saved result. Saved context and interrupted history are retained. Enter new instructions and send manually. The next request asks the model to inspect state read-only and forbids replaying the old request. Your draft and attachments are preserved.')} onCancel={() => setRecover(undefined)} onConfirm={() => action.run(async () => { if (!recover) return; await Chat.prepareRecovery(recover); setRecover(undefined); await chat.refresh(); })}/>
     {panel === 'models' && <ModelSheet conversation={conversation} disabled={running} close={() => setPanel(null)} onChange={chat.refresh}/>}
     <ConfirmDialog open={removeCurrent} title={t('永久删除会话？','Delete conversation forever?')} description={t('会话及所有分支、工作区将被删除，无法恢复。','This conversation, its branches, and workspace will be permanently deleted.')} danger onCancel={() => setRemoveCurrent(false)} onConfirm={() => action.run(async () => { await Chat.deleteConversation({conversationId:conversation.id}); setRemoveCurrent(false); await chat.refresh(); })}/>
   </main>;

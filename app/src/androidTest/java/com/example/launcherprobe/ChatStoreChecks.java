@@ -55,6 +55,11 @@ public final class ChatStoreChecks extends Instrumentation {
                 finish(Activity.RESULT_OK, result);
                 return;
             }
+            if ("task-recovery-seed".equals(featureCheck) || "task-recovery-verify".equals(featureCheck)) {
+                result.putString("stream", TaskRecoveryDeviceChecks.run(this, featureCheck) + "\n");
+                finish(Activity.RESULT_OK, result);
+                return;
+            }
             if ("share-intake".equals(featureCheck) || "share-ui".equals(featureCheck) || "notifications".equals(featureCheck)
                     || "voice-continuity".equals(featureCheck) || "search-consistency".equals(featureCheck)) {
                 result.putString("stream", ("share-intake".equals(featureCheck)

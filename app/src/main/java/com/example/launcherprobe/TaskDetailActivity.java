@@ -222,8 +222,10 @@ public final class TaskDetailActivity extends ComponentActivity {
         long created = card.optLong("created");
         info("创建时间", created == 0 ? "旧会话未记录" : android.text.format.DateFormat.format("M月d日 HH:mm", created).toString());
         info("运行方式", "后台运行");
+        if (card.optJSONObject("recovery") != null && card.optJSONObject("recovery").optBoolean("needed"))
+            info("中断恢复", "已保存记录保留，外部操作结果可能未知。打开对话准备续接，先检查状态。");
         String error = card.optString("error");
-        if (!error.isEmpty() && "error".equals(card.optString("runStatus"))) { TextView warning = label(error, 13, colors.error); warning.setPadding(0, dp(8), 0, dp(8)); content.addView(warning); }
+        if (!error.isEmpty() && ("error".equals(card.optString("runStatus")) || "interrupted".equals(card.optString("runStatus")))) { TextView warning = label(error, 13, colors.error); warning.setPadding(0, dp(8), 0, dp(8)); content.addView(warning); }
         if (!card.optString("result").isEmpty()) {
             TextView toggle = label(replyExpanded ? "收起最新回复" : "查看最新回复", 13, colors.accent);
             toggle.setMinHeight(dp(40)); toggle.setGravity(Gravity.CENTER_VERTICAL); toggle.setFocusable(true);

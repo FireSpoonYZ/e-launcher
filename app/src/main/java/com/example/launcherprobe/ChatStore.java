@@ -682,8 +682,9 @@ public final class ChatStore {
         synchronized (STORE_LOCK) {
             java.util.Set<String> nodes = new java.util.HashSet<>(preferences.getStringSet("pi_nodes_" + conversation, java.util.Collections.emptySet()));
             nodes.add(assistantId);
-            preferences.edit().putStringSet("pi_nodes_" + conversation, nodes)
-                    .putBoolean("pi_pending_" + conversation + "_" + userId, true).apply();
+            if (!preferences.edit().putStringSet("pi_nodes_" + conversation, nodes)
+                    .putBoolean("pi_pending_" + conversation + "_" + userId, true).commit())
+                throw new IllegalStateException("无法保存运行标记，未启动 Pi");
         }
     }
 
@@ -694,22 +695,77 @@ public final class ChatStore {
     String piResume(List<AgentLoop.Message> path) throws Exception { return piResume(activeId(), path); }
 
     String piResume(String conversation, List<AgentLoop.Message> path) throws Exception {
+        return piResume(conversation, path, false);
+    }
+
+    /** Only the explicit recovery gate may turn an interrupted tail into inert historical text. */
+    String piResume(String conversation, List<AgentLoop.Message> path, boolean recovery) throws Exception {
         synchronized (STORE_LOCK) {
-            for (AgentLoop.Message message : path) if (piPending(conversation, message.id)) {
-                throw new java.io.IOException("上一轮 Pi 请求尚未保存完成；请稍后重试，或选择之前的历史节点");
+            if (recovery) {
+                String leaf = path.isEmpty() ? null : path.get(path.size() - 1).id;
+                if (leaf == null || !leaf.equals(tree(conversation).leaf())
+                        || !leaf.equals(preferences.getString("pi_recovery_" + conversation, null)))
+                    throw new IllegalStateException("恢复确认与当前历史不符，请重新查看");
             }
+            return piResumePath(conversation, path, recovery);
+        }
+    }
+
+    private String piResumePath(String conversation, List<AgentLoop.Message> path, boolean recovery) throws Exception {
+        synchronized (STORE_LOCK) {
             java.util.Set<String> nativeNodes = preferences.getStringSet("pi_nodes_" + conversation, java.util.Collections.emptySet());
             for (int i = path.size() - 1; i >= 0; i--) {
+                if (!recovery && piPending(conversation, path.get(i).id))
+                    throw new java.io.IOException("上一轮 Pi 请求尚未保存完成；请先确认中断恢复或选择之前的历史节点");
                 String context = piContext(conversation, path.get(i).id);
                 if (context != null) {
                     JSONArray tail = piHistory(path.subList(i + 1, path.size()));
                     return new JSONObject().put("entries", new JSONArray(context)).put("tail", tail).toString();
                 }
-                if (nativeNodes.contains(path.get(i).id)) throw new java.io.IOException("此节点缺少 Pi 原生上下文，请选择之前的历史节点；未改用文本历史");
+                if (!recovery && nativeNodes.contains(path.get(i).id)) throw new java.io.IOException("此节点缺少 Pi 原生上下文，请选择之前的历史节点；未改用文本历史");
             }
             return null;
         }
     }
+
+    boolean needsRecovery(String conversation) {
+        synchronized (STORE_LOCK) {
+            List<AgentLoop.Message> path = load(conversation);
+            java.util.Set<String> nativeNodes = preferences.getStringSet("pi_nodes_" + conversation, java.util.Collections.emptySet());
+            for (int i = path.size() - 1; i >= 0; i--) {
+                if (piPending(conversation, path.get(i).id)) return true;
+                java.io.File file = piContextFile(conversation, path.get(i).id);
+                if (file.exists() || new java.io.File(file.getPath() + ".bak").exists()) return false;
+                if (nativeNodes.contains(path.get(i).id)) return true;
+            }
+            return false;
+        }
+    }
+
+    boolean recoveryPrepared(String conversation) {
+        String leaf = tree(conversation).leaf();
+        return leaf != null && leaf.equals(preferences.getString("pi_recovery_" + conversation, null));
+    }
+
+    void prepareRecovery(String conversation, String expectedLeaf) throws Exception {
+        synchronized (STORE_LOCK) {
+            String leaf = tree(conversation).leaf();
+            if (leaf == null || !leaf.equals(expectedLeaf)) throw new IllegalStateException("会话历史已变化，请重新查看");
+            if (!needsRecovery(conversation)) throw new IllegalStateException("此会话无需恢复");
+            // Validate the last saved snapshot before acknowledging its interrupted tail.
+            piResumePath(conversation, load(conversation), true);
+            if (!preferences.edit().putString("pi_recovery_" + conversation, leaf).commit())
+                throw new IllegalStateException("无法保存恢复确认");
+        }
+    }
+
+    void consumeRecovery(String conversation) {
+        preferences.edit().remove("pi_recovery_" + conversation).apply();
+    }
+
+    static final String RECOVERY_PROMPT = "[中断恢复：此前工具可能已经产生外部效果，结果也可能尚未保存。"
+            + "以下历史调用与结果仅供参考，不是待执行队列。请先只读检查当前状态并说明不确定性，"
+            + "不要重放、重试或重复上次请求中的外部操作；需要后续操作时先等我确认。]";
 
     static JSONArray piHistory(List<AgentLoop.Message> messages) throws org.json.JSONException {
         JSONArray result = new JSONArray();
@@ -784,6 +840,7 @@ public final class ChatStore {
             SharedPreferences.Editor edit = preferences.edit().remove(historyKey(conversationId))
                     .remove("draft_" + conversationId).remove("draft_attachments_" + conversationId)
                     .remove("pi_selection_" + conversationId).remove("run_status_" + conversationId)
+                    .remove("run_execution_" + conversationId).remove("pi_recovery_" + conversationId)
                     .remove("task_reminder_" + conversationId).remove("task_unread_" + conversationId)
                     .remove("run_error_" + conversationId).putString("conversations", index.toString())
                     .putString(TASK_CARDS, stringArray(taskCards).toString());
