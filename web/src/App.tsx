@@ -5,11 +5,11 @@ import { HashRouter, Navigate, Route, Routes, useLocation } from 'react-router-d
 import { Device, type DeviceState } from './native';
 import { Environment, Loading, useBack } from './ui';
 import { ArchivedPage, ChatPage, HistoryPage } from './Chat';
+import { BackupsPage } from './Backups';
 import { SettingsHome, GeneralPage, AppearancePage, DevicePage, AboutPage, VoicePage } from './Settings';
 import { ProvidersPage, ResourcesPage } from './Resources';
 import { AdvancedPage, EditorPage } from './Editor';
 import { SchedulesPage, ScheduleHistoryPage } from './Schedules';
-import { BackupsPage } from './Backups';
 const TerminalsPage = lazy(() => import('./RemoteTerminal').then(module => ({default: module.TerminalsPage})));
 const TerminalPage = lazy(() => import('./RemoteTerminal').then(module => ({default: module.TerminalPage})));
 

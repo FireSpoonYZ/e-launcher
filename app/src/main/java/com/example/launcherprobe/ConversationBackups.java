@@ -281,6 +281,7 @@ final class ConversationBackups {
 
     private void validateAttachments(Object value, ConversationBackupArchive.Unpacked unpacked, Set<String> referenced) throws Exception {
         walkAttachments(value, attachment -> {
+            requireAttachmentMetadata(attachment);
             ChatAttachment item = ChatAttachment.fromJson(attachment);
             String path = "attachments/" + item.id;
             File file = unpacked.files.get(path);

@@ -374,6 +374,33 @@ public class ConversationBackupsTest {
         }
     }
 
+    @Test public void portableReferencesStillRequireStrictRuntimeCompatibleMetadata() throws Exception {
+        store.save(Collections.singletonList(message("user", "user", "valid tree", Collections.emptyList())));
+        for (String corruption : Arrays.asList("mime", "name", "kind", "unsupported-kind", "fraction", "zero", "oversized", "image-mime")) {
+            String id = UUID.randomUUID().toString();
+            File directory = new File(context.getCacheDir(), UUID.randomUUID().toString()); directory.mkdir();
+            File payload = new File(directory, "payload");
+            long size = corruption.equals("zero") ? 0 : corruption.equals("oversized") ? AttachmentStore.MAX_BYTES + 1 : 1;
+            try (RandomAccessFile file = new RandomAccessFile(payload, "rw")) { file.setLength(size); }
+            JSONObject metadata = new ChatAttachment(id, "file.txt", "text/plain", "file", size, "attachments/" + id).toJson();
+            if (corruption.equals("mime")) metadata.remove("mimeType");
+            if (corruption.equals("name")) metadata.remove("name");
+            if (corruption.equals("kind")) metadata.remove("kind");
+            if (corruption.equals("unsupported-kind")) metadata.put("kind", "video");
+            if (corruption.equals("fraction")) metadata.put("size", 1.5);
+            if (corruption.equals("image-mime")) metadata.put("kind", "image");
+            JSONObject snapshot = store.backupSnapshot(store.activeId()).put("draftAttachments", new JSONArray().put(metadata));
+            File conversation = new File(directory, "conversation.json"); writeUtf8(conversation.toPath(), snapshot.toString());
+            Map<String, File> sources = new LinkedHashMap<>();
+            sources.put("conversation.json", conversation); sources.put("attachments/" + id, payload);
+            File archive = new File(directory, "invalid.zip");
+            ConversationBackupArchive.pack(archive, sources, new JSONObject().put("title", "invalid").put("workspace", false).put("nodes", 1));
+            assertThrows(corruption, IOException.class, () -> backups.prepareImport(new FileInputStream(archive)));
+            assertEquals(1, store.conversations().size());
+            ConversationBackupArchive.deleteTree(directory);
+        }
+    }
+
     @Test public void rejectsLenientJsonDepthBypassAndDuplicateKeys() throws Exception {
         String attack = "{'x':'\"', 'deep':" + "[".repeat(1000) + "0" + "]".repeat(1000) + ", 'y':'\"'}";
         assertThrows(IOException.class, () -> ConversationBackupArchive.object(attack.getBytes(StandardCharsets.UTF_8)));
