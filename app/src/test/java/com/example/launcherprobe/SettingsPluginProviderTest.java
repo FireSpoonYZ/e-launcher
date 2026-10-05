@@ -113,6 +113,27 @@ public class SettingsPluginProviderTest {
         assertTrue(opened.result.getString("source").contains("fixture-token"));
     }
 
+    @Test public void readinessOnlyExposesConfigPresenceAndInvalidatesOnCredentialChanges() throws Exception {
+        store.save(false, "settings.json", "{\"defaultProvider\":\"fixture\",\"defaultModel\":\"model\"}", null);
+        store.save(false, "models.json", "{\"providers\":{\"fixture\":{\"apiKey\":\"inline-secret\",\"headers\":{\"Authorization\":\"header-secret\"}}}}", null);
+        RecordingCall first = new RecordingCall("readiness", new JSObject());
+        plugin.readiness(first);
+        assertNull(first.error);
+        assertTrue(first.result.getBoolean("selectionConfigured"));
+        assertTrue(first.result.getBoolean("credentialSaved"));
+        assertEquals(5, first.result.length());
+        assertFalse(first.result.toString().contains("secret"));
+        store.save(false, "auth.json", "{\"fixture\":{\"type\":\"api_key\",\"key\":\"rotated-secret\"}}", null);
+        RecordingCall changed = new RecordingCall("readiness", new JSObject());
+        plugin.readiness(changed);
+        assertNotEquals(first.result.getString("revision"), changed.result.getString("revision"));
+        store.save(false, "settings.json", "{}", null);
+        RecordingCall empty = new RecordingCall("readiness", new JSObject());
+        plugin.readiness(empty);
+        assertFalse(empty.result.getBoolean("selectionConfigured"));
+        assertFalse(empty.result.getBoolean("credentialSaved"));
+    }
+
     private static void assertName(JSONObject definition, String name) throws Exception {
         if (name == null || name.trim().isEmpty()) assertFalse("Optional blank name must be omitted", definition.has("name"));
         else assertEquals(name, definition.getString("name"));

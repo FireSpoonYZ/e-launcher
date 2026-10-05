@@ -123,3 +123,21 @@ test('snapshot handshake replays uncovered deltas and preserves covered question
   assert.equal(h.reads, 1);
   assert.equal(h.commits.at(-1).sequence, 12);
 });
+
+test('late status and errors from an old request never flash over a newer request', async () => {
+  const h = harness();
+  await h.stream.refresh();
+  const beforeErrors = h.errors.length, beforeStatuses = h.statuses.length;
+  h.server = {...h.server,sequence:11};
+  h.stream.receive({sequence:11,type:'runStatus',conversationId:'front',requestId:'old-run',payload:{message:'Old retry'}});
+  assert.equal(h.statuses.length,beforeStatuses);
+  await settle();
+  h.server = {...h.server,sequence:12};
+  const afterRefreshErrors = h.errors.length;
+  h.stream.receive({sequence:12,type:'error',conversationId:'front',requestId:'old-run',payload:{message:'Old error'}});
+  assert.equal(h.errors.length,afterRefreshErrors);
+  await settle();
+  assert(!h.statuses.includes('Old retry'));
+  assert(!h.errors.includes('Old error'));
+  assert(beforeErrors > 0);
+});

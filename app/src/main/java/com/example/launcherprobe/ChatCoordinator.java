@@ -50,11 +50,61 @@ final class ChatCoordinator {
     private ChatCoordinator(Context context) {
         this.context = context;
         store = new ChatStore(context);
+        recoverInterruptedRuns();
         ArchiveCleanupScheduler.schedule(context);
+    }
+
+    /** Runs once for the process owner, never when disposable ChatStore observers are created. */
+    private void recoverInterruptedRuns() {
+        android.content.SharedPreferences prefs = context.getSharedPreferences("chat", Context.MODE_PRIVATE);
+        List<ChatStore.Conversation> conversations = new ArrayList<>(store.conversations());
+        conversations.addAll(store.archivedConversations());
+        for (ChatStore.Conversation conversation : conversations) {
+            String id = conversation.id, status = prefs.getString("run_status_" + id, "");
+            if (!"running".equals(status) && !"stopping".equals(status)
+                    && !(status.isEmpty() && store.needsRecovery(id))) continue;
+            JSONObject previous = parseObject(prefs.getString("run_execution_" + id, "{}"));
+            String warning = "应用进程已结束，本轮运行已中断。工具可能已完成，结果尚未保存；恢复前请先检查当前状态。";
+            JSONObject interrupted = json("phase", "interrupted", "message", "运行已中断",
+                    "toolName", previous.optString("toolName"), "updatedAt", System.currentTimeMillis());
+            prefs.edit().putString("run_status_" + id, "interrupted")
+                    .putString("run_error_" + id, warning).putString("run_execution_" + id, interrupted.toString()).commit();
+        }
+    }
+
+    private void saveRunState(SessionRun run, boolean durable) {
+        android.content.SharedPreferences.Editor edit = context.getSharedPreferences("chat", Context.MODE_PRIVATE)
+                .edit().putString("run_status_" + run.conversationId, run.status)
+                .putString("run_execution_" + run.conversationId, run.execution.snapshot().toString());
+        if (durable) {
+            if (!edit.commit()) throw new IllegalStateException("无法保存运行标记，未启动 Pi");
+        } else edit.apply();
+    }
+
+    private JSONObject execution(String id, SessionRun run) {
+        return run == null ? parseObject(context.getSharedPreferences("chat", Context.MODE_PRIVATE)
+                .getString("run_execution_" + id, "{}")) : run.execution.snapshot();
+    }
+
+    private JSONObject recovery(String id) {
+        boolean available = !activeRuns.containsKey(id) && !terminatingRuns.containsKey(id)
+                && store.needsRecovery(id);
+        return json("needed", available, "prepared", available && store.recoveryPrepared(id));
+    }
+
+    synchronized void prepareRecovery(String id, String expectedLeaf) throws Exception {
+        if (!id.equals(store.activeId())) throw new IllegalStateException("会话已切换");
+        if (store.isArchived(id)) throw new IllegalStateException("请先恢复此会话");
+        if (activeRuns.containsKey(id) || terminatingRuns.containsKey(id))
+            throw new IllegalStateException("本轮尚未结束，请等待停止完成");
+        store.prepareRecovery(id, expectedLeaf);
+        // Preparation never starts Node, sends anything, or changes the draft/attachments.
+        emit(id, null, "recoveryPrepared", null, new JSONObject(), true);
     }
 
     ChatStore store() { return store; }
     boolean running() { return !activeRuns.isEmpty(); }
+    synchronized boolean backupBusy(String id) { return activeRuns.containsKey(id) || terminatingRuns.containsKey(id); }
     boolean running(String conversationId) { return activeRuns.containsKey(conversationId); }
     String requestId() {
         SessionRun run = activeRuns.get(store.activeId());
@@ -135,6 +185,9 @@ final class ChatCoordinator {
         if (prompt.isEmpty() && attachments.isEmpty()) throw new IllegalArgumentException("消息不能为空");
         AttachmentStore attachmentStore = new AttachmentStore(context);
         for (ChatAttachment attachment : attachments) attachmentStore.requireFile(attachment);
+        if (!activeRuns.containsKey(conversationId) && !terminatingRuns.containsKey(conversationId)
+                && store.needsRecovery(conversationId) && !store.recoveryPrepared(conversationId))
+            throw new IllegalStateException("本轮有未保存完整的记录。请先准备中断恢复，勿重发原请求。");
         SessionRun run;
         synchronized (runLock) {
             if (voiceRegistered != null) voiceConversationTitle(conversationId);
@@ -164,6 +217,7 @@ final class ChatCoordinator {
 
     private synchronized SessionRun registerRun(String conversationId, String submissionId, boolean background) {
         SessionRun run = new SessionRun(conversationId, UUID.randomUUID().toString());
+        run.recovery = store.recoveryPrepared(conversationId);
         run.extensionUi = parseObject(store.extensionUi(conversationId, store.load(conversationId)));
         // Questions belong to one live request, unlike durable todo snapshots.
         run.extensionUi.remove("askUser");
@@ -182,6 +236,7 @@ final class ChatCoordinator {
             try {
                 ChatExecutionService.setActiveCount(context, activeRuns.size());
                 store.showTaskCard(conversationId);
+                saveRunState(run, true);
             } catch (RuntimeException failure) {
                 activeRuns.remove(conversationId, run);
                 try { ChatExecutionService.setActiveCount(context, activeRuns.size()); }
@@ -257,7 +312,9 @@ final class ChatCoordinator {
             run.cancellation.cancel();
             if (run.bridge != null) run.bridge.abort(run.requestId);
             run.status = "stopping";
+            run.execution.stop();
             run.message = "正在停止…";
+            saveRunState(run, false);
             new TaskNotifications(context).cancel(conversationId);
         }
         emit(run, "runStatus", null, json("status", run.status, "message", run.message), true);
@@ -456,7 +513,8 @@ final class ChatCoordinator {
             }
         }
         return json("conversationId", conversationId, "title", conversation.title,
-                "modelState", modelState, "todo", todo == null ? JSONObject.NULL : todo,
+                "modelState", modelState, "execution", execution(conversationId, active),
+                "recovery", recovery(conversationId), "todo", todo == null ? JSONObject.NULL : todo,
                 "askUser", askUser == null ? JSONObject.NULL : askUser,
                 "requestId", active == null ? JSONObject.NULL : active.requestId,
                 "questionnairePending", askUser != null && active.questionnaireReplyPending != null,
@@ -480,7 +538,8 @@ final class ChatCoordinator {
                 .put("chatAttachmentRoot", new java.io.File(context.getFilesDir(), "chat-attachments").getAbsolutePath())
                 .toString();
         List<AgentLoop.Message> full = new ArrayList<>(store.load(run.conversationId));
-        String sdkHistory = store.piResume(run.conversationId, full);
+        String sdkHistory = store.piResume(run.conversationId, full, run.recovery);
+        String effectivePrompt = run.recovery ? ChatStore.RECOVERY_PROMPT + "\n\n" + text : text;
         List<AgentLoop.Message> prior = new ArrayList<>(full);
         AgentLoop.Message user = new AgentLoop.Message(UUID.randomUUID().toString(), "user", text, null,
                 Collections.emptyList(), false, attachments);
@@ -494,6 +553,7 @@ final class ChatCoordinator {
         List<AgentLoop.Message> work = new ArrayList<>(prior);
         work.add(user);
         run.persistence = new PiTurnPersistence(store, run.conversationId, user.id, run.assistantId, work);
+        if (run.recovery) store.consumeRecovery(run.conversationId);
         // The first widget refresh must see the new task's persisted user message.
         emit(run, "runStatus", null, json("status", "running", "message", run.message), true);
         emit(run, "snapshot", user.id, new JSONObject());
@@ -503,7 +563,7 @@ final class ChatCoordinator {
                 synchronized (runLock) {
                     if (!ownsRun(run) || run.cancellation.cancelled()) throw new InterruptedException("pi 启动已取消");
                     run.bridge = bridge;
-                    bridge.prompt(run.requestId, run.conversationId, config, text, attachments, sdkHistory,
+                    bridge.prompt(run.requestId, run.conversationId, config, effectivePrompt, attachments, sdkHistory,
                             prior, configStore, event -> main.post(() -> {
                                 if (ownsRun(run)) onPiEvent(event, run);
                                 else if (terminatingRuns.get(run.conversationId) == run) {
@@ -524,7 +584,7 @@ final class ChatCoordinator {
     }
 
     synchronized void foregroundServiceTimedOut() {
-        final String message = "Android 已停止超时的后台任务；返回应用后可重新发送";
+        final String message = "Android 已停止超时的后台任务。已保存的记录保留；工具可能已完成，请先检查状态，勿直接重发原请求。";
         List<SessionRun> interrupted;
         synchronized (runLock) {
             interrupted = new ArrayList<>(activeRuns.values());
@@ -540,6 +600,8 @@ final class ChatCoordinator {
                 synchronized (run.pendingDelta) { run.pendingDelta.setLength(0); }
                 activeRuns.remove(run.conversationId, run);
                 run.status = "aborted";
+                run.execution.finish("interrupted");
+                saveRunState(run, false);
                 run.message = "";
                 run.error = message;
                 recentResults.put(run.conversationId, new RunResult(run.status, run.error));
@@ -566,7 +628,8 @@ final class ChatCoordinator {
     synchronized void onTerminatingPiEvent(JSONObject event, SessionRun run) {
         if (terminatingRuns.get(run.conversationId) != run) return;
         Exception persistenceFailure = null;
-        try { run.persistence.accept(event); }
+        try { run.persistence.accept("end".equals(event.optString("type"))
+                ? json("type", "end", "status", event.optString("status"), "interrupted", true) : event); }
         catch (Exception exception) {
             persistenceFailure = exception;
             run.error = "Pi 会话未保存：" + detail(exception);
@@ -593,13 +656,20 @@ final class ChatCoordinator {
     synchronized void onPiEvent(JSONObject event, SessionRun run) {
         if (!ownsRun(run)) return;
         String type = event.optString("type");
+        String previousExecution = run.execution.snapshot().toString();
+        run.execution.accept(event);
+        if (!previousExecution.equals(run.execution.snapshot().toString())) {
+            run.message = run.execution.snapshot().optString("message");
+            saveRunState(run, false);
+        }
         JSONObject message = event.optJSONObject("message");
         if ("message".equals(type) && message != null && "assistant".equals(message.optString("role"))) {
             main.removeCallbacksAndMessages(run.persistence);
             synchronized (run.pendingDelta) { run.pendingDelta.setLength(0); }
         }
         Exception persistenceFailure = null;
-        try { run.persistence.accept(event); }
+        try { run.persistence.accept(run.interrupted && "end".equals(type)
+                ? json("type", "end", "status", event.optString("status"), "interrupted", true) : event); }
         catch (Exception exception) {
             persistenceFailure = exception;
             run.error = "Pi 会话未保存：" + detail(exception);
@@ -626,10 +696,12 @@ final class ChatCoordinator {
                     !String.valueOf(previousQuestion).equals(String.valueOf(askUser)));
         } else if ("tool_start".equals(type)) emit(run, "toolStart", null, event);
         else if ("tool_end".equals(type)) emit(run, "toolEnd", null, event);
-        else if ("status".equals(type)) {
-            run.status = "running";
-            run.message = event.optString("message", "正在回复…");
-            emit(run, "runStatus", null, event);
+        else if ("status".equals(type) || "shower_wait".equals(type)) {
+            if (!run.cancellation.cancelled()) {
+                run.message = event.has("phase") || "shower_wait".equals(type)
+                        ? run.execution.snapshot().optString("message") : event.optString("message", run.message);
+                emit(run, "runStatus", null, json("message", run.message, "execution", run.execution.snapshot()));
+            }
         } else if ("questionnaire_reply".equals(type)) {
             String questionnaireId = event.optString("questionnaireId");
             if (questionnaireId.equals(run.questionnaireReplyPending) && event.optBoolean("accepted"))
@@ -641,6 +713,7 @@ final class ChatCoordinator {
             emit(run, "questionnaireReply", null, event);
         } else if ("error".equals(type)) {
             run.error = event.optString("message");
+            if ("runtime_disconnected".equals(event.optString("reason"))) run.interrupted = true;
             emit(run, "error", null, event);
         } else if ("end".equals(type)) {
             flushPiDelta(true, run);
@@ -676,7 +749,9 @@ final class ChatCoordinator {
     private void endPersistence(SessionRun run, String status, Throwable original) {
         PiTurnPersistence persistence = run.persistence;
         if (persistence == null) return;
-        try { persistence.accept(new JSONObject().put("type", "end").put("status", status)); }
+        if (run.bridge != null || run.nodeRegistered) run.interrupted = true;
+        try { persistence.accept(new JSONObject().put("type", "end").put("status", status)
+                .put("interrupted", run.interrupted)); }
         catch (Exception saving) { original.addSuppressed(saving); }
     }
 
@@ -689,6 +764,8 @@ final class ChatCoordinator {
             if (!ownsRun(run)) return;
             if (error != null && !error.isEmpty()) run.error = error;
             run.status = status;
+            run.execution.finish(run.interrupted ? "interrupted" : status);
+            saveRunState(run, false);
             run.message = "";
             if (run.persistence != null) main.removeCallbacksAndMessages(run.persistence);
             synchronized (run.pendingDelta) { run.pendingDelta.setLength(0); }
@@ -722,15 +799,19 @@ final class ChatCoordinator {
         runs.sort(Comparator.comparing(value -> value.conversationId));
         JSONArray active = new JSONArray();
         for (SessionRun run : runs) active.put(json("conversationId", run.conversationId,
-                "requestId", run.requestId, "status", run.status, "message", run.message));
+                "requestId", run.requestId, "status", run.status, "message", run.message,
+                "execution", run.execution.snapshot()));
         JSONObject extensionUi = current == null
                 ? parseObject(store.extensionUi(activeId, store.load(activeId))) : current.extensionUi;
         return json("sequence", sequence.get(), "running", current != null,
                 "requestId", current == null ? JSONObject.NULL : current.requestId,
                 "conversationId", activeId, "conversation", NativeJson.conversation(store, activeId),
                 "activeRuns", active, "extensionUi", extensionUi,
-                "error", current != null ? current.error : recent == null ? "" : recent.error,
-                "status", current != null ? current.message : recent == null ? "" : recent.status);
+                "execution", execution(activeId, current), "recovery", recovery(activeId),
+                "error", current != null ? current.error : recent == null ? context.getSharedPreferences("chat", Context.MODE_PRIVATE)
+                        .getString("run_error_" + activeId, "") : recent.error,
+                "status", current != null ? current.message : recent == null ? context.getSharedPreferences("chat", Context.MODE_PRIVATE)
+                        .getString("run_status_" + activeId, "") : recent.status);
     }
 
     private void emit(SessionRun run, String type, String nodeId, JSONObject payload) {
@@ -766,6 +847,8 @@ final class ChatCoordinator {
     static final class SessionRun {
         boolean preserveDraft;
         boolean scheduled;
+        boolean recovery, interrupted;
+        final TaskExecutionState execution = new TaskExecutionState();
         final String conversationId;
         final String requestId;
         final AgentLoop.CancelToken cancellation = new AgentLoop.CancelToken();

@@ -145,10 +145,19 @@ final class ShowerController {
     }
 
     synchronized boolean awaitAutomation() throws InterruptedException {
+        return awaitAutomation(ignored -> { });
+    }
+
+    synchronized boolean awaitAutomation(java.util.function.Consumer<Boolean> waiting) throws InterruptedException {
         boolean waited = manualControl;
-        while (manualControl) wait();
-        if (Thread.currentThread().isInterrupted()) throw new InterruptedException("虚拟屏操作已取消");
-        return waited;
+        if (waited) waiting.accept(true);
+        try {
+            while (manualControl) wait();
+            if (Thread.currentThread().isInterrupted()) throw new InterruptedException("虚拟屏操作已取消");
+            return waited;
+        } finally {
+            if (waited) waiting.accept(false);
+        }
     }
 
     synchronized void touch(Preview current, android.view.MotionEvent event) throws Exception {

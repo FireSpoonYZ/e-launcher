@@ -5,10 +5,12 @@ import { HashRouter, Navigate, Route, Routes, useLocation } from 'react-router-d
 import { Device, type DeviceState } from './native';
 import { Environment, Loading, useBack } from './ui';
 import { ArchivedPage, ChatPage, HistoryPage } from './Chat';
+import { BackupsPage } from './Backups';
 import { SettingsHome, GeneralPage, AppearancePage, DevicePage, AboutPage, VoicePage } from './Settings';
 import { ProvidersPage, ResourcesPage } from './Resources';
 import { AdvancedPage, EditorPage } from './Editor';
 import { SchedulesPage, ScheduleHistoryPage } from './Schedules';
+import { ReadinessPage } from './Readiness';
 const TerminalsPage = lazy(() => import('./RemoteTerminal').then(module => ({default: module.TerminalsPage})));
 const TerminalPage = lazy(() => import('./RemoteTerminal').then(module => ({default: module.TerminalPage})));
 
@@ -72,11 +74,13 @@ function Shell({initialDevice}: {initialDevice: DeviceState}) {
     <Route path="/chat/:conversationId?" element={<ChatPage/>}/>
     <Route path="/history/:conversationId" element={<HistoryPage/>}/>
     <Route path="/archived" element={<ArchivedPage/>}/>
+    <Route path="/backups" element={<BackupsPage/>}/>
     <Route path="/terminals" element={<Suspense fallback={<Loading/>}><TerminalsPage/></Suspense>}/>
     <Route path="/terminals/:hostId/:sessionId" element={<Suspense fallback={<Loading/>}><TerminalPage/></Suspense>}/>
     <Route path="/schedules" element={<SchedulesPage/>}/>
     <Route path="/schedules/history" element={<ScheduleHistoryPage/>}/>
     <Route path="/settings" element={<SettingsHome/>}/>
+    <Route path="/settings/readiness" element={<ReadinessPage/>}/>
     <Route path="/settings/general" element={<GeneralPage/>}/>
     <Route path="/settings/appearance" element={<AppearancePage/>}/>
     <Route path="/settings/device" element={<DevicePage/>}/>

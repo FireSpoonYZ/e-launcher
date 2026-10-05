@@ -13,6 +13,8 @@ export type TerminalEvent = { hostId: string } & (
   | { event: 'terminal.listChanged' }
 );
 interface RemoteTerminalPlugin {
+  /** Reads saved hosts and authenticated sockets; never dials or decrypts tokens. */
+  readiness(): Promise<{paired: number; connected: number}>;
   loadShortcuts(): Promise<{ value: string | null }>;
   saveShortcuts(options: { value: string | null }): Promise<void>;
   listHosts(): Promise<{ hosts: Host[] }>;

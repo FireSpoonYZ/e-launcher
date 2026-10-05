@@ -71,6 +71,13 @@ final class PiTurnPersistence {
                             "Pi 工具已执行，但原生上下文未保存，请选择之前的历史节点。", null,
                             Collections.emptyList(), true));
                 }
+                // A lost transport can hide an already-completed side effect even before tool_start arrives.
+                // Keep the durable pending marker unless the runtime supplied its native checkpoint.
+                if (event.optBoolean("interrupted") && entries == null) {
+                    store.savePiPreview(conversation, userId, assistantId, new ArrayList<>(path));
+                    ended = true;
+                    break;
+                }
                 String contextNode = path.get(path.size() - 1).id;
                 store.savePiTurn(conversation, userId, assistantId, path, contextNode, entries, extensionUi);
                 ended = true;

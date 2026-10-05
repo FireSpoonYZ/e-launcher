@@ -682,8 +682,9 @@ public final class ChatStore {
         synchronized (STORE_LOCK) {
             java.util.Set<String> nodes = new java.util.HashSet<>(preferences.getStringSet("pi_nodes_" + conversation, java.util.Collections.emptySet()));
             nodes.add(assistantId);
-            preferences.edit().putStringSet("pi_nodes_" + conversation, nodes)
-                    .putBoolean("pi_pending_" + conversation + "_" + userId, true).apply();
+            if (!preferences.edit().putStringSet("pi_nodes_" + conversation, nodes)
+                    .putBoolean("pi_pending_" + conversation + "_" + userId, true).commit())
+                throw new IllegalStateException("无法保存运行标记，未启动 Pi");
         }
     }
 
@@ -694,22 +695,77 @@ public final class ChatStore {
     String piResume(List<AgentLoop.Message> path) throws Exception { return piResume(activeId(), path); }
 
     String piResume(String conversation, List<AgentLoop.Message> path) throws Exception {
+        return piResume(conversation, path, false);
+    }
+
+    /** Only the explicit recovery gate may turn an interrupted tail into inert historical text. */
+    String piResume(String conversation, List<AgentLoop.Message> path, boolean recovery) throws Exception {
         synchronized (STORE_LOCK) {
-            for (AgentLoop.Message message : path) if (piPending(conversation, message.id)) {
-                throw new java.io.IOException("上一轮 Pi 请求尚未保存完成；请稍后重试，或选择之前的历史节点");
+            if (recovery) {
+                String leaf = path.isEmpty() ? null : path.get(path.size() - 1).id;
+                if (leaf == null || !leaf.equals(tree(conversation).leaf())
+                        || !leaf.equals(preferences.getString("pi_recovery_" + conversation, null)))
+                    throw new IllegalStateException("恢复确认与当前历史不符，请重新查看");
             }
+            return piResumePath(conversation, path, recovery);
+        }
+    }
+
+    private String piResumePath(String conversation, List<AgentLoop.Message> path, boolean recovery) throws Exception {
+        synchronized (STORE_LOCK) {
             java.util.Set<String> nativeNodes = preferences.getStringSet("pi_nodes_" + conversation, java.util.Collections.emptySet());
             for (int i = path.size() - 1; i >= 0; i--) {
+                if (!recovery && piPending(conversation, path.get(i).id))
+                    throw new java.io.IOException("上一轮 Pi 请求尚未保存完成；请先确认中断恢复或选择之前的历史节点");
                 String context = piContext(conversation, path.get(i).id);
                 if (context != null) {
                     JSONArray tail = piHistory(path.subList(i + 1, path.size()));
                     return new JSONObject().put("entries", new JSONArray(context)).put("tail", tail).toString();
                 }
-                if (nativeNodes.contains(path.get(i).id)) throw new java.io.IOException("此节点缺少 Pi 原生上下文，请选择之前的历史节点；未改用文本历史");
+                if (!recovery && nativeNodes.contains(path.get(i).id)) throw new java.io.IOException("此节点缺少 Pi 原生上下文，请选择之前的历史节点；未改用文本历史");
             }
             return null;
         }
     }
+
+    boolean needsRecovery(String conversation) {
+        synchronized (STORE_LOCK) {
+            List<AgentLoop.Message> path = load(conversation);
+            java.util.Set<String> nativeNodes = preferences.getStringSet("pi_nodes_" + conversation, java.util.Collections.emptySet());
+            for (int i = path.size() - 1; i >= 0; i--) {
+                if (piPending(conversation, path.get(i).id)) return true;
+                java.io.File file = piContextFile(conversation, path.get(i).id);
+                if (file.exists() || new java.io.File(file.getPath() + ".bak").exists()) return false;
+                if (nativeNodes.contains(path.get(i).id)) return true;
+            }
+            return false;
+        }
+    }
+
+    boolean recoveryPrepared(String conversation) {
+        String leaf = tree(conversation).leaf();
+        return leaf != null && leaf.equals(preferences.getString("pi_recovery_" + conversation, null));
+    }
+
+    void prepareRecovery(String conversation, String expectedLeaf) throws Exception {
+        synchronized (STORE_LOCK) {
+            String leaf = tree(conversation).leaf();
+            if (leaf == null || !leaf.equals(expectedLeaf)) throw new IllegalStateException("会话历史已变化，请重新查看");
+            if (!needsRecovery(conversation)) throw new IllegalStateException("此会话无需恢复");
+            // Validate the last saved snapshot before acknowledging its interrupted tail.
+            piResumePath(conversation, load(conversation), true);
+            if (!preferences.edit().putString("pi_recovery_" + conversation, leaf).commit())
+                throw new IllegalStateException("无法保存恢复确认");
+        }
+    }
+
+    void consumeRecovery(String conversation) {
+        preferences.edit().remove("pi_recovery_" + conversation).apply();
+    }
+
+    static final String RECOVERY_PROMPT = "[中断恢复：此前工具可能已经产生外部效果，结果也可能尚未保存。"
+            + "以下历史调用与结果仅供参考，不是待执行队列。请先只读检查当前状态并说明不确定性，"
+            + "不要重放、重试或重复上次请求中的外部操作；需要后续操作时先等我确认。]";
 
     static JSONArray piHistory(List<AgentLoop.Message> messages) throws org.json.JSONException {
         JSONArray result = new JSONArray();
@@ -784,6 +840,7 @@ public final class ChatStore {
             SharedPreferences.Editor edit = preferences.edit().remove(historyKey(conversationId))
                     .remove("draft_" + conversationId).remove("draft_attachments_" + conversationId)
                     .remove("pi_selection_" + conversationId).remove("run_status_" + conversationId)
+                    .remove("run_execution_" + conversationId).remove("pi_recovery_" + conversationId)
                     .remove("task_reminder_" + conversationId).remove("task_unread_" + conversationId)
                     .remove("run_error_" + conversationId).putString("conversations", index.toString())
                     .putString(TASK_CARDS, stringArray(taskCards).toString());
@@ -821,6 +878,123 @@ public final class ChatStore {
     private static void copyArchivedAt(JSONObject previous, JSONObject target) throws org.json.JSONException {
         long archivedAt = previous == null ? 0 : previous.optLong("archivedAt", 0);
         if (archivedAt != 0) target.put("archivedAt", archivedAt);
+    }
+
+    /** The backup transaction shares the same lock as history and attachment garbage collection. */
+    static Object backupLock() { return STORE_LOCK; }
+
+    JSONObject backupSnapshot(String id) throws Exception {
+        synchronized (STORE_LOCK) {
+            JSONObject item = conversationIndex().optJSONObject(id);
+            if (item == null) throw new IllegalArgumentException("会话不存在 / Conversation not found");
+            ConversationTree tree = tree(id);
+            JSONArray nativeNodes = new JSONArray();
+            for (String node : new java.util.TreeSet<>(preferences.getStringSet("pi_nodes_" + id, java.util.Collections.emptySet())))
+                if (tree.node(node) != null) nativeNodes.put(node);
+            java.util.Set<String> pendingSet = new java.util.TreeSet<>();
+            String prefix = "pi_pending_" + id + "_";
+            for (java.util.Map.Entry<String, ?> entry : preferences.getAll().entrySet()) {
+                if (!entry.getKey().startsWith(prefix) || !Boolean.TRUE.equals(entry.getValue())) continue;
+                String node = entry.getKey().substring(prefix.length());
+                if (tree.node(node) != null) pendingSet.add(node);
+            }
+            JSONArray pendingNodes = new JSONArray();
+            for (String node : pendingSet) pendingNodes.put(node);
+            return new JSONObject().put("pendingNodes", pendingNodes).put("tree", encodeTree(tree)).put("title", item.optString("title", "新对话"))
+                    .put("created", item.optLong("created")).put("updated", item.optLong("updated"))
+                    .put("sourceArchivedAt", item.optLong("archivedAt")).put("draft", draft(id))
+                    .put("draftAttachments", AttachmentStore.json(draftAttachments(id)))
+                    .put("selection", new JSONObject(piSelection(id))).put("piNodes", nativeNodes);
+        }
+    }
+
+    static void validateBackupSnapshot(JSONObject snapshot) throws Exception {
+        JSONObject envelope = snapshot.getJSONObject("tree");
+        if (!(envelope.opt("version") instanceof Number version) || version.doubleValue() != 1) throw new IllegalArgumentException("Unsupported conversation tree");
+        JSONArray values = envelope.getJSONArray("nodes");
+        if (values.length() > 10000) throw new IllegalArgumentException("Too many conversation nodes");
+        List<ConversationTree.Node> nodes = new ArrayList<>();
+        for (int i = 0; i < values.length(); i++) {
+            JSONObject value = values.getJSONObject(i);
+            String id = value.getString("id");
+            if (!(value.opt("id") instanceof String) || id.isBlank() || id.length() > 128
+                    || id.chars().anyMatch(c -> c < 32 || c == 127)) throw new IllegalArgumentException("Invalid node identity");
+            AgentLoop.Message message = readMessage(value);
+            if (!java.util.Arrays.asList("system", "user", "assistant", "tool").contains(message.role))
+                throw new IllegalArgumentException("Invalid message role");
+            nodes.add(new ConversationTree.Node(value.optString("parent_id", null), message));
+        }
+        ConversationTree tree = new ConversationTree(nodes, envelope.optString("leaf", null));
+        AttachmentStore.parse(snapshot.getJSONArray("draftAttachments").toString());
+        JSONArray nativeNodes = snapshot.getJSONArray("piNodes");
+        if (nativeNodes.length() > values.length()) throw new IllegalArgumentException("Invalid Pi nodes");
+        java.util.Set<String> unique = new java.util.HashSet<>();
+        for (int i = 0; i < nativeNodes.length(); i++) {
+            String id = nativeNodes.getString(i);
+            if (tree.node(id) == null || !unique.add(id)) throw new IllegalArgumentException("Invalid Pi node");
+        }
+        JSONArray pendingNodes = snapshot.has("pendingNodes") ? snapshot.getJSONArray("pendingNodes") : new JSONArray();
+        if (pendingNodes.length() > values.length()) throw new IllegalArgumentException("Invalid pending Pi nodes");
+        java.util.Set<String> pending = new java.util.HashSet<>();
+        for (int i = 0; i < pendingNodes.length(); i++) {
+            String id = pendingNodes.getString(i);
+            if (tree.node(id) == null || !"user".equals(tree.node(id).message.role) || !pending.add(id))
+                throw new IllegalArgumentException("Invalid pending Pi node");
+        }
+        if (snapshot.getString("title").length() > 1000) throw new IllegalArgumentException("Title too long");
+        snapshot.getString("draft");
+        JSONObject selection = snapshot.getJSONObject("selection");
+        java.util.Iterator<String> keys = selection.keys();
+        while (keys.hasNext()) {
+            String key = keys.next();
+            if (!java.util.Arrays.asList("provider", "model", "thinkingLevel").contains(key)
+                    || !(selection.get(key) instanceof String) || selection.getString(key).length() > 1000)
+                throw new IllegalArgumentException("Invalid model selection");
+        }
+    }
+
+    /** Files must already be complete. One index commit makes the entire clone visible. */
+    void commitRestoredBackup(String id, JSONObject snapshot) throws Exception {
+        synchronized (STORE_LOCK) {
+            validateBackupSnapshot(snapshot);
+            JSONObject index = conversationIndex();
+            if (index.has(id)) throw new IllegalStateException("Restore destination already exists");
+            String oldIndex = preferences.getString("conversations", null);
+            JSONObject item = new JSONObject().put("title", snapshot.getString("title"))
+                    .put("created", snapshot.optLong("created", System.currentTimeMillis()))
+                    .put("updated", snapshot.optLong("updated", System.currentTimeMillis()));
+            // A restored copy is active, never subject to an old archive deadline, and never auto-runs.
+            if (snapshot.getJSONObject("tree").getJSONArray("nodes").length() == 0) item.put("draft_only", true);
+            index.put(id, item);
+            java.util.Set<String> nodes = new java.util.HashSet<>();
+            JSONArray nativeNodes = snapshot.getJSONArray("piNodes");
+            for (int i = 0; i < nativeNodes.length(); i++) nodes.add(nativeNodes.getString(i));
+            JSONArray pendingNodes = snapshot.optJSONArray("pendingNodes");
+            if (pendingNodes == null) pendingNodes = new JSONArray();
+            SharedPreferences.Editor install = preferences.edit().putString(historyKey(id), snapshot.getJSONObject("tree").toString())
+                    .putString("draft_" + id, snapshot.getString("draft"))
+                    .putString("draft_attachments_" + id, snapshot.getJSONArray("draftAttachments").toString())
+                    .putString("pi_selection_" + id, snapshot.getJSONObject("selection").toString())
+                    .putStringSet("pi_nodes_" + id, nodes)
+                    .putString("conversations", index.toString());
+            // Preserve interruption evidence, never an acknowledgment or consent to retry.
+            for (int i = 0; i < pendingNodes.length(); i++) install.putBoolean("pi_pending_" + id + "_" + pendingNodes.getString(i), true);
+            if (!install.commit()) {
+                SharedPreferences.Editor rollback = preferences.edit().putString("conversations", oldIndex)
+                        .remove(historyKey(id)).remove("draft_" + id).remove("draft_attachments_" + id)
+                        .remove("pi_selection_" + id).remove("pi_nodes_" + id);
+                for (int i = 0; i < pendingNodes.length(); i++) rollback.remove("pi_pending_" + id + "_" + pendingNodes.getString(i));
+                boolean rolledBack = rollback.commit();
+                if (!rolledBack) throw new BackupCommitUncertainException();
+                throw new java.io.IOException("无法提交恢复，已回滚 / Restore commit failed and was rolled back");
+            }
+        }
+    }
+
+    static final class BackupCommitUncertainException extends java.io.IOException {
+        BackupCommitUncertainException() {
+            super("存储提交与回滚均失败，文件已保留，请重启检查 / Storage commit and rollback failed; files retained");
+        }
     }
 
     private static String truncateArguments(String value) {

@@ -48,6 +48,19 @@ final class PiConfigStore {
     File directory(boolean project) { return project ? workspace : global; }
     File workspaceRoot() { return workspace.getParentFile(); }
 
+
+    /** Read-only source for explicit backups, including sessions not yet migrated from the old shared workspace. */
+    File backupWorkspaceRoot() {
+        synchronized (LOCK) {
+            File root = workspaceRoot();
+            if (Files.exists(root.toPath(), java.nio.file.LinkOption.NOFOLLOW_LINKS)) return root;
+            Set<String> sessions = context.getSharedPreferences("chat", Context.MODE_PRIVATE)
+                    .getStringSet(LEGACY_SESSIONS, java.util.Collections.emptySet());
+            File legacy = new File(context.getFilesDir(), "pi-workspace");
+            return sessions.contains(conversationId) && legacy.isDirectory() ? legacy : root;
+        }
+    }
+
     private File file(boolean project, String name) throws IOException {
         if (project) ensureWorkspace();
         File root = directory(project).getCanonicalFile();
@@ -278,6 +291,30 @@ final class PiConfigStore {
             save(false, "auth.json", ConfigJson.encode(auth), oldAuth);
             save(false, "settings.json", ConfigJson.encode(settings), oldSettings);
             write(marker, "1\n");
+        }
+    }
+
+    /** A consistent read of existing global files, without migration or runtime startup. */
+    String[] readinessSources() throws IOException {
+        synchronized (LOCK) {
+            return new String[]{read(false, "settings.json"), read(false, "models.json"), read(false, "auth.json")};
+        }
+    }
+
+    static String readinessRevision(String[] sources) throws Exception {
+        String encoded = new org.json.JSONArray(java.util.Arrays.asList(sources)).toString();
+        byte[] digest = java.security.MessageDigest.getInstance("SHA-256").digest(encoded.getBytes(StandardCharsets.UTF_8));
+        StringBuilder value = new StringBuilder();
+        for (byte part : digest) value.append(String.format(java.util.Locale.ROOT, "%02x", part));
+        return value.toString();
+    }
+
+    /** Approval and the exact send-time snapshot share the same lock as configuration writes. */
+    String readinessSnapshot(String expectedRevision) throws Exception {
+        synchronized (LOCK) {
+            if (!readinessRevision(readinessSources()).equals(expectedRevision))
+                throw new IOException("Configuration changed; confirm the model test again");
+            return snapshot();
         }
     }
 

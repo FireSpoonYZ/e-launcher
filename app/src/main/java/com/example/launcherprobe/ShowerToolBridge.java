@@ -46,6 +46,10 @@ final class ShowerToolBridge {
     }
 
     JSONObject execute(String conversationId, JSONObject arguments) throws Exception {
+        return execute(conversationId, arguments, ignored -> { });
+    }
+
+    JSONObject execute(String conversationId, JSONObject arguments, java.util.function.Consumer<Boolean> waiting) throws Exception {
         if (conversationId == null || conversationId.isBlank()) {
             throw new IllegalArgumentException("Shower 操作必须属于一个聊天");
         }
@@ -53,7 +57,7 @@ final class ShowerToolBridge {
         ShowerController controller = controllers.computeIfAbsent(conversationId,
                 ignored -> new ShowerController(context, manager));
         synchronized (controller) {
-        boolean userOperated = controller.awaitAutomation();
+        boolean userOperated = controller.awaitAutomation(waiting);
         String action = arguments.optString("action", "");
         if (userOperated && !"screenshot".equals(action)) {
             throw new IllegalStateException("用户刚结束手动接管，画面可能已改变；本次操作未执行，请先 screenshot 重新定位再继续");
