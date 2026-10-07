@@ -71,6 +71,19 @@ public final class RemoteTerminalPlugin extends Plugin {
         run(call, () -> resolve(call, new JSONObject().put("hosts", store.hosts())));
     }
 
+    /** Does not connect, send requests, decrypt tokens, or alter saved pairing records. */
+    @PluginMethod public void readiness(PluginCall call) {
+        run(call, () -> {
+            org.json.JSONArray hosts = store.hosts();
+            int connected = 0;
+            for (int index = 0; index < hosts.length(); index++) {
+                HostConnection owner = connections.get(hosts.getJSONObject(index).getString("id"));
+                if (owner != null && owner.socket != null && owner.socket.authenticated) connected++;
+            }
+            resolve(call, new JSONObject().put("paired", hosts.length()).put("connected", connected));
+        });
+    }
+
     @PluginMethod public void pair(PluginCall call) {
         run(call, () -> {
             JSONObject data = call.getData();

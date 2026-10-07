@@ -9,6 +9,7 @@ import { SettingsHome, GeneralPage, AppearancePage, DevicePage, AboutPage, Voice
 import { ProvidersPage, ResourcesPage } from './Resources';
 import { AdvancedPage, EditorPage } from './Editor';
 import { SchedulesPage, ScheduleHistoryPage } from './Schedules';
+import { ReadinessPage } from './Readiness';
 const TerminalsPage = lazy(() => import('./RemoteTerminal').then(module => ({default: module.TerminalsPage})));
 const TerminalPage = lazy(() => import('./RemoteTerminal').then(module => ({default: module.TerminalPage})));
 
@@ -77,6 +78,7 @@ function Shell({initialDevice}: {initialDevice: DeviceState}) {
     <Route path="/schedules" element={<SchedulesPage/>}/>
     <Route path="/schedules/history" element={<ScheduleHistoryPage/>}/>
     <Route path="/settings" element={<SettingsHome/>}/>
+    <Route path="/settings/readiness" element={<ReadinessPage/>}/>
     <Route path="/settings/general" element={<GeneralPage/>}/>
     <Route path="/settings/appearance" element={<AppearancePage/>}/>
     <Route path="/settings/device" element={<DevicePage/>}/>
