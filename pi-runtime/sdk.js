@@ -12,6 +12,7 @@ import { getThemeByName } from "./node_modules/@earendil-works/pi-coding-agent/d
 import { toAgentHistory } from "./index.js";
 import { mcpOptions, mcpQuery } from "./mcp.js";
 import { clearExtensionCache } from "./node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/loader.js";
+import todoExtension, { TODO_ENTRY_TYPE, readTodoState, replayTodo } from "./extensions/todo/index.js";
 import {
   ExtensionUiBridge,
   findRpivAskUserQuestionTool,
@@ -94,6 +95,7 @@ async function services(config, signal, resourceLoaderOptions) {
         modelRuntimeSignal: signal, resourceLoaderOptions: {
           ...resourceLoaderOptions,
           extensionFactories: [
+            { name: "todo", builtin: true, replaceable: true, factory: todoExtension },
             { name: "codemode", builtin: true, replaceable: true, factory: createCodemodeExtension() },
             { name: "tool_search", builtin: true, replaceable: true, factory: createToolSearchExtension() },
             { name: "mcp", builtin: true, replaceable: true, factory: createMcpExtension(mcp) },
@@ -233,6 +235,9 @@ export async function createSdkRuntime(command, signal, resourceLoaderOptions) {
     const sessionManager = SessionManager.inMemory(s.cwd, undefined, nativeEntries ? history : undefined);
     if (!nativeEntries) for (const message of history) sessionManager.appendMessage(message);
     for (const message of await historyWithAttachments(command.sdkHistoryTail ?? [], config, model)) sessionManager.appendMessage(message);
+    // One-time import for pre-fork codemode sessions, whose only durable todo was the app's .ui.json.
+    const legacyTodo = command.todo?.package === "@juicesharp/rpiv-todo" ? readTodoState(command.todo) : undefined;
+    if (legacyTodo && !replayTodo(sessionManager.getBranch())) sessionManager.appendCustomEntry(TODO_ENTRY_TYPE, legacyTodo);
     const result = await s.withHttp(() => createAgentSessionFromServices({
       services: s, model, thinkingLevel: level, sessionManager,
     }));
@@ -281,13 +286,6 @@ export async function createSdkRuntime(command, signal, resourceLoaderOptions) {
             toolCalls: event.message.content.filter((part) => part.type === "toolCall")
               .map((part) => ({ id: part.id, name: part.name, arguments: JSON.stringify(part.arguments) })) } });
         } else if (event.type === "message_end" && event.message.role === "toolResult") {
-          if (todoTool && event.message.toolName === todoTool.name) {
-            const snapshot = readTodoSnapshot(event.message.details);
-            if (snapshot) {
-              todo = snapshot;
-              emitExtensionUi();
-            }
-          }
           emit({ type: "message", message: { role: "tool",
             content: event.message.content.filter((part) => part.type === "text").map((part) => part.text).join("\n"),
             toolCallId: event.message.toolCallId,
@@ -295,6 +293,14 @@ export async function createSdkRuntime(command, signal, resourceLoaderOptions) {
         } else if (event.type === "tool_execution_start") {
           emit({ type: "tool_start", toolCallId: event.toolCallId, name: event.toolName, args: event.args });
         } else if (event.type === "tool_execution_end") {
+          // Direct and codemode-nested calls both end here; nested ones never become toolResult messages.
+          if (todoTool && event.toolName === todoTool.name) {
+            const snapshot = readTodoSnapshot(event.result?.details);
+            if (snapshot) {
+              todo = snapshot;
+              emitExtensionUi();
+            }
+          }
           emit({ type: "tool_end", toolCallId: event.toolCallId, name: event.toolName,
             result: event.result, isError: event.isError });
         } else if (event.type === "auto_retry_start" || event.type === "auto_compaction_start") {

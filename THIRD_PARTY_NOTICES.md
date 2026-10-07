@@ -74,6 +74,18 @@ The Android Pi runtime bundles `@earendil-works/pi-coding-agent`, `pi-agent-core
 
 The APK also includes the complete official **npm 11.6.2** distribution and its bundled dependencies, fetched from `https://registry.npmjs.org/npm/-/npm-11.6.2.tgz` with the exact SHA-512 integrity recorded in `pi-runtime/package-lock.json` and checked by `scripts/prepare-pi-runtime.ps1`. npm identifies its license as **Artistic License 2.0**; its `LICENSE` file and bundled dependency notices are retained inside the versioned npm payload. Source is available at https://github.com/npm/cli/tree/v11.6.2.
 
+## Bundled todo extension
+
+The app's [todo extension](pi-runtime/extensions/todo/index.js) is adapted from
+**@juicesharp/rpiv-todo 2.12.0**, Copyright (c) 2026 juicesharp, MIT License.
+Upstream: https://github.com/juicesharp/rpiv-mono/tree/main/packages/rpiv-todo.
+The original license is retained in [LICENSE](pi-runtime/extensions/todo/LICENSE)
+and copied into the APK as `assets/pi-sdk/RPIV_TODO_LICENSE.txt`.
+The fork retains the tool actions, task fields, transitions and dependency checks,
+removes terminal-only UI/configuration, and persists mutations as branch-relative
+Pi custom entries so codemode-nested calls survive runtime reconstruction.
+It is bundled for e-launcher and is not published as a separate package.
+
 ## Codex Horizon reference material
 
 The voice appearance reference in `app/src/main/res/raw/voice_horizon.glsl` and

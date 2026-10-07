@@ -39,6 +39,7 @@ for (const name of ["docs", "examples", "dist/modes/interactive/theme", "dist/co
   await cp(`${sdk}/${name}`, `${assets}/${name}`, { recursive: true, filter: (path) => !path.endsWith(".map") && !path.endsWith(".d.ts") });
 }
 
+await copyFile("extensions/todo/LICENSE", `${assets}/RPIV_TODO_LICENSE.txt`);
 await copyFile(sdkRequire.resolve("quickjs-wasi/quickjs.wasm"), `${assets}/quickjs.wasm`);
 // Photon CJS reads beside the bundle (__dirname), not beside Node or the session cwd.
 await copyFile(sdkRequire.resolve("@silvia-odwyer/photon-node/photon_rs_bg.wasm"), "../app/src/main/assets/photon_rs_bg.wasm");

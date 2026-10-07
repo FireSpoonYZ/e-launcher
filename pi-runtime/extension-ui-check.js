@@ -19,6 +19,8 @@ try {
     baseDir: packageRoot, path: join(packageRoot, "index.ts") };
   const recognized = await findRpivTodoTool([{ name: "todo", sourceInfo }]);
   assert.equal(recognized?.name, "todo", "the package-owned todo tool is recognized");
+  const builtin = { name:"todo", sourceInfo:{ source:"builtin", path:"builtin:todo" } };
+  assert.equal(await findRpivTodoTool([builtin]), builtin, "the app-owned builtin is recognized");
   assert.equal(await findRpivTodoTool([{ name: "todo", sourceInfo: { ...sourceInfo, source: "./same-name.js" } }]), undefined,
     "a same-name tool without the package source is rejected");
   assert.equal(await findRpivTodoTool([{ name: "todo", sourceInfo: { ...sourceInfo, baseDir: root } }]), undefined,
@@ -36,6 +38,11 @@ try {
     { type:"message", message:{ role:"toolResult", toolName:"todo", details:later } },
     { type:"message", message:{ role:"toolResult", toolName:"todo", details:{ tasks:"corrupt", nextId:9 } } },
   ], recognized), owned(later), "the last valid package todo snapshot wins even when followed by corrupt data");
+  assert.deepEqual(replayRpivTodo([
+    { type:"custom", customType:"e-launcher-todo", data:later },
+    { type:"custom", customType:"e-launcher-todo", data:{ tasks:[null], nextId:4 } },
+    { type:"message", message:{ role:"toolResult", toolName:"todo", details:first } },
+  ], builtin), owned(later), "custom state is authoritative and corrupt entries do not erase it");
   assert.deepEqual(replayRpivTodo([], recognized), owned({ tasks:[], nextId:1 }),
     "recognized package replay starts with an explicitly owned empty snapshot");
   assert.equal(replayRpivTodo([{ type:"message", message:{ role:"toolResult", toolName:"todo", details:first } }], undefined), null,

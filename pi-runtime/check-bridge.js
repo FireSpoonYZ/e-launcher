@@ -58,6 +58,10 @@ const api = http.createServer((req, res) => {
       res.on("close", () => held.delete(res));
     } else if (prompt === "shower") {
       tool("shower", { action:"screenshot", maxWidth:360, maxHeight:640 });
+    } else if (prompt === "codemode-todo-create") {
+      tool("codemode", { code: 'await tools.todo({action:"create",subject:"bundled todo",description:"restored detail"});' });
+    } else if (prompt === "codemode-todo-resume") {
+      tool("codemode", { code: 'await tools.todo({action:"get",id:1}); await tools.todo({action:"update",id:1,status:"completed"});' });
     } else if (prompt === "codemode-check" && !called.includes("codemode")) {
       tool("codemode", { code: 'text(await tools.read({ path: "codemode-fixture.txt" }));' });
     } else if (prompt === "search-apps" && !called.includes("search_apps")) {
@@ -369,6 +373,20 @@ try {
   assert.match(codemodeEnd.result.content[0].text, /codemode-read-ok/);
   assert.deepEqual(requests.at(-1).tools.map(tool => tool.function.name), ["codemode"]);
   console.log("PASS: shipped codemode WASM/worker executes a real nested read in only mode");
+
+  send({ id:"todo-create", conversationId:"todo-session", type:"prompt", sdk:true,
+    prompt:"codemode-todo-create", config:codemodeConfig });
+  assert.equal((await waitFor(event => event.id === "todo-create" && event.type === "end")).status, "completed");
+  const todoHistory = events.find(event => event.id === "todo-create" && event.type === "context").entries;
+  assert(todoHistory.some(entry => entry.type === "custom" && entry.customType === "e-launcher-todo"));
+  send({ id:"todo-resume", conversationId:"todo-session", type:"prompt", sdk:true,
+    prompt:"codemode-todo-resume", config:codemodeConfig, sdkHistory:todoHistory });
+  assert.equal((await waitFor(event => event.id === "todo-resume" && event.type === "end")).status, "completed");
+  assert.match(events.find(event => event.id === "todo-resume" && event.type === "tool_end"
+    && event.name === "todo" && event.result.details.action === "get").result.content[0].text, /restored detail/);
+  assert.equal(events.filter(event => event.id === "todo-resume" && event.type === "extension_ui").at(-1)
+    .state.todo.tasks[0].status, "completed");
+  console.log("PASS: shipped builtin todo persists codemode calls and restores next-turn get/update");
 
   const timeoutA = structuredClone(config), timeoutB = structuredClone(config);
   timeoutA.settings.httpIdleTimeoutMs = 1_000; timeoutA.settings.defaultTools = ["delay"];

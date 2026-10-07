@@ -703,7 +703,8 @@ public final class ChatStore {
                 String context = piContext(conversation, path.get(i).id);
                 if (context != null) {
                     JSONArray tail = piHistory(path.subList(i + 1, path.size()));
-                    return new JSONObject().put("entries", new JSONArray(context)).put("tail", tail).toString();
+                    return new JSONObject().put("entries", new JSONArray(context)).put("tail", tail)
+                            .put("todo", new JSONObject(extensionUi(conversation, path)).optJSONObject("todo")).toString();
                 }
                 if (nativeNodes.contains(path.get(i).id)) throw new java.io.IOException("此节点缺少 Pi 原生上下文，请选择之前的历史节点；未改用文本历史");
             }

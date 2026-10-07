@@ -112,6 +112,8 @@ public class PiPersistenceTest {
         firstTurn.accept(new JSONObject().put("type", "context").put("entries", entries()));
         firstTurn.accept(new JSONObject().put("type", "end").put("status", "completed"));
         assertEquals(pending.toString(), new JSONObject(store.extensionUi(store.load())).toString());
+        assertEquals(pending.getJSONObject("todo").toString(),
+                new JSONObject(store.piResume(store.load())).getJSONObject("todo").toString());
 
         AgentLoop.Message secondUser = new AgentLoop.Message("user", "second");
         List<AgentLoop.Message> secondPath = new ArrayList<>(store.load());

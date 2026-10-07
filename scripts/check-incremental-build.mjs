@@ -31,6 +31,7 @@ test('runtime build reuses complete npm only and repairs changed/deleted assets'
     await put(join(runtime, 'package.json'), JSON.stringify({ type: 'module', dependencies: { npm: '11.6.2' } }));
     await put(join(runtime, 'package-lock.json'), '{}');
     await cp(join(root, 'pi-runtime/build.js'), join(runtime, 'build.js'));
+    await put(join(runtime, 'extensions/todo/LICENSE'), 'todo-license-fixture');
     await put(join(runtime, 'android.js'), 'import { value } from "./value.js"; console.log(value);');
     await put(join(runtime, 'value.js'), 'export const value = "first-bundle";');
     for (const name of ['package.json', 'README.md', 'CHANGELOG.md', 'docs/old.md', 'examples/sdk/example.ts', 'dist/modes/interactive/theme/dark.json', 'dist/core/export-html/template.html']) {
@@ -52,6 +53,7 @@ test('runtime build reuses complete npm only and repairs changed/deleted assets'
     assert.equal(runNode(runtime, bundle).trim(), 'first-bundle');
     assert.match(await read(join(assets, 'codemode-worker.js')), /worker-fixture/);
     assert.equal(await read(join(assets, 'pi-sdk/quickjs.wasm')), 'wasm-fixture');
+    assert.equal(await read(join(assets, 'pi-sdk/RPIV_TODO_LICENSE.txt')), 'todo-license-fixture');
     const firstMarker = await read(marker);
     const firstTime = (await stat(marker)).mtimeMs;
     const firstPayloadTime = (await stat(join(payload, 'bin/npm-cli.js'))).mtimeMs;

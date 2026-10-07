@@ -203,7 +203,8 @@ final class PiAgentBridge {
                 .put("attachments", AttachmentStore.json(attachments));
         if (sdkHistory != null) {
             JSONObject resume = new JSONObject(sdkHistory);
-            command.put("sdkHistory", resume.getJSONArray("entries")).put("sdkHistoryTail", resume.getJSONArray("tail"));
+            command.put("sdkHistory", resume.getJSONArray("entries")).put("sdkHistoryTail", resume.getJSONArray("tail"))
+                    .put("todo", resume.optJSONObject("todo"));
         }
         sendRequest(command, configStore, nextListener);
     }

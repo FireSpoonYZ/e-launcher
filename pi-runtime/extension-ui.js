@@ -3,10 +3,11 @@ import { randomUUID } from "node:crypto";
 import { readFile, realpath } from "node:fs/promises";
 import { isAbsolute, relative } from "node:path";
 import { stripVTControlCharacters } from "node:util";
+import { readTodoState, replayTodo } from "./extensions/todo/index.js";
 
+// Keep the original wire tag so existing Android/Web snapshots and histories stay compatible.
 export const RPIV_TODO_PACKAGE = "@juicesharp/rpiv-todo";
 export const RPIV_ASK_USER_QUESTION_PACKAGE = "@juicesharp/rpiv-ask-user-question";
-const TODO_STATUSES = new Set(["pending", "in_progress", "completed", "deleted"]);
 const MAX_WIDGET_LINES = 200, MAX_TEXT = 8_000;
 
 function text(value) {
@@ -345,7 +346,8 @@ export async function findPackageTool(tools, toolName, packageName) {
 }
 
 export function findRpivTodoTool(tools) {
-  return findPackageTool(tools, "todo", RPIV_TODO_PACKAGE);
+  return tools.find(tool => tool.name === "todo" && tool.sourceInfo?.path === "builtin:todo"
+    && tool.sourceInfo.source === "builtin") ?? findPackageTool(tools, "todo", RPIV_TODO_PACKAGE);
 }
 
 export function findRpivAskUserQuestionTool(tools) {
@@ -353,27 +355,13 @@ export function findRpivAskUserQuestionTool(tools) {
 }
 
 export function readTodoSnapshot(details) {
-  if (!details || typeof details !== "object" || !Array.isArray(details.tasks)
-      || !Number.isSafeInteger(details.nextId) || details.nextId < 1) return undefined;
-  const ids = new Set(), tasks = [];
-  for (const task of details.tasks) {
-    if (!task || typeof task !== "object" || !Number.isSafeInteger(task.id) || task.id < 1
-        || ids.has(task.id) || typeof task.subject !== "string" || !TODO_STATUSES.has(task.status)) return undefined;
-    ids.add(task.id);
-    tasks.push({ id:task.id, subject:task.subject, status:task.status });
-  }
-  if (tasks.some((task) => task.id >= details.nextId)) return undefined;
-  return { package:RPIV_TODO_PACKAGE, tasks, nextId:details.nextId };
+  const state = readTodoState(details);
+  if (!state) return undefined;
+  const tasks = state.tasks.map(({ id, subject, status }) => ({ id, subject, status }));
+  return { package:RPIV_TODO_PACKAGE, tasks, nextId:state.nextId };
 }
 
 export function replayRpivTodo(branch, recognizedTool) {
   if (!recognizedTool) return null;
-  let snapshot = { package:RPIV_TODO_PACKAGE, tasks:[], nextId:1 };
-  for (const entry of branch) {
-    const message = entry?.type === "message" ? entry.message : undefined;
-    if (message?.role !== "toolResult" || message.toolName !== recognizedTool.name) continue;
-    const candidate = readTodoSnapshot(message.details);
-    if (candidate) snapshot = candidate;
-  }
-  return snapshot;
+  return readTodoSnapshot(replayTodo(branch, recognizedTool.name) ?? { tasks:[], nextId:1 });
 }
