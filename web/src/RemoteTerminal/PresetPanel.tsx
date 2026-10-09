@@ -10,7 +10,7 @@ import { AccessoryButton } from './AccessoryButton';
 
 // Layout/editor reference: Orca MobileSessionCommandDock and CustomKeyModal,
 // de8bffe24045b396212f4f63de8960ec8380ea07. MIT, Lovecast Inc. See ATTRIBUTION.md.
-export function Presets({disabled,send,accessoryKeys,activeModifiers=[]}: {disabled:boolean;send(preset:Preset):void;accessoryKeys?:ReactNode;activeModifiers?:TerminalShortcutModifier[]}) {
+export function Presets({disabled,send,accessoryKeys,builtInEditor,activeModifiers=[]}: {disabled:boolean;send(preset:Preset):void;accessoryKeys?:ReactNode;builtInEditor?:ReactNode;activeModifiers?:TerminalShortcutModifier[]}) {
   const t=useText();
   const [initial]=useState(()=>{try{return {presets:loadPresets(localStorage),error:''};}catch(e){return {presets:[] as Preset[],error:String(e)};}});
   const [error,setError]=useState(initial.error);
@@ -86,6 +86,7 @@ export function Presets({disabled,send,accessoryKeys,activeModifiers=[]}: {disab
           <button aria-label={t('下移 ','Move down ')+p.label} disabled={saving || index===presets.length-1} onClick={()=>{const next=[...presets];[next[index],next[index+1]]=[next[index+1],next[index]];update(next);}}><ArrowDown size={16}/></button>
           <button className="rt-danger" disabled={saving} aria-label={t('删除 ','Delete ')+p.label} onClick={()=>update(mutatePreset(presets,{type:'delete',id:p.id}))}><Trash2 size={16}/></button></div>
         </div>)}</div>
+      {builtInEditor}
       </>}
       </div>
     </Dialog>

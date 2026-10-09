@@ -24,7 +24,7 @@ test('Kitty report-all committed text and release events use the xterm encoder',
 test('Kitty committed uppercase and supplementary Unicode retain literal codepoints', () => {
   const kitty={...modes,kittyFlags:8};
   assert.equal(encodeText('Foo🙂',kitty),'\x1b[70u\x1b[111u\x1b[111u\x1b[128578u');
-  assert.equal(encodePaste('A中',kitty),'\x1b[65u\x1b[20013u');
+  assert.equal(encodePaste('A中',kitty),'A中'); // Orca clipboard paste is literal text, not physical Kitty keys.
   assert.equal(encodeText('A',{...kitty,kittyFlags:24}),'\x1b[65;;65u');
 });
 test('hardware decision keeps physical shifted digits, keypad and flags3 printable releases', () => {
@@ -94,7 +94,7 @@ test('Orca beforeinput submit ignores composition updates and binds/unbinds exac
 });
 test('paste is bracketed only when negotiated and does not invent Enter', () => {
   assert.equal(encodePaste('你好',modes),'你好');
-  assert.equal(encodePaste('a\nb',{...modes,bracketedPaste:true}),'\x1b[200~a\rb\x1b[201~');
+  assert.equal(encodePaste('a\nb',{...modes,bracketedPaste:true}),'\x1b[200~a\nb\x1b[201~');
 });
 test('Orca repeat cancellation prevents held key from repeating after control loss', async context => {
   context.mock.timers.enable({apis:['setTimeout','Date']});

@@ -27,6 +27,52 @@ public final class RemoteTerminalPlugin extends Plugin {
 
     @Override public void load() { store = new RemoteTerminalStore(getContext()); }
 
+    @PluginMethod public void setTerminalPage(PluginCall call) {
+        run(call, () -> {
+            String token = RemoteTerminalProtocol.text(call.getData(), "token", 128);
+            if (!(call.getData().opt("active") instanceof Boolean))
+                throw new IllegalArgumentException("Invalid active");
+            if (!(getActivity() instanceof MainActivity))
+                throw new IllegalArgumentException("Terminal page requires MainActivity");
+            ((MainActivity) getActivity()).setTerminalPage(token, call.getBoolean("active", false));
+            call.resolve();
+        });
+    }
+
+    @PluginMethod public void readClipboard(PluginCall call) {
+        handler.post(() -> {
+            try {
+                android.content.ClipboardManager clipboard = (android.content.ClipboardManager)
+                        getContext().getSystemService(android.content.Context.CLIPBOARD_SERVICE);
+                android.content.ClipData clip = clipboard.getPrimaryClip();
+                if (clip == null || clip.getItemCount() == 0) {
+                    call.resolve(new JSObject().put("text", "")); return;
+                }
+                CharSequence text = clip.getItemAt(0).getText();
+                if (text == null) throw new IllegalArgumentException("Clipboard has no text");
+                if (text.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8).length > 65536)
+                    throw new IllegalArgumentException("Clipboard exceeds 64 KiB");
+                call.resolve(new JSObject().put("text", text.toString()));
+            } catch (Exception failure) {
+                call.reject("Clipboard read failed or text exceeds 64 KiB", "CLIPBOARD_ERROR");
+            }
+        });
+    }
+
+    @PluginMethod public void writeClipboard(PluginCall call) {
+        handler.post(() -> {
+            try {
+                Object text = call.getData().opt("text");
+                if (!(text instanceof String) || ((String) text).length() > 1024 * 1024)
+                    throw new IllegalArgumentException("Invalid clipboard text");
+                android.content.ClipboardManager clipboard = (android.content.ClipboardManager)
+                        getContext().getSystemService(android.content.Context.CLIPBOARD_SERVICE);
+                clipboard.setPrimaryClip(android.content.ClipData.newPlainText("Terminal", (String) text));
+                call.resolve();
+            } catch (Exception failure) { call.reject("Clipboard write failed", "CLIPBOARD_ERROR"); }
+        });
+    }
+
     private interface Operation { void run() throws Exception; }
     private void run(PluginCall call, Operation operation) {
         handler.post(() -> {

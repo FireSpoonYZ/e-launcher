@@ -60,7 +60,7 @@ test('coded pin event halts pending retry and NOT_FOUND does not loop',async () 
 test('TerminalView subscription cleanup is scoped; recovery never sends mutations or resets canvas before snapshot', () => {
   const source=readFileSync(new URL('../src/RemoteTerminal/TerminalView.tsx',import.meta.url),'utf8');
   assert.match(source,/const subscriptionId = crypto.randomUUID\(\)/);
-  assert.match(source,/'terminal.subscribe',\{sessionId,subscriptionId\}/);
+  assert.match(source,/'terminal.subscribe',\{sessionId,subscriptionId,displayMode:requestedDisplayMode.current/);
   assert.match(source,/'terminal.unsubscribe',\{sessionId,subscriptionId\}/);
   const recovery=source.slice(source.indexOf('const recovery = createRecovery'),source.indexOf('reconnect.current ='));
   assert.doesNotMatch(recovery,/terminal\.(send|create|close|claim|updateViewport)|term\.reset/);
@@ -99,6 +99,6 @@ test('session-change notification during delayed profiles refresh commits the ne
 
 test('taking control triggers mobile viewport fitting without a physical resize', () => {
   const source=readFileSync(new URL('../src/RemoteTerminal/TerminalView.tsx',import.meta.url),'utf8');
-  assert.match(source,/void updateViewport\(\).*\[fontSize,owner\]\);/);
+  assert.match(source,/void updateViewport\(\)[\s\S]*\[fontSize,owner\]\);/);
   assert.match(source,/setRecovering\(true\); setConnected\(false\); initialized = false/);
 });

@@ -1,18 +1,22 @@
 import { registerPlugin, type PluginListenerHandle } from '@capacitor/core';
 
 export interface Host { id: string; name: string; address: string; port: number; fingerprint: string }
-export interface Session { id: string; title: string; profileId: string; cwd: string; cols: number; rows: number; status: 'running' | 'exited'; exitCode?: number; ownerClientId: string | null }
+export interface Session { id: string; title: string; profileId: string; cwd: string; cols: number; rows: number; status: 'running' | 'exited'; exitCode?: number; ownerClientId: string | null; displayMode?: DisplayMode }
+export type DisplayMode = 'auto' | 'phone' | 'desktop';
 export interface Snapshot { ansi: string; cols: number; rows: number; seq: number; kittyKeyboardFlags?: number }
 export interface Profile { id: string; name: string; executable: string; available: boolean; reason?: string }
 export type TerminalEvent = { hostId: string } & (
   | { event: 'connection'; state: 'connected' | 'disconnected'; message?: string; code?: string }
   | { event: 'terminal.output'; sessionId: string; data: string; seq: number }
-  | { event: 'terminal.snapshot'; sessionId: string; snapshot: Snapshot }
+  | { event: 'terminal.snapshot'; sessionId: string; snapshot: Snapshot; displayMode?: DisplayMode }
   | { event: 'terminal.control'; sessionId: string; ownerClientId: string | null }
   | { event: 'terminal.exit'; sessionId: string; exitCode: number }
   | { event: 'terminal.listChanged' }
 );
 interface RemoteTerminalPlugin {
+  setTerminalPage(options: {token: string; active: boolean}): Promise<void>;
+  readClipboard(): Promise<{text: string}>;
+  writeClipboard(options: {text: string}): Promise<void>;
   loadShortcuts(): Promise<{ value: string | null }>;
   saveShortcuts(options: { value: string | null }): Promise<void>;
   listHosts(): Promise<{ hosts: Host[] }>;

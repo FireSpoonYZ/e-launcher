@@ -30,7 +30,7 @@ test('tabs and dock retain route, theme and keyboard safety contracts',()=>{
  const source=readFileSync(new URL('../src/RemoteTerminal/TerminalView.tsx',import.meta.url),'utf8');
  const tabs=readFileSync(new URL('../src/RemoteTerminal/SessionTabs.tsx',import.meta.url),'utf8');
  const css=readFileSync(new URL('../src/RemoteTerminal/terminal.css',import.meta.url),'utf8');
- assert.match(source,/getComputedStyle\(element.current!\)/);
+ assert.match(source,/term.options.theme=\{\.\.\.DEFAULT_TERMINAL_THEME\}/);
  assert.match(source,/navigate=\{leave\}/);
  assert.match(source,/window.addEventListener\('app-back',back\)/);
  assert.match(source,/className="rt-keyboard-toggle"/);
@@ -56,5 +56,6 @@ test('remote keyboard viewport removes only the duplicated bottom inset',()=>{
  const css=readFileSync(new URL('../src/RemoteTerminal/terminal.css',import.meta.url),'utf8');
  assert.match(source,/data-keyboard-open=\{keyboardOpen\}/);
  assert.match(css,/#root:has\(\.rt-terminal \.rt-dock\[data-keyboard-open=true\]\) \{ padding-bottom:0; \}/);
- assert.doesNotMatch(css,/#[a-f\d]{6}\b/i,'remote layout must use the existing app palette');
+ assert.match(css,/\.rt-terminal \{.*background:var\(--bg\)/);
+ assert.match(css,/\.rt-screen,.*background-color:#1a1b26/,'only terminal grid has Orca palette');
 });

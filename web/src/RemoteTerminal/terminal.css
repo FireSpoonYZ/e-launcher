@@ -111,10 +111,10 @@
 .rt-tab-list { border-left:1px solid var(--line); border-radius:0!important; }
 .rt-tab-placeholder { padding:12px 20px; color:var(--muted); }
 .rt-terminal .inline-error { max-height:86px; overflow:auto; flex-shrink:0; font-size:.8rem; padding:10px 12px; margin:0; border-radius:0; background:var(--surface); }
-.rt-screen { flex:1; min-height:0; overflow:auto; touch-action:none; position:relative; padding:8px; }
-.rt-screen .xterm { height:100%; }
+.rt-screen { flex:1; min-height:0; overflow:hidden; touch-action:none; position:relative; padding:8px; }
+.rt-screen .xterm { height:100%; font-variant-emoji:text; }
 /* Match xterm's otherwise opaque unused viewport to the remote workspace. */
-.rt-screen, .rt-screen .xterm, .rt-screen .xterm:not(.allow-transparency) .xterm-viewport { background-color:var(--bg); }
+.rt-screen, .rt-screen .xterm, .rt-screen .xterm:not(.allow-transparency) .xterm-viewport { background-color:#1a1b26; }
 .rt-screen .xterm-helper-textarea { visibility:hidden; }
 .rt-screen.rt-select { touch-action:auto; user-select:text; }
 .rt-dock { flex-shrink:0; background:var(--surface); border-top:1px solid var(--line); }

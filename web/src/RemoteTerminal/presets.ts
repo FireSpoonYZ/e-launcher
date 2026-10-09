@@ -5,13 +5,7 @@ import { buildTerminalShortcutKey, type TerminalShortcutBinding } from './orca/t
 import { encodeKey, encodeText, type InputModes } from './input.ts';
 export type Preset = { id: string; label: string } & ({ kind: 'text'; text: string; appendEnter: boolean } | { kind: 'chord'; chord: TerminalShortcutBinding });
 export const PRESET_STORAGE_KEY = 'remote-terminal.shortcuts.v1';
-export const DEFAULT_PRESETS: Preset[] = [
-  { id: 'interrupt', label: 'Ctrl+C', kind: 'chord', chord: { key: 'c', modifiers: ['ctrl'] } },
-  { id: 'reverse-search', label: 'Search', kind: 'chord', chord: { key: 'r', modifiers: ['ctrl'] } },
-  { id: 'status', label: 'Git status', kind: 'text', text: 'git status', appendEnter: true },
-  { id: 'agent-pi', label: 'Pi example', kind: 'text', text: 'pi', appendEnter: false },
-  { id: 'agent-claude', label: 'Claude example', kind: 'text', text: 'claude', appendEnter: false },
-];
+export const DEFAULT_PRESETS: Preset[] = [];
 // Keep bindings editable even when only an enhanced keyboard protocol can encode them.
 export function describeShortcut(binding: TerminalShortcutBinding): {label:string;accessibilityLabel:string} | null {
   if (!binding || typeof binding.key !== 'string' || !Array.isArray(binding.modifiers) || !binding.modifiers.every(m => typeof m === 'string' && ['ctrl','alt','shift'].includes(m))) return null;

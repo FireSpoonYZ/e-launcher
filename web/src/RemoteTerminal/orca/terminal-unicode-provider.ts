@@ -1,5 +1,5 @@
 // Orca: src/shared/terminal-unicode-provider.ts @ de8bffe24045b396212f4f63de8960ec8380ea07
-// MIT Copyright (c) 2026 Lovecast Inc. Adaptation: local .ts imports only. See ../LICENSE.orca.
+// MIT Copyright (c) 2026 Lovecast Inc. Adaptation: strip-compatible explicit constructor field; provider logic unchanged. See ../LICENSE.orca.
 import type { IUnicodeHandling, IUnicodeVersionProvider } from '@xterm/xterm'
 
 type XtermTerminalWithUnicodeCore = {
@@ -30,7 +30,8 @@ function createProperties(charKind: number, width: 0 | 1 | 2, shouldJoin: boolea
 class OrcaUnicodeProvider implements IUnicodeVersionProvider {
   public readonly version = ORCA_UNICODE_VERSION
 
-  public constructor(private readonly baseProvider: IUnicodeVersionProvider) {}
+  private readonly baseProvider: IUnicodeVersionProvider
+  public constructor(baseProvider: IUnicodeVersionProvider) { this.baseProvider = baseProvider }
 
   public wcwidth(codepoint: number): 0 | 1 | 2 {
     return this.baseProvider.wcwidth(codepoint)

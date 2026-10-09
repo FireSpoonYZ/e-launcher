@@ -17,7 +17,7 @@ final class RemoteTerminalProtocol {
     private static final Set<String> METHODS = new HashSet<>(Arrays.asList(
             "profiles.list", "terminal.list", "terminal.create", "terminal.subscribe",
             "terminal.unsubscribe", "terminal.claim", "terminal.release", "terminal.send",
-            "terminal.updateViewport", "terminal.close"));
+            "terminal.updateViewport", "terminal.displayModeSet", "terminal.close"));
 
     static String text(JSONObject object, String key, int max) throws Exception {
         Object value = object.opt(key);
@@ -84,6 +84,22 @@ final class RemoteTerminalProtocol {
         if (method.equals("terminal.subscribe") || method.equals("terminal.unsubscribe")) {
             allowed.add("subscriptionId");
             if (params.has("subscriptionId")) text(params, "subscriptionId", 128);
+        }
+        if (method.equals("terminal.subscribe") || method.equals("terminal.displayModeSet")) {
+            allowed.addAll(Arrays.asList("displayMode", "viewport", "subscriptionId"));
+            if (method.equals("terminal.displayModeSet")) text(params, "subscriptionId", 128);
+            if (params.has("displayMode") || method.equals("terminal.displayModeSet")) {
+                if (!Arrays.asList("auto", "desktop").contains(params.opt("displayMode")))
+                    throw new IllegalArgumentException("Invalid displayMode");
+            }
+            if (params.has("viewport")) {
+                Object raw = params.opt("viewport");
+                if (!(raw instanceof JSONObject)) throw new IllegalArgumentException("Invalid viewport");
+                JSONObject viewport = (JSONObject) raw;
+                integer(viewport, "cols", 20, 400);
+                integer(viewport, "rows", 8, 200);
+                if (viewport.length() != 2) throw new IllegalArgumentException("Invalid viewport");
+            }
         }
         if (method.equals("terminal.send")) {
             allowed.addAll(Arrays.asList("data", "encoding"));

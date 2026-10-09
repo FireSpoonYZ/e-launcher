@@ -70,6 +70,29 @@ public class RemoteTerminalProtocolTest {
                 params.put("data", "x").put("encoding", "utf8")));
     }
 
+    @Test public void displayModeUsesScopedSubscriptionAndBoundedPhoneGrid() throws Exception {
+        JSONObject p = new JSONObject().put("sessionId", "s").put("subscriptionId", "page")
+                .put("displayMode", "auto").put("viewport", new JSONObject().put("cols", 20).put("rows", 8));
+        RemoteTerminalProtocol.request("terminal.subscribe", p);
+        RemoteTerminalProtocol.request("terminal.displayModeSet", p);
+        RemoteTerminalProtocol.request("terminal.displayModeSet", new JSONObject().put("sessionId", "s")
+                .put("subscriptionId", "page").put("displayMode", "desktop"));
+        assertThrows(Exception.class, () -> RemoteTerminalProtocol.request("terminal.displayModeSet",
+                new JSONObject().put("sessionId", "s").put("displayMode", "auto")));
+        assertThrows(Exception.class, () -> RemoteTerminalProtocol.request("terminal.displayModeSet",
+                p.put("displayMode", "phone")));
+        p.put("displayMode", "auto");
+        for (JSONObject invalid : new JSONObject[] {
+                new JSONObject().put("cols", 19).put("rows", 8),
+                new JSONObject().put("cols", 20).put("rows", 7),
+                new JSONObject().put("cols", 401).put("rows", 8),
+                new JSONObject().put("cols", 20).put("rows", 201),
+                new JSONObject().put("cols", 20).put("rows", 8).put("extra", 1) }) {
+            assertThrows(Exception.class, () -> RemoteTerminalProtocol.request("terminal.displayModeSet",
+                    p.put("viewport", invalid)));
+        }
+    }
+
     @Test public void publicHostCannotExposeCredentialOrClientInternals() throws Exception {
         JSONObject record = descriptor().put("id", PIN).put("address", "localhost")
                 .put("token", "secret").put("tokenCiphertext", "ciphertext")

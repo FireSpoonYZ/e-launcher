@@ -7,9 +7,15 @@ import { encodeImeCommitForKitty } from './orca/terminal-ime-kitty-commit-encodi
 export const TERMINAL_SEND_MAX_BYTES = 64 * 1024;
 export const terminalInputByteLength = (data: string): number => new TextEncoder().encode(data).byteLength;
 export const isTerminalSendWithinLimit = (data: string): boolean => terminalInputByteLength(data) <= TERMINAL_SEND_MAX_BYTES;
+// Accessory IDs describe actions; the encoder needs their underlying key and modifiers.
+export function terminalAccessoryBinding(id: string): TerminalShortcutBinding {
+  if (id === 'shiftTab') return { key: 'tab', modifiers: ['shift'] };
+  if (/^ctrl[A-Z]$/.test(id)) return { key: id.slice(-1).toLowerCase(), modifiers: ['ctrl'] };
+  return { key: id, modifiers: [] };
+}
 export type HardwareBinding = TerminalShortcutBinding & { code?: string; metaKey?: boolean };
 const kitty = new KittyKeyboard();
-export interface InputModes { applicationCursor: boolean; kittyFlags?: number; bracketedPaste: boolean }
+export interface InputModes { applicationCursor: boolean; kittyFlags?: number; bracketedPaste: boolean; altScreen?: boolean }
 const domKeys: Record<string, string> = { escape: 'Escape', enter: 'Enter', tab: 'Tab', backspace: 'Backspace', delete: 'Delete', insert: 'Insert', home: 'Home', end: 'End', pageUp: 'PageUp', pageDown: 'PageDown', arrowUp: 'ArrowUp', arrowDown: 'ArrowDown', arrowLeft: 'ArrowLeft', arrowRight: 'ArrowRight', space: ' ' };
 export function encodeKey(binding: HardwareBinding, modes: InputModes, eventType = 1): string {
   const { key, modifiers } = binding;
@@ -58,8 +64,9 @@ export function encodeText(text: string, modes: InputModes): string {
     ? Array.from(text).map(key => encodeImeCommitForKitty({key, shiftKey:false}, modes.kittyFlags!, {committedText:key}).report ?? key).join('') : text;
 }
 export function encodePaste(text: string, modes: InputModes): string {
-  const normalized = text.replace(/\r\n|\n/g, '\r');
-  return modes.bracketedPaste ? '\x1b[200~' + normalized + '\x1b[201~' : encodeText(normalized, modes);
+  const wrap = modes.bracketedPaste && !modes.altScreen;
+  const normalized = wrap ? text.replace(/\x1b\[20[01]~/g, '') : text;
+  return wrap ? '\x1b[200~' + normalized + '\x1b[201~' : normalized;
 }
 export interface LiveInputDelivery { cancelled(): void; uncertain(): void }
 // DOM reports composition explicitly: no timer guesses whether Chinese preedit is committed.

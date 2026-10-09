@@ -39,6 +39,26 @@ public class MainActivity extends BridgeActivity {
     private boolean uiReady;
     private boolean webReady;
     private boolean archivePromptShown;
+    private String terminalPageToken;
+
+    void setTerminalPage(String token, boolean active) {
+        if (active) terminalPageToken = token;
+        else if (token.equals(terminalPageToken)) terminalPageToken = null;
+        applyWebTextZoom(getResources().getConfiguration());
+    }
+
+    private void applyWebTextZoom(Configuration configuration) {
+        if (chatWebView != null) chatWebView.getSettings().setTextZoom(
+                terminalTextZoom(terminalPageToken != null, configuration.fontScale));
+    }
+
+    static boolean isTerminalPageRoute(String route) {
+        return route != null && route.matches("/terminals/[^/]+/[^/?]+(?:\\?.*)?");
+    }
+
+    static int terminalTextZoom(boolean terminalPage, float fontScale) {
+        return terminalPage ? 100 : Math.round(fontScale * 100);
+    }
 
     /** The resumed assistant, if any; wake-word input may present its listening panel here. */
     static MainActivity resumed() { return resumedActivity.get(); }
@@ -65,7 +85,11 @@ public class MainActivity extends BridgeActivity {
         registerPlugin(DevicePlugin.class);
         registerPlugin(RemoteTerminalPlugin.class);
         bridgeBuilder.addWebViewListener(new WebViewListener() {
-            @Override public void onPageStarted(WebView view) { webReady = false; }
+            @Override public void onPageStarted(WebView view) {
+                webReady = false;
+                terminalPageToken = null;
+                applyWebTextZoom(getResources().getConfiguration());
+            }
             @Override public void onPageLoaded(WebView view) {
                 webReady = trustedWebUrl(view.getUrl());
                 applyPendingRoute();
@@ -81,7 +105,8 @@ public class MainActivity extends BridgeActivity {
         if (bridge != null) {
             chatWebView = bridge.getWebView();
             chatWebView.setBackgroundColor(appearance.background);
-            chatWebView.getSettings().setTextZoom(Math.round(getResources().getConfiguration().fontScale * 100));
+            terminalPageToken = isTerminalPageRoute(initialWebRoute) ? "route-init" : null;
+            applyWebTextZoom(getResources().getConfiguration());
             // Keep Capacitor's parent and SystemBars listener: they own safe-area CSS and IME insets.
             chatWebView.requestApplyInsets();
             applyPendingRoute();
@@ -164,7 +189,7 @@ public class MainActivity extends BridgeActivity {
 
     @Override public void onConfigurationChanged(Configuration configuration) {
         super.onConfigurationChanged(configuration);
-        if (chatWebView != null) chatWebView.getSettings().setTextZoom(Math.round(configuration.fontScale * 100));
+        applyWebTextZoom(configuration);
     }
 
     @Override public void onWindowFocusChanged(boolean focused) {

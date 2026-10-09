@@ -343,6 +343,34 @@ public class MainActivityNavigationTest {
         assertEquals(2, WidgetShadow.immediateRefreshes);
     }
 
+    @Test public void terminalPageZoomIsScopedRestoresLatestSystemScaleAndIgnoresStaleCleanup() {
+        TestMainActivity activity = open(new Intent(context, MainActivity.class));
+        android.webkit.WebView view = activity.getBridge().getWebView();
+        android.content.res.Configuration configuration = new android.content.res.Configuration(
+                activity.getResources().getConfiguration());
+        configuration.fontScale = 1.5f;
+        activity.getResources().updateConfiguration(configuration, activity.getResources().getDisplayMetrics());
+        activity.onConfigurationChanged(configuration);
+        assertEquals(150, view.getSettings().getTextZoom());
+        activity.setTerminalPage("first", true);
+        assertEquals(100, view.getSettings().getTextZoom());
+        configuration.fontScale = 1.8f;
+        activity.getResources().updateConfiguration(configuration, activity.getResources().getDisplayMetrics());
+        activity.onConfigurationChanged(configuration);
+        assertEquals(100, view.getSettings().getTextZoom());
+        activity.setTerminalPage("second", true);
+        activity.setTerminalPage("first", false);
+        assertEquals(100, view.getSettings().getTextZoom());
+        activity.setTerminalPage("second", false);
+        assertEquals(180, view.getSettings().getTextZoom());
+        assertTrue(MainActivity.isTerminalPageRoute("/terminals/host/session"));
+        assertTrue(MainActivity.isTerminalPageRoute("/terminals/host/session?restored=1"));
+        assertFalse(MainActivity.isTerminalPageRoute("/terminals/host"));
+        assertFalse(MainActivity.isTerminalPageRoute("/chat/session"));
+        assertEquals(100, MainActivity.terminalTextZoom(true, 2f));
+        assertEquals(200, MainActivity.terminalTextZoom(false, 2f));
+    }
+
     @Test public void microphoneDenialAndRecognizerResultsReachVoiceManager() {
         TestMainActivity activity = open(new Intent(context, MainActivity.class));
         VoiceManager manager = VoiceManager.get(activity);

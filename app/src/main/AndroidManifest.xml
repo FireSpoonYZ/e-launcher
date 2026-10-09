@@ -130,7 +130,7 @@
             android:theme="@style/VoiceGlassTheme" />
         <activity
             android:name=".MainActivity"
-            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode|navigation|density"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode|navigation|density|fontScale"
             android:exported="true"
             android:launchMode="singleTask"
             android:theme="@style/WebAppTheme"
