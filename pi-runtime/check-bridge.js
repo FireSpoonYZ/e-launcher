@@ -88,9 +88,9 @@ const api = http.createServer((req, res) => {
     } else if (prompt === "schedule-list" && !called.includes("schedule_task")) {
       tool("schedule_task", { action:"list" });
     } else if (prompt === "schedule-create" && !called.includes("schedule_task")) {
-      tool("schedule_task", { action:"create", title:"早间简报", prompt:"整理资讯", repeat:"daily", time:"08:00" });
+      tool("schedule_task", { action:"create", title:"早间简报", prompt:"整理资讯", repeat:"daily", time:"08:00", alarmMode:"alarmClock" });
     } else if (prompt === "schedule-statutory" && !called.includes("schedule_task")) {
-      tool("schedule_task", { action:"create", title:"调休提醒", prompt:"整理资讯", repeat:"statutoryWorkday", time:"08:00" });
+      tool("schedule_task", { action:"create", title:"调休提醒", prompt:"整理资讯", repeat:"statutoryWorkday", time:"08:00", alarmMode:"exact" });
     } else if (prompt === "schedule-holiday" && !called.includes("schedule_task")) {
       tool("schedule_task", { action:"create", title:"休息提醒", prompt:"休息", repeat:"statutoryHoliday", time:"08:00" });
     } else if (prompt === "schedule-stale" && !called.includes("schedule_task")) {
@@ -293,8 +293,8 @@ try {
   console.log("PASS: shipped CJS registers and bridges list_apps/search_apps independently");
   for (const [id, promptText, expectedArguments] of [
     ["schedule-list", "schedule-list", { action:"list" }],
-    ["schedule-create", "schedule-create", { action:"create", title:"早间简报", prompt:"整理资讯", repeat:"daily", time:"08:00" }],
-    ["schedule-statutory", "schedule-statutory", { action:"create", title:"调休提醒", prompt:"整理资讯", repeat:"statutoryWorkday", time:"08:00" }],
+    ["schedule-create", "schedule-create", { action:"create", title:"早间简报", prompt:"整理资讯", repeat:"daily", time:"08:00", alarmMode:"alarmClock" }],
+    ["schedule-statutory", "schedule-statutory", { action:"create", title:"调休提醒", prompt:"整理资讯", repeat:"statutoryWorkday", time:"08:00", alarmMode:"exact" }],
     ["schedule-holiday", "schedule-holiday", { action:"create", title:"休息提醒", prompt:"休息", repeat:"statutoryHoliday", time:"08:00" }],
   ]) {
     send({ id, conversationId:id, type:"prompt", sdk:true, prompt:promptText, config });

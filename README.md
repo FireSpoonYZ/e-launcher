@@ -91,7 +91,9 @@ Widget 不显示虚拟桌面；进入任务详情页后，有关联虚拟屏的�
 
 强行停止应用（force-stop）、撤销权限及系统后台限制仍可能阻止或中断执行；不保证关机或重启后首次解锁前运行。Node 启动故障可能持续到应用进程重启，有限重试不是 Node 自愈机制，也不新增独立 Node 进程。普通定时任务不需要 Shizuku，仅任务中的 Shower 手机操作需要对应授权与服务。
 
-浏览器界面检查：`node scripts/check-schedules.mjs`，使用 Chrome／Edge 和内存原生桥接样例验证真实 React 页面，截图保存到系统临时目录；`--serve` 可打开本地设计对照页面。此检查不会创建 Android 闹钟或调用模型，不能替代真机后台执行验证。原生周期和持久化回归见 `ScheduleRuleTest` 与 `ScheduledTasksTest`。本次定时可靠性改动仅开发，尚待集成验证；以上为既有检查入口，不代表本次已执行或通过。
+浏览器界面检查：`node scripts/check-schedules.mjs`，使用 Chrome／Edge 和内存原生桥接样例验证真实 React 页面，截图保存到系统临时目录；`--serve` 可打开本地设计对照页面。此检查不会创建 Android 闹钟或调用模型，不能替代真机后台执行验证。原生周期和持久化回归见 `ScheduleRuleTest` 与 `ScheduledTasksTest`。
+
+设备定时执行检查：构建并覆盖安装对应 ABI 的调试 APK，配置默认模型后，运行 `node scripts/check-scheduled-alarms-device.mjs --serial=<设备序列号>`。脚本同时支持明确指定的手机或模拟器，先确认没有运行中的会话，再分别创建系统闹钟和精确定时短回复任务，验证后台进程回收、锁屏触发、实际 Pi/模型回复、无重复记录及完成后删除，并检查任务入口。它不强行停止应用、不替换模型配置或整份定时偏好，只清理自己创建的任务定义，保留执行会话和记录，不切换当前聊天。验收前后比对已安装 APK 与当前 worktree 调试包的 SHA-256，截图和报告写入系统临时目录。ROM 忽略 `am kill` 时，脚本通过调试应用自身 UID 的 `SIGKILL` 模拟进程丢失，不设置应用的强行停止状态。此检查不覆盖关机、强行停止、长时间 Doze、Shizuku 手机操作或启动失败重试的故障注入。
 
 ## 构建与检查（Windows PowerShell）
 

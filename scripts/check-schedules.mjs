@@ -191,9 +191,23 @@ if (process.argv.includes('--serve')) {
     await click('.schedule-row [role="switch"]');
     await wait('!document.querySelector(".schedule-row").classList.contains("is-paused")');
 
+    await click('[aria-label="编辑 早间简报"]');
+    await wait('document.querySelector("input[maxlength]")?.value==="早间简报"');
+    await evaluate('location.hash="/schedules?taskId=task-b"');
+    await wait('document.querySelector("input[maxlength]")?.value==="每周复盘"');
+    assert.equal(await evaluate('document.querySelector("textarea").value'), '总结本周进展。', 'A new task entry replaces the open editor identity');
+    await fill('input[maxlength="80"]', '保留当前草稿');
+    await evaluate('scheduleFixture.set({now:Date.now()})');
+    assert.equal(await evaluate('document.querySelector("input[maxlength]").value'), '保留当前草稿', 'Snapshot refresh does not reset the same task draft');
+    await click('.schedule-cancel'); await clickText('放弃修改');
+    await wait('!document.querySelector(".schedule-sheet")');
     await click('.schedule-page-footer button');
     await wait('document.querySelector(".schedule-editor")');
     await fill('input[maxlength="80"]', '验证任务'); await fill('textarea', '整理阅读笔记');
+    assert.equal(await evaluate('[...document.querySelectorAll(".schedule-repeat-options button")].find(el=>el.textContent.trim()==="系统闹钟").getAttribute("aria-pressed")'), 'true', 'New schedules default to the visible system alarm');
+    await clickText('精确定时');
+    assert.equal(await evaluate('[...document.querySelectorAll(".schedule-repeat-options button")].find(el=>el.textContent.trim()==="精确定时").getAttribute("aria-pressed")'), 'true');
+    await clickText('系统闹钟');
     await screenshot('editor');
     assert.equal(await evaluate('document.querySelectorAll(".schedule-editor input[type=date]").length'), 0, 'Once uses the next matching local time without an absolute date');
     assert.equal(await evaluate('document.querySelectorAll("[role=spinbutton]").length'), 2);
@@ -211,7 +225,7 @@ if (process.argv.includes('--serve')) {
     await screenshot('weekly'); await clickText('确定');
     await wait('document.querySelector(".schedule-cycle-link")');
     assert.match(await evaluate('document.querySelector(".schedule-cycle-link").textContent'), /每周 一、五/);
-    await click('[aria-label="执行后删除"]');
+    await click('[aria-label="完成后删除"]');
     await wait('!document.querySelector(".schedule-save").disabled');
     await evaluate('scheduleFixture.failNextSave=true'); await clickText('保存');
     await wait('document.querySelector(".schedule-editor .inline-error")');
@@ -220,6 +234,7 @@ if (process.argv.includes('--serve')) {
     let saved = await evaluate('scheduleFixture.state.tasks.find(task=>task.title==="验证任务")');
     assert.equal(saved.repeat, 'weekly'); assert.deepEqual(saved.weekdays, [1, 5]); assert.equal(saved.time, '18:30');
     assert.equal(saved.prompt, '整理阅读笔记'); assert.equal(saved.vibrate, true); assert.equal(saved.deleteAfterRun, true);
+    assert.equal(saved.alarmMode, 'alarmClock', 'Alarm mode reaches the native save boundary');
 
     await click('[aria-label="编辑 验证任务"]'); await wait('document.querySelector(".schedule-cycle-link")');
     await click('.schedule-cycle-link');
@@ -285,9 +300,12 @@ if (process.argv.includes('--serve')) {
     assert.equal(saved.prompt, '整理阅读笔记'); assert.equal(saved.deleteAfterRun, true);
     await click('[aria-label="编辑 月度总结"]'); await wait('document.querySelector(".schedule-cycle-link")');
     assert.match(await evaluate('document.querySelector(".schedule-cycle-link").textContent'), /每月 31 日/);
+    assert.equal(await evaluate('[...document.querySelectorAll(".schedule-repeat-options button")].find(el=>el.textContent.trim()==="精确定时").getAttribute("aria-pressed")'), 'true', 'Legacy schedules retain exact mode');
+    await clickText('系统闹钟');
     await wait('!document.querySelector(".schedule-save").disabled');
     await clickText('保存'); await wait('!document.querySelector(".schedule-sheet")');
     assert.equal(await evaluate('scheduleFixture.state.tasks.find(task=>task.id==="task-c").repeat'), 'monthly');
+    assert.equal(await evaluate('scheduleFixture.state.tasks.find(task=>task.id==="task-c").alarmMode'), 'alarmClock', 'Legacy mode can be upgraded without losing its rule');
     await resize(390, 844);
     await click('[aria-label="编辑 验证任务"]'); await fill('input[maxlength="80"]', '未保存');
     await click('.schedule-cancel'); await wait('document.querySelector(".schedule-discard")');
@@ -303,7 +321,20 @@ if (process.argv.includes('--serve')) {
     assert.equal(await evaluate('scheduleFixture.state.records.length'), 3, 'Deleting a definition removed history');
 
     await click('.schedule-history-link'); await wait('document.querySelectorAll(".schedule-record").length===3');
-    await screenshot('history'); await clickText('异常'); await wait('document.querySelectorAll(".schedule-record").length===2');
+    await screenshot('history');
+    await evaluate(`scheduleFixture.set({records:[...scheduleFixture.state.records,
+      {id:'queued-check',taskId:'task-a',title:'等待安全重试',scheduledAt:Date.now(),startedAt:Date.now(),finishedAt:0,status:'queued',reason:'startup_retry',message:'尚未提交 Pi',attempt:1,nextAttemptAt:Date.now()+60000,conversationId:null},
+      {id:'starting-check',taskId:'task-b',title:'启动确认中',scheduledAt:Date.now(),startedAt:Date.now(),finishedAt:0,status:'starting',reason:'',message:'',attempt:1,conversationId:null},
+      {id:'interrupted-check',taskId:'task-c',title:'中断不重放',scheduledAt:Date.now(),startedAt:Date.now(),finishedAt:Date.now(),status:'aborted',reason:'interrupted',message:'',attempt:1,conversationId:null}
+    ]})`);
+    await wait('document.querySelectorAll(".schedule-record").length===6');
+    assert.match(await evaluate('document.querySelector(".record-queued").textContent'), /待执行.*启动重试.*最多尝试 3 次.*已尝试启动：1.*下次重试：/s);
+    assert.match(await evaluate('document.querySelector(".record-starting").textContent'), /启动中.*尚未确认开始执行/s);
+    assert.match(await evaluate('document.querySelector(".record-aborted").textContent'), /不会自动重试/);
+    await screenshot('recovery-history');
+    await evaluate('scheduleFixture.set({records:scheduleFixture.state.records.filter(record=>!record.id.endsWith("-check"))})');
+    await wait('document.querySelectorAll(".schedule-record").length===3');
+    await clickText('异常'); await wait('document.querySelectorAll(".schedule-record").length===2');
     await clickText('全部'); await click('.schedule-open-chat'); await wait('document.querySelector(".chat-page")');
     await click('[aria-label="会话列表"]'); await wait('document.querySelector(".drawer-schedules")');
     await screenshot('drawer'); await click('.drawer-schedules'); await wait('document.querySelectorAll(".schedule-row").length===3');
@@ -320,7 +351,7 @@ if (process.argv.includes('--serve')) {
     await wait('document.documentElement.lang==="en" && document.querySelectorAll(".schedule-row").length===3');
     await noHorizontalOverflow(); await screenshot('english-small');
     assert.deepEqual(browserErrors, [], 'Browser runtime exceptions');
-    const report = 'PASS: navigation; filters; switches; keyboard wrap; scroll and touch snap/save consistency; empty custom repeat blocked; multi-day create; switches and prompt retained; save failure; monthly and legacy round-trip; independent statutory rules/coverage/unsupported/unknown-year notices; 320px top actions; discard/delete; history; permission/retry; dark/English.\nNative bridge is a fixture, not real Android scheduling.\nScreenshots: ' + output;
+    const report = 'PASS: alarmClock default and mode switching; legacy exact round-trip; queued/starting/retry/interrupted history; completion-only deletion copy; navigation; filters; switches; keyboard wrap; scroll and touch snap/save consistency; empty custom repeat blocked; multi-day create; switches and prompt retained; save failure; monthly and legacy round-trip; independent statutory rules/coverage/unsupported/unknown-year notices; 320px top actions; discard/delete; history; permission/retry; dark/English.\nNative bridge is a fixture, not real Android scheduling.\nScreenshots: ' + output;
     await writeFile(join(output, 'result.txt'), report); console.log(report);
   } finally { socket?.close(); browser.kill(); await server.close(); }
 }
