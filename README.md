@@ -70,6 +70,16 @@ Widget 不显示虚拟桌面；进入任务详情页后，有关联虚拟屏的�
 
 此检查使用临时会话和系统设置应用，不调用模型；验证连续画面、触摸后画面变化、预览期间 AI 截图及退出后继续操作。测试会删除临时会话，截图写到显式 `artifactDir` 参数目录中的 `shower-preview-check.png`；拉取到电脑时必须使用仓库外目录。历史设备结果不能代表此次迁移通过，刷新率、键盘与 ROM 差异仍需设备验收。
 
+锁屏检查使用 `checks=shower-lockscreen`，开始前解锁测试设备并授权 Shizuku：
+
+```powershell
+& $adb -s <serial> shell am instrument -w -e checks shower-lockscreen -e artifactDir /sdcard/Android/data/com.example.launcherprobe/files/lockscreen-check com.example.launcherprobe.test/com.example.launcherprobe.ChatStoreChecks
+```
+
+检查会暂时启用系统锁屏，将显示超时设为 15 秒并关闭充电常亮，随后锁屏闲置 30 秒，验证虚拟屏截图有内容、滑动改变画面、主屏保持锁定和关闭、释放后屏幕消失。结束时恢复这些设置并唤醒测试设备；若配置了密码，需要人工解锁。证据包含操作前后 PNG 和 display/power/window 状态，拉取到仓库外保存。ADB 按键与输入仅验证自动化路径，模拟器结果不代表厂商 ROM 真机通过。
+
+Shower 对存活的独立虚拟屏每约 4 秒报告显示活动，保留原有 5 分钟空闲回收。Android 14+ 截图直接调用 WindowManager 获取目标虚拟屏，避免临时镜像屏随主屏休眠；Android 13 保留原截图路径。
+
 ### 定时任务
 
 聊天页左侧会话抽屉的「新会话」下方提供「定时任务」入口。管理页支持创建、编辑、启用／暂停、删除及执行记录；周期设置与主表单共用一个底部面板，返回时保留主表单，关闭未保存的修改时会确认。助手内置 `schedule_task`，可 list、create、update 和 delete。update 只提交要改的字段，宿主按当前 revision 合并未提供的规则并保留启用或暂停；revision 不一致或任务已删除会返回错误，不会自动再提交一次。返回里的 `exactAlarmGranted` 为 false 或 `schedulingError` 非空只表示任务已保存，精确闹钟尚未排上，不能当成到点一定会执行。
