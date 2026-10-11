@@ -30,20 +30,28 @@ public final class WindowManager {
 
     /** Captures on API 34+; the caller owns the returned software bitmap. */
     public Bitmap captureDisplay(int displayId, float frameScale) throws ReflectiveOperationException {
-        Class<?> screenCaptureClass = Class.forName("android.window.ScreenCapture");
-        Class<?> captureArgsClass = Class.forName("android.window.ScreenCapture$CaptureArgs");
-        Class<?> builderClass = Class.forName("android.window.ScreenCapture$CaptureArgs$Builder");
-        Class<?> listenerClass = Class.forName("android.window.ScreenCapture$ScreenCaptureListener");
-        Class<?> syncListenerClass = Class.forName("android.window.ScreenCapture$SynchronousScreenCaptureListener");
-        Class<?> bufferClass = Class.forName("android.window.ScreenCapture$ScreenshotHardwareBuffer");
+        String screenCaptureClassName = Build.VERSION.SDK_INT >= 37
+                ? "android.window.ScreenCaptureInternal" : "android.window.ScreenCapture";
+        Class<?> screenCaptureClass = Class.forName(screenCaptureClassName);
+        Class<?> captureArgsClass = Class.forName(screenCaptureClassName + "$CaptureArgs");
+        Class<?> builderClass = Class.forName(screenCaptureClassName + "$CaptureArgs$Builder");
+        Class<?> listenerClass = Class.forName(screenCaptureClassName + "$ScreenCaptureListener");
+        Class<?> syncListenerClass = Class.forName(screenCaptureClassName + "$SynchronousScreenCaptureListener");
+        Class<?> bufferClass = Class.forName(screenCaptureClassName + "$ScreenshotHardwareBuffer");
         Method getBuffer = syncListenerClass.getMethod("getBuffer");
         Method getHardwareBuffer = bufferClass.getMethod("getHardwareBuffer");
         Method asBitmap = bufferClass.getMethod("asBitmap");
 
         Object builder = builderClass.getConstructor().newInstance();
         builderClass.getMethod("setFrameScale", float.class).invoke(builder, frameScale);
-        builderClass.getMethod("setCaptureSecureLayers", boolean.class).invoke(builder, false);
-        builderClass.getMethod("setAllowProtected", boolean.class).invoke(builder, false);
+        if (Build.VERSION.SDK_INT >= 37) {
+            // 0 is REDACT for both secure and protected content policies.
+            builderClass.getMethod("setSecureContentPolicy", int.class).invoke(builder, 0);
+            builderClass.getMethod("setProtectedContentPolicy", int.class).invoke(builder, 0);
+        } else {
+            builderClass.getMethod("setCaptureSecureLayers", boolean.class).invoke(builder, false);
+            builderClass.getMethod("setAllowProtected", boolean.class).invoke(builder, false);
+        }
         Object args = builderClass.getMethod("build").invoke(builder);
         Object listener = screenCaptureClass.getMethod("createSyncCaptureListener").invoke(null);
         manager.getClass().getMethod("captureDisplay", int.class, captureArgsClass, listenerClass)
