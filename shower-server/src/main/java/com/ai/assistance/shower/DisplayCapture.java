@@ -5,7 +5,6 @@ import android.graphics.Rect;
 import android.hardware.display.VirtualDisplay;
 import android.media.Image;
 import android.media.ImageReader;
-import android.os.Build;
 import android.os.IBinder;
 import android.view.Surface;
 
@@ -40,14 +39,25 @@ final class DisplayCapture {
             reader = ImageReader.newInstance(width, height, android.graphics.PixelFormat.RGBA_8888, 2);
             Surface surface = reader.getSurface();
             try {
-                mirror = ServiceManager.getDisplayManager().createVirtualDisplay(
-                        "ShowerScreenshot", width, height, displayId, surface);
-            } catch (Exception first) {
+                display = SurfaceControl.createDisplay("ShowerScreenshot", false);
+                SurfaceControl.setDisplaySurface(display, surface, input.toRect(), new Rect(0, 0, width, height),
+                        info.getLayerStack());
+            } catch (Exception | LinkageError | AssertionError first) {
+                if (display != null) {
+                    try {
+                        SurfaceControl.destroyDisplay(display);
+                        display = null;
+                    } catch (Throwable cleanup) {
+                        first.addSuppressed(cleanup);
+                        throw first;
+                    }
+                }
+                Main.logToFile("SurfaceControl capture unavailable; falling back to DisplayManager", first);
                 try {
-                    display = createDisplay();
-                    setDisplaySurface(display, surface, input.toRect(), new Rect(0, 0, width, height),
-                            info.getLayerStack());
-                } catch (Exception second) {
+                    mirror = ServiceManager.getDisplayManager().createVirtualDisplay(
+                            "ShowerScreenshot", width, height, displayId, surface);
+                    if (mirror == null) throw new IllegalStateException("Screenshot mirror creation failed");
+                } catch (Exception | LinkageError | AssertionError second) {
                     first.addSuppressed(second);
                     throw first;
                 }
@@ -69,25 +79,6 @@ final class DisplayCapture {
                 mirror.release();
             } catch (Throwable ignored) { }
             if (reader != null) reader.close();
-        }
-    }
-
-    private static IBinder createDisplay() throws Exception {
-        boolean secure = Build.VERSION.SDK_INT < AndroidVersions.API_30_ANDROID_11
-                || (Build.VERSION.SDK_INT == AndroidVersions.API_30_ANDROID_11
-                && !"S".equals(Build.VERSION.CODENAME));
-        return SurfaceControl.createDisplay("ShowerScreenshot", secure);
-    }
-
-    private static void setDisplaySurface(IBinder display, Surface surface, Rect source,
-            Rect target, int layerStack) {
-        SurfaceControl.openTransaction();
-        try {
-            SurfaceControl.setDisplaySurface(display, surface);
-            SurfaceControl.setDisplayProjection(display, 0, source, target);
-            SurfaceControl.setDisplayLayerStack(display, layerStack);
-        } finally {
-            SurfaceControl.closeTransaction();
         }
     }
 
