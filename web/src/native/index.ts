@@ -136,11 +136,11 @@ export interface DevicePlugin {
 }
 
 export type ScheduleRule = { repeat: 'once'|'daily'|'weekly'|'monthly'|'statutoryWorkday'|'statutoryHoliday'; time: string; weekday: number; weekdays?: number[]; monthDay: number };
-export type ScheduledTaskInput = ScheduleRule & { id?: string; revision?: number; title: string; prompt: string; vibrate?: boolean; deleteAfterRun?: boolean };
+export type ScheduledTaskInput = ScheduleRule & { id?: string; revision?: number; title: string; prompt: string; alarmMode?: 'alarmClock'|'exact'; vibrate?: boolean; deleteAfterRun?: boolean };
 export type ScheduleCalendarInfo = { calendarNotice?: string; calendarCoverage?: string; calendarFallback?: string };
 export type ScheduleSource = { sourceConversationId: string|null; sourceConversationAvailable: boolean };
 export type ScheduledTask = ScheduledTaskInput & ScheduleCalendarInfo & ScheduleSource & { id: string; revision: number; enabled: boolean; createdAt: number; nextRunAt: number };
-export type ScheduleRecord = ScheduleSource & { id: string; taskId: string; title: string; scheduledAt: number; startedAt: number; finishedAt: number; status: 'running'|'completed'|'error'|'aborted'|'skipped'; reason: string; message: string; conversationId: string|null; conversationAvailable: boolean };
+export type ScheduleRecord = ScheduleSource & { id: string; taskId: string; title: string; scheduledAt: number; startedAt: number; finishedAt: number; status: 'queued'|'starting'|'running'|'completed'|'error'|'aborted'|'skipped'; reason: string; message: string; attempt?: number; nextAttemptAt?: number; conversationId: string|null; conversationAvailable: boolean };
 export type ScheduleSnapshot = { tasks: ScheduledTask[]; records: ScheduleRecord[]; exactAlarmGranted: boolean; schedulingError: string; timeZone: string; now: number; localNow: string; calendarVersion?: string };
 export type SchedulePreview = ScheduleCalendarInfo & { nextRunAt: number; timeZone: string };
 export interface ScheduledTasksPlugin {
