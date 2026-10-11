@@ -6,7 +6,6 @@ import android.annotation.SuppressLint;
 import android.graphics.Rect;
 import android.os.Build;
 import android.os.IBinder;
-import android.system.Os;
 import android.view.Surface;
 
 import java.lang.reflect.Method;
@@ -25,53 +24,52 @@ public final class SurfaceControl {
     }
 
     private static Method getBuiltInDisplayMethod;
-    private static Class<?> displayControlClass;
 
     private SurfaceControl() {
     }
 
-    public static void setDisplaySurface(IBinder displayToken, Surface surface, Rect source,
-            Rect target, int layerStack) throws ReflectiveOperationException {
-        try (android.view.SurfaceControl.Transaction transaction = new android.view.SurfaceControl.Transaction()) {
-            Class<?> clazz = android.view.SurfaceControl.Transaction.class;
-            clazz.getMethod("setDisplaySurface", IBinder.class, Surface.class)
-                    .invoke(transaction, displayToken, surface);
-            clazz.getMethod("setDisplayProjection", IBinder.class, int.class, Rect.class, Rect.class)
-                    .invoke(transaction, displayToken, 0, source, target);
-            clazz.getMethod("setDisplayLayerStack", IBinder.class, int.class)
-                    .invoke(transaction, displayToken, layerStack);
-            transaction.apply();
+    public static void openTransaction() {
+        try {
+            CLASS.getMethod("openTransaction").invoke(null);
+        } catch (Exception e) {
+            throw new AssertionError(e);
         }
     }
 
-    private static synchronized Class<?> getDisplayControlClass() throws ReflectiveOperationException {
-        if (displayControlClass == null) {
-            Class<?> factory = Class.forName("com.android.internal.os.ClassLoaderFactory");
-            Method createClassLoader = factory.getDeclaredMethod("createClassLoader", String.class,
-                    String.class, String.class, ClassLoader.class, int.class, boolean.class, String.class);
-            ClassLoader loader = (ClassLoader) createClassLoader.invoke(null,
-                    Os.getenv("SYSTEMSERVERCLASSPATH"), null, null,
-                    ClassLoader.getSystemClassLoader(), 0, true, null);
-            Class<?> clazz = loader.loadClass("com.android.server.display.DisplayControl");
-            Method loadLibrary = Runtime.class.getDeclaredMethod("loadLibrary0", Class.class, String.class);
-            loadLibrary.setAccessible(true);
-            loadLibrary.invoke(Runtime.getRuntime(), clazz, "android_servers");
-            displayControlClass = clazz;
+    public static void closeTransaction() {
+        try {
+            CLASS.getMethod("closeTransaction").invoke(null);
+        } catch (Exception e) {
+            throw new AssertionError(e);
         }
-        return displayControlClass;
+    }
+
+    public static void setDisplayProjection(IBinder displayToken, int orientation, Rect layerStackRect, Rect displayRect) {
+        try {
+            CLASS.getMethod("setDisplayProjection", IBinder.class, int.class, Rect.class, Rect.class)
+                    .invoke(null, displayToken, orientation, layerStackRect, displayRect);
+        } catch (Exception e) {
+            throw new AssertionError(e);
+        }
+    }
+
+    public static void setDisplayLayerStack(IBinder displayToken, int layerStack) {
+        try {
+            CLASS.getMethod("setDisplayLayerStack", IBinder.class, int.class).invoke(null, displayToken, layerStack);
+        } catch (Exception e) {
+            throw new AssertionError(e);
+        }
+    }
+
+    public static void setDisplaySurface(IBinder displayToken, Surface surface) {
+        try {
+            CLASS.getMethod("setDisplaySurface", IBinder.class, Surface.class).invoke(null, displayToken, surface);
+        } catch (Exception e) {
+            throw new AssertionError(e);
+        }
     }
 
     public static IBinder createDisplay(String name, boolean secure) throws Exception {
-        if (Build.VERSION.SDK_INT >= 34) {
-            Class<?> clazz = getDisplayControlClass();
-            if (Build.VERSION.SDK_INT >= 36) {
-                // Avoid depending on another display to render while the main display is off.
-                return (IBinder) clazz.getMethod("createVirtualDisplay", String.class, boolean.class,
-                        boolean.class, String.class, float.class).invoke(null, name, secure, false, "", 0.0f);
-            }
-            String method = Build.VERSION.SDK_INT >= 35 ? "createVirtualDisplay" : "createDisplay";
-            return (IBinder) clazz.getMethod(method, String.class, boolean.class).invoke(null, name, secure);
-        }
         return (IBinder) CLASS.getMethod("createDisplay", String.class, boolean.class).invoke(null, name, secure);
     }
 
@@ -100,12 +98,7 @@ public final class SurfaceControl {
 
     public static void destroyDisplay(IBinder displayToken) {
         try {
-            if (Build.VERSION.SDK_INT >= 34) {
-                String method = Build.VERSION.SDK_INT >= 35 ? "destroyVirtualDisplay" : "destroyDisplay";
-                getDisplayControlClass().getMethod(method, IBinder.class).invoke(null, displayToken);
-            } else {
-                CLASS.getMethod("destroyDisplay", IBinder.class).invoke(null, displayToken);
-            }
+            CLASS.getMethod("destroyDisplay", IBinder.class).invoke(null, displayToken);
         } catch (Exception e) {
             throw new AssertionError(e);
         }
