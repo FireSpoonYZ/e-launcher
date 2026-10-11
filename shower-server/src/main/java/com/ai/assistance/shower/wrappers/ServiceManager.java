@@ -22,6 +22,7 @@ public final class ServiceManager {
     private static ActivityManager activityManager;
     private static WindowManager windowManager;
     private static DisplayManager displayManager;
+    private static PowerManager powerManager;
 
     private ServiceManager() {
     }
@@ -48,6 +49,13 @@ public final class ServiceManager {
             windowManager = WindowManager.create();
         }
         return windowManager;
+    }
+
+    public static synchronized PowerManager getPowerManager() {
+        if (powerManager == null) {
+            powerManager = PowerManager.create();
+        }
+        return powerManager;
     }
 
     public static synchronized DisplayManager getDisplayManager() {
