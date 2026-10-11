@@ -58,6 +58,7 @@ public final class Main {
     private static final int DEFAULT_BIT_RATE = 500_000;
     private static final long IDLE_TIMEOUT_MS = 15_000;
     private static final long DISPLAY_IDLE_TIMEOUT_MS = 300_000;
+    private static final long DISPLAY_USER_ACTIVITY_INTERVAL_MS = 4_000;
     private static final Pattern PACKAGE_NAME = Pattern.compile(
             "[A-Za-z][A-Za-z0-9_]*(?:\\.[A-Za-z][A-Za-z0-9_]*)+");
     private static final Pattern TOKEN = Pattern.compile("[a-f0-9-]{36}");
@@ -401,10 +402,25 @@ public final class Main {
                 for (DisplaySession current : displays.values()) {
                     // The same lock covers input/capture, so an in-flight operation cannot expire.
                     synchronized (current) {
-                        if (SystemClock.elapsedRealtime() - current.lastActive >= DISPLAY_IDLE_TIMEOUT_MS) {
+                        if (displays.get(current.id) != current) continue;
+                        long now = SystemClock.elapsedRealtime();
+                        if (now - current.lastActive >= DISPLAY_IDLE_TIMEOUT_MS) {
                             logToFile("Virtual display " + current.id + " idle for 300000ms; releasing", null);
                             try { releaseDisplay(current.id); }
                             catch (Exception exception) { logToFile("Idle display release failed", exception); }
+                        } else if (Build.VERSION.SDK_INT >= 33 && now >= current.nextUserActivityAt) {
+                            // Only API 33+ displays request independent groups; run as shell, not a host Binder caller.
+                            current.nextUserActivityAt = now + DISPLAY_USER_ACTIVITY_INTERVAL_MS;
+                            try {
+                                ServiceManager.getPowerManager().userActivity(current.id);
+                                current.userActivityFailed = false;
+                            } catch (IllegalStateException exception) {
+                                if (!current.userActivityFailed) {
+                                    logToFile("Virtual display " + current.id + " userActivity failed: "
+                                            + exception, exception);
+                                }
+                                current.userActivityFailed = true;
+                            }
                         }
                     }
                 }
@@ -563,6 +579,8 @@ public final class Main {
         Surface previewSurface;
         volatile boolean running = true;
         long lastActive = SystemClock.elapsedRealtime();
+        long nextUserActivityAt; // First activity is due on the next watcher tick, without renewing the resource lease.
+        boolean userActivityFailed;
 
         DisplaySession(int id, int width, int height, int dpi, VirtualDisplay virtualDisplay,
                 MediaCodec encoder, Surface surface, InputController input) {
