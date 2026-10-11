@@ -31,6 +31,9 @@ function CalendarStatus({value}: {value?: ScheduleCalendarInfo}) {
   return <>{value?.calendarCoverage && <p className="secondary">{value.calendarCoverage}</p>}
     {value?.calendarNotice && <p className="secondary" role="status">{value.calendarNotice}；{value.calendarFallback}</p>}</>;
 }
+function alarmModeLabel(mode: ScheduledTaskInput['alarmMode'], t: Text) {
+  return mode === 'alarmClock' ? t('系统闹钟', 'System alarm') : t('精确定时', 'Exact alarm');
+}
 function ruleLabel(rule: ScheduleRule, t: Text) { return `${repeatLabel(rule, t)} ${rule.time}`; }
 function countdown(nextRunAt: number, now: number, t: Text) {
   const minutes = Math.max(1, Math.ceil((nextRunAt - now) / 60000));
@@ -129,7 +132,7 @@ export function SchedulesPage() {
           : !visible.length ? <ScheduleEmpty title={t('没有符合条件的任务', 'No matching tasks')}/>
           : <div className="schedule-list">{visible.map(task => <div key={task.id}><article className={`schedule-row${task.enabled ? '' : ' is-paused'}`} key={task.id}>
             <button className="schedule-row-main" onClick={() => { action.setError(''); setEditing(task); }} aria-label={t(`编辑 ${task.title}`, `Edit ${task.title}`)}>
-              <span><time className="schedule-clock">{task.time}</time><span>{repeatLabel(task, t)}</span><strong>{task.title}</strong>{task.calendarNotice && <small>{task.calendarNotice}；{task.calendarFallback}</small>}<small>{!task.enabled ? t('已暂停', 'Paused') : !state.data!.exactAlarmGranted ? t('等待闹钟与提醒权限', 'Waiting for alarm permission') : t('下次：', 'Next: ') + dateLabel(task.nextRunAt, state.data!.timeZone, t)}</small></span>
+              <span><time className="schedule-clock">{task.time}</time><span>{repeatLabel(task, t)} · {alarmModeLabel(task.alarmMode, t)}</span><strong>{task.title}</strong>{task.calendarNotice && <small>{task.calendarNotice}；{task.calendarFallback}</small>}<small>{!task.enabled ? t('已暂停', 'Paused') : !state.data!.exactAlarmGranted ? t('等待闹钟与提醒权限', 'Waiting for alarm permission') : t('下次：', 'Next: ') + dateLabel(task.nextRunAt, state.data!.timeZone, t)}</small></span>
             </button>
             <div className="schedule-toggle-target"><Toggle label={t(`启用 ${task.title}`, `Enable ${task.title}`)} checked={task.enabled} disabled={action.busy} onChange={checked => void mutateEnabled(task, checked)}/></div>
             <button className="icon-button" aria-label={t(`${task.title} 的更多操作`, `More actions for ${task.title}`)} disabled={action.busy} onClick={() => { action.setError(''); setMenu(task); }}><MoreHorizontal/></button>
@@ -215,8 +218,8 @@ function TimeWheel({label, count, value, disabled, onChange, onMoving}: {
 function TaskEditor({task, timeZone, hostNow, calendarVersion, onClose, onSaved}: {task?: ScheduledTask; timeZone: string; hostNow: number; calendarVersion?: string; onClose(): void; onSaved(value: ScheduleSnapshot): void}) {
   const t = useText(); const action = useAction();
   const initial = useRef<ScheduledTaskInput>(task
-    ? {id: task.id, revision: task.revision, title: task.title, prompt: task.prompt, ...ruleOf(task), vibrate: task.vibrate ?? false, deleteAfterRun: task.deleteAfterRun ?? false}
-    : {title: '', prompt: '', repeat: 'once', time: '08:00', weekday: 1, monthDay: 1, vibrate: true, deleteAfterRun: false}).current;
+    ? {id: task.id, revision: task.revision, title: task.title, prompt: task.prompt, ...ruleOf(task), alarmMode: task.alarmMode ?? 'exact', vibrate: task.vibrate ?? false, deleteAfterRun: task.deleteAfterRun ?? false}
+    : {title: '', prompt: '', repeat: 'once', time: '08:00', weekday: 1, monthDay: 1, alarmMode: 'alarmClock', vibrate: true, deleteAfterRun: false}).current;
   const [draft, setDraft] = useState(initial);
   const [cycle, setCycle] = useState<ScheduleRule>();
   const [custom, setCustom] = useState(false);
@@ -294,17 +297,26 @@ function TaskEditor({task, timeZone, hostNow, calendarVersion, onClose, onSaved}
                 onChange={minute => setDraft(value => ({...value, time: value.time.slice(0, 3) + String(minute).padStart(2, '0')}))}/>
             </div>
             <p className="schedule-wheel-hint secondary">{t('上下滑动选择时间，键盘可用方向键。', 'Scroll to choose; arrow keys also work.')}</p>
+            <fieldset className="schedule-field" disabled={action.busy} aria-describedby="schedule-alarm-mode-hint">
+              <legend>{t('定时模式', 'Alarm mode')}</legend>
+              <div className="schedule-repeat-options">
+                {(['alarmClock', 'exact'] as const).map(alarmMode => <button type="button" key={alarmMode} aria-pressed={draft.alarmMode === alarmMode}
+                  onClick={() => setDraft({...draft, alarmMode})}>{alarmModeLabel(alarmMode, t)}<Check aria-hidden="true"/></button>)}
+              </div>
+              <p className="secondary" id="schedule-alarm-mode-hint">{t('系统闹钟：系统可显示下一次闹钟，点击可打开任务。精确定时：不显示为系统下一次闹钟。两种模式都需要闹钟与提醒权限。', 'System alarm: the system may show the next alarm; tapping it opens the task. Exact alarm: not shown as the next system alarm. Both modes require alarms & reminders permission.')}</p>
+              <p className="secondary">{t('迟到不超过 15 分钟（含）只补跑一次；超过则跳过，不重放多个历史周期。', 'A run up to 15 minutes late (inclusive) is caught up once; later runs are skipped. Multiple past occurrences are not replayed.')}</p>
+            </fieldset>
             <div className="schedule-alarm-options">
               <button type="button" className="schedule-cycle-link" disabled={action.busy} onClick={() => {
                 setCycle(ruleOf(draft)); setCustom(draft.repeat === 'weekly' && !['1,2,3,4,5', '6,7'].includes(daysOf(draft).join()));
               }}><span>{t('重复', 'Repeat')}</span><small>{repeatLabel(draft, t)}</small><ChevronRight/></button>
               <div className="schedule-option"><span>{t('执行时振动', 'Vibrate on start')}</span><Toggle label={t('执行时振动', 'Vibrate on start')} checked={draft.vibrate ?? false} disabled={action.busy} onChange={vibrate => setDraft({...draft, vibrate})}/></div>
-              <div className="schedule-option"><span>{t('执行后删除', 'Delete after start')}</span><Toggle label={t('执行后删除', 'Delete after start')} checked={draft.deleteAfterRun ?? false} disabled={action.busy} onChange={deleteAfterRun => setDraft({...draft, deleteAfterRun})}/></div>
+              <div className="schedule-option"><span>{t('完成后删除', 'Delete after completion')}</span><Toggle label={t('完成后删除', 'Delete after completion')} checked={draft.deleteAfterRun ?? false} disabled={action.busy} onChange={deleteAfterRun => setDraft({...draft, deleteAfterRun})}/></div>
             </div>
-            <p className="secondary schedule-option-hint">{t('成功发起后删除定时任务，执行会话和记录保留；发起失败不会删除。', 'Deletes the schedule only after a successful start. Conversations and history remain; failed starts are not deleted.')}</p>
+            <p className="secondary schedule-option-hint">{t('仅在 Pi 回合正常结束后删除未被修改的定时任务，会话和记录保留；失败或中断不删除。“完成”不保证外部操作成功。', 'Deletes the unchanged schedule only when the Pi turn ends normally. Conversations and history remain; failures or interruptions keep the schedule. “Completed” does not guarantee that external actions succeeded.')}</p>
             <label className="schedule-field"><span>{t('备注', 'Note')}</span><input required maxLength={80} placeholder={t('例如：早间简报', 'e.g. Morning briefing')} value={draft.title} disabled={action.busy} onChange={e => setDraft({...draft, title: e.target.value})}/></label>
             <label className="schedule-field"><span>{t('任务内容', 'Task instructions')}</span><textarea required maxLength={8000} rows={3} placeholder={t('告诉 Pi，这个时间要做什么…', 'Tell Pi what to do at this time…')} value={draft.prompt} disabled={action.busy} onChange={e => setDraft({...draft, prompt: e.target.value})}/><small>{t('备注用于识别任务；这里的内容会原样交给 AI 执行。', 'The note identifies the task; these instructions are sent to AI.')}</small></label>
-            <div className="schedule-destination"><div><span>{t('结果发送到', 'Results')}</span><span className="secondary">{t('新会话', 'New conversation')}</span></div><p className="secondary">{t('每次执行会新建独立会话，使用全局默认模型，不复制来源聊天。一次性任务发起或错过后会停用，重新启用时按下一个满足条件的自然日时刻执行。', 'Each run creates an independent conversation using the global default model, without copying the source chat. One-time tasks pause after starting or missing a run; enabling again schedules the next matching local day and time.')}</p></div>
+            <div className="schedule-destination"><div><span>{t('结果发送到', 'Results')}</span><span className="secondary">{t('新会话', 'New conversation')}</span></div><p className="secondary">{t('每次执行会新建独立会话，使用全局默认模型，不复制来源聊天。一次性任务进入待执行或错过后会停用，重新启用时按下一个满足条件的自然日时刻执行。', 'Each run creates an independent conversation using the global default model, without copying the source chat. One-time tasks pause after a run is queued or missed; enabling again schedules the next matching local day and time.')}</p></div>
           </>}
           {(cycle || activeRule.repeat === 'statutoryWorkday' || activeRule.repeat === 'statutoryHoliday') && <p className="secondary">{t('法定工作日包含调休补班；法定节假日包含普通周末和公告放假，不含补班。', 'Statutory workdays include makeup shifts; statutory days off include ordinary weekends and official holidays, excluding makeup shifts.')}</p>}
           <CalendarStatus value={preview.value}/>
@@ -314,14 +326,27 @@ function TaskEditor({task, timeZone, hostNow, calendarVersion, onClose, onSaved}
   </Dialog>;
 }
 function recordStatus(status: ScheduleRecord['status'], t: Text) {
-  return {running: t('执行中', 'Running'), completed: t('已完成', 'Completed'), error: t('失败', 'Failed'), aborted: t('已中断', 'Interrupted'), skipped: t('已跳过', 'Skipped')}[status];
+  return {queued: t('待执行', 'Queued'), starting: t('启动中', 'Starting'), running: t('执行中', 'Running'), completed: t('已完成', 'Completed'), error: t('失败', 'Failed'), aborted: t('已中断', 'Interrupted'), skipped: t('已跳过', 'Skipped')}[status];
 }
 function recordMessage(record: ScheduleRecord, t: Text) {
-  if (record.message) return record.message;
-  if (record.reason === 'missed') return t('错过计划时间，本次未执行。可返回任务列表查看后续安排。', 'This run missed its scheduled time. Check the task list for future plans.');
-  if (record.reason === 'overlap') return t('上一次任务仍在执行，已跳过本次。', 'The previous run is still active; this occurrence was skipped.');
-  if (record.reason === 'interrupted') return t('应用进程已结束，本次执行已中断。', 'The app process ended before this run completed.');
-  return {running: t('Pi 正在执行，可打开会话查看进度。', 'Pi is working. Open the conversation to follow progress.'), completed: t('任务已完成', 'Task completed'), error: t('执行失败，请查看会话。', 'Run failed. See the conversation for details.'), aborted: t('本次执行已停止', 'This run was stopped'), skipped: t('本次执行已跳过', 'This occurrence was skipped')}[record.status];
+  const status = {
+    queued: t('等待启动，尚未提交 Pi。', 'Waiting to start; not yet submitted to Pi.'),
+    starting: t('正在尝试启动 Pi，尚未确认开始执行。', 'Trying to start Pi; execution has not yet been confirmed.'),
+    running: t('Pi 正在执行，可打开会话查看进度。', 'Pi is working. Open the conversation to follow progress.'),
+    completed: t('Pi 回合已正常结束；不保证外部操作成功。', 'The Pi turn ended normally; this does not guarantee that external actions succeeded.'),
+    error: t('启动或执行失败，请查看详情或会话。', 'Startup or execution failed. See the details or conversation.'),
+    aborted: t('本次执行已停止或结果不明。', 'This run stopped or its outcome is unknown.'),
+    skipped: t('本次执行已跳过。', 'This occurrence was skipped.'),
+  }[record.status];
+  const reasons: Record<string, string> = {
+    missed: t('错过允许的执行时间，本次未执行。可返回任务列表查看后续安排。', 'This run missed its allowed time window. Check the task list for future plans.'),
+    overlap: t('上一次任务仍待执行或执行中，已跳过本次。', 'The previous run is still pending or active; this occurrence was skipped.'),
+    interrupted: t('应用进程已结束，执行结果不明；不会自动重试。', 'The app process ended and the outcome is unknown; this run will not be retried automatically.'),
+    catch_up: t('补跑：计划时间后 15 分钟内只补跑一次。', 'Catch-up: a late occurrence is run only once within 15 minutes of its scheduled time.'),
+    startup_retry: t('启动重试：仅确认未提交 Pi 的启动失败可重试，最多尝试 3 次。', 'Startup retry: only failures confirmed not submitted to Pi may be retried, with at most 3 attempts.'),
+    cancelled: t('任务已暂停、删除或修改，尚未开始的本次执行已取消。', 'The task was paused, deleted or changed; this pending occurrence was cancelled before it started.'),
+  };
+  return [status, reasons[record.reason]].filter(Boolean).join(' ');
 }
 export function ScheduleHistoryPage() {
   const t = useText(); const nav = useNavigate(); const [params] = useSearchParams();
@@ -339,11 +364,14 @@ export function ScheduleHistoryPage() {
       {state.data && <>
         {taskId && <div className="schedule-history-scope"><strong>{title ?? t('已删除的任务', 'Deleted task')}</strong><button className="quiet-button" onClick={() => nav('/schedules/history', {replace: true})}>{t('查看全部', 'View all')}</button></div>}
         <p className="secondary">{t('设备时区：', 'Device time zone: ')}{state.data.timeZone}</p>
-        <p className="schedule-summary">{t('保留最近 100 条执行记录', 'The latest 100 runs are kept')}</p>
+        <p className="schedule-summary">{t('保留最近 100 条执行记录；待执行、启动中和执行中的记录不会被截断。', 'The latest 100 runs are kept; queued, starting and running records are not removed by this limit.')}</p>
         <div className="segments schedule-filters" role="group" aria-label={t('筛选执行记录', 'Filter history')}>{(['all', 'completed', 'error'] as const).map((value, i) => <button key={value} aria-pressed={filter === value} onClick={() => setFilter(value)}>{[t('全部', 'All'), t('已完成', 'Completed'), t('异常', 'Issues')][i]}</button>)}</div>
         {!visible.length ? <ScheduleEmpty title={t('暂无执行记录', 'No runs yet')}>{t('任务执行后，结果会显示在这里。', 'Run results will appear here.')}</ScheduleEmpty> : visible.map(record => <article key={record.id} className={`schedule-record record-${record.status}`}>
-          <div className="schedule-record-icon" aria-hidden="true">{record.status === 'completed' ? <Check/> : record.status === 'error' || record.status === 'aborted' ? <CircleAlert/> : record.status === 'running' ? <LoaderCircle className="spin"/> : <Clock3/>}</div>
+          <div className="schedule-record-icon" aria-hidden="true">{record.status === 'completed' ? <Check/> : record.status === 'error' || record.status === 'aborted' ? <CircleAlert/> : record.status === 'running' || record.status === 'starting' ? <LoaderCircle className="spin"/> : <Clock3/>}</div>
           <div className="schedule-record-body"><div className="schedule-record-title"><strong>{record.title}</strong><span>{recordStatus(record.status, t)}</span></div><time dateTime={new Date(record.scheduledAt).toISOString()}>{dateLabel(record.scheduledAt, state.data!.timeZone, t)}</time><p>{recordMessage(record, t)}</p>
+            {record.message && <p>{record.message}</p>}
+            {record.attempt !== undefined && <p>{t('已尝试启动：', 'Startup attempts: ')}{record.attempt}</p>}
+            {record.status === 'queued' && record.nextAttemptAt !== undefined && record.nextAttemptAt > 0 && <p>{t(record.reason === 'startup_retry' ? '下次重试：' : '计划启动：', record.reason === 'startup_retry' ? 'Next retry: ' : 'Planned start: ')}<time dateTime={new Date(record.nextAttemptAt).toISOString()}>{dateLabel(record.nextAttemptAt, state.data!.timeZone, t)}</time></p>}
             {record.conversationAvailable && record.conversationId ? <button className="quiet-button schedule-open-chat" disabled={action.busy} onClick={() => action.run(async () => { await Chat.selectConversation({conversationId: record.conversationId!}); nav(`/chat/${record.conversationId}`); })}>{t('查看执行会话', 'Open execution conversation')}<ChevronRight/></button> : record.conversationId && <small>{t('执行会话已删除或未创建', 'Execution conversation deleted or not created')}</small>}
             <SourceConversation value={record} busy={action.busy} onOpen={openConversation}/>
           </div>
