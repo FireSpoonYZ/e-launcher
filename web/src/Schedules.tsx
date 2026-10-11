@@ -141,7 +141,7 @@ export function SchedulesPage() {
       </>}
     </div>
     <footer className="schedule-page-footer"><button className="button full" disabled={!state.data} onClick={() => setEditing('new')}><Plus/>{t('新建任务', 'New task')}</button></footer>
-    {editing && <TaskEditor task={editing === 'new' ? undefined : editing} timeZone={state.data!.timeZone} hostNow={state.data!.now} calendarVersion={state.data?.calendarVersion} onClose={() => setEditing(null)} onSaved={next => {
+    {editing && <TaskEditor key={editing === 'new' ? 'new' : `task:${editing.id}`} task={editing === 'new' ? undefined : editing} timeZone={state.data!.timeZone} hostNow={state.data!.now} calendarVersion={state.data?.calendarVersion} onClose={() => setEditing(null)} onSaved={next => {
       state.accept(next); setEditing(null); setFilter('all');
       setNotice(editing === 'new' ? t('定时任务已创建', 'Scheduled task created') : t('修改已保存', 'Changes saved'));
     }}/>}
