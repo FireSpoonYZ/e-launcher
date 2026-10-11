@@ -22,9 +22,10 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArraySet;
 
-/** Private durable definitions and receipts, driven by one native alarm for the next due time. */
+/** Private durable definitions and receipts, with one native alarm per delivery mode. */
 final class ScheduledTasks {
     static final String ACTION_RUN = "com.example.launcherprobe.RUN_SCHEDULED_TASKS";
+    private static final long MAX_LATENESS_MS = 15 * 60 * 1000L;
     private static ScheduledTasks instance;
 
     static synchronized ScheduledTasks get(Context context) {
@@ -40,7 +41,6 @@ final class ScheduledTasks {
     private final ChatCoordinator coordinator;
     private final Set<Runnable> listeners = new CopyOnWriteArraySet<>();
     private final String processId = UUID.randomUUID().toString();
-    private String schedulingError = "";
 
     private ScheduledTasks(Application context) {
         this.context = context;
@@ -70,15 +70,7 @@ final class ScheduledTasks {
         calendar = updated;
         try {
             JSONObject state = read();
-            JSONArray tasks = state.getJSONArray("tasks");
-            long now = clock.getAsLong();
-            ZoneId zone = ZoneId.systemDefault();
-            for (int i = 0; i < tasks.length(); i++) {
-                JSONObject task = tasks.getJSONObject(i);
-                ScheduleRule rule = ScheduleRule.fromJson(task);
-                if (rule.isStatutory() && task.getBoolean("enabled"))
-                    task.put("nextRunAt", rule.nextAfter(now, zone, calendar));
-            }
+            prepareOccurrences(state, false);
             write(state);
             scheduleAlarm(state);
         } catch (Exception failure) {
@@ -123,7 +115,7 @@ final class ScheduledTasks {
             calendar.describe(task, rule, now, rule.nextAfter(now, zone, calendar), zone);
         }
         return new JSONObject().put("tasks", tasks).put("records", history)
-                .put("exactAlarmGranted", exactAlarmGranted()).put("schedulingError", schedulingError)
+                .put("exactAlarmGranted", exactAlarmGranted()).put("schedulingError", state.optString("schedulingError"))
                 .put("timeZone", zone.getId()).put("now", now)
                 .put("localNow", Instant.ofEpochMilli(now).atZone(zone).toOffsetDateTime().toString())
                 .put("calendarVersion", calendar.version());
@@ -135,6 +127,7 @@ final class ScheduledTasks {
         if (input.has("id")) requireTask(read().getJSONArray("tasks"),
                 ScheduleRule.text(input, "id"), ScheduleRule.integer(input, "revision"));
         ScheduleRule rule = ScheduleRule.fromJson(input);
+        alarmMode(input, "alarmClock");
         long next = rule.nextAfter(now, zone, calendar);
         JSONObject result = new JSONObject().put("nextRunAt", next).put("timeZone", zone.getId());
         calendar.describe(result, rule, now, next, zone);
@@ -161,9 +154,10 @@ final class ScheduledTasks {
         ScheduleRule rule = ScheduleRule.fromJson(ruleInput);
         boolean vibrate = ScheduleRule.bool(input, "vibrate", previous != null && previous.optBoolean("vibrate"));
         boolean deleteAfterRun = ScheduleRule.bool(input, "deleteAfterRun", previous != null && previous.optBoolean("deleteAfterRun"));
+        String mode = alarmMode(input, previous == null ? "alarmClock" : previous.getString("alarmMode"));
         boolean enabled = previous == null || previous.getBoolean("enabled");
         JSONObject task = rule.json().put("id", id).put("title", title).put("prompt", prompt)
-                .put("vibrate", vibrate).put("deleteAfterRun", deleteAfterRun)
+                .put("vibrate", vibrate).put("deleteAfterRun", deleteAfterRun).put("alarmMode", mode)
                 .put("enabled", enabled).put("revision", previous == null ? 1 : previous.getInt("revision") + 1)
                 .put("createdAt", previous == null ? now : previous.getLong("createdAt"))
                 .put("sourceConversationId", previous == null
@@ -171,6 +165,7 @@ final class ScheduledTasks {
                         : previous.opt("sourceConversationId") == null ? JSONObject.NULL : previous.get("sourceConversationId"))
                 .put("nextRunAt", enabled ? rule.nextAfter(now, ZoneId.systemDefault(), calendar) : 0);
         if (index < 0) tasks.put(task); else tasks.put(index, task);
+        cancelQueued(state, id);
         write(state);
         scheduleAlarm(state);
         changed();
@@ -184,6 +179,7 @@ final class ScheduledTasks {
         long now = clock.getAsLong();
         task.put("enabled", enabled).put("revision", revision + 1).put("nextRunAt", enabled
                 ? rule.nextAfter(now, ZoneId.systemDefault(), calendar) : 0);
+        cancelQueued(state, id);
         write(state);
         scheduleAlarm(state);
         changed();
@@ -195,6 +191,7 @@ final class ScheduledTasks {
         JSONArray tasks = state.getJSONArray("tasks");
         requireTask(tasks, id, revision);
         tasks.remove(indexOf(tasks, id));
+        cancelQueued(state, id);
         // Existing runs and their conversations belong to the user, not to the definition's lifetime.
         write(state);
         scheduleAlarm(state);
@@ -236,6 +233,7 @@ final class ScheduledTasks {
                 .put("title", input.has("title") ? ScheduleRule.text(input, "title") : current.getString("title"))
                 .put("prompt", input.has("prompt") ? ScheduleRule.text(input, "prompt") : current.getString("prompt"))
                 .put("repeat", repeat)
+                .put("alarmMode", alarmMode(input, current.getString("alarmMode")))
                 .put("time", input.has("time") ? ScheduleRule.text(input, "time") : current.getString("time"));
         if ("weekly".equals(repeat)) {
             if (input.has("weekdays")) merged.put("weekdays", input.get("weekdays"));
@@ -254,109 +252,128 @@ final class ScheduledTasks {
         return merged;
     }
 
-    /** Boot, clock changes and foreground recovery only schedule future work; they do not start agents. */
+    /** Recovery persists pending work and registers alarms, but never starts an agent or FGS. */
     synchronized void restore() throws Exception { restore(false); }
 
     synchronized void restore(boolean clockChanged) throws Exception {
         JSONObject state = read();
-        boolean modified = recoverRuns(state);
-        long now = clock.getAsLong();
-        ZoneId zone = ZoneId.systemDefault();
-        boolean zoneChanged = !zone.getId().equals(state.optString("timeZone", zone.getId()));
-        boolean recalculate = zoneChanged || clockChanged;
-        JSONArray tasks = state.getJSONArray("tasks");
-        for (int i = 0; i < tasks.length(); i++) {
-            JSONObject task = tasks.getJSONObject(i);
-            if (!task.getBoolean("enabled")) continue;
-            ScheduleRule rule = ScheduleRule.fromJson(task);
-            long due = task.getLong("nextRunAt");
-            boolean missed = due > 0 && due <= now && !recalculate;
-            if (missed || recalculate || due <= 0 || rule.isStatutory()) {
-                if (missed) addRecord(state, task, due, "skipped", "missed", null);
-                if ("once".equals(rule.repeat) && missed)
-                    task.put("enabled", false).put("nextRunAt", 0).put("revision", task.getInt("revision") + 1);
-                else task.put("nextRunAt", rule.nextAfter(now, zone, calendar));
-                modified = true;
-            }
-        }
-        if (modified || zoneChanged) {
-            state.put("timeZone", zone.getId());
-            write(state);
-        }
+        prepareOccurrences(state, clockChanged);
+        write(state);
         scheduleAlarm(state);
         changed();
     }
 
-    /** Claim every due occurrence durably before submitting any prompt; stale/duplicate alarms are harmless. */
-    synchronized void onAlarm() throws Exception {
-        if (!exactAlarmGranted()) { restore(); return; }
-        JSONObject state = read();
-        ZoneId zone = ZoneId.systemDefault();
-        boolean zoneChanged = !zone.getId().equals(state.optString("timeZone", zone.getId()));
+    private void prepareOccurrences(JSONObject state, boolean clockChanged) throws JSONException {
         recoverRuns(state);
         long now = clock.getAsLong();
+        ZoneId zone = ZoneId.systemDefault();
+        boolean recalculate = clockChanged || !zone.getId().equals(state.optString("timeZone", zone.getId()));
         JSONArray tasks = state.getJSONArray("tasks");
-        JSONArray pending = new JSONArray();
+        JSONArray runs = state.getJSONArray("runs");
+        for (int i = 0; i < runs.length(); i++) {
+            JSONObject run = runs.getJSONObject(i);
+            if (!"queued".equals(run.getString("status"))) continue;
+            if (recalculate || !queuedDefinitionMatches(state, run))
+                finishSkipped(run, "cancelled");
+            else if (!withinLateness(run.getLong("scheduledAt"), now))
+                finishSkipped(run, "missed");
+        }
         for (int i = 0; i < tasks.length(); i++) {
             JSONObject task = tasks.getJSONObject(i);
             if (!task.getBoolean("enabled")) continue;
             ScheduleRule rule = ScheduleRule.fromJson(task);
-            if (zoneChanged) task.put("nextRunAt", rule.nextAfter(now, zone, calendar));
             long due = task.getLong("nextRunAt");
-            if (due <= 0 || due > now) continue;
-            if (rule.isStatutory() && calendar.isWorkday(java.time.Instant.ofEpochMilli(due).atZone(zone).toLocalDate(), zone)
+            if (recalculate || due <= 0) {
+                task.put("nextRunAt", rule.nextAfter(now, zone, calendar));
+                continue;
+            }
+            if (due > now) {
+                if (rule.isStatutory()) task.put("nextRunAt", rule.nextAfter(now, zone, calendar));
+                continue;
+            }
+            if (rule.isStatutory() && calendar.isWorkday(Instant.ofEpochMilli(due).atZone(zone).toLocalDate(), zone)
                     != "statutoryWorkday".equals(rule.repeat)) {
                 task.put("nextRunAt", rule.nextAfter(now, zone, calendar));
                 continue;
             }
-            if ("once".equals(task.getString("repeat")))
+            // Automatic once-disable belongs to this occurrence, not to a user edit cancelling it.
+            if ("once".equals(rule.repeat))
                 task.put("enabled", false).put("nextRunAt", 0).put("revision", task.getInt("revision") + 1);
-            else task.put("nextRunAt", ScheduleRule.fromJson(task).nextAfter(now, ZoneId.systemDefault(), calendar));
-            if (hasRunningTask(state, task.getString("id"))) {
-                addRecord(state, task, due, "skipped", "overlap", null);
-            } else {
-                String conversationId = UUID.randomUUID().toString();
-                JSONObject run = addRecord(state, task, due, "running", "", conversationId);
-                pending.put(new JSONObject().put("task", task).put("run", run));
+            else task.put("nextRunAt", rule.nextAfter(now, zone, calendar));
+            if (!withinLateness(due, now)) addRecord(state, task, due, "skipped", "missed");
+            else if (hasActiveTask(state, task.getString("id"))) addRecord(state, task, due, "skipped", "overlap");
+            else {
+                JSONObject run = addRecord(state, task, due, "queued", now > due ? "catch_up" : "");
+                run.put("taskSnapshot", new JSONObject(task.toString())).put("nextAttemptAt", now);
             }
         }
         state.put("timeZone", zone.getId());
+    }
+
+    private static boolean withinLateness(long due, long now) {
+        return now <= due + MAX_LATENESS_MS;
+    }
+
+    /** Both alarm modes claim through this lock and the same durable occurrence ledger. */
+    synchronized void onAlarm() throws Exception {
+        if (!exactAlarmGranted()) { restore(); return; }
+        JSONObject state = read();
+        prepareOccurrences(state, false);
         write(state);
         scheduleAlarm(state);
-        for (int i = 0; i < pending.length(); i++) {
-            JSONObject item = pending.getJSONObject(i);
-            JSONObject task = item.getJSONObject("task");
-            JSONObject run = item.getJSONObject("run");
-            String request;
+        JSONArray runs = state.getJSONArray("runs");
+        for (int i = 0; i < runs.length(); i++) {
+            JSONObject run = runs.getJSONObject(i);
+            if ("queued".equals(run.getString("status")) && run.getLong("nextAttemptAt") <= clock.getAsLong())
+                startQueuedRun(run.getString("id"));
+        }
+        changed();
+    }
+
+    private void startQueuedRun(String id) throws Exception {
+        JSONObject state = read();
+        JSONArray runs = state.getJSONArray("runs");
+        int index = indexOf(runs, id);
+        if (index < 0) return;
+        JSONObject run = runs.getJSONObject(index);
+        long now = clock.getAsLong();
+        if (!"queued".equals(run.getString("status")) || run.getLong("nextAttemptAt") > now) return;
+        JSONObject task = run.getJSONObject("taskSnapshot");
+        if (!queuedDefinitionMatches(state, run)) finishSkipped(run, "cancelled");
+        else if (!withinLateness(run.getLong("scheduledAt"), now)) finishSkipped(run, "missed");
+        else {
+            int attempt = run.getInt("attempt") + 1;
+            run.put("status", "starting").put("reason", "").put("message", "")
+                    .put("attempt", attempt).put("nextAttemptAt", 0)
+                    .put("startedAt", now).put("finishedAt", 0).put("owner", processId)
+                    .put("conversationId", UUID.randomUUID().toString()).put("requestId", JSONObject.NULL);
+            write(state); // Never submit unless the starting fence has reached durable storage.
+            String request = null;
             try {
                 request = coordinator.sendScheduled(run.getString("conversationId"),
                         task.getString("title"), task.getString("prompt"));
                 if (request == null || request.isEmpty()) throw new IllegalStateException("任务未成功发起");
             } catch (Exception failure) {
-                updateRecord(run.getString("id"), "error", "", detail(failure), null);
-                continue;
+                long next = clock.getAsLong() + attempt * 60_000L;
+                boolean retry = failure instanceof ChatCoordinator.ScheduledStartException
+                        && attempt < 3 && withinLateness(run.getLong("scheduledAt"), next);
+                run.put("status", retry ? "queued" : "error").put("reason", retry ? "startup_retry" : "")
+                        .put("message", detail(failure)).put("nextAttemptAt", retry ? next : 0)
+                        .put("finishedAt", retry ? 0 : clock.getAsLong());
             }
-            // Submission, not completion, is the boundary: failed starts must never delete definitions.
-            updateRecord(run.getString("id"), "running", "", "", request);
-            if (task.optBoolean("deleteAfterRun")) {
-                JSONObject latest = read();
-                JSONArray definitions = latest.getJSONArray("tasks");
-                int index = indexOf(definitions, task.getString("id"));
-                if (index >= 0) {
-                    definitions.remove(index);
-                    write(latest);
-                    scheduleAlarm(latest);
-                }
-            }
-            if (task.optBoolean("vibrate")) {
-                try {
-                    Vibrator vibrator = context.getSystemService(Vibrator.class);
-                    if (vibrator != null && vibrator.hasVibrator())
-                        vibrator.vibrate(VibrationEffect.createOneShot(200, VibrationEffect.DEFAULT_AMPLITUDE));
-                } catch (RuntimeException failure) { Log.w("ScheduledTasks", "Unable to vibrate", failure); }
-            }
+            if (request != null && !request.isEmpty())
+                run.put("status", "running").put("requestId", request).put("message", "");
         }
-        changed();
+        // A post-submission disk failure leaves starting, never a replayable queued occurrence.
+        write(state);
+        scheduleAlarm(state);
+        if ("running".equals(run.getString("status")) && task.optBoolean("vibrate")) {
+            try {
+                Vibrator vibrator = context.getSystemService(Vibrator.class);
+                if (vibrator != null && vibrator.hasVibrator())
+                    vibrator.vibrate(VibrationEffect.createOneShot(200, VibrationEffect.DEFAULT_AMPLITUDE));
+            } catch (RuntimeException failure) { Log.w("ScheduledTasks", "Unable to vibrate", failure); }
+        }
     }
 
     private boolean recoverRuns(JSONObject state) throws JSONException {
@@ -364,34 +381,58 @@ final class ScheduledTasks {
         JSONArray runs = state.getJSONArray("runs");
         for (int i = 0; i < runs.length(); i++) {
             JSONObject run = runs.getJSONObject(i);
-            if ("running".equals(run.getString("status")) && !processId.equals(run.optString("owner"))
-                    && !coordinator.running(run.optString("conversationId"))) {
-                run.put("status", "aborted").put("reason", "interrupted").put("finishedAt", clock.getAsLong());
+            String status = run.getString("status");
+            if (("starting".equals(status) || "running".equals(status)) && !processId.equals(run.optString("owner"))) {
+                run.put("status", "aborted").put("reason", "interrupted").put("finishedAt", clock.getAsLong())
+                        .put("nextAttemptAt", 0);
                 modified = true;
             }
         }
         return modified;
     }
 
-    private static boolean hasRunningTask(JSONObject state, String taskId) throws JSONException {
+    private static boolean activeStatus(String status) {
+        return "queued".equals(status) || "starting".equals(status) || "running".equals(status);
+    }
+
+    private static boolean hasActiveTask(JSONObject state, String taskId) throws JSONException {
         JSONArray runs = state.getJSONArray("runs");
         for (int i = 0; i < runs.length(); i++) {
             JSONObject run = runs.getJSONObject(i);
-            if (taskId.equals(run.getString("taskId")) && "running".equals(run.getString("status"))) return true;
+            if (taskId.equals(run.getString("taskId")) && activeStatus(run.getString("status"))) return true;
         }
         return false;
     }
 
+    private static boolean queuedDefinitionMatches(JSONObject state, JSONObject run) throws JSONException {
+        JSONArray tasks = state.getJSONArray("tasks");
+        int index = indexOf(tasks, run.getString("taskId"));
+        return index >= 0 && tasks.getJSONObject(index).getInt("revision")
+                == run.getJSONObject("taskSnapshot").getInt("revision");
+    }
+
+    private void cancelQueued(JSONObject state, String taskId) throws JSONException {
+        JSONArray runs = state.getJSONArray("runs");
+        for (int i = 0; i < runs.length(); i++) {
+            JSONObject run = runs.getJSONObject(i);
+            if (taskId.equals(run.getString("taskId")) && "queued".equals(run.getString("status")))
+                finishSkipped(run, "cancelled");
+        }
+    }
+
+    private void finishSkipped(JSONObject run, String reason) throws JSONException {
+        run.put("status", "skipped").put("reason", reason).put("finishedAt", clock.getAsLong()).put("nextAttemptAt", 0);
+    }
+
     private JSONObject addRecord(JSONObject state, JSONObject task, long due, String status,
-            String reason, String conversationId) throws JSONException {
-        long now = clock.getAsLong();
+            String reason) throws JSONException {
         JSONObject run = new JSONObject().put("id", UUID.randomUUID().toString())
                 .put("taskId", task.getString("id")).put("title", task.getString("title"))
                 .put("sourceConversationId", task.has("sourceConversationId") ? task.get("sourceConversationId") : JSONObject.NULL)
-                .put("scheduledAt", due).put("startedAt", "running".equals(status) ? now : 0)
-                .put("finishedAt", "running".equals(status) ? 0 : now).put("status", status)
+                .put("scheduledAt", due).put("startedAt", 0)
+                .put("finishedAt", activeStatus(status) ? 0 : clock.getAsLong()).put("status", status)
                 .put("reason", reason).put("message", "").put("owner", processId)
-                .put("conversationId", conversationId == null ? JSONObject.NULL : conversationId);
+                .put("attempt", 0).put("nextAttemptAt", 0).put("conversationId", JSONObject.NULL);
         state.getJSONArray("runs").put(run);
         return run;
     }
@@ -406,34 +447,32 @@ final class ScheduledTasks {
             if (payload == null) return;
             for (int i = 0; i < runs.length(); i++) {
                 JSONObject run = runs.getJSONObject(i);
-                if (!"running".equals(run.getString("status"))
-                        || !event.optString("conversationId").equals(run.optString("conversationId"))) continue;
+                String status = run.getString("status");
+                // Synchronous failed-start events must not terminate a queued retry or its next attempt.
+                if (!("starting".equals(status) || "running".equals(status))
+                        || !processId.equals(run.optString("owner"))
+                        || !event.optString("conversationId").equals(run.optString("conversationId"))
+                        || (!run.isNull("requestId") && !run.getString("requestId").equals(event.optString("requestId"))))
+                    continue;
                 if ("error".equals(type)) run.put("message", payload.optString("message"));
                 else {
-                    String status = payload.optString("status");
-                    run.put("status", "completed".equals(status) ? "completed" : "aborted".equals(status) ? "aborted" : "error")
-                            .put("finishedAt", clock.getAsLong());
+                    String result = payload.optString("status");
+                    run.put("status", "completed".equals(result) ? "completed" : "aborted".equals(result) ? "aborted" : "error")
+                            .put("finishedAt", clock.getAsLong()).put("nextAttemptAt", 0);
+                    JSONObject task = run.optJSONObject("taskSnapshot");
+                    if ("completed".equals(result) && task != null && task.getBoolean("deleteAfterRun")) {
+                        JSONArray tasks = state.getJSONArray("tasks");
+                        int taskIndex = indexOf(tasks, run.getString("taskId"));
+                        if (taskIndex >= 0 && tasks.getJSONObject(taskIndex).getInt("revision") == task.getInt("revision"))
+                            tasks.remove(taskIndex);
+                    }
                 }
                 write(state);
+                if ("end".equals(type)) scheduleAlarm(state);
                 changed();
                 return;
             }
         } catch (Exception failure) { Log.e("ScheduledTasks", "Unable to save task result", failure); }
-    }
-
-    private void updateRecord(String id, String status, String reason, String message, String requestId) throws Exception {
-        JSONObject state = read();
-        JSONArray runs = state.getJSONArray("runs");
-        for (int i = 0; i < runs.length(); i++) {
-            JSONObject run = runs.getJSONObject(i);
-            if (!id.equals(run.getString("id"))) continue;
-            run.put("requestId", requestId == null ? JSONObject.NULL : requestId);
-            if (!"running".equals(status) || "running".equals(run.getString("status")))
-                run.put("status", status).put("reason", reason).put("message", message)
-                        .put("finishedAt", "running".equals(status) ? 0 : clock.getAsLong());
-            write(state);
-            return;
-        }
     }
 
     private JSONObject read() throws JSONException {
@@ -449,6 +488,8 @@ final class ScheduledTasks {
         ZoneId zone = ZoneId.systemDefault();
         for (int i = 0; i < tasks.length(); i++) {
             JSONObject task = tasks.getJSONObject(i);
+            String mode = alarmMode(task, "exact");
+            if (!task.has("alarmMode")) { task.put("alarmMode", mode); modified = true; }
             if (!task.has("runAt")) continue;
             // Retire the old absolute pin; keep overdue occurrences for normal missed-run recovery.
             task.remove("runAt");
@@ -466,7 +507,7 @@ final class ScheduledTasks {
         while (runs.length() > 100) {
             int oldestFinished = -1;
             for (int i = 0; i < runs.length(); i++) {
-                if (!"running".equals(runs.getJSONObject(i).getString("status"))) { oldestFinished = i; break; }
+                if (!activeStatus(runs.getJSONObject(i).getString("status"))) { oldestFinished = i; break; }
             }
             if (oldestFinished < 0) break;
             runs.remove(oldestFinished);
@@ -477,25 +518,68 @@ final class ScheduledTasks {
 
     private void scheduleAlarm(JSONObject state) throws JSONException {
         AlarmManager alarms = context.getSystemService(AlarmManager.class);
-        PendingIntent operation = PendingIntent.getBroadcast(context, 0,
-                new Intent(context, ScheduledTaskReceiver.class).setAction(ACTION_RUN),
-                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
-        schedulingError = "";
+        String error = "";
         try {
-            alarms.cancel(operation);
-            if (!exactAlarmGranted()) return;
-            long next = Long.MAX_VALUE;
-            JSONArray tasks = state.getJSONArray("tasks");
-            for (int i = 0; i < tasks.length(); i++) {
-                JSONObject task = tasks.getJSONObject(i);
-                if (task.getBoolean("enabled") && task.getLong("nextRunAt") > 0)
-                    next = Math.min(next, task.getLong("nextRunAt"));
+            // Replace the pre-dual-mode requestCode 0 alarm on upgrade.
+            alarms.cancel(alarmOperation(0));
+            boolean granted = exactAlarmGranted();
+            for (int modeIndex = 1; modeIndex <= 2; modeIndex++) {
+                PendingIntent operation = alarmOperation(modeIndex);
+                alarms.cancel(operation);
+                if (!granted) continue;
+                String mode = modeIndex == 1 ? "exact" : "alarmClock";
+                long next = Long.MAX_VALUE;
+                String taskId = null;
+                JSONArray tasks = state.getJSONArray("tasks");
+                for (int i = 0; i < tasks.length(); i++) {
+                    JSONObject task = tasks.getJSONObject(i);
+                    long due = task.getLong("nextRunAt");
+                    if (task.getBoolean("enabled") && mode.equals(task.getString("alarmMode")) && due > 0 && due < next) {
+                        next = due;
+                        taskId = task.getString("id");
+                    }
+                }
+                JSONArray runs = state.getJSONArray("runs");
+                for (int i = 0; i < runs.length(); i++) {
+                    JSONObject run = runs.getJSONObject(i);
+                    if (!"queued".equals(run.getString("status"))) continue;
+                    long due = run.getLong("nextAttemptAt");
+                    if (mode.equals(run.getJSONObject("taskSnapshot").getString("alarmMode")) && due < next) {
+                        next = due;
+                        taskId = run.getString("taskId");
+                    }
+                }
+                if (next == Long.MAX_VALUE) continue;
+                if ("alarmClock".equals(mode)) {
+                    PendingIntent show = PendingIntent.getActivity(context, 2,
+                            new Intent(context, MainActivity.class).setAction(ACTION_RUN + ".SHOW")
+                                    .putExtra(MainActivity.EXTRA_OPEN_SCHEDULE, taskId)
+                                    .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP),
+                            PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+                    alarms.setAlarmClock(new AlarmManager.AlarmClockInfo(next, show), operation);
+                } else alarms.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, next, operation);
             }
-            if (next != Long.MAX_VALUE) alarms.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, next, operation);
         } catch (RuntimeException failure) {
-            schedulingError = detail(failure);
+            error = detail(failure);
             Log.e("ScheduledTasks", "Unable to schedule alarm", failure);
         }
+        if (!error.equals(state.optString("schedulingError"))) {
+            state.put("schedulingError", error);
+            write(state);
+        }
+    }
+
+    private PendingIntent alarmOperation(int requestCode) {
+        return PendingIntent.getBroadcast(context, requestCode,
+                new Intent(context, ScheduledTaskReceiver.class).setAction(ACTION_RUN),
+                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+    }
+
+    private static String alarmMode(JSONObject input, String fallback) {
+        String mode = input.has("alarmMode") ? ScheduleRule.text(input, "alarmMode") : fallback;
+        if (!("alarmClock".equals(mode) || "exact".equals(mode)))
+            throw new IllegalArgumentException("alarmMode 必须是 alarmClock 或 exact");
+        return mode;
     }
 
     private static int indexOf(JSONArray tasks, String id) throws JSONException {
