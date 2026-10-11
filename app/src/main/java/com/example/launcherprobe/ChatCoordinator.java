@@ -113,6 +113,11 @@ final class ChatCoordinator {
         return id;
     }
 
+    /** Only explicit pre-Pi rejection sites may produce this retryable failure. */
+    static final class ScheduledStartException extends RuntimeException {
+        ScheduledStartException(RuntimeException cause) { super(cause.getMessage(), cause); }
+    }
+
     String sendScheduled(String conversationId, String title, String prompt) throws Exception {
         store.createBackgroundConversation(conversationId, title);
         return send(conversationId, prompt, Collections.emptyList(), null, true, null, true);
@@ -138,7 +143,7 @@ final class ChatCoordinator {
         SessionRun run;
         synchronized (runLock) {
             if (voiceRegistered != null) voiceConversationTitle(conversationId);
-            run = registerRun(conversationId, submissionId, background);
+            run = registerRun(conversationId, submissionId, background, scheduled);
             if (run == null) return null;
             run.scheduled = scheduled;
             run.preserveDraft = voiceRegistered != null;
@@ -159,10 +164,11 @@ final class ChatCoordinator {
     }
 
     SessionRun registerRun(String conversationId, String submissionId) {
-        return registerRun(conversationId, submissionId, false);
+        return registerRun(conversationId, submissionId, false, false);
     }
 
-    private synchronized SessionRun registerRun(String conversationId, String submissionId, boolean background) {
+    private synchronized SessionRun registerRun(String conversationId, String submissionId, boolean background,
+            boolean scheduled) {
         SessionRun run = new SessionRun(conversationId, UUID.randomUUID().toString());
         run.extensionUi = parseObject(store.extensionUi(conversationId, store.load(conversationId)));
         // Questions belong to one live request, unlike durable todo snapshots.
@@ -181,6 +187,14 @@ final class ChatCoordinator {
             activeRuns.put(conversationId, run);
             try {
                 ChatExecutionService.setActiveCount(context, activeRuns.size());
+            } catch (RuntimeException failure) {
+                activeRuns.remove(conversationId, run);
+                try { ChatExecutionService.setActiveCount(context, activeRuns.size()); }
+                catch (RuntimeException rollbackFailure) { failure.addSuppressed(rollbackFailure); }
+                if (scheduled) throw new ScheduledStartException(failure);
+                throw failure;
+            }
+            try {
                 store.showTaskCard(conversationId);
             } catch (RuntimeException failure) {
                 activeRuns.remove(conversationId, run);
@@ -497,30 +511,35 @@ final class ChatCoordinator {
         // The first widget refresh must see the new task's persisted user message.
         emit(run, "runStatus", null, json("status", "running", "message", run.message), true);
         emit(run, "snapshot", user.id, new JSONObject());
-        executor.execute(() -> {
-            try {
-                PiAgentBridge bridge = PiAgentBridge.get(context);
-                synchronized (runLock) {
-                    if (!ownsRun(run) || run.cancellation.cancelled()) throw new InterruptedException("pi 启动已取消");
-                    run.bridge = bridge;
-                    bridge.prompt(run.requestId, run.conversationId, config, text, attachments, sdkHistory,
-                            prior, configStore, event -> main.post(() -> {
-                                if (ownsRun(run)) onPiEvent(event, run);
-                                else if (terminatingRuns.get(run.conversationId) == run) {
-                                    onTerminatingPiEvent(event, run);
-                                }
-                            }));
-                    run.nodeRegistered = true;
+        try {
+            executor.execute(() -> {
+                try {
+                    PiAgentBridge bridge = PiAgentBridge.get(context);
+                    synchronized (runLock) {
+                        if (!ownsRun(run) || run.cancellation.cancelled()) throw new InterruptedException("pi 启动已取消");
+                        run.bridge = bridge;
+                        bridge.prompt(run.requestId, run.conversationId, config, text, attachments, sdkHistory,
+                                prior, configStore, event -> main.post(() -> {
+                                    if (ownsRun(run)) onPiEvent(event, run);
+                                    else if (terminatingRuns.get(run.conversationId) == run) {
+                                        onTerminatingPiEvent(event, run);
+                                    }
+                                }));
+                        run.nodeRegistered = true;
+                    }
+                } catch (Throwable exception) {
+                    synchronized (runLock) {
+                        endPersistence(run, run.cancellation.cancelled() ? "aborted" : "error", exception);
+                        if (ownsRun(run)) finish(run, run.cancellation.cancelled() ? "aborted" : "error",
+                                detail(exception));
+                        else acknowledgeTermination(run);
+                    }
                 }
-            } catch (Throwable exception) {
-                synchronized (runLock) {
-                    endPersistence(run, run.cancellation.cancelled() ? "aborted" : "error", exception);
-                    if (ownsRun(run)) finish(run, run.cancellation.cancelled() ? "aborted" : "error",
-                            detail(exception));
-                    else acknowledgeTermination(run);
-                }
-            }
-        });
+            });
+        } catch (java.util.concurrent.RejectedExecutionException failure) {
+            if (run.scheduled) throw new ScheduledStartException(failure);
+            throw failure;
+        }
     }
 
     synchronized void foregroundServiceTimedOut() {
