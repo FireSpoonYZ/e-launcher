@@ -29,7 +29,7 @@ export function useBack() {
     else if (location.pathname.startsWith('/terminals/')) navigate('/terminals', {replace: true});
     else if (location.pathname === '/terminals') navigate('/chat', {replace: true});
     else if (location.pathname.startsWith('/schedules/')) navigate('/schedules', {replace: true});
-    else if (location.pathname.startsWith('/history/') || location.pathname === '/schedules' || location.pathname === '/archived') navigate('/chat', {replace: true});
+    else if (location.pathname.startsWith('/history/') || location.pathname === '/schedules' || location.pathname === '/archived' || location.pathname === '/backups') navigate('/chat', {replace: true});
     else void Device.close();
   };
 }

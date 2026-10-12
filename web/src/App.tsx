@@ -5,6 +5,7 @@ import { HashRouter, Navigate, Route, Routes, useLocation } from 'react-router-d
 import { Device, type DeviceState } from './native';
 import { Environment, Loading, useBack } from './ui';
 import { ArchivedPage, ChatPage, HistoryPage } from './Chat';
+import { BackupsPage } from './Backups';
 import { SettingsHome, GeneralPage, AppearancePage, DevicePage, AboutPage, VoicePage } from './Settings';
 import { ProvidersPage, ResourcesPage } from './Resources';
 import { AdvancedPage, EditorPage } from './Editor';
@@ -72,6 +73,7 @@ function Shell({initialDevice}: {initialDevice: DeviceState}) {
     <Route path="/chat/:conversationId?" element={<ChatPage/>}/>
     <Route path="/history/:conversationId" element={<HistoryPage/>}/>
     <Route path="/archived" element={<ArchivedPage/>}/>
+    <Route path="/backups" element={<BackupsPage/>}/>
     <Route path="/terminals" element={<Suspense fallback={<Loading/>}><TerminalsPage/></Suspense>}/>
     <Route path="/terminals/:hostId/:sessionId" element={<Suspense fallback={<Loading/>}><TerminalPage/></Suspense>}/>
     <Route path="/schedules" element={<SchedulesPage/>}/>

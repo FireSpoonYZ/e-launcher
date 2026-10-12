@@ -55,6 +55,7 @@ final class ChatCoordinator {
 
     ChatStore store() { return store; }
     boolean running() { return !activeRuns.isEmpty(); }
+    synchronized boolean backupBusy(String id) { return activeRuns.containsKey(id) || terminatingRuns.containsKey(id); }
     boolean running(String conversationId) { return activeRuns.containsKey(conversationId); }
     String requestId() {
         SessionRun run = activeRuns.get(store.activeId());

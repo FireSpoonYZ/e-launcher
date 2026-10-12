@@ -81,6 +81,7 @@ public class MainActivity extends BridgeActivity {
             consumeIntent(getIntent());
         }
         registerPlugin(ChatPlugin.class);
+        registerPlugin(ConversationBackupPlugin.class);
         registerPlugin(ScheduledTasksPlugin.class);
         registerPlugin(SettingsPlugin.class);
         registerPlugin(DevicePlugin.class);
