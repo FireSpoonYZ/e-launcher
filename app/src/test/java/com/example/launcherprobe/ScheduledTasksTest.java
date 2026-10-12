@@ -164,7 +164,7 @@ public class ScheduledTasksTest {
     @Test public void bootSkipsOverdueOccurrenceWithoutLaunchingAnAgent() throws Exception {
         tasks.save(input());
         JSONObject state = stored();
-        state.getJSONArray("tasks").getJSONObject(0).put("nextRunAt", System.currentTimeMillis() - 60_000);
+        state.getJSONArray("tasks").getJSONObject(0).put("nextRunAt", System.currentTimeMillis() - 16 * 60_000);
         persist(state);
         new ScheduledTaskReceiver().onReceive(application, new Intent(Intent.ACTION_BOOT_COMPLETED));
         JSONObject snapshot = tasks.snapshot();
@@ -225,7 +225,8 @@ public class ScheduledTasksTest {
         assertEquals(2, kept.getInt("revision"));
         assertFalse(Shadows.shadowOf(application.getSystemService(android.os.Vibrator.class)).isVibrating());
         JSONObject record = tasks.snapshot().getJSONArray("records").getJSONObject(0);
-        assertEquals("error", record.getString("status"));
+        assertEquals("queued", record.getString("status"));
+        assertEquals("startup_retry", record.getString("reason"));
         assertTrue(record.getString("message").contains("fixture foreground start denied"));
         assertNotNull(record.getString("conversationId"));
         assertTrue(record.getBoolean("conversationAvailable"));
@@ -244,7 +245,8 @@ public class ScheduledTasksTest {
         ChatCoordinator.SessionRun active = coordinator.registerRun(chat.activeId(), null);
         JSONObject state = stored();
         state.getJSONArray("tasks").getJSONObject(0).put("nextRunAt", System.currentTimeMillis() - 1000);
-        state.getJSONArray("runs").put(run("existing-run", task.getString("id"), active.conversationId));
+        state.getJSONArray("runs").put(run("existing-run", task.getString("id"), active.conversationId)
+                .put("owner", (String) ReflectionHelpers.getField(tasks, "processId")));
         persist(state);
         tasks.onAlarm();
         JSONObject snapshot = tasks.snapshot();
@@ -379,7 +381,8 @@ public class ScheduledTasksTest {
             persist(state);
             tasks.onAlarm();
             JSONObject snapshot = tasks.snapshot();
-            assertEquals(0, snapshot.getJSONArray("tasks").length());
+            // deleteAfterRun removes the definition only after the run completes.
+            assertFalse(snapshot.getJSONArray("tasks").getJSONObject(0).getBoolean("enabled"));
             assertEquals(1, snapshot.getJSONArray("records").length());
             JSONObject receipt = snapshot.getJSONArray("records").getJSONObject(0);
             assertEquals("running", receipt.getString("status"));
@@ -415,7 +418,7 @@ public class ScheduledTasksTest {
     @Test public void missedOneTimeTaskIsPausedKeptAndCanBeReenabled() throws Exception {
         tasks.save(input().put("repeat", "once").put("deleteAfterRun", true));
         JSONObject state = stored();
-        state.getJSONArray("tasks").getJSONObject(0).put("nextRunAt", System.currentTimeMillis() - 1000);
+        state.getJSONArray("tasks").getJSONObject(0).put("nextRunAt", System.currentTimeMillis() - 16 * 60_000);
         persist(state);
         tasks.restore();
         JSONObject snapshot = tasks.snapshot();

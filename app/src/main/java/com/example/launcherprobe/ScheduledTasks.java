@@ -488,8 +488,8 @@ final class ScheduledTasks {
         ZoneId zone = ZoneId.systemDefault();
         for (int i = 0; i < tasks.length(); i++) {
             JSONObject task = tasks.getJSONObject(i);
-            String mode = alarmMode(task, "exact");
-            if (!task.has("alarmMode")) { task.put("alarmMode", mode); modified = true; }
+            // Legacy tasks stay exact; filled in memory so read-only queries (search) never write.
+            task.put("alarmMode", alarmMode(task, "exact"));
             if (!task.has("runAt")) continue;
             // Retire the old absolute pin; keep overdue occurrences for normal missed-run recovery.
             task.remove("runAt");
