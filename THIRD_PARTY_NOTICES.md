@@ -77,13 +77,13 @@ The APK also includes the complete official **npm 11.6.2** distribution and its 
 ## Bundled todo extension
 
 The app's [todo extension](pi-runtime/extensions/todo/index.js) is adapted from
-**@juicesharp/rpiv-todo 2.12.0**, Copyright (c) 2026 juicesharp, MIT License.
+**@juicesharp/rpiv-todo 2.13.5**, Copyright (c) 2026 juicesharp, MIT License.
 Upstream: https://github.com/juicesharp/rpiv-mono/tree/main/packages/rpiv-todo.
 The original license is retained in [LICENSE](pi-runtime/extensions/todo/LICENSE)
 and copied into the APK as `assets/pi-sdk/RPIV_TODO_LICENSE.txt`.
-The fork retains the tool actions, task fields, transitions and dependency checks,
-removes terminal-only UI/configuration, and persists mutations as branch-relative
-Pi custom entries so codemode-nested calls survive runtime reconstruction.
+The fork retains the tool actions, task fields, transitions, dependency checks and
+`rpiv-todo-state` custom entries. It removes terminal-only UI/configuration and
+still replays this fork's older `e-launcher-todo` entries.
 It is bundled for e-launcher and is not published as a separate package.
 
 ## Codex Horizon reference material

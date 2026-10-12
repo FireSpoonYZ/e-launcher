@@ -26,8 +26,8 @@ Models, resource diagnostics, OAuth prompts, credential updates, package operati
 
 Android supplies a thin, non-TUI extension UI context for widgets, status, notifications and the question adapter; terminal/custom-editor APIs remain unavailable.
 
-The app bundles [`builtin:todo`](extensions/todo/README.md), a MIT-licensed fork of rpiv-todo 2.12.0.
-Each mutation writes an `e-launcher-todo` custom entry into the Pi session; both the tool and native/Web progress views restore from the current branch. This includes codemode-only nested calls, subsequent turns, branch navigation and compaction. Runtime factories keep separate state even when conversations share a cwd. Old direct tool-result snapshots remain readable; pre-fork codemode sessions can import their saved Android `.ui.json` once when no structured branch state exists. No standalone `.pi/todo.json` is created.
+The app bundles [`builtin:todo`](extensions/todo/README.md), a MIT-licensed fork of rpiv-todo 2.13.5.
+Each mutation writes the upstream `rpiv-todo-state` custom entry into the Pi session (older `e-launcher-todo` entries remain readable); both the tool and native/Web progress views restore from the current branch. This includes codemode-only nested calls, subsequent turns, branch navigation and compaction. Runtime factories keep separate state even when conversations share a cwd. Old direct tool-result snapshots remain readable; pre-fork codemode sessions can import their saved Android `.ui.json` once when no structured branch state exists. No standalone `.pi/todo.json` is created.
 
 Remove the old `npm:@juicesharp/rpiv-todo` package in Pi resources to use the bundled implementation: like other replaceable built-ins, `builtin:todo` yields to a third-party `todo` tool. It can be disabled with `-builtin:todo`. The original wire tag `@juicesharp/rpiv-todo` is retained for existing Android/Web snapshots. The task widget still shows question status and opens the conversation/detail screen for answering.
 

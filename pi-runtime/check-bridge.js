@@ -378,7 +378,7 @@ try {
     prompt:"codemode-todo-create", config:codemodeConfig });
   assert.equal((await waitFor(event => event.id === "todo-create" && event.type === "end")).status, "completed");
   const todoHistory = events.find(event => event.id === "todo-create" && event.type === "context").entries;
-  assert(todoHistory.some(entry => entry.type === "custom" && entry.customType === "e-launcher-todo"));
+  assert(todoHistory.some(entry => entry.type === "custom" && entry.customType === "rpiv-todo-state"));
   send({ id:"todo-resume", conversationId:"todo-session", type:"prompt", sdk:true,
     prompt:"codemode-todo-resume", config:codemodeConfig, sdkHistory:todoHistory });
   assert.equal((await waitFor(event => event.id === "todo-resume" && event.type === "end")).status, "completed");

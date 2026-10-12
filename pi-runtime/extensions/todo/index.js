@@ -1,11 +1,12 @@
-// Forked from @juicesharp/rpiv-todo 2.12.0 (MIT, see LICENSE). The tool contract, reducer and
-// result format are retained; the terminal overlay, /todos command, hotkey, config and i18n are
-// dropped because Android has no TUI. Each mutation is also saved as a session custom entry: a call
-// made inside codemode never becomes a toolResult message, so the upstream replay lost it.
+// Forked from @juicesharp/rpiv-todo 2.13.5 (MIT, see LICENSE). The tool contract, reducer, result
+// format and rpiv-todo-state custom entries are retained; the terminal overlay, /todos command,
+// hotkey, config and i18n are dropped because Android has no TUI.
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 
-export const TODO_ENTRY_TYPE = "e-launcher-todo";
+export const TODO_ENTRY_TYPE = "rpiv-todo-state";
+// This fork's entry type before upstream 2.13.5 added rpiv-todo-state; old sessions still replay.
+const LEGACY_ENTRY_TYPE = "e-launcher-todo";
 const TOOL_NAME = "todo";
 const MUTATIONS = new Set(["create", "update", "delete", "clear"]);
 const STATUSES = new Set(["pending", "in_progress", "completed", "deleted"]);
@@ -24,7 +25,7 @@ export function readTodoState(data) {
 
 /** The snapshot an entry carries: a todo tool result's details or a saved custom entry. */
 export function todoEntryData(entry, toolName = TOOL_NAME) {
-  if (entry?.type === "custom" && entry.customType === TODO_ENTRY_TYPE) return entry.data;
+  if (entry?.type === "custom" && (entry.customType === TODO_ENTRY_TYPE || entry.customType === LEGACY_ENTRY_TYPE)) return entry.data;
   const message = entry?.type === "message" ? entry.message : undefined;
   return message?.role === "toolResult" && message.toolName === toolName ? message.details : undefined;
 }
@@ -261,13 +262,12 @@ export default function todoExtension(pi) {
     parameters,
     async execute(_toolCallId, params) {
       const { state: next, op } = applyTaskMutation(state, params.action, params);
-      if (MUTATIONS.has(params.action) && op.kind !== "error" && op.changed !== false) {
-        pi.appendEntry(TODO_ENTRY_TYPE, { tasks: next.tasks, nextId: next.nextId });
-      }
       state = next;
-      return { content: [{ type: "text", text: formatContent(op, state) }], details: {
-        action: params.action, params, tasks: state.tasks, nextId: state.nextId,
-        ...(op.kind === "error" ? { error: op.message } : {}) } };
+      const details = { action: params.action, params, tasks: state.tasks, nextId: state.nextId,
+        ...(op.kind === "error" ? { error: op.message } : {}) };
+      // A call made inside codemode never becomes a toolResult, so the entry is what replay sees.
+      if (MUTATIONS.has(params.action) && op.kind !== "error" && op.changed !== false) pi.appendEntry(TODO_ENTRY_TYPE, details);
+      return { content: [{ type: "text", text: formatContent(op, state) }], details };
     },
   });
 }
