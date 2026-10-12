@@ -521,7 +521,7 @@ public final class SettingsPlugin extends Plugin {
             throw new IllegalArgumentException("Pi 设置仅支持全局配置；旧工作区配置保留但不再生效");
         if (Arrays.asList("test_provider", "login", "logout").contains(operation) && arguments.optString("providerId").isEmpty())
             throw new IllegalArgumentException("providerId is required");
-        if (Arrays.asList("install", "update", "remove").contains(operation) && arguments.optString("source").trim().isEmpty())
+        if (Arrays.asList("install", "remove").contains(operation) && arguments.optString("source").trim().isEmpty())
             throw new IllegalArgumentException("source is required");
         if ("resource_toggle".equals(operation) && (arguments.optString("kind").isEmpty() || arguments.optString("path").isEmpty()))
             throw new IllegalArgumentException("kind and path are required");

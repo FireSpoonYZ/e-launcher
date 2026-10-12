@@ -404,21 +404,22 @@ export async function sdkQuery(command, signal, emit = () => {}, interact = asyn
         emit({ type: "setting", project, key, previous: previous ?? null, value: packaged ? next : patterns });
         return { enabled: command.enabled };
       }
-      if (typeof command.source !== "string" || !command.source.trim()) throw new Error("请输入包来源");
+      // update without a source updates every configured package.
+      if (command.type !== "update" && (typeof command.source !== "string" || !command.source.trim())) throw new Error("请输入包来源");
       const local = false;
       const before = (local ? s.settingsManager.getProjectSettings() : s.settingsManager.getGlobalSettings()).packages;
       if (command.type === "install") await manager.installAndPersist(command.source, { local });
       if (command.type === "remove") {
         if (!await manager.removeAndPersist(command.source, { local })) throw new Error("当前范围内没有这个包");
       }
-      if (command.type === "update") await manager.update(command.source);
+      if (command.type === "update") await manager.update(command.source?.trim() || undefined);
       await s.settingsManager.flush();
       clearExtensionCache();
       const after = (local ? s.settingsManager.getProjectSettings() : s.settingsManager.getGlobalSettings()).packages;
       if (JSON.stringify(before) !== JSON.stringify(after)) {
         emit({ type: "setting", project: local, key: "packages", previous: before ?? null, value: after ?? [] });
       }
-      return { source: command.source };
+      return { source: command.source ?? null };
     }
     if (command.type === "login") {
       let deviceIdRequested = false;
