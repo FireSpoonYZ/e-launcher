@@ -53,7 +53,7 @@ await build({
 await build({
   entryPoints: [`${sdk}/dist/extensions/codemode/worker.js`],
   bundle: true, platform: "node", format: "esm", target: "node24",
-  banner: { js: 'import { createRequire } from "node:module"; const require = createRequire(import.meta.url);' },
+  // Pi 1.1 starts this worker from a data: URL, so it must not use import.meta or require.
   outfile: "../app/src/main/assets/codemode-worker.js",
 });
 

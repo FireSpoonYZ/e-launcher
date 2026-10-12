@@ -4,7 +4,7 @@ import { readFile } from "node:fs/promises";
 for (const name of ["pi-agent-core", "pi-ai", "pi-coding-agent"]) {
   const pinned = JSON.parse(await readFile(new URL("package.json", import.meta.url), "utf8")).dependencies[`@earendil-works/${name}`];
   const installed = JSON.parse(await readFile(new URL(`node_modules/@earendil-works/${name}/package.json`, import.meta.url), "utf8")).version;
-  assert.equal(pinned, "1.0.0", `${name} must be exactly pinned`);
+  assert.equal(pinned, "1.1.0", `${name} must be exactly pinned`);
   assert.equal(installed, pinned, `${name} installed version`);
 }
 
@@ -32,11 +32,11 @@ const translations = JSON.parse(await readFile(new URL("../app/src/main/assets/u
 const activity = await readFile(new URL("../app/src/main/java/com/example/launcherprobe/PiSettingsActivity.java", import.meta.url), "utf8");
 assert(!activity.includes("Pi 配置格式 0.99.2") && !activity.includes("Pi Coding Agent SDK 0.99.2"));
 for (const [key, value] of Object.entries(translations)) {
-  if (key.includes("Pi ") && key.includes("1.0.0")) assert(value.includes("1.0.0"), `matching translated version: ${key}`);
+  if (key.includes("Pi ") && key.includes("1.1.0")) assert(value.includes("1.1.0"), `matching translated version: ${key}`);
   assert(!key.includes("Pi Coding Agent SDK 0.99.2") && !key.includes("Pi 配置格式 0.99.2"));
 }
 for (const key of [
-  "Pi Coding Agent SDK 1.0.0 · 本地 Node Agent",
-  "Pi 配置格式 1.0.0。Pi Agent 使用完整 SDK 读取设置和资源。终端专用选项保留在文件中，不改变 Android 界面。",
-]) assert(activity.includes(key) && translations[key]?.includes("1.0.0"), "settings version text and translation key match");
+  "Pi Coding Agent SDK 1.1.0 · 本地 Node Agent",
+  "Pi 配置格式 1.1.0。Pi Agent 使用完整 SDK 读取设置和资源。终端专用选项保留在文件中，不改变 Android 界面。",
+]) assert(activity.includes(key) && translations[key]?.includes("1.1.0"), "settings version text and translation key match");
 console.log(`PASS: all ${keys.length} Pi and bundled extension settings have labeled, grouped controls`);

@@ -146,7 +146,7 @@ export default function(pi) {
     execute:async () => ({ content:[{ type:"image", mimeType:"image/png", data:"AAAA!" }] }) });
 }
 `);
-  const undici = await import("./node_modules/@earendil-works/pi-coding-agent/node_modules/undici/index.js");
+  const undici = await import("undici");
   explicitAgent = new undici.Agent();
   let explicitDispatches = 0;
   globalThis.__launcherSdkCheckDispatcher = { dispatch(options, handler) {

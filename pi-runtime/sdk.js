@@ -7,7 +7,7 @@ import {
   DefaultPackageManager, ModelRegistry, createCodemodeExtension, createMcpExtension, createToolSearchExtension,
 } from "@earendil-works/pi-coding-agent";
 import { InMemoryCredentialStore, getSupportedThinkingLevels } from "@earendil-works/pi-ai";
-import undici from "./node_modules/@earendil-works/pi-coding-agent/node_modules/undici/index.js";
+import undici from "undici";
 import { getThemeByName } from "./node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/theme.js";
 import { toAgentHistory } from "./index.js";
 import { mcpOptions, mcpQuery } from "./mcp.js";

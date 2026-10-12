@@ -144,7 +144,7 @@ require('node:fs').writeFileSync('installed.txt',require('fixture-dep')+':'+chil
       });
     }
     const ready = await waitFor(event => event.type === 'ready');
-    assert.equal(ready.piVersion, '1.0.0', 'shipped SDK version');
+    assert.equal(ready.piVersion, '1.1.0', 'shipped SDK version');
     assert.equal(JSON.parse(await fs.readFile(path.join(path.dirname(bundle), 'pi-sdk/package.json'))).version, ready.piVersion);
     if(!mcpOnly)assert.equal((await fs.readFile(path.join(path.dirname(bundle), 'photon_rs_bg.wasm'))).subarray(0,4).toString('hex'), '0061736d');
     if(!mcpOnly){
@@ -370,7 +370,7 @@ export default function(pi) {
         'cancel/failure does not lose the durable installation ID');
       assert(!events.some(event=>event.id===id && event.type==='credential'), 'cancel/failure does not mutate credentials');
     }
-    console.log('PASS: Pi 1.0.0; Photon WASM + real resize worker/read; four bundled factories; codemode worker/bash structured exits; generateImages credentials/native history/chat attachment; bundled OAuth loaders/deviceId reuse, ordered persistence, cancel/failure (no external requests)');
+    console.log('PASS: Pi 1.1.0; Photon WASM + real resize worker/read; four bundled factories; codemode worker/bash structured exits; generateImages credentials/native history/chat attachment; bundled OAuth loaders/deviceId reuse, ordered persistence, cancel/failure (no external requests)');
     console.log('PASS: npm 11.6.2; scoped registry install; dependencies/postinstall/node/execPath; durable settings; fresh TS extension load; same-chat next-turn tool; filters/scopes/non-extension/errors/repeat install/remove');
   } finally {
     socket?.destroy();
