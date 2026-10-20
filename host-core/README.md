@@ -1,15 +1,15 @@
 # @e-launcher/host-core
 
-模块 1：共享 Bot/Host 本机登记簿。提供本机 Bot 定义与主私聊记录的持久化，单 Host 所有者，跨进程身份稳定。包正式名为 `@e-launcher/host-core`；当前仓库尚无 workspace/包安装连接，示例直接从仓库根导入本地文件（见下文）。
+本机 Bot/Host 核心。模块 1 提供 Bot 定义与主私聊身份登记；模块 2 接入 Pi Durable 长期主私聊、历史与执行恢复。运行时由单 Host 所有者持有，跨进程身份稳定。包正式名为 `@e-launcher/host-core`；当前仓库尚无 workspace/包安装连接，示例直接从仓库根导入本地文件（见下文）。
 
 整体方向见 [../docs/next-generation-architecture.md](../docs/next-generation-architecture.md)（状态：未来设计）。
 
 ## 实现与边界
 
 - 需要 Node >= 22.19.0（package.json 中 `engines.node` 声明的最低版本）。存储用 Node 内置 SQLite（`node:sqlite`），数据库文件即 `dataRoot/host.sqlite`；新的 dataRoot 会自动建立（含必要的目录与库文件）。
-- 只做 Bot/Host 定义与主私聊记录的持久化；不运行模型、Durable、BC，不加入 runtime 空插槽、群聊或 HTTP 服务。
+- `openHost` 负责登记；`openRuntime` 负责 Pi Durable 主私聊。暂未接入 BC、文件/Bash 工具、群聊、隧道或 HTTP 服务。
 - 写入由 SQLite 事务保护，重复请求重试安全。
-- 本模块当前只是登记簿，**不是** Durable 内部状态库，也未接好 BC。
+- `host.sqlite` 仍只保存登记数据，Durable 使用独立的 `durable.sqlite`；`runtime-owner.sqlite` 的 SQLite 事务锁保证单进程所有权。
 - SQLite 宿主适配尚未在 Android 验证；旧运行链路未被替换。
 - dataRoot（数据库/记录）与 cwd（工具默认工作目录）分离：不 `process.chdir`，本模块也不往 cwd 写入任何文件。
 
@@ -95,8 +95,8 @@ node host-core/cli.js create   --data-root '/path/to/data-root'   --request-id r
 - `store.js`：openStore(dataRoot)，返回 {deviceId, createBot, getBot, findByRequest, listBots, close}。
 - `host.js`：openHost({dataRoot})，返回 {deviceId, dataRoot, createBot, getBot, findByRequest, listBots, close}。
 - `cli.js`：CLI 入口。
-- `index.js`：re-export openHost（仅此一个导出）。
-- `index.d.ts`：BotRecord、CreateBotInput、Host、openHost 类型。
+- `index.js`：导出 `openHost` 和 `openRuntime`。
+- `index.d.ts`：登记接口，以及 `Runtime`、`PrimarySubmission`、`HistoryPage` 等类型。
 
 ## 本次模块验收
 
@@ -105,3 +105,73 @@ node host-core/cli.js create   --data-root '/path/to/data-root'   --request-id r
 通过 SQLite 触发器模拟 Bot 写入后、主私聊写入前的失败，确认 Bot、主私聊及请求记录一起回滚，修复后同请求可正常提交。更高版本、未知表结构和损坏数据库均被拒绝且原文件保持不变；外键、完整性检查及公开类型声明检查通过。
 
 验收数据与报告保存在仓库外临时目录，没有新增测试文件。Android 和 Linux 尚未运行本模块；本次验收不包含 Durable/BC 或现有 Android 应用集成。
+
+## 模块 2：Durable 长期主私聊
+
+依赖固定为 `@earendil-works/pi-durable`、`@earendil-works/pi-ai`、`@earendil-works/chord` 1.3.0。先在仓库根执行：
+
+```bash
+npm --prefix host-core ci --ignore-scripts --no-audit --no-fund
+```
+
+模块 1 的同步 API、创建幂等语义和 `host.sqlite` schema v1 均保留。Bot 的公开主私聊 UUID 与 Durable 内部数字会话 ID 在同一 Durable commit 中建立映射；不是把旧 SDK 的 Session 或运行检查点直接导入。
+
+### 显式模型配置
+
+当前配置入口支持 OpenAI completions 兼容服务。将以下 JSON 保存到仓库外的 `runtime-config.json`，按实际服务修改 URL 和模型：
+
+```json
+{
+  "defaultModel": "local/model",
+  "providers": [{
+    "id": "local",
+    "baseUrl": "http://127.0.0.1:8000/v1",
+    "apiKeyEnv": "HOST_MODEL_API_KEY",
+    "models": [{"id": "model", "contextWindow": 32768, "maxTokens": 1024}]
+  }]
+}
+```
+
+`apiKeyEnv` 指定环境变量名，凭证仅在请求时从该变量读取，不写入 Bot、历史或中心；无密钥的本地服务可明确省略此字段。模块不扫描、迁移或覆盖旧 `models.json` / `auth.json`，不执行密钥命令，暂未迁移 OAuth。`modelRef` 已指定的 Bot 使用自身选择；为空时，首次主私聊采用配置中的默认值并持久保存，以后改变默认值不自动替换已有会话模型。
+
+### 命令与 API
+
+```bash
+DATA_ROOT='/path/to/host-data'
+CONFIG='/path/to/runtime-config.json'
+BOT_ID='粘贴登记接口返回的botId'
+node host-core/runtime-cli.js send --data-root "$DATA_ROOT" --config "$CONFIG" --bot-id "$BOT_ID" --request-id message-001 --text '你好'
+node host-core/runtime-cli.js status --data-root "$DATA_ROOT" --bot-id "$BOT_ID" --request-id message-001
+node host-core/runtime-cli.js history --data-root "$DATA_ROOT" --bot-id "$BOT_ID" --limit 50
+node host-core/runtime-cli.js wait --data-root "$DATA_ROOT" --config "$CONFIG" --bot-id "$BOT_ID" --request-id message-001
+```
+
+从仓库根 ESM 可导入 `openRuntime`。它接收 `{dataRoot, models?, defaultModel?}`，其中 `models` 为 pi-ai 的 Models 集合；省略时为空集合，可用于不调用模型的历史和回执查询。运行时提供：
+
+| 方法 | 语义 |
+| --- | --- |
+| `submit(botId, {requestId, text})` | 持久提交输入并返回受理状态 |
+| `wait(botId, requestId)` | 等待已有提交，进行中工作可恢复；已结束回执直接返回 |
+| `getSubmission(botId, requestId)` | 被动查询，无此提交返回 null |
+| `history(botId, {limit?, cursor?})` | 原始条目按时间顺序分页，默认 50，上限 200 |
+| `abort(botId)` | 停止该主私聊的当前执行与待处理输入，等待确认 |
+| `resume()` | 启动已有持久任务的调度，不创建新输入 |
+| `close()` | 幂等关闭资源，保留未完成工作供之后恢复 |
+
+提交回执包含公开 `botId` / `conversationId`、`requestId`、Durable `submissionId`、`status`、`answerText` 和 `reason`。状态为 queued、placed、done 或 unanswered。相同请求 ID 和相同正文返回原提交；正文不同报 `REQUEST_CONFLICT`。已失败的提交重试相同 ID 仍返回失败回执，继续对话应发送新请求 ID。
+
+历史页的 `nextCursor` 只用于对应 Host、Bot 和扫描条件，调用方应原样传回。历史和 status 不启动模型；未有 Durable 会话时返回空历史/空回执。运行时已被其他进程持有时报 `RUNTIME_BUSY`，不会打开第二个写入者；进程崩溃后由操作系统释放锁。
+
+成功命令输出一行 JSON；send/wait 得到 unanswered 时仍输出回执并退出 2；参数、配置、存储错误写 JSON error 到 stderr 并退出 1。Node 22 可能同时输出 SQLite 的原生实验性警告。
+
+### 恢复与范围
+
+正常关闭与进程中断都保留 Durable 的受理记录和执行状态。重新打开后可先被动查询，再通过 wait 或 resume 恢复；不要为了恢复编造新请求 ID。请求正文摘要与提交之间存在未确认窗口：若回执未返回，调用方保留原 ID 与正文重试。被中断的模型请求可能重新发送，不承诺外部请求恰好执行一次。
+
+Durable 自动 compaction 当前关闭，BC 将在下一模块成为上下文压缩所有者。本模块没有注册文件、命令或屏幕工具，没有替换旧 Android/Capacitor 运行链路。
+
+### 模块 2 验收
+
+父助手在 Windows / Git Bash、Node 26.8.2 与最低版本 Node 22.19.0 下完成 143 个端到端检查点及公开类型声明检查。模型服务采用本地可控的 OpenAI completions SSE 服务，未调用付费模型或读取真实模型凭证。
+
+验证覆盖跨进程主私聊、原始历史分页、不同 Bot 上下文隔离、持久模型选择、请求去重与冲突、错误回执、单进程所有权、强制结束进程后的同 ID 恢复、主动停止、关闭后释放所有权，以及已结束等待不启动其他待处理工作。报告与验证数据保存在仓库外，没有新增测试文件；Linux、Android 和外部真实模型服务尚未验收。

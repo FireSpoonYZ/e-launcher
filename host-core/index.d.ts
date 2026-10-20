@@ -1,3 +1,6 @@
+import type { Models } from '@earendil-works/pi-ai';
+import type { EntryRecord } from '@earendil-works/pi-durable';
+
 export interface BotRecord {
   botId: string;
   deviceId: string;
@@ -26,3 +29,48 @@ export interface Host {
 }
 
 export function openHost(options: { dataRoot: string }): Host;
+
+export interface PrimarySubmission {
+  botId: string;
+  conversationId: string;
+  requestId: string;
+  submissionId: number;
+  status: 'queued' | 'placed' | 'done' | 'unanswered';
+  answerText: string | null;
+  reason: string | null;
+}
+
+export interface SubmissionInput {
+  requestId: string;
+  text: string;
+}
+
+export interface HistoryOptions {
+  limit?: number;
+  cursor?: Record<string, unknown> | null;
+}
+
+export interface HistoryPage {
+  botId: string;
+  conversationId: string;
+  items: readonly EntryRecord[];
+  nextCursor: Record<string, unknown> | null;
+}
+
+export interface OpenRuntimeOptions {
+  dataRoot: string;
+  models?: Models;
+  defaultModel?: string | null;
+}
+
+export interface Runtime {
+  submit(botId: string, input: SubmissionInput): Promise<PrimarySubmission>;
+  wait(botId: string, requestId: string): Promise<PrimarySubmission>;
+  getSubmission(botId: string, requestId: string): Promise<PrimarySubmission | null>;
+  history(botId: string, options?: HistoryOptions): Promise<HistoryPage>;
+  abort(botId: string): Promise<void>;
+  resume(): void;
+  close(): Promise<void>;
+}
+
+export function openRuntime(options: OpenRuntimeOptions): Promise<Runtime>;
