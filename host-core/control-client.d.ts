@@ -6,7 +6,8 @@ import type {
   HistoryOptions,
   HistoryPage,
   ContextStatus,
-  ControlHostInfo
+  ControlHostInfo,
+  BotLiveFrame
 } from './index.js';
 
 export class ControlApiError extends Error {
@@ -32,6 +33,10 @@ export interface HistoryClientOptions extends HistoryOptions {
   signal?: AbortSignal;
 }
 
+export interface LiveClientOptions {
+  signal?: AbortSignal;
+}
+
 export interface ControlClient {
   getHostInfo(options?: ControlClientCallOptions): Promise<ControlHostInfo>;
   listBots(options?: ControlClientCallOptions): Promise<BotRecord[]>;
@@ -43,6 +48,8 @@ export interface ControlClient {
   history(botId: string, options?: HistoryClientOptions): Promise<HistoryPage>;
   abort(botId: string, options?: ControlClientCallOptions): Promise<{ botId: string }>;
   contextStatus(botId: string, options?: ControlClientCallOptions): Promise<ContextStatus>;
+  /** Consume the authenticated live SSE stream for a bot; ends on an end frame, break/return, or signal abort. */
+  live(botId: string, options?: LiveClientOptions): AsyncIterable<BotLiveFrame>;
 }
 
 export function createControlClient(options: ControlClientOptions): ControlClient;

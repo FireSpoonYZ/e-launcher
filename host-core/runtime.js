@@ -18,6 +18,7 @@ import { formatPrimarySubmission, normalizeHistoryOptions, readPrimaryHistory } 
 import { createContextManager } from './context-manager.js';
 import { createContextTools } from './context-tools.js';
 import { BC_KERNEL_VERSION } from './context-state.js';
+import { createRuntimeLive } from './runtime-live.js';
 
 const CTX = BACKGROUND_CONTEXT;
 
@@ -120,15 +121,18 @@ export async function openRuntime(options) {
     host.close();
     throw err;
   }
-  return createRuntime({ host, harness, models, defaultModel, releaseOwner, manager, cleanupEnvs });
+  const live = createRuntimeLive({ host, getHarness: () => harness });
+  return createRuntime({ host, harness, models, defaultModel, releaseOwner, manager, cleanupEnvs, live });
 }
 
-function createRuntime({ host, harness, models, defaultModel, releaseOwner, manager, cleanupEnvs }) {
+function createRuntime({ host, harness, models, defaultModel, releaseOwner, manager, cleanupEnvs, live }) {
   let closePromise = null;
   const close = () => {
     closePromise ??= (async () => {
       // 依次执行并收集每步错误：任何一步失败仍继续清理，最后显式抛出。
       const errors = [];
+      // 先停止全部 live 订阅，再关闭 harness：保持既有错误收集与资源释放语义。
+      try { await live.close(); } catch (err) { errors.push(err); }
       try { await harness.close(CTX); } catch (err) { errors.push(err); }
       try { await cleanupEnvs(); } catch (err) { errors.push(err); }
       try { host.close(); } catch (err) { errors.push(err); }
@@ -159,6 +163,9 @@ function createRuntime({ host, harness, models, defaultModel, releaseOwner, mana
         }
         conversation = await getPrimaryConversation(harness, bot, { create: true, defaultModel }, CTX);
       }
+
+      // 会话解析/创建后、输入提交前，绑定等待中的 live watch（不等待外部 listener）。
+      await live.bind(botId, conversation);
 
       // 持久化正文摘要用于去重：同 requestId 不同正文冲突，相同/首次保存。
       const digest = createHash('sha256').update(text).digest('hex');
@@ -255,6 +262,10 @@ function createRuntime({ host, harness, models, defaultModel, releaseOwner, mana
 
     resume() {
       harness.resume();
+    },
+
+    watch(botId, options) {
+      return live.watch(botId, options);
     },
 
     close,

@@ -1,8 +1,9 @@
 import { parseArgs } from 'node:util';
 import { pathToFileURL } from 'node:url';
+import { once } from 'node:events';
 import { createControlClient } from './control-client.js';
 
-const USAGE = `usage: node host-core/control-cli.js <host|create|list|get|find-request|send|status|history|abort|context> [options]
+const USAGE = `usage: node host-core/control-cli.js <host|create|list|get|find-request|send|status|history|abort|context|live> [options]
 
 commands:
   host             print host info
@@ -15,6 +16,7 @@ commands:
   history          list conversation history; requires --bot-id [--limit] [--cursor]
   abort            abort a bot's current work; requires --bot-id
   context          print context status; requires --bot-id
+  live             stream live bot frames, one JSON line per frame; requires --bot-id
 
 options:
   --url <url>         host control server URL (required, except --help)
@@ -55,6 +57,7 @@ const REQUIRED = {
   history: ['bot-id'],
   abort: ['bot-id'],
   context: ['bot-id'],
+  live: ['bot-id'],
 };
 
 // host/list 不接受任何资源参数。
@@ -182,10 +185,42 @@ async function main() {
     case 'context':
       result = await client.contextStatus(values['bot-id']);
       break;
+    case 'live':
+      await streamLive(client, values['bot-id']);
+      return;
   }
   process.stdout.write(JSON.stringify(result) + '\n');
   if (command === 'send' && result?.status === 'unanswered') {
     process.exitCode = 2;
+  }
+}
+
+// live 是唯一流式命令：逐帧一行 JSON。SIGINT/SIGTERM/EPIPE 只取消本流并正常退出。
+async function streamLive(client, botId) {
+  const ac = new AbortController();
+  let writeError = null;
+  const stop = () => ac.abort();
+  const onStdoutError = (err) => {
+    if (err?.code !== 'EPIPE') writeError = err;
+    stop();
+  };
+  process.on('SIGINT', stop);
+  process.on('SIGTERM', stop);
+  process.stdout.on('error', onStdoutError);
+  try {
+    for await (const frame of client.live(botId, { signal: ac.signal })) {
+      if (!process.stdout.write(JSON.stringify(frame) + '\n')) {
+        // 背压：等待 drain；AbortSignal 保证信号/EPIPE 可打断，不会无限挂起。
+        await once(process.stdout, 'drain', { signal: ac.signal });
+      }
+    }
+  } catch (err) {
+    if (writeError) throw writeError;
+    if (!ac.signal.aborted) throw err;
+  } finally {
+    process.removeListener('SIGINT', stop);
+    process.removeListener('SIGTERM', stop);
+    process.stdout.removeListener('error', onStdoutError);
   }
 }
 

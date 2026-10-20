@@ -94,11 +94,113 @@ export interface Runtime {
   history(botId: string, options?: HistoryOptions): Promise<HistoryPage>;
   abort(botId: string): Promise<void>;
   contextStatus(botId: string): Promise<ContextStatus>;
+  watch(botId: string, options?: { signal?: AbortSignal }): Promise<BotWatch>;
   resume(): void;
   close(): Promise<void>;
 }
 
 export function openRuntime(options: OpenRuntimeOptions): Promise<Runtime>;
+
+/**
+ * Live preview types (module 6): bounded, non-durable projection frames for a
+ * Bot's primary conversation over authenticated local SSE. Previews are
+ * transient progress; the raw history API remains the full source of truth.
+ */
+
+export interface LiveMessage {
+  role: 'user' | 'assistant' | 'toolResult';
+  text: string;
+  truncated: boolean;
+  toolName?: string;
+  toolCallId?: string;
+  isError?: boolean;
+}
+
+export interface LiveHistoryItem {
+  id: number;
+  kind: string;
+  messages: LiveMessage[];
+}
+
+export interface LiveTool {
+  callId: string;
+  name: string;
+  status: 'pending' | 'running' | 'done';
+  output: string;
+  truncated: boolean;
+  droppedBytes: number;
+  droppedLines: number;
+  entryId?: number;
+  parentCallId?: string;
+}
+
+export interface LiveGeneration {
+  text: string;
+  truncated: boolean;
+}
+
+export interface BotLiveState {
+  history: LiveHistoryItem[];
+  historyTruncated: boolean;
+  lastEntryId: number | null;
+  generation: LiveGeneration | null;
+  tools: LiveTool[];
+  toolsTruncated: boolean;
+  busy: boolean;
+  queuedCount: number;
+}
+
+/** Whole-field replacement of selected BotLiveState fields; never append/delta. */
+export type BotLiveChanges = Partial<BotLiveState>;
+
+export interface BotLiveSnapshot {
+  type: 'snapshot';
+  botId: string;
+  conversationId: string;
+  sequence: number;
+  state: BotLiveState;
+}
+
+export interface BotLiveUpdate {
+  type: 'update';
+  botId: string;
+  conversationId: string;
+  sequence: number;
+  changes: BotLiveChanges;
+}
+
+type BotWatchEndReason =
+  | 'stopped'
+  | 'cancelled'
+  | 'session_closed'
+  | 'retired'
+  | 'listener_error'
+  | 'session_failed';
+
+export interface BotLiveEnd {
+  type: 'end';
+  botId: string;
+  conversationId: string;
+  sequence: number;
+  reason: BotWatchEndReason;
+}
+
+/** Frames delivered to Runtime.watch listeners (snapshot first, then updates). */
+export type BotLiveDataFrame = BotLiveSnapshot | BotLiveUpdate;
+
+/** All wire frames including the transport-only end frame. */
+export type BotLiveFrame = BotLiveDataFrame | BotLiveEnd;
+
+export interface BotWatchEnd {
+  reason: BotWatchEndReason;
+}
+
+export interface BotWatch {
+  readonly value: BotLiveSnapshot;
+  start(listener: (frame: BotLiveDataFrame) => void | Promise<void>): void;
+  stop(): Promise<BotWatchEnd>;
+  readonly closed: Promise<BotWatchEnd>;
+}
 
 export interface ControlHostInfo {
   protocolVersion: 1;

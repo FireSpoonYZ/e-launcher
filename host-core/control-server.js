@@ -10,6 +10,7 @@ import {
   writeControlJson,
   writeControlError,
 } from './control-http.js';
+import { serveBotLive } from './control-live.js';
 
 const BIND_HOST = '127.0.0.1';
 const DEFAULT_PORT = 8787;
@@ -20,6 +21,7 @@ const routes = [
   { method: 'GET', key: '/v1/bots', pattern: /^\/v1\/bots\/?$/, params: [], hasBody: false, handler: listBots },
   { method: 'POST', key: '/v1/bots', pattern: /^\/v1\/bots\/?$/, params: [], hasBody: true, handler: createBot },
   { method: 'GET', key: '/v1/bots/:botId', pattern: /^\/v1\/bots\/([^/]+)\/?$/, params: ['botId'], hasBody: false, handler: getBot },
+  { method: 'GET', key: '/v1/bots/:botId/live', pattern: /^\/v1\/bots\/([^/]+)\/live\/?$/, params: ['botId'], hasBody: false, handler: live },
   { method: 'GET', key: '/v1/bot-requests/:requestId', pattern: /^\/v1\/bot-requests\/([^/]+)\/?$/, params: ['requestId'], hasBody: false, handler: findByRequest },
   { method: 'POST', key: '/v1/bots/:botId/submissions', pattern: /^\/v1\/bots\/([^/]+)\/submissions\/?$/, params: ['botId'], hasBody: true, handler: submit },
   { method: 'GET', key: '/v1/bots/:botId/submissions/:requestId', pattern: /^\/v1\/bots\/([^/]+)\/submissions\/([^/]+)\/?$/, params: ['botId', 'requestId'], hasBody: false, handler: getSubmission },
@@ -175,6 +177,10 @@ async function getBot(host, runtime, params, body, req, res) {
   const bot = host.getBot(params.botId);
   if (!bot) throw new ControlHttpError(404, 'BOT_NOT_FOUND', 'bot not found');
   writeControlJson(res, 200, bot);
+}
+
+async function live(host, runtime, params, body, req, res) {
+  await serveBotLive(req, res, runtime, params.botId);
 }
 
 async function findByRequest(host, runtime, params, body, req, res) {

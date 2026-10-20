@@ -1,13 +1,13 @@
 # @e-launcher/host-core
 
-本机 Bot/Host 核心。模块 1 提供 Bot 定义与主私聊身份登记；模块 2 接入 Pi Durable 长期主私聊、历史与执行恢复；模块 3 内嵌 Billion Context；模块 4 接入本机工具（read/write/edit/bash 与 grep/find/ls）；模块 5 接入本机长驻控制 API 与客户端。运行时由单 Host 所有者持有，跨进程身份稳定。包正式名为 `@e-launcher/host-core`；当前仓库尚无 workspace/包安装连接，示例直接从仓库根导入本地文件（见下文）。
+本机 Bot/Host 核心。模块 1 提供 Bot 定义与主私聊身份登记；模块 2 接入 Pi Durable 长期主私聊、历史与执行恢复；模块 3 内嵌 Billion Context；模块 4 接入本机工具（read/write/edit/bash 与 grep/find/ls）；模块 5 接入本机长驻控制 API 与客户端；模块 6 接入 Bot 主私聊直播预览（认证本地 SSE、运行时 watch、客户端与 CLI）。运行时由单 Host 所有者持有，跨进程身份稳定。包正式名为 `@e-launcher/host-core`；当前仓库尚无 workspace/包安装连接，示例直接从仓库根导入本地文件（见下文）。
 
 整体方向见 [../docs/next-generation-architecture.md](../docs/next-generation-architecture.md)（状态：未来设计）。
 
 ## 实现与边界
 
 - 需要 Node >= 22.19.0（package.json 中 `engines.node` 声明的最低版本）。存储用 Node 内置 SQLite（`node:sqlite`），数据库文件即 `dataRoot/host.sqlite`；新的 dataRoot 会自动建立（含必要的目录与库文件）。
-- `openHost` 负责登记；`openRuntime` 负责 Pi Durable 主私聊、内嵌 BC 及本机工具。群聊与隧道仍未接入；模块 5 提供基础 HTTP 本机控制面。
+- `openHost` 负责登记；`openRuntime` 负责 Pi Durable 主私聊、内嵌 BC 及本机工具。群聊与隧道仍未接入；模块 5 提供基础 HTTP 本机控制面，模块 6 在其上加认证本地 SSE 直播预览。
 - 写入由 SQLite 事务保护，重复请求重试安全。
 - `host.sqlite` 仍只保存登记数据，Durable 使用独立的 `durable.sqlite`；`runtime-owner.sqlite` 的 SQLite 事务锁保证单进程所有权。
 - SQLite 宿主适配尚未在 Android 验证；旧运行链路未被替换。
@@ -96,12 +96,15 @@ node host-core/cli.js create   --data-root '/path/to/data-root'   --request-id r
 - `host.js`：openHost({dataRoot})，返回 {deviceId, dataRoot, createBot, getBot, findByRequest, listBots, close}。
 - `cli.js`：CLI 入口。
 - `index.js`：导出 `openHost`、`openRuntime`、`openControlServer` 与控制 IO 辅助（`ControlHttpError`、`createControlAuthorizer`、`readControlBody`、`writeControlJson`、`writeControlError`）。
-- `index.d.ts`：登记接口，以及 `Runtime`、`PrimarySubmission`、`HistoryPage`、`OpenRuntimeOptions`（含可选 `bashPath`/`toolPaths`）等类型。
+- `index.d.ts`：登记接口，以及 `Runtime`、`PrimarySubmission`、`HistoryPage`、`OpenRuntimeOptions`（含可选 `bashPath`/`toolPaths`）、模块 6 直播预览类型（`LiveMessage`/`LiveHistoryItem`/`LiveTool`/`LiveGeneration`/`BotLiveState`/`BotLiveChanges`/`BotLiveSnapshot`/`BotLiveUpdate`/`BotLiveDataFrame`/`BotLiveEnd`/`BotLiveFrame`/`BotWatchEnd`/`BotWatch`）等类型。
 - `host-environment.js`：HostExecutionEnv（NodeExecutionEnv 子类）；仅命令字符串经 Git Bash/bash 执行，argv 数组与文件操作直接透传。
 - `grep-tool.js` / `find-tool.js` / `ls-tool.js`：grep（rg）、find（fd）、ls 工具。
 - `search-bin.js`：rg/fd 固定版本、asset 规格与解析顺序；`prepare-tools.js`：显式下载并安装 rg/fd 的 CLI。
 - `control-client.js` / `control-client.d.ts`：控制客户端（`./control-client` 子路径导出），由协作任务提供。
-- `control-server-cli.js` / `control-cli.js`：模块 5 两个 CLI，由协作任务提供。
+- `control-server-cli.js` / `control-cli.js`：模块 5 两个 CLI，由协作任务提供；`control-cli.js` 的 `live` 子命令在模块 6 增加。
+- `runtime-live-projection.js` / `runtime-live.js`：模块 6 直播预览投影与 `Runtime.watch`。
+- `control-live.js`：模块 6 SSE 路由 `GET /v1/bots/:botId/live`。
+- `control-live-client.js`：模块 6 SSE 流式解析与 `readControlLive`。
 
 ## 本次模块验收
 
@@ -348,3 +351,81 @@ node host-core/control-cli.js <host|create|list|get|find-request|send|status|his
 存在慢请求体和运行中命令时，私有 stdin shutdown 约 1.1 秒完成优雅关闭并退出 0。Node 22 重启后自动恢复同一 submissionId，原 Host/Bot 身份保留，中断的 unsafe Bash 回执说明可能部分执行，已发生的写入不重放。端口 0、stdin EOF 不停 Host、重复所有者拒绝、CLI 导入无副作用与令牌不回显均通过。
 
 模型使用本地可控 SSE 服务，没有调用真实付费模型或读取真实模型凭证。数据与 module5-verification.json 报告保存在仓库外，没有新增测试文件；Linux、Android、arm64、框架隧道、中心和 Tauri 外壳尚未验收。
+
+## 模块 6：Bot 主私聊实时预览（认证本地 SSE）
+
+模块 6 为模块 5 的控制 API 增加主私聊实时预览：客户端经认证本地 SSE 订阅某 Bot 主私聊的**有界**投影（历史窗口/工具/生成文本/忙碌状态），先拿到完整快照，再接收整体替换式的更新。预览是瞬态进度，不是可靠记录；**原始历史 API 仍是完整事实源**，分页读取不受影响。
+
+**没有**群消息传输、中心或 Tauri 外壳，也没有轮询或新调度器；不要据此宣称这些能力已就绪。
+
+### 服务端路由
+
+| 方法与路径 | 成功响应 |
+| --- | --- |
+| GET `/v1/bots/:botId/live` | 200 SSE（`event: bot-live`，`data: <JSON frame>`，空行分隔）；帧见下表 |
+
+SSE 与现有路由共用 Bearer 认证；不接受查询参数令牌，不改变 CORS/Origin 规则。`serveBotLive` handler 在流结束后才 resolve，由既有 inflight 追踪与服务关闭统一收尾；只在 SSE 响应上设置无限超时与可选心跳，不改 JSON 路由的服务器超时。
+
+帧公共部分为 `{type, botId, conversationId, sequence}`；`conversationId` 恒为该 Bot 的公开主私聊 UUID（即使 SDK conversation 尚不存在）。`sequence` 在每个订阅内单调递增，可跳号/合并，是投影修订版本号，**不是**持久游标或 ACK。
+
+| type | 字段 | 语义 |
+| --- | --- | --- |
+| snapshot | `state: BotLiveState` | 每个订阅最先异步交付一次完整快照；重连从新 sequence 和全新有界快照开始 |
+| update | `changes: Partial<BotLiveState>` | 变更字段是整体替换（含历史窗口整窗替换），不是追加/增量 |
+| end | `reason` | 仅传输层；连接可能在其写出前结束，尽力投递 |
+
+### 运行时 watch
+
+`Runtime.watch(botId, {signal?})` 返回 `BotWatch`：
+
+| 成员 | 语义 |
+| --- | --- |
+| `value` | 最新完整 `BotLiveSnapshot`（用于 SSE 背压重置） |
+| `start(listener)` | 先异步投递快照，再串行交付更新；慢监听器只保留最新状态。内部原生观察回调仅投影/入队，不调用 Session API 或 commit |
+| `stop()` | 取消观察者，返回 `BotWatchEnd`；不等待用户回调完成 |
+| `closed` | 观察终止的 Promise（`BotWatchEnd`） |
+
+实现使用公共 `Conversation.watch`（BACKGROUND_CONTEXT 派生的取消上下文），投影 Durable 约 100ms 提交的部分消息/工具，**不是** provider 的每个 token；无 subscribeCommits、TaskGraph 内存或 watchDoc 轮询。
+
+**订阅是被动的**：不创建/启动模型会话。新 Bot（或尚无 Durable 会话）返回空快照并保持挂起，绝不创建或启动模型；`Runtime.submit` 在主私聊解析/创建后绑定挂起订阅，再提交输入。每个订阅只附着一次底层 watch；subscribe/bind/stop 竞争幂等处理。
+
+### 有界预览界限
+
+投影有明确上限并置截断标记：
+
+- 历史窗口：最新 50 条可显示条目；每条最多 8 条消息；每条消息 ≤ 4096 UTF-16 单元；全窗口文本总量 ≤ 65536 UTF-16 单元（超出时丢弃最旧整条目）。
+- 生成文本 ≤ 32768 UTF-16 单元。
+- 工具：前 32 个；每个工具输出尾部 ≤ 4096 UTF-16 单元。
+- 省略 system/未知角色及所有非文本部分（参数/签名等）；`droppedBytes`/`droppedLines` 透出丢弃量。
+
+需要完整原文请使用既有 `history` 分页接口；预览窗口与完整历史互不影响。
+
+### 客户端与 CLI
+
+`ControlClient.live(botId, {signal?})` 返回 `AsyncIterable<BotLiveFrame>`，纯 JS 无 Node 导入，浏览器/WebView 可用（native fetch 适配，不发送 Origin）。解析按 SSE 语法（LF/CRLF、注释、多行 data、TextDecoder 流式、单帧上限 1MiB、忽略心跳），校验帧信封（已知类型、botId 匹配、非空公开 conversationId、安全非负 sequence、snapshot.state/update.changes 为对象、end.reason）；HTTP 错误信封仍是 `ControlApiError`。`return`/`break`/`abort` 只取消读取与连接，不发 abort API；意外 EOF/网络/协议错误抛出明确错误，显式 end 正常结束；不自动重连/轮询。
+
+```bash
+node host-core/control-cli.js live --url http://127.0.0.1:8787 \
+  --token-env CONTROL_TOKEN --bot-id "$BOT_ID"
+```
+
+`live` 与其它单结果命令不同：每个帧输出一行 JSON；SIGINT/SIGTERM 或 stdout EPIPE 只停止该流并以正常码退出；stdout 背压用标准 drain+signal 处理。
+
+### 断开与恢复边界
+
+- 客户端断开只 `watch.stop()`，不会 `runtime.abort()`：Agent 继续运行。
+- Host 进程退出只是暂停，重启后经长期服务 `resume()` 恢复，不能冒充 abort；end 帧尽力而为。
+- 服务端背压：`res.write` 返回 false 后停止写新更新；只有实际跳过更新时才记 needReset，`drain` 时补最新 `watch.value` 完整快照。已被接受的帧不会因 drain 重复发送，空闲的大快照也不会反复发送。
+- 不承诺瞬态进度的可靠投递；预览丢失以新快照重建，完整历史仍可分页读取。
+
+### 模块 6 验收
+
+父助手在 Windows x64 / Git Bash、Node 26.8.2 与 Node 22.19.0 下完成 124 个端到端检查点，全部通过；公开类型声明检查通过。隔离 Chrome 页面加载实际纯 JS 客户端，并通过真实 HTTP SSE 夹具验证 LF/CRLF、多行 data、UTF-8、大小限制、身份与修订顺序、错误信封和取消。
+
+实际订阅验证了新 Bot 空快照且 Durable 表计数不变、首次发送绑定多个订阅、已有历史快照、工具 pending/running/done 与中途输出、排队与显式停止。CLI 的 stdout EPIPE 正常退出后，Agent 仍完成写文件。使用本机 OpenSSL TLS 服务分三次发送模型 SSE，分别收到两次已提交部分回复和完整终态；Node 22 的 40006 单元原始回答仅把生成预览截到 32768 单元。
+
+长历史触发 50 条及 65536 单元窗口限制，原始历史保持完整；真实 40 次工具调用仅预览前 32 个，工具输出尾部截到 4096 单元。慢客户端收到合并及重置快照，最后恢复到最新空闲状态；66989 字节空闲快照只发送一次，没有 drain 循环。空闲流跨过 30 秒并收到两次心跳。
+
+关闭时存在 SSE 订阅及快速断连请求，Node 22 服务约 1.1 秒退出 0，随后重新打开同一数据目录成功，设备及主私聊身份保留。数据、协议夹具与 module6-verification.json 保存在仓库外，没有新增测试文件，也没有调用外部模型或读取真实凭证。
+
+Linux、Android、arm64、Tauri/TUI 和真实终端信号尚未验收。Runtime.watch 的直接慢监听器、故障及取消竞争仅作源码核对，实际端到端验收经过 HTTP/CLI 订阅路径；本模块未实现可靠群消息、跨设备隧道或中心。
