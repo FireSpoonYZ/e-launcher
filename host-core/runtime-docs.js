@@ -1,5 +1,6 @@
 import { defineDoc, configure } from '@earendil-works/pi-durable';
 import { parseModelRef } from './runtime-models.js';
+import { ContextState, BC_KERNEL_VERSION } from './context-state.js';
 
 function errWithCode(message, code) {
   const err = new Error(message);
@@ -62,11 +63,35 @@ export async function getPrimaryConversation(harness, bot, options, context) {
       model,
       instructions: bot.role,
       cwd: bot.cwd,
-      tools: [],
+      tools: null,
     });
     draft.byPrimary[primaryId] = record.id;
     return record.id;
   }, context);
 
   return harness.conversation(conversationId, context);
+}
+
+/**
+ * 主动模式升级：旧版创建的会话受 tools:[] 限制，未启用 Billion Context。
+ * 对已映射且尚无 ContextState 的会话清除该限制（tools:null 继承 registry 默认工具）。
+ * 调用方只应在显式传入 models 的 active openRuntime 中执行；被动查询不做改造。
+ */
+export async function upgradeLegacyContextConversations(harness, context) {
+  const index = await harness.snapshot(PrimaryIndex, context);
+  if (!index) return;
+  for (const conversationId of Object.values(index.byPrimary ?? {})) {
+    const doc = await harness.snapshot(ContextState, conversationId, context);
+    if (doc) {
+      if (doc.kernelVersion !== BC_KERNEL_VERSION) {
+        const err = new Error('kernel version mismatch: expected ' + BC_KERNEL_VERSION + ', found ' + doc.kernelVersion);
+        err.code = 'UNSUPPORTED_SCHEMA';
+        throw err;
+      }
+      continue;
+    }
+    await harness.commit(async (tx) => {
+      await configure(tx, conversationId, { tools: null });
+    }, context);
+  }
 }

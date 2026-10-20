@@ -107,3 +107,20 @@ Source: https://github.com/stablyai/orca, commit `de8bffe24045b396212f4f63de8960
 MIT License, Copyright (c) 2026 Lovecast Inc. Adapted terminal input, key encoding, IME composition, gestures, Unicode width handling, shortcut mutations and native request tracking. Exact paths and changes: [ATTRIBUTION.md](web/src/RemoteTerminal/ATTRIBUTION.md) and [native adaptation](docs/remote-terminal-android.md). Full license: [LICENSE.orca](web/src/RemoteTerminal/LICENSE.orca).
 
 The extracted xterm.js Kitty keyboard encoder uses the pinned `@xterm/xterm@6.1.0-beta.303` source and retains its [MIT license](web/src/RemoteTerminal/xterm/LICENSE).
+## acp-kernel
+
+The next-generation host-core will use **acp-kernel 0.0.101**, by ranxianglei,
+for embedded in-context compression. The current Android runtime does not yet
+depend on or bundle this package.
+
+- Repository: https://github.com/ranxianglei/acp-kernel
+- License: MIT, with the upstream "Attribution on Product Surfaces" additional
+  term; the full text is retained verbatim at
+  [`licenses/acp-kernel-MIT.txt`](licenses/acp-kernel-MIT.txt).
+
+That additional term requires visible attribution on at least one of the
+product's home page, documentation, or About/Credits/Acknowledgements page,
+stating the product uses acp-kernel and linking to
+https://github.com/ranxianglei/acp-kernel. For server-side or embedded uses
+without a user-facing surface, carrying these notices in the shipped
+documentation satisfies the term.

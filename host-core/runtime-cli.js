@@ -2,13 +2,14 @@ import { parseArgs } from 'node:util';
 import { openRuntime } from './runtime.js';
 import { loadRuntimeConfig } from './runtime-models.js';
 
-const USAGE = `usage: node host-core/runtime-cli.js <send|wait|history|status> [options]
+const USAGE = `usage: node host-core/runtime-cli.js <send|wait|history|status|context> [options]
 
 commands:
   send             submit a message and wait for its answer; requires --data-root --config --bot-id --request-id --text
   wait             wait for an existing submission; requires --data-root --config --bot-id --request-id
   history          list conversation history; requires --data-root --bot-id [--limit] [--cursor]
   status           print one submission; requires --data-root --bot-id --request-id
+  context          print context status; requires --data-root --bot-id
 
 options:
   --data-root <dir>   verified absolute data directory (required, except help)
@@ -37,6 +38,7 @@ const REQUIRED = {
   wait: ['data-root', 'config', 'bot-id', 'request-id'],
   history: ['data-root', 'bot-id'],
   status: ['data-root', 'bot-id', 'request-id'],
+  context: ['data-root', 'bot-id'],
 };
 
 function invalid(message) {
@@ -129,6 +131,9 @@ async function main() {
         break;
       case 'status':
         result = await runtime.getSubmission(values['bot-id'], values['request-id']);
+        break;
+      case 'context':
+        result = await runtime.contextStatus(values['bot-id']);
         break;
     }
     process.stdout.write(JSON.stringify(result) + '\n');

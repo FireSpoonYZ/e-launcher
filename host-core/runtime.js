@@ -1,14 +1,18 @@
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
-import { Harness, createRegistry } from '@earendil-works/pi-durable';
+import { Harness, createRegistry, defineExtension, section, hook, GenerationTask } from '@earendil-works/pi-durable';
 import { openNodeSqliteStorage } from '@earendil-works/pi-durable/storage/sqlite/node';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { createModels } from '@earendil-works/pi-ai/models';
+import { buildCompressSystemPrompt } from 'acp-kernel';
 import { openHost } from './host.js';
 import { acquireRuntimeOwner } from './runtime-owner.js';
 import { parseModelRef } from './runtime-models.js';
-import { getPrimaryConversation, RequestKeys } from './runtime-docs.js';
+import { getPrimaryConversation, RequestKeys, upgradeLegacyContextConversations } from './runtime-docs.js';
 import { formatPrimarySubmission, normalizeHistoryOptions, readPrimaryHistory } from './runtime-history.js';
+import { createContextManager } from './context-manager.js';
+import { createContextTools } from './context-tools.js';
+import { BC_KERNEL_VERSION } from './context-state.js';
 
 const CTX = BACKGROUND_CONTEXT;
 
@@ -35,14 +39,28 @@ export async function openRuntime(options) {
   let releaseOwner = null;
   let storage = null;
   let harness = null;
+  // 内嵌 Billion Context：每 Host 一个 registry/管理器，hook 仅随生成调度运行。
+  const manager = createContextManager({ getHarness: () => harness, models });
+  const registry = createRegistry();
+  registry.install(defineExtension({
+    name: 'host.billion-context',
+    tools: createContextTools(manager),
+    sections: [section('billion-context', () => buildCompressSystemPrompt())],
+    hooks: [hook(GenerationTask, { beforeRequest: manager.prepare })],
+  }));
+  // 显式传入 models 才是主动模式：把旧 tools:[] 会话升级为继承 registry 默认工具。
+  const upgradeLegacy = options?.models !== undefined;
   try {
     releaseOwner = acquireRuntimeOwner(host.dataRoot);
     storage = await openNodeSqliteStorage(join(host.dataRoot, 'durable.sqlite'));
     harness = await Harness.open(storage, {
       models,
-      registry: createRegistry(),
+      registry,
       settings: { compaction: { enabled: false } },
     }, CTX);
+    if (upgradeLegacy) {
+      await upgradeLegacyContextConversations(harness, CTX);
+    }
   } catch (err) {
     if (harness) {
       try { await harness.close(CTX); } catch { /* close 失败不掩盖原错误 */ }
@@ -53,10 +71,10 @@ export async function openRuntime(options) {
     host.close();
     throw err;
   }
-  return createRuntime({ host, harness, models, defaultModel, releaseOwner });
+  return createRuntime({ host, harness, models, defaultModel, releaseOwner, manager });
 }
 
-function createRuntime({ host, harness, models, defaultModel, releaseOwner }) {
+function createRuntime({ host, harness, models, defaultModel, releaseOwner, manager }) {
   let closePromise = null;
   const close = () => {
     closePromise ??= (async () => {
@@ -171,6 +189,17 @@ function createRuntime({ host, harness, models, defaultModel, releaseOwner }) {
       const conversation = await getPrimaryConversation(harness, bot, {}, CTX);
       if (!conversation) return;
       await conversation.abort(CTX);
+    },
+
+    async contextStatus(botId) {
+      assertNonBlank(botId, 'botId');
+      const bot = host.getBot(botId);
+      if (!bot) throw errWithCode(`bot not found: ${botId}`, 'BOT_NOT_FOUND');
+      const conversation = await getPrimaryConversation(harness, bot, {}, CTX);
+      const status = conversation
+        ? await manager.inspect(conversation.id, CTX)
+        : { kernelVersion: BC_KERNEL_VERSION, status: null, blocks: [], messageRefs: { byRaw: {}, byRef: {} }, prepared: null };
+      return { botId, conversationId: bot.primaryConversationId, ...status };
     },
 
     resume() {

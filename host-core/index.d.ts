@@ -1,5 +1,6 @@
 import type { Models } from '@earendil-works/pi-ai';
 import type { EntryRecord } from '@earendil-works/pi-durable';
+import type { CompressionBlock, StatusReport } from 'acp-kernel';
 
 export interface BotRecord {
   botId: string;
@@ -57,6 +58,25 @@ export interface HistoryPage {
   nextCursor: Record<string, unknown> | null;
 }
 
+export interface ContextStatus {
+  botId: string;
+  conversationId: string;
+  kernelVersion: string;
+  status: StatusReport | null;
+  blocks: readonly CompressionBlock[];
+  messageRefs: {
+    byRaw: Record<string, string>;
+    byRef: Record<string, string>;
+  };
+  prepared: {
+    key: string;
+    taskId: string;
+    cutoff: number;
+    contextWindow: number;
+    tokenCount: number;
+  } | null;
+}
+
 export interface OpenRuntimeOptions {
   dataRoot: string;
   models?: Models;
@@ -69,6 +89,7 @@ export interface Runtime {
   getSubmission(botId: string, requestId: string): Promise<PrimarySubmission | null>;
   history(botId: string, options?: HistoryOptions): Promise<HistoryPage>;
   abort(botId: string): Promise<void>;
+  contextStatus(botId: string): Promise<ContextStatus>;
   resume(): void;
   close(): Promise<void>;
 }
