@@ -199,6 +199,8 @@ Kokoro 路径请求流式 PCM（24 kHz、单声道、16 位小端），使用 Au
 
 当前自部署服务使用 Kokoro v1.0 权重；音色固定不代表韵律和发音已经通过试听。验收时应测试中文夹英文、数字、长回复、连续打断和网络中断，区分 HTTP 响应头时间、首个音频块时间与手机实际出声时间。
 
+下一代多端 Bot 架构见 [未来设计（尚未实现）](docs/next-generation-architecture.md)。
+
 ## 源码与许可证
 
 本项目保留 AGPLv3 项目许可及 Ogesture 历史归属，当前已删除其导航手势派生实现；仍包含 Operit Shower 的 LGPL-3.0 派生源码。主项目完整许可证见 [LICENSE](LICENSE)，Operit 许可证副本见 [licenses/Operit-LGPL-3.0.txt](licenses/Operit-LGPL-3.0.txt)；固定上游版本、真实移植文件和修改见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。分发 APK 时须遵守对应源码与构建材料提供义务，仅给未修改上游链接不足以满足本修改版的义务。
