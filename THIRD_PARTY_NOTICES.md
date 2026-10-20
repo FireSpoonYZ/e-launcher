@@ -109,7 +109,7 @@ MIT License, Copyright (c) 2026 Lovecast Inc. Adapted terminal input, key encodi
 The extracted xterm.js Kitty keyboard encoder uses the pinned `@xterm/xterm@6.1.0-beta.303` source and retains its [MIT license](web/src/RemoteTerminal/xterm/LICENSE).
 ## acp-kernel
 
-The next-generation host-core will use **acp-kernel 0.0.101**, by ranxianglei,
+The host-core uses **acp-kernel 0.0.101**, by ranxianglei,
 for embedded in-context compression. The current Android runtime does not yet
 depend on or bundle this package.
 
@@ -124,3 +124,17 @@ stating the product uses acp-kernel and linking to
 https://github.com/ranxianglei/acp-kernel. For server-side or embedded uses
 without a user-facing surface, carrying these notices in the shipped
 documentation satisfies the term.
+
+## ripgrep and fd (search tools)
+
+The host-core installs pinned **ripgrep 15.1.0** (<https://github.com/BurntSushi/ripgrep>) and
+**fd 10.3.0** (<https://github.com/sharkdp/fd>) into the host dataRoot to back the grep/find
+tools. Both projects offer their software under the MIT License (ripgrep additionally offers the
+Unlicense); host-core selects and preserves each project's MIT license. The upstream license texts
+are not copied into this repository: `host-core/prepare-tools.js` extracts each official release
+archive's `LICENSE-MIT` entry at install time and saves it beside the installed binary at
+`<dataRoot>/tools/<platform>-<arch>/<name>-<version>/LICENSE-MIT`, so the exact upstream notice
+accompanies the downloaded artifact. Binaries are fetched from the projects' official GitHub release
+assets at pinned tags (`15.1.0`, `v10.3.0`), checked against PE/ELF headers, and installed with
+atomic rename; installation results report sha256 fingerprints. Only Windows x64 has been exercised
+so far.

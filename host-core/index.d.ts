@@ -81,6 +81,10 @@ export interface OpenRuntimeOptions {
   dataRoot: string;
   models?: Models;
   defaultModel?: string | null;
+  /** Optional explicit bash (Git Bash on Windows) executable; when omitted, HostEnv probes fixed Git install directories (Windows) or /bin/bash and /usr/bin/bash (Linux), never PATH. */
+  bashPath?: string;
+  /** Optional explicit search binaries for grep (rg) and find (fd); existence is checked at use. */
+  toolPaths?: { rg?: string; fd?: string };
 }
 
 export interface Runtime {

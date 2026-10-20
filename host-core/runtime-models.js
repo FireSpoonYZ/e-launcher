@@ -1,4 +1,5 @@
 import { readFile } from 'node:fs/promises';
+import path from 'node:path';
 import { createModels, createProvider } from '@earendil-works/pi-ai/models';
 import { openAICompletionsApi } from '@earendil-works/pi-ai/api/openai-completions.lazy';
 
@@ -23,6 +24,42 @@ function isHttpUrl(value) {
   } catch {
     return false;
   }
+}
+
+/**
+ * 校验执行选项边界：bashPath 与 toolPaths 均可选，仅 undefined 表示未提供；
+ * 显式 null 或类型错误一律 INVALID_ARGUMENT。不探测文件存在性——路径是否可用留到实际使用。
+ */
+export function parseExecutionOptions(options = {}) {
+  let bashPath;
+  if (options.bashPath !== undefined) {
+    if (typeof options.bashPath !== 'string' || options.bashPath.trim() === '' || !path.isAbsolute(options.bashPath)) {
+      throw invalidArgument('bashPath must be a non-empty absolute path');
+    }
+    const base = path.basename(options.bashPath).toLowerCase();
+    if (base !== 'bash' && base !== 'bash.exe') {
+      throw invalidArgument('bashPath must point to a bash or bash.exe executable');
+    }
+    bashPath = options.bashPath;
+  }
+  let toolPaths;
+  if (options.toolPaths !== undefined) {
+    if (typeof options.toolPaths !== 'object' || options.toolPaths === null || Array.isArray(options.toolPaths)) {
+      throw invalidArgument('toolPaths must be an object');
+    }
+    toolPaths = {};
+    for (const [name, value] of Object.entries(options.toolPaths)) {
+      if (name !== 'rg' && name !== 'fd') {
+        throw invalidArgument(`toolPaths has unknown tool: ${name}`);
+      }
+      if (value === undefined) continue;
+      if (typeof value !== 'string' || value.trim() === '' || !path.isAbsolute(value)) {
+        throw invalidArgument(`toolPaths.${name} must be a non-empty absolute path`);
+      }
+      toolPaths[name] = value;
+    }
+  }
+  return { bashPath, toolPaths };
 }
 
 /**
@@ -85,7 +122,8 @@ export async function loadRuntimeConfig(file) {
     defaultModel = config.defaultModel;
   }
 
-  return { models, defaultModel };
+  const execution = parseExecutionOptions(config);
+  return { models, defaultModel, bashPath: execution.bashPath, toolPaths: execution.toolPaths };
 }
 
 function validateProviders(providers) {

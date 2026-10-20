@@ -5,9 +5,14 @@ import { openNodeSqliteStorage } from '@earendil-works/pi-durable/storage/sqlite
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { createModels } from '@earendil-works/pi-ai/models';
 import { buildCompressSystemPrompt } from 'acp-kernel';
+import { createCodingTools } from '@earendil-works/pi-durable/tools';
+import { createHostExecutionEnv } from './host-environment.js';
 import { openHost } from './host.js';
 import { acquireRuntimeOwner } from './runtime-owner.js';
-import { parseModelRef } from './runtime-models.js';
+import { parseExecutionOptions, parseModelRef } from './runtime-models.js';
+import { createGrepTool } from './grep-tool.js';
+import { createFindTool } from './find-tool.js';
+import { createLsTool } from './ls-tool.js';
 import { getPrimaryConversation, RequestKeys, upgradeLegacyContextConversations } from './runtime-docs.js';
 import { formatPrimarySubmission, normalizeHistoryOptions, readPrimaryHistory } from './runtime-history.js';
 import { createContextManager } from './context-manager.js';
@@ -33,15 +38,57 @@ function assertNonBlank(value, name) {
  * Ownership of dataRoot is exclusive for the runtime's lifetime; close() releases it.
  */
 export async function openRuntime(options) {
+  // 执行选项先于任何写数据校验：bashPath/toolPaths 类型错误在打开 host 前拒绝。
+  const execution = parseExecutionOptions(options);
   const host = openHost({ dataRoot: options?.dataRoot });
   const models = options?.models ?? createModels();
   const defaultModel = options?.defaultModel ?? null;
   let releaseOwner = null;
   let storage = null;
   let harness = null;
+
+  // 每 conversationId+cwd 一个执行环境；绝不 process.chdir 或默认 process.cwd，缺 cwd 明确报错。
+  const envCache = new Map();
+  const envFor = (target) => {
+    const cwd = target.cwd;
+    if (typeof cwd !== 'string' || cwd.trim() === '') {
+      throw errWithCode(`conversation ${target.conversationId} has no cwd; configure the bot cwd before sending`, 'INVALID_ARGUMENT');
+    }
+    const key = target.conversationId + '\u0000' + cwd;
+    let env = envCache.get(key);
+    if (!env) {
+      env = createHostExecutionEnv({ cwd, bashPath: execution.bashPath });
+      envCache.set(key, env);
+    }
+    return env;
+  };
+  const cleanupEnvs = async () => {
+    const envs = [...envCache.values()];
+    envCache.clear();
+    const results = await Promise.allSettled(envs.map((env) => env.cleanup(CTX)));
+    const failures = results.filter((result) => result.status === 'rejected');
+    if (failures.length > 0) {
+      throw new AggregateError(failures.map((result) => result.reason), `env cleanup failed for ${failures.length} environment(s)`);
+    }
+  };
+
   // 内嵌 Billion Context：每 Host 一个 registry/管理器，hook 仅随生成调度运行。
   const manager = createContextManager({ getHarness: () => harness, models });
   const registry = createRegistry();
+  registry.install(createCodingTools());
+  registry.install(defineExtension({
+    name: 'host.tools',
+    tools: [
+      createGrepTool({ dataRoot: host.dataRoot, toolPaths: execution.toolPaths }),
+      createFindTool({ dataRoot: host.dataRoot, toolPaths: execution.toolPaths }),
+      createLsTool(),
+    ],
+    sections: [section('host-execution', (input) => {
+      const shell = process.platform === 'win32' ? 'Git Bash' : 'bash';
+      const cwd = input.env?.cwd ?? input.agent.cwd;
+      return `Tools execute on this host (device ${host.deviceId}) through ${shell}; they are not sandboxed. Default working directory: ${JSON.stringify(cwd ?? null)}.`;
+    })],
+  }));
   registry.install(defineExtension({
     name: 'host.billion-context',
     tools: createContextTools(manager),
@@ -57,6 +104,7 @@ export async function openRuntime(options) {
       models,
       registry,
       settings: { compaction: { enabled: false } },
+      env: envFor,
     }, CTX);
     if (upgradeLegacy) {
       await upgradeLegacyContextConversations(harness, CTX);
@@ -67,23 +115,26 @@ export async function openRuntime(options) {
     } else if (storage) {
       try { await storage.close(CTX); } catch { /* close 失败不掩盖原错误 */ }
     }
+    try { await cleanupEnvs(); } catch { /* open 失败清理不掩盖原错误 */ }
     try { releaseOwner?.(); } catch { /* release 失败不掩盖原错误 */ }
     host.close();
     throw err;
   }
-  return createRuntime({ host, harness, models, defaultModel, releaseOwner, manager });
+  return createRuntime({ host, harness, models, defaultModel, releaseOwner, manager, cleanupEnvs });
 }
 
-function createRuntime({ host, harness, models, defaultModel, releaseOwner, manager }) {
+function createRuntime({ host, harness, models, defaultModel, releaseOwner, manager, cleanupEnvs }) {
   let closePromise = null;
   const close = () => {
     closePromise ??= (async () => {
-      try {
-        await harness.close(CTX);
-      } finally {
-        host.close();
-        releaseOwner();
-      }
+      // 依次执行并收集每步错误：任何一步失败仍继续清理，最后显式抛出。
+      const errors = [];
+      try { await harness.close(CTX); } catch (err) { errors.push(err); }
+      try { await cleanupEnvs(); } catch (err) { errors.push(err); }
+      try { host.close(); } catch (err) { errors.push(err); }
+      try { releaseOwner(); } catch (err) { errors.push(err); }
+      if (errors.length === 1) throw errors[0];
+      if (errors.length > 1) throw new AggregateError(errors, 'runtime close failed');
     })();
     return closePromise;
   };

@@ -1,6 +1,6 @@
 # 下一代多端 Bot 架构设计
 
-> 状态：目标架构设计，整体尚未实现。[Bot/Host 核心](../host-core/README.md) 已独立实现模块 1 本机登记、模块 2 Durable 长期主私聊及模块 3 内嵌 Billion Context；跨端通信和应用集成尚未完成。本文约定产品方向、首版设计默认与工程验证边界，不授权删除现有能力。当前安装、构建及运行行为仍以 [README](../README.md) 为准。
+> 状态：目标架构设计，整体尚未实现。[Bot/Host 核心](../host-core/README.md) 已独立实现模块 1 本机登记、模块 2 Durable 长期主私聊、模块 3 内嵌 Billion Context 及模块 4 本机工具；整体通信、跨端与外壳（Tauri/TUI）尚未完成。本文约定产品方向、首版设计默认与工程验证边界，不授权删除现有能力。当前安装、构建及运行行为仍以 [README](../README.md) 为准。
 
 ## 1. 已确认目标与首版边界
 
@@ -77,6 +77,16 @@ cwd 是工具默认工作目录，不是数据库目录或进程全局 cwd。Hos
 Windows Host 明确定位 Git Bash 并验证环境，不能任由 PATH 误选 shell；Linux 使用 bash。缺少所需 shell 时报告不可用，不静默改用 PowerShell。这只约束新版 Bot 命令执行，不改变现有 PowerShell 构建脚本，也不改写现有远程终端支持 PowerShell/Bash/Nushell 的事实。
 
 Android 迁移现有工具能力及 Java 桥，包括文件、语音、分享、应用与 Shower 等实际能力，不降级为远程壳或纯工具端。原生模块继续处理系统权限、Binder、附件与界面入口；工具输出、网页和屏幕内容均不可信，不能据其文本扩权。
+
+### 模块 4：本机工具已实现
+
+模块 4 已接入本机工具：read/write/edit/bash 复用 pi-durable 原生工具，grep/find/ls 为本模块适配（rg/fd/文件 API）。工具在 Bot Host 上执行，cwd 默认位置不是沙盒；不 `process.chdir`，按 conversation+cwd 缓存执行环境，运行时关闭时清理环境进程。
+
+Windows 命令环境只在固定 Git 安装目录定位 Git Bash，Linux 固定 `/bin/bash`、`/usr/bin/bash`，均不搜索 PATH，不提供 PowerShell；缺少 shell 只影响 bash 工具，文件工具仍可用。`openRuntime`/配置支持可选 `bashPath`（绝对路径 bash/bash.exe）与 `toolPaths`（`{rg, fd}` 绝对路径），仅 undefined 视为未提供，存在性在使用时懒检查。
+
+rg/fd 定位顺序：显式 toolPaths -> dataRoot 固定版本（`<dataRoot>/tools/<platform>-<arch>/<name>-<version>/`）-> Pi agent bin -> PATH（Linux fd 别名 fdfind）。模型调用不触发下载；`node host-core/prepare-tools.js --data-root ...` 显式安装 rg 15.1.0 / fd 10.3.0（curl/tar，Windows 仅 System32 tar、无 PowerShell 回退；固定官方 URL、固定 entry 流式提取、LICENSE-MIT 随下载保存、原子发布、sha256 指纹）。资源安装目前仅在 Windows x64 实际运行，四平台验收未完成。
+
+工具限额：find 默认 1000 条（上限 10000）、50KB、60 秒，坏 glob 报错，NUL 分帧防换行文件名；grep 单 JSON 记录 64KiB、每行 500 Unicode 码点、50KB、60 秒，自设限只取消自身进程；ls 纯文件 API、无外部程序。重放沿用原生安全语义，不承诺外部 shell 副作用 exactly-once；BC 复杂工具内容继续受保护，未做进一步结果卸载。
 
 ### 本机状态与恢复边界
 
