@@ -199,7 +199,7 @@ Kokoro 路径请求流式 PCM（24 kHz、单声道、16 位小端），使用 Au
 
 当前自部署服务使用 Kokoro v1.0 权重；音色固定不代表韵律和发音已经通过试听。验收时应测试中文夹英文、数字、长回复、连续打断和网络中断，区分 HTTP 响应头时间、首个音频块时间与手机实际出声时间。
 
-下一代多端 Bot 架构见 [未来设计（尚未实现）](docs/next-generation-architecture.md)。
+下一代多端 Bot 架构见 [未来设计（尚未实现）](docs/next-generation-architecture.md)。首个重构模块 [Bot/Host 本机登记簿](host-core/README.md) 已作为独立 Node 包实现，尚未接入现有应用。
 
 ## 源码与许可证
 
