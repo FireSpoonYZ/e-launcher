@@ -99,3 +99,23 @@ export interface Runtime {
 }
 
 export function openRuntime(options: OpenRuntimeOptions): Promise<Runtime>;
+
+export interface ControlHostInfo {
+  protocolVersion: 1;
+  deviceId: string;
+  platform: string;
+  arch: string;
+}
+
+export interface OpenControlServerOptions extends OpenRuntimeOptions {
+  token: string;
+  port?: number;
+}
+
+export interface ControlServer {
+  deviceId: string;
+  url: string;
+  close(): Promise<void>;
+}
+
+export function openControlServer(options: OpenControlServerOptions): Promise<ControlServer>;
