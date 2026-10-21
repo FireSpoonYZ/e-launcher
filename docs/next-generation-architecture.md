@@ -1,6 +1,6 @@
 # 下一代多端 Bot 架构设计
 
-> 状态：目标架构设计，整体尚未实现。[Bot/Host 核心](../host-core/README.md) 已独立实现模块 1 本机登记、模块 2 Durable 长期主私聊、模块 3 内嵌 Billion Context、模块 4 本机工具及模块 5 本机控制面（长期本地 Host 控制 API：基础 HTTP、回环端口、Bearer 令牌认证、拒绝全部 Origin；配套 Node/浏览器兼容客户端）及模块 6 主私聊实时预览（认证本地 SSE：有界快照+整体替换更新、每订阅 sequence 非持久游标，原始历史分页保留；无群消息/中心/Tauri，无轮询或新调度器）；模块 7 已实现本机持久消息账本（作用域/成员修订、不可变信封、outbox、落地去重 ACK、本地收件/历史/缺口、特权离线 CLI；仅 messages.sqlite 本机存储，无网络认证/隧道/中心/推理）；模块 8 已实现认证设备中继与 Host 消息投递（中心只存设备注册，复用模块 7 outbox，本机进程网络端到端已通；跨设备/真机网络验收与完整中心产品尚未完成）；模块 9 已实现认证远程 Host JSON 控制（固定 10 个 JSON 方法、独立多客户端角色、Node 客户端与一次性 CLI；父助手已完成本机独立进程 171/171 个端到端检查点验收，具体范围见下文）；模块 10 已完成群与 Bot DM 的独立被动工作上下文（显式导入、独立 Durable/BC、本机 API/CLI；父助手完成 149/149 个检查点，范围与限制见下文）。模块 11 已完成自然群聊决策与通信工具（父助手完成 161/161 个端到端检查点及 18 份数据库完整性/外键检查；本机 WSS 与脚本化模型服务，范围与限制见下文）。模块 12（成员范围管理与历史补齐）已完成父助手限定范围验收（122/122 检查点，见下节）。模块 13（Hindsight → Pi Durable 长期事实记忆）已完成 Host 侧适配交付（进度 13/20；最终清理/验收与合入归父助手，真实 Hindsight 服务联调未做）。总计划 20 个模块、已完成 13 个、14–20 共 7 个待交付。整体通信（框架隧道/中心产品）、跨端与外壳（Tauri/TUI）尚未完成。本文约定产品方向、首版设计默认与工程验证边界，不授权删除现有能力。当前安装、构建及运行行为仍以 [README](../README.md) 为准。
+> 状态：目标架构设计，整体尚未实现。[Bot/Host 核心](../host-core/README.md) 已独立实现模块 1 本机登记、模块 2 Durable 长期主私聊、模块 3 内嵌 Billion Context、模块 4 本机工具及模块 5 本机控制面（长期本地 Host 控制 API：基础 HTTP、回环端口、Bearer 令牌认证、拒绝全部 Origin；配套 Node/浏览器兼容客户端）及模块 6 主私聊实时预览（认证本地 SSE：有界快照+整体替换更新、每订阅 sequence 非持久游标，原始历史分页保留；无群消息/中心/Tauri，无轮询或新调度器）；模块 7 已实现本机持久消息账本（作用域/成员修订、不可变信封、outbox、落地去重 ACK、本地收件/历史/缺口、特权离线 CLI；仅 messages.sqlite 本机存储，无网络认证/隧道/中心/推理）；模块 8 已实现认证设备中继与 Host 消息投递（中心只存设备注册，复用模块 7 outbox，本机进程网络端到端已通；跨设备/真机网络验收与完整中心产品尚未完成）；模块 9 已实现认证远程 Host JSON 控制（固定 10 个 JSON 方法、独立多客户端角色、Node 客户端与一次性 CLI；父助手已完成本机独立进程 171/171 个端到端检查点验收，具体范围见下文）；模块 10 已完成群与 Bot DM 的独立被动工作上下文（显式导入、独立 Durable/BC、本机 API/CLI；父助手完成 149/149 个检查点，范围与限制见下文）。模块 11 已完成自然群聊决策与通信工具（父助手完成 161/161 个端到端检查点及 18 份数据库完整性/外键检查；本机 WSS 与脚本化模型服务，范围与限制见下文）。模块 12（成员范围管理与历史补齐）已完成父助手限定范围验收（122/122 检查点，见下节）。模块 13（Hindsight → Pi Durable 长期事实记忆）已完成 Host 侧适配交付（进度 13/20；真实 Hindsight 服务联调未做）。模块 14（统一 Host 服务与设备接入）已完成父助手限定范围验收（139/139 检查点，见下节）。总计划 20 个模块、已完成 14 个、15–20 共 6 个待交付。整体通信（框架隧道/中心产品）、跨端与外壳（Tauri/TUI）尚未完成。本文约定产品方向、首版设计默认与工程验证边界，不授权删除现有能力。当前安装、构建及运行行为仍以 [README](../README.md) 为准。
 
 当前交付计划与完成/剩余模块见 [重构路线图](refactor-roadmap.md)。
 
@@ -139,11 +139,11 @@ Bot DM 使用通知、请求、相关回复的语义，可查历史并允许沉�
 
 实跑覆盖并发分页去重、Bot/room/DM/BC 与作者隔离、旧目标和迟到引用、Unicode 原文，以及整页/水位/新绑定与 BC 的 SQL 故障原子回滚。进行中强杀证据仅采用第 3 次（健康 Host、请求体已发出、写锁阻塞 health、exit 137/client reset 56）；恢复后 sync 导入 1 条、再试为 0，前两次未证实请求接纳，不计该证据。已受理 sync 的 HTTP 超时断连不阻止释放锁后完成导入；Runtime 关闭期间消息链路仍可落盘 ACK，重开后显式 sync 才推进水位。
 
-最终 **4 个模型请求均为 4 次显式 primary 提交**，没有工作上下文推理；Host A 的 16 个工作上下文共 0 个 tasks，模型 wire 与 primary SSE 无群/DM 标记。原远程 10 方法回归通过，远程 `workHistory` 拒绝为 `not-sent`；本轮四个 work 操作仅限本机。数据库检查与本轮进程清理完成。详细报告在仓库外：`C:/Users/46040/AppData/Local/Temp/e-launcher-work-contexts-1792552863388/module10-verification.json`。
+最终 **4 个模型请求均为 4 次显式 primary 提交**，没有工作上下文推理；Host A 的 16 个工作上下文共 0 个 tasks，模型 wire 与 primary SSE 无群/DM 标记。原远程 10 方法回归通过，远程 `workHistory` 拒绝为 `not-sent`；本轮四个 work 操作仅限本机（M14 v2 起远端已支持固定 work RPC，见下节）。数据库检查与本轮进程清理完成。详细报告在仓库外：`C:/Users/46040/AppData/Local/Temp/e-launcher-work-contexts-1792552863388/module10-verification.json`。
 
 未实测跨物理设备/WAN、Linux/Android/arm64、Tauri/TUI、浏览器 native-fetch 适配集成及真实外部付费模型；直接 JS AbortSignal、直接 `Runtime.close` 并发调用/关闭竞态也未实跑；本轮已测 HTTP 断连和进程优雅关闭。全局 128 pending/256 连接负载、中继慢接收者压力及模块 9 既有限制保留。
 
-以上是模块 10 的历史验收记录，不作为模块 11 自然群聊决策/发言/通信工具的验收证据；模块 11 的独立验收见下节。模块 12 成员同步/历史补齐已完成父助手限定范围验收；模块 13 长期事实记忆已完成 Host 侧适配交付。模块 9 中继远程协议保持固定 10 个方法，远程 work 版本化接线属于模块 14；不增加 Session 产品或 UI。
+以上是模块 10 的历史验收记录，不作为模块 11 自然群聊决策/发言/通信工具的验收证据；模块 11 的独立验收见下节。模块 12 成员同步/历史补齐已完成父助手限定范围验收；模块 13 长期事实记忆已完成 Host 侧适配交付。模块 9 中继远程协议保持固定 10 个方法，远程 work 版本化接线属于模块 14（M14 v2 起已扩展为 35 个固定方法并支持固定 work/memory RPC，见下节）；不增加 Session 产品或 UI。
 
 ### 模块 11：自然群聊决策与通信工具（已完成父助手验收）
 
@@ -193,13 +193,13 @@ Bot DM 使用通知、请求、相关回复的语义，可查历史并允许沉�
 
 模型缺失/不可用和生成失败只阻塞本 scope（`MODEL_REQUIRED`/`MODEL_NOT_FOUND`/`WORK_GENERATION_FAILED`，保留已有 `CONTEXT_LIMIT`），修复后显式 resumeWork，不热重试。意外存储/schema 错误保留 fatal、停止驱动并对 activity/变更暴露，不吞掉或重置；需正确关闭/重开及处理原因。自动处理、被动工作接口和通信工具共用一份懒开 MessageLog，关闭先停驱动并静止已接纳操作，等 harness 关闭后才关 log；DeviceLink 的连接与锁独立。
 
-**仅本机控制扩展。** Runtime/ControlClient 增加 `getWorkActivity`、`stopWork`、`resumeWork`；本机 HTTP 为 GET `/v1/bots/:botId/work-contexts/:scopeKey/activity`、POST `…/stop`、POST `…/resume`（两个 POST 要求解析后为空对象；零字节 body 沿用 `readControlBody` 约定视作 `{}`，客户端仍发送 JSON `{}`），均返回 WorkActivity。沿用 Bearer/Origin 规则及 scopeKey=`'~'+encodeURIComponent(scopeId)`，解码一次且只剥一个 `~`。客户端 options 仅 signal，取消 HTTP 不撤销已受理操作。CLI 为 `work-activity`/`work-stop`/`work-resume --bot-id --scope-id`（另加原 url/token-env 连接选项），拒绝无关参数。M10 四个本机 work 操作保留；远端仍是 getHostInfo/listBots/createBot/getBot/findByRequest/submit/getSubmission/history/abort/contextStatus 十方法，不增加远端 work 或群/DM live。
+**仅本机控制扩展。** Runtime/ControlClient 增加 `getWorkActivity`、`stopWork`、`resumeWork`；本机 HTTP 为 GET `/v1/bots/:botId/work-contexts/:scopeKey/activity`、POST `…/stop`、POST `…/resume`（两个 POST 要求解析后为空对象；零字节 body 沿用 `readControlBody` 约定视作 `{}`，客户端仍发送 JSON `{}`），均返回 WorkActivity。沿用 Bearer/Origin 规则及 scopeKey=`'~'+encodeURIComponent(scopeId)`，解码一次且只剥一个 `~`。客户端 options 仅 signal，取消 HTTP 不撤销已受理操作。CLI 为 `work-activity`/`work-stop`/`work-resume --bot-id --scope-id`（另加原 url/token-env 连接选项），拒绝无关参数。M10 四个本机 work 操作保留；远端仍是 getHostInfo/listBots/createBot/getBot/findByRequest/submit/getSubmission/history/abort/contextStatus 十方法，不增加远端 work 或群/DM live（截至 M11；M14 v2 起已支持固定 work/memory RPC 与远端 live，见下节）。
 
-完整参数、DTO、使用示例及 `module11-verification.json` 证据位置见 [Host 核心模块 11 说明](../host-core/README.md#模块-11自然群聊决策与-bot-通信工具已完成父助手验收)。模块 **12** 已完成父助手限定范围验收（122/122 检查点，见下节 [模块 12](../host-core/README.md#模块-12成员范围管理与历史补齐已完成父助手验收)）；模块 **13** 已完成 Host 侧适配交付，模块 **14–20 共 7 个** 仍待交付：远程 work/实时接线、跨平台/迁移/外壳与真机集成；不新增后台任务产品。
+完整参数、DTO、使用示例及 `module11-verification.json` 证据位置见 [Host 核心模块 11 说明](../host-core/README.md#模块-11自然群聊决策与-bot-通信工具已完成父助手验收)。模块 **12** 已完成父助手限定范围验收（122/122 检查点，见下节 [模块 12](../host-core/README.md#模块-12成员范围管理与历史补齐已完成父助手验收)）；模块 **13** 已完成 Host 侧适配交付。模块 **14**（远程 work/实时接线、统一服务与本机设置、客户端待发送/对账）已完成父助手限定范围验收（139/139 检查点，见下节），总完成数 **14/20**；模块 **15–20 共 6 个**仍待交付：跨平台/迁移/外壳与真机集成；不新增后台任务产品。
 
 **模块 11 验收范围。** 父助手在 **Windows / Git Bash、Node 26.8.2 / 22.19.0**，使用 pi-durable **1.3.0**、acp-kernel **0.0.101**，完成 **161/161 个检查点，失败 0**。实际 localhost WSS 连接 Host A/B，模型 HTTP/SSE 进程使用脚本化 Mockoon 响应；这是实际运行协议与恢复机制的验收，不是付费模型或智能决策质量验证。
 
-实跑覆盖无 @ 的独立决策、回声/notice/reply 不生新请求、真实作者及伪造字段拒绝、私有最终文本、旧请求停止且新决策实际发布、跨来源/目标 guard、退出/重入、持久 owner 停止、DM 直接关联/首回复/超时及跨 Bot 隔离。8 条预览分页恰好各一次，50KiB/Unicode 边界与完整原文通过，超大单 scope 在可用前缀之后明确报错。B Runtime 关闭时独立链路仍落盘 notice 并 ACK，重开仅导入；M10 被动方法、主私聊 history/live、空 Host 懒开、所有权、缺模型/配置后显式恢复及远端十方法回归通过，远端 work 扩展仍拒绝。
+实跑覆盖无 @ 的独立决策、回声/notice/reply 不生新请求、真实作者及伪造字段拒绝、私有最终文本、旧请求停止且新决策实际发布、跨来源/目标 guard、退出/重入、持久 owner 停止、DM 直接关联/首回复/超时及跨 Bot 隔离。8 条预览分页恰好各一次，50KiB/Unicode 边界与完整原文通过，超大单 scope 在可用前缀之后明确报错。B Runtime 关闭时独立链路仍落盘 notice 并 ACK，重开仅导入；M10 被动方法、主私聊 history/live、空 Host 懒开、所有权、缺模型/配置后显式恢复及远端十方法回归通过，远端 work 扩展仍拒绝（截至 M11；M14 v2 起已支持固定 work RPC，见下节）。
 
 等待 task **489** 优雅关闭后在 Node 22 按原 task/绝对截止恢复，不因停机过期重置 30 秒。发布 task **729** 在真实发送落盘、原生工具结果插入被 SQLite 触发器阻断后遭 SIGKILL，重开返回同一回执且只保留一条发布，更新输入未丢。原生重试也实测了请求 cutoff 与较旧 BC 缓存 cutoff 不同仍能完成，以及同一 task 下一次尝试刷新来源水位、实际模型请求正文包含新输入。
 
@@ -286,20 +286,32 @@ Bot DM 使用通知、请求、相关回复的语义，可查历史并允许沉�
 - **有界补史**：副本同步泵最多 4 个活跃 `(scopeId,peerDeviceId)` 修复任务、每 peer 至多 1 个在途请求、5s 超时、限 256 条冷却，分页遍历本地 scope/peer，页边界轮转；稀疏缺口用 SQL 定位且同 pass 不重求同一缺口；`recordReplicaScan` 只记录请求区间扫描时间，空观察不代表全局完整/在线。
 - **自源恢复**：来自 peer 的本机源历史重建发布指纹（仅补空）并恢复丢失的远端 outbox（保留已 ack），后续本地发布沿用最高序号+1。
 - **scopeProtocol:1 升级与信任**：先升 relay；已协商源向在线未协商旧目标发 scope 帧回 UNSUPPORTED，未协商/旧源发 scope 帧被 REVOKED 关闭；ready 缺能力→UNSUPPORTED_SCOPE_PROTOCOL，真旧 relay 可能以 BAD_FRAME 拒绝扩展 hello；新连接要求协商；认证通道+TLS 信任服务 Host，无原始作者端到端签名/加密声明。
-- **六个本机入口**：GET/POST `/v1/scopes`、GET `/v1/scopes/:scopeKey`、POST `…/members`、POST `…/messages`、GET `…/replicas`（`scopeKey='~'+encodeURIComponent(scopeId)`），配合 ControlClient/CLI 六个方法与 `--input` 文件入口；默认 50/上限 200 分页、控制≈1MiB/同步≈2MiB 预算；用户消息回执与元数据收据都不是投递/推理完成。六个方法仅本机，远端仍固定 10 方法。
+- **六个本机入口**：GET/POST `/v1/scopes`、GET `/v1/scopes/:scopeKey`、POST `…/members`、POST `…/messages`、GET `…/replicas`（`scopeKey='~'+encodeURIComponent(scopeId)`），配合 ControlClient/CLI 六个方法与 `--input` 文件入口；默认 50/上限 200 分页、控制≈1MiB/同步≈2MiB 预算；用户消息回执与元数据收据都不是投递/推理完成。六个方法仅本机，远端仍固定 10 方法（截至 M12；M14 v2 起已扩展为 35 个固定方法，见下节）。
 
 ### 模块 13：可追溯长期记忆（Hindsight → Pi Durable，Host 侧适配交付）
 
-模块 13 把长期记忆落地为**派生事实**：自动提取的稳定偏好与事实存放在由宿主显式配置的 Hindsight 服务中，可追溯来源、适用范围与纠正，按范围控制共享。已完成 Host 侧适配交付，进度 **13/20**（14–20 共 7 个待交付）。验证环境为真实 Durable/BC/HTTP/CLI/SQLite + 隔离 Mockoon 协议夹具；真实 Hindsight 服务联调未做。
+模块 13 把长期记忆落地为**派生事实**：自动提取的稳定偏好与事实存放在由宿主显式配置的 Hindsight 服务中，可追溯来源、适用范围与纠正，按范围控制共享。已完成 Host 侧适配交付（M13 交付时为 13/20；当前含 M14 为 14/20）。验证环境为真实 Durable/BC/HTTP/CLI/SQLite + 隔离 Mockoon 协议夹具；真实 Hindsight 服务联调未做。
 
 - **版本与外接**：复用 Pi Hindsight **0.13.0** 策略与 REST 客户端 schema **0.9.2**，适配 pi-durable **1.3.0** 生命周期，不直接加载 Pi 扩展；客户端版本不是已验证的服务端版本。
-- **显式服务配置与数据归属**：每 Host 显式配置 `options.hindsight {baseUrl, apiKeyEnv?, sharedMemory?}`（apiKeyEnv 仅为环境变量名）；事实提取与检索由该服务执行；本机 `hindsight.sqlite` 仅作适配侧输入跟踪/outbox/召回缓存/来源出处/纠正审计，不是第二个事实引擎；原始 Native Entry 与消息账本历史保持完整。relay 永不接收/存储记忆或凭证；不继承 Pi 个人/项目/全局 banks、HOME 配置或会话文件身份；URL 绑定固定 endpointHash，防止旧 outbox 静默改投另一端点。
+- **显式服务配置与数据归属**：每 Host 显式配置 `options.hindsight {baseUrl, apiKeyEnv?, sharedMemory?}`（apiKeyEnv 仅为环境变量名）；事实提取与检索由该服务执行；本机 `hindsight.sqlite` 仅作适配侧输入跟踪/outbox/召回缓存/来源出处/纠正审计，不是第二个事实引擎；原始 Native Entry 与消息账本历史保持完整。M13 阶段记忆接口仅本机；M14 v2 可经中继有界瞬时转发记忆业务结果。中心仅持久保存设备登记与认证校验信息，不持久保存聊天、工作上下文、记忆正文或模型/Hindsight API 凭证；不继承 Pi 个人/项目/全局 banks、HOME 配置或会话文件身份；URL 绑定固定 endpointHash，防止旧 outbox 静默改投另一端点。
 - **私有与共享**：默认私有记忆库按 `(deviceId, botId, target)` 建立，target 为 primary/scope/shared；`sharedMemory` 默认关闭，启用后仅同一 Bot 经本机 API/CLI 或模型工具提交的显式笔记可进 shared，自动转录永不共享；共享需显式选择，当前作用域身份由控制器注入，former-member 读语义沿用既有工作绑定的授权。
 - **自动召回与显式工具区别**：自动召回是临时性的，在 BC prepare 后、预算检查前注入且仅限预算内，不写回原生条目或 BC 源；显式记忆工具调用/结果走普通 Durable 工具历史，但排除在自动来源抽取之外。
 - **队列与纠正不确定性**：异步受理（accepted）≠ 抽取完成（completed）；稳定 operationId 恢复同一次发布，失败抽取不自动重试，需显式 retry；PATCH 纠正/失效/恢复只改派生记忆并保留审计，unconfirmed 结局不自动回放，仅明确 HTTP 4xx 拒绝判 rejected/responded；仅世界/体验事实可编辑，观测派生。
 - **接口**：八个本机 Runtime 方法/CLI（memory-status/recall/reflect/retain/get/source/correct/retry）与八个模型工具（hindsight_status/recall/reflect/retain/get/source/correct/retry）；`memoryStatus(botId, input?)` 的 input 为 `{target?,state?,limit?,cursor?}`，返回分页 job 回执（jobs/nextCursor），游标绑定派生 bank/过滤、不能选另一记忆库，计数全上下文、列表可按 state 过滤。memoryStatus **不创建记忆库、不发起后端请求，但可读取已有库**。
 - **关闭顺序**：先启动 Durable close，再取消网络请求并等待记忆调用结束，避免正常关闭持久化任务中止，保留可恢复任务。
 - **验收状态（夹具环境）**：Windows、Node 26.8.2/22.19.0，实际运行 Pi Durable 1.3.0 + acp-kernel 0.0.101、本地 HTTP/CLI/SQLite；模型与 Hindsight wire 响应来自隔离 Mockoon 夹具。验证八个本机 API/CLI 与八个模型工具、禁用不建库/配置拒绝、私有与 shared bank 边界、provider 前捕获与仅完成态收集、分页/并发收集、代理对安全重建与 Unicode 预览、BC 压缩与预算内召回、稳定 operationId 与显式重试、纠正审计与 unconfirmed/4xx 映射、schema/设备/端点变更拒绝、关闭保留可恢复任务、2MiB 后端响应拒绝与公开声明严格检查。真实 Hindsight 服务部署/API 互通与语义抽取/召回/reflect 质量**未经联调**。完整开发说明与限制见 [Host 核心模块 13 说明](../host-core/README.md#hindsight-memory)。
+
+### 模块 14：统一 Host 服务与设备接入（已完成父助手限定范围验收）
+
+模块 14 已完成父助手限定范围验收（139/139 检查点），总完成数 **14/20**。它把模块 5 本机控制面、模块 8/9 认证中继与远程控制、模块 10–12 工作上下文/scope、模块 13 记忆整合为统一本机服务，并新增本机设置持久化、远端协议 v2 与客户端待发送/对账。
+
+- **统一本机服务**：`openHostService({dataRoot, token, port?, initialSettings?})` 同进程一个 Runtime + 一个 DeviceLink（绝不 spawn 两进程）；控制监听成功后才连接 relay。`host-service-cli` 默认 serve，`--initial-settings` 用于初始化设置；已有库也接受规范化后相同的 seed，差异报 REQUEST_CONFLICT 且不覆盖已有设置。状态 `getStatus()`/GET `/v1/service` 区分 `phase:'running'`（仅本机）与 `relay.phase==='online'`（远端在线）；connecting/backoff/blocked 不虚报 online/ready。legacy 独立 `control-server-cli`/`device-link-cli` 仍可用。
+- **本机设置**：`host-settings.sqlite` schema v1 两张表（identity + 当前行 revision/JSON），expectedRevision CAS；设置 JSON 保存配置本身（URL/模型目录/预算/CA 路径等），仅凭证字段以 env 变量名表示，值不进中继；模型目录白名单无 baseUrl/header/secret。GET/PUT `/v1/settings` 与离线 `host-service-cli settings-get/settings-set` 都可用（离线不启动 Runtime，便于配置错误救援）；更新只下次重开生效，不自动迁移已持久会话 model。
+- **协议表**：relay protocolVersion 1、scopeProtocol 1 host-only、controlProtocol 2（35 方法 = 旧十 + 新增 25）；v2 client/link 必须 ready 回显 2，旧 client/host 经 v1 兼容。settings/status 不进远端表，无通用代理；remote listDevices/devices-list wire 投影仅四字段白名单，注册/轮换/撤销仍本地 registry CLI。
+- **实时预览**：有界安全完整快照（primary/work 分开，work scopeId 恒定、conversationId null→UUID 一次），8/client、8/host、128 relay，opening 20s 非 lifetime；冷观察不创建会话/推理，取消/断流只结束观察；回环 HTTP 拒 Origin，网页需 native fetch 适配。
+- **客户端待发送**：仅客户端 SQLite + owner 锁，显式冻结业务 ID，无 auto flush/reconnect replay；state 含 unconfirmed，先只读 reconcile，missing 后用户显式 send 原 payload；accepted 只 Host 受理，不是模型完成或 peer ACK；sourceDeviceId 与真实作者/role 分离，callId 不是业务幂等键。
+- **验收**：Windows x64 / Git Bash、Node 26.8.2/22.19.0、真实本地 HTTP/CLI/TLS/WSS、持久 SQLite、Durable 1.3.0 + BC 0.0.101，模型/Hindsight 用隔离 Mockoon 夹具；139/139 检查点通过、53 份 SQLite 完整性/外键（含故意畸形 schema 夹具）、8 个 Native tasks 终态/0 active、30 个 tail readers 清理、夹具剩余 0；无新依赖/仓库测试。冻结 M13 v1 远程 CLI 与 device-link 桥接端经当前控制服务（位于冻结桥后）调用 `getHostInfo` 通过，不代表整个旧 Runtime 或每个旧客户端场景都冻结验证；无首帧时约 20.159 秒触发超时，合成 Host 协议对端收到对应 live-cancel；活动观察凭证撤销/轮换、旧 token 拒绝/新 token 可用、8-live 容量。
+- **未实测保留**：物理 WAN/多机、Linux/Android/arm64、Tauri/TUI 与 native-fetch UI；真实 Hindsight 互操作/语义与付费模型；全局 128-live/256 连接饱和与持续反压；穷举直接 JS AbortSignal/iterator.return/close 与跨代 teardown 交错；真实交互式控制台 SIGINT/SIGTERM 矩阵。类型检查 skipLibCheck 通过，完整检查仍有 genai 缺 `@modelcontextprotocol/sdk/client/index.js`（TS2307），不宣称全量第三方类型检查通过。统一长驻服务不是 OS 服务安装器也不保证始终在线；Android/Tauri/TUI、迁移与现有原生兼容属后续模块。TLS+认证 peer 不等于原作者 E2E 签名/加密；relay 仅有界瞬时转发业务，不持久保存业务正文/工作上下文/模型与 Hindsight API 凭证或运行推理；中心仅持久保存设备登记与认证校验信息（设备 token 哈希/credentialVersion）。
 
 ## 7. 外壳与 Android 生命周期
 

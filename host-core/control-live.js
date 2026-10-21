@@ -1,6 +1,7 @@
-// 模块 6：Bot 主会话实时预览。GET /v1/bots/:botId/live 经已认证本机 SSE 推送
-// 快照/更新/结束帧；观察生命周期只绑定 res close 与 req aborted，绝不误停正常 GET。
-// 反压只在 drain 复位时补发最新完整快照，不积压中间更新，也不阻塞运行时监听器。
+// 模块 6：Bot 主会话/远端工作上下文实时预览。GET /v1/bots/:botId/live 与 work live
+// 经已认证本机 SSE 推送快照/更新/结束帧；观察生命周期只绑定 res close 与 req aborted，
+// 绝不误停正常 GET。反压只在 drain 复位时补发最新完整快照，不积压中间更新，也不阻塞
+// 运行时监听器。work live 帧由 watch.value 生成（含 scopeId，绑定前 conversationId 可为 null）。
 
 const SSE_HEADERS = {
   'content-type': 'text/event-stream; charset=utf-8',
@@ -12,14 +13,14 @@ const HEARTBEAT_MS = 15000;
 const END_REASONS = new Set(['stopped', 'cancelled', 'session_closed', 'retired', 'listener_error', 'session_failed']);
 
 /**
- * SSE 处理器：在 runtime.watch 成功后才写 SSE 头，因此 bot/auth 错误仍由
+ * SSE 处理器：在 watch 成功后才写 SSE 头，因此 bot/auth 错误仍由
  * dispatch 输出 JSON 错误。返回的 promise 在连接结束时才 resolve，宿主现有
  * inflight 跟踪与 server.closeAllConnections 因此能完整接管订阅释放。
  */
-export function serveBotLive(req, res, runtime, botId) {
+function serveLive(req, res, getWatch) {
   return new Promise((resolve, reject) => {
     (async () => {
-      const watch = await runtime.watch(botId, {});
+      const watch = await getWatch();
       try {
         if (req.readableAborted || req.socket.destroyed || res.destroyed) {
           // early exit：尚未开始观察就断连，停止观察后必须 settle，避免挂起。
@@ -54,6 +55,7 @@ export function serveBotLive(req, res, runtime, botId) {
         const snapshotFrame = () => ({
           type: 'snapshot',
           botId: watch.value.botId,
+          scopeId: watch.value.scopeId,
           conversationId: watch.value.conversationId,
           sequence: watch.value.sequence,
           state: watch.value.state,
@@ -128,6 +130,7 @@ export function serveBotLive(req, res, runtime, botId) {
         const endFrame = (reason) => ({
           type: 'end',
           botId: watch.value.botId,
+          scopeId: watch.value.scopeId,
           conversationId: watch.value.conversationId,
           sequence: watch.value.sequence,
           reason,
@@ -167,4 +170,12 @@ export function serveBotLive(req, res, runtime, botId) {
       }
     })().catch(reject);
   });
+}
+
+export function serveBotLive(req, res, runtime, botId) {
+  return serveLive(req, res, () => runtime.watch(botId, {}));
+}
+
+export function serveWorkLive(req, res, runtime, botId, scopeId) {
+  return serveLive(req, res, () => runtime.watchWork(botId, scopeId, {}));
 }

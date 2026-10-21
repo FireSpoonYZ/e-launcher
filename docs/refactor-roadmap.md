@@ -1,6 +1,6 @@
 # 多端 Bot 重构路线图
 
-当前交付计划共 **20 个模块**：**1–13 已完成，共 13 个**；**14–20 待交付，共 7 个**。模块 12 已通过父助手限定范围的端到端验收（122/122 个检查点，见下文）；模块 13（长期事实记忆）已完成 Host 侧适配交付（验证环境与限制见下节），完成数为 **13/20**。模块按交付范围计数，工时另行评估。此前按依赖滚动细分，完整总数未预先锁定；本表是依据已确认剩余范围整理的交付计划，不是最初就约定 20 个模块。
+当前交付计划共 **20 个模块**：**1–14 已完成，共 14 个**；**15–20 待交付，共 6 个**。模块 12 已通过父助手限定范围的端到端验收（122/122 个检查点，见下文）；模块 13（长期事实记忆）已完成 Host 侧适配交付（验证环境与限制见下节）；模块 14（统一 Host 服务与设备接入）已完成父助手限定范围验收（139/139 个检查点，见下节）。模块按交付范围计数，工时另行评估。此前按依赖滚动细分，完整总数未预先锁定；本表是依据已确认剩余范围整理的交付计划，不是最初就约定 20 个模块。
 
 架构约束见 [下一代多端 Bot 架构设计](next-generation-architecture.md)，已交付能力与验收细节见 [Host 核心说明](../host-core/README.md)。保持 **B 架构、单人多设备、中心轻量**：Bot 在指定设备和 cwd 长期工作，中心只做设备注册、认证与业务中继，不保存聊天/模型凭证或运行模型决策。Android 是完整本机 Host，不是远程壳；原签名、旧数据、Widget、Shower 和既有定时能力必须兼容，不新增后台任务产品。
 
@@ -23,7 +23,7 @@
 | 11 | 自然群聊决策与 Bot 通信工具 | 已完成 | 主动 resume、独立 scope 决策/持久停止、发布复核与原生 hook 取消、真实 Bot 作者、DM 等待/恢复和有界预览；父助手 161/161 检查点及类型检查通过，含 18 份数据库完整性/外键检查，范围见下文。 |
 | 12 | 成员范围管理与历史补齐 | 已完成 | 托管元数据权威/CAS/请求去重、v1→v2 原子迁移、已知 peer 副本授权与缺口补史、自源恢复、scopeProtocol:1 与六个本机入口；父助手 122/122 检查点、42 份 SQLite 完整性/FK、7 原生任务终态、18 BC 快照及公开声明检查通过，环境/限制见下文。 |
 | 13 | 可追溯长期记忆 | 已完成 · Host 侧适配交付 | 八个本机 API/CLI 与八个模型工具；自动提取稳定偏好与事实，保留来源、适用范围与纠正，按范围控制共享。真实 Durable/BC/HTTP/CLI/SQLite + 隔离 Mockoon 夹具验证；真实 Hindsight 服务联调未做，无虚构 commit/检查点计数。 |
-| 14 | 统一 Host 服务与设备接入 | 待交付 | 常驻服务整合、设备登记/凭证配置、Host 本机模型设置、远端实时预览及客户端待发送/对账接线。 |
+| 14 | 统一 Host 服务与设备接入 | 已完成 · 父助手限定范围验收 | 常驻服务整合、设备登记/凭证配置、Host 本机模型设置、35 个固定远程业务方法、远端实时预览及客户端待发送/对账接线；139/139 检查点、53 份 SQLite 完整性/FK、8 个 Native tasks 终态及夹具清理通过，范围见下文。 |
 | 15 | Android 本机 Host 与原生能力桥 | 待交付 | 手机运行 Durable/BC/存储/工具；复用 Shower、Shizuku、语音与原生桥，验收运行生命周期。 |
 | 16 | 旧数据迁移与 Android 兼容 | 待交付 | 原签名覆盖更新、旧聊天/附件/草稿/SDK 历史映射；Widget、导航恢复、既有 schedule_task/AlarmManager 能力与数据兼容。 |
 | 17 | Tauri Windows / Linux 客户端 | 待交付 | 以 Bot 为中心的设备、私聊、群聊、设置与附件界面，连接共同 Host 协议与桌面常驻服务。 |
@@ -76,13 +76,13 @@
 | `stopWork(botId,scopeId)` | POST `…/stop`，解析后为空对象 | `work-stop --bot-id --scope-id` |
 | `resumeWork(botId,scopeId)` | POST `…/resume`，解析后为空对象 | `work-resume --bot-id --scope-id` |
 
-两个 POST 的零字节 HTTP body 沿用 `readControlBody` 约定等同 `{}`，客户端仍发送 JSON `{}`。三者返回 WorkActivity；客户端额外 options 仅 `{signal?}`，取消 HTTP 不撤销已受理操作。沿用 Bearer/Origin 校验、scopeKey=`'~'+encodeURIComponent(scopeId)`（一次解码、剥一个 `~`），CLI 仍用 `--url --token-env`，拒绝无关参数。远端依旧仅 **getHostInfo/listBots/createBot/getBot/findByRequest/submit/getSubmission/history/abort/contextStatus 十方法**，不增加远端 work 或群/DM 直播；接线留给模块 14。完整声明、参数与示例见 [Host 核心说明](../host-core/README.md)。
+两个 POST 的零字节 HTTP body 沿用 `readControlBody` 约定等同 `{}`，客户端仍发送 JSON `{}`。三者返回 WorkActivity；客户端额外 options 仅 `{signal?}`，取消 HTTP 不撤销已受理操作。沿用 Bearer/Origin 校验、scopeKey=`'~'+encodeURIComponent(scopeId)`（一次解码、剥一个 `~`），CLI 仍用 `--url --token-env`，拒绝无关参数。远端依旧仅 **getHostInfo/listBots/createBot/getBot/findByRequest/submit/getSubmission/history/abort/contextStatus 十方法**，不增加远端 work 或群/DM 直播；接线留给模块 14（截至 M11；M14 v2 起已扩展为 35 个固定方法，见下节）。完整声明、参数与示例见 [Host 核心说明](../host-core/README.md)。
 
 父助手实际运行覆盖无 @ 的独立决策、回声/DM notice/reply 仅导入、最终文本私有、真实作者与防伪、跨来源/目标 guard、旧请求停止后新决策确实发布、来源退群/重入、目标单独拒绝及持久 owner 停止。DM 直接 replyTo 查询排除同 root 下其他请求、自身 reply 与 notice；首回复、超时不重发、迟到回复以及跨 Bot 隐私通过。8 条预览分页各一次，50KiB/Unicode/原文保留及超大单 scope 的前缀与错误边界通过。
 
 - 等待 task **489** 优雅关闭后由 Node 22 恢复原 task 和绝对截止，停机过期不重置 30 秒；发布 task **729** 在消息已提交、原生结果插入遭 SQLite 触发器故障后被 SIGKILL，重开返回同回执，更新输入仍保留且只产生一条发布。
 - 原生重试 task **852** 在请求 cutoff **858**、BC 缓存 cutoff **856** 时完成；task **913** 的第 2 次尝试把来源水位 **66 → 67**，实际模型请求正文随之更新。预算阻断保留原文/未处理输入，工作 fatal 与主私聊 BC 失败的隔离、缺模型/配置更新后须显式恢复均通过。
-- Host A/B 经真实 WSS 完成脚本化模型 request/reply；B Runtime 关闭时链路仍持久收件/ACK，重开对 notice 只导入。M10 被动接口、primary history/live、空 Host 懒开、所有权、本机 HTTP/CLI 边界和远端十方法回归通过，远端 work 扩展仍拒绝。
+- Host A/B 经真实 WSS 完成脚本化模型 request/reply；B Runtime 关闭时链路仍持久收件/ACK，重开对 notice 只导入。M10 被动接口、primary history/live、空 Host 懒开、所有权、本机 HTTP/CLI 边界和远端十方法回归通过，远端 work 扩展仍拒绝（截至 M11；M14 v2 起已支持固定 work RPC，见下节）。
 
 公开声明通过 **strict NodeNext + `--skipLibCheck`**；既有第三方声明依赖限制保留，不宣称全部上游声明通过检查。**18 份 SQLite 数据库**完整性/外键检查通过，最终无活动原生任务或故障触发器，中心仍仅设备注册表。**7 个最终服务均 exit 0**，全部验收夹具进程已清理、剩余 0。报告：`C:/Users/46040/AppData/Local/Temp/e-launcher-group-decisions-1792558247725/module11-verification.json`；详细行为见 [Host 核心说明](../host-core/README.md)。
 
@@ -95,22 +95,32 @@
 
 ## 模块 12 完成范围与验收限制
 
-模块 12 已通过父助手限定范围的端到端验收：**122/122 个检查点通过**，完成数为 **12/20**。环境为 **Windows 本机 Host A–E、Node 26.8.2/22.19.0、真实本地 TLS/WSS 与 HTTP/CLI**；模型回归使用 **Mockoon 脚本化 HTTP/SSE 夹具**，不是付费/智能模型验收。验收覆盖：元数据分发/离线 pending/持久与迟到 ACK、同设备多 Bot 目标去重、托管 create/update 幂等与并发 CAS、DM/legacy 边界（Managed bypass 拒绝、legacy 可推进修订）、第三方补史（B 自 C 修复 60 条缺失消息至 61 条总数，页 46+14，原始 source/信封/digest 保留、无伪造 A outbox ACK）、自源恢复（A 自源 61 条信封/digest/发布指纹相同，同 ID 重试原时间、下一发布 sequence 62）、含转义字符的 JSON 精确字节预算与整项前缀、迁移中的 schema 冲突事务回滚与副本整页回滚分别验证、MAX_SAFE_INTEGER 稀疏修复与不安全下一序号拒绝、恢复 authority 修订 delivery:null（已知 pending/acked 保留、本地空目标 ACK 合法）、scope-wire 畸形帧/能力/角色/伪造来源边界、旧 relay 拒新 hello/缺能力阻塞/旧目标 UNSUPPORTED、同 peer 公平调度、stop/resume、被动元数据零原生任务、BC 不准备、超大输入 CONTEXT_LIMIT 零 provider 请求、primary live 隔离、远端十方法回归且白名单未扩。
+模块 12 已通过父助手限定范围的端到端验收：**122/122 个检查点通过**，完成数为 **12/20**。环境为 **Windows 本机 Host A–E、Node 26.8.2/22.19.0、真实本地 TLS/WSS 与 HTTP/CLI**；模型回归使用 **Mockoon 脚本化 HTTP/SSE 夹具**，不是付费/智能模型验收。验收覆盖：元数据分发/离线 pending/持久与迟到 ACK、同设备多 Bot 目标去重、托管 create/update 幂等与并发 CAS、DM/legacy 边界（Managed bypass 拒绝、legacy 可推进修订）、第三方补史（B 自 C 修复 60 条缺失消息至 61 条总数，页 46+14，原始 source/信封/digest 保留、无伪造 A outbox ACK）、自源恢复（A 自源 61 条信封/digest/发布指纹相同，同 ID 重试原时间、下一发布 sequence 62）、含转义字符的 JSON 精确字节预算与整项前缀、迁移中的 schema 冲突事务回滚与副本整页回滚分别验证、MAX_SAFE_INTEGER 稀疏修复与不安全下一序号拒绝、恢复 authority 修订 delivery:null（已知 pending/acked 保留、本地空目标 ACK 合法）、scope-wire 畸形帧/能力/角色/伪造来源边界、旧 relay 拒新 hello/缺能力阻塞/旧目标 UNSUPPORTED、同 peer 公平调度、stop/resume、被动元数据零原生任务、BC 不准备、超大输入 CONTEXT_LIMIT 零 provider 请求、primary live 隔离、远端十方法回归且白名单未扩（截至 M12；M14 v2 起已扩展，见下节）。
 
 公开声明以 **strict NodeNext + `--skipLibCheck`** 通过；**42 份 SQLite** 完整性/外键通过（含备份/迁移夹具）；**7 个原生任务**全部终态、无活动任务/故障触发器；**18 份 BC 基础快照**的版本均为 acp-kernel **0.0.101**；夹具进程清理完成，relay 仅存设备注册表。
 
 剩余限制：未验证物理 WAN/Linux/Android/arm64/Tauri/TUI；M7–M11 为选定回归而非全量历史场景重跑；M12 高水位/反压分支未单独饱和测试（沿用 M8 共享路径）；未穷尽并发微观交错；原始作者端到端签名/加密**未实现**，当前信任模型是认证通道+TLS 认证 peer；Mockoon 夹具不代表付费/智能模型验收。
 
-模块 **13** 已完成 Host 侧适配交付。模块 **14–20 共 7 个**仍待交付：统一服务与远程/live 接线、Android 本机 Host/旧数据兼容、Tauri/TUI 与跨设备打包真机验收。
+模块 **13** 已完成 Host 侧适配交付。模块 **14**（统一服务与远程/live 接线、本机设置、客户端待发送/对账）已完成父助手限定范围验收（139/139 检查点，见下节），总完成数 **14/20**；模块 **15–20 共 6 个**仍待交付：Android 本机 Host/旧数据兼容、Tauri/TUI 与跨设备打包真机验收。
 
 ## 模块 13 当前状态与开发说明
 
-模块 13（可追溯长期记忆：Hindsight → Pi Durable）已完成 Host 侧适配交付，进度 **13/20**（14–20 共 7 个待交付）。Host 侧已通过限定范围验收，进程清理与数据库完整性检查完成。
+模块 13（可追溯长期记忆：Hindsight → Pi Durable）已完成 Host 侧适配交付（M13 交付时为 13/20；当前含 M14 为 14/20）。Host 侧已通过限定范围验收，进程清理与数据库完整性检查完成。
 
 - **版本**：复用 Pi Hindsight **0.13.0** 策略与 REST 客户端 schema **0.9.2**，适配 pi-durable **1.3.0** 生命周期；客户端版本不是已验证的服务端版本。
-- **显式配置与数据归属**：每个 Host 必须显式配置 `options.hindsight {baseUrl, apiKeyEnv?, sharedMemory?}`；事实提取与检索由该服务执行，本机 `hindsight.sqlite` 仅作适配侧输入跟踪/outbox/召回缓存/出处/纠正审计，不是第二个事实引擎；原始 Native/账本历史不变；relay 永不接收/存储记忆或凭证；不继承 Pi banks/HOME/会话身份。
+- **显式配置与数据归属**：每个 Host 必须显式配置 `options.hindsight {baseUrl, apiKeyEnv?, sharedMemory?}`；事实提取与检索由该服务执行，本机 `hindsight.sqlite` 仅作适配侧输入跟踪/outbox/召回缓存/出处/纠正审计，不是第二个事实引擎；原始 Native/账本历史不变；M13 阶段记忆接口仅本机；M14 v2 可经中继有界瞬时转发记忆业务结果。中心仅持久保存设备登记与认证校验信息，不持久保存聊天、工作上下文、记忆正文或模型/Hindsight API 凭证；不继承 Pi banks/HOME/会话身份。
 - **私有与共享**：默认私有 primary/scope bank；`sharedMemory` 默认关闭，启用后仅同 Bot 显式注记可进 shared，自动转录永不共享。
 - **自动召回与显式工具**：自动召回为 BC prepare 后预算内临时注入；显式记忆工具调用/结果走普通 Durable 工具历史，但排除在自动来源抽取之外。
 - **队列与纠正不确定性**：accepted ≠ completed，稳定 operationId 恢复、失败抽取不自动重试、显式 retry；PATCH 纠正/失效/恢复不改原始历史，unconfirmed 不自动回放，仅明确 HTTP 4xx 拒绝判 rejected/responded；仅世界/体验事实可编辑，观测派生。
 - **接口**：八个本机 Runtime 方法/CLI（memory-status/recall/reflect/retain/get/source/correct/retry）与八个模型工具（hindsight_status/recall/reflect/retain/get/source/correct/retry）；memory-status 输入 `{target?,state?,limit?,cursor?}` 返回分页 job 回执，游标绑定派生 bank/过滤，计数全上下文。
 - **验证（夹具环境）**：Windows、Node 26.8.2/22.19.0，实际运行 Pi Durable 1.3.0 + acp-kernel 0.0.101、本地 HTTP/CLI/SQLite；模型与 Hindsight 的 wire 响应来自隔离 Mockoon 夹具。验证八个本机 API/CLI 与八个模型工具、禁用不建库/配置拒绝、私有与 shared bank 边界、provider 前捕获与仅完成态收集（120 scope 消息 + 2 回答 → 122 job）、分页/并发收集、代理对安全重建与 Unicode 预览、BC 压缩与预算内召回、稳定 operationId 与失败抽取显式重试、纠正审计与 unconfirmed/4xx 映射、schema/设备/端点变更拒绝、关闭保留可恢复任务、2MiB 后端响应拒绝与公开声明严格检查。真实 Hindsight 服务部署/API 互通与语义抽取/召回/reflect 质量**未经联调**。详见 [Host 核心模块 13 说明](../host-core/README.md)。
+
+## 模块 14 完成范围与验收限制
+
+模块 14（统一 Host 服务与设备接入）已完成父助手限定范围验收，总完成数 **14/20**，M15–M20 共 6 个模块仍待交付且未开始任何 M15 工作。
+
+- **验收环境**：Windows x64 / Git Bash、Node 26.8.2/22.19.0、真实本地 HTTP/CLI/TLS/WSS、持久 SQLite、Pi Durable 1.3.0 + acp-kernel 0.0.101；模型与 Hindsight wire 响应来自隔离 Mockoon OpenAI-compatible SSE/Hindsight 协议夹具。无新增依赖、无仓库测试或临时脚本。
+- **结果**：139/139 检查点通过（失败 0）；53 份 SQLite 完整性/外键通过（含刻意构造的畸形 schema 夹具，一致性不代表被接受）；8 个 Native tasks 全部 terminal、0 active；30 个 tail readers 清理、夹具进程剩余 0。
+- **覆盖**：统一服务/离线 settings/CAS/重开/重复 owner、null 与 512KiB 启动边界、缺 memory-env 离线救援、settings 存储错误与关闭恢复；35 个固定 v2 方法（含 8 个 memory 方法）、冻结 v1 客户端与 Host 桥兼容及能力拒绝；primary/work 安全快照、冷被动、null→公开绑定、normal/error 帧结束、sequence/目标/私有字段拒绝、1MiB JSON preflight（含误标 SSE）、8-live 容量；无首帧时约 20.159 秒触发超时，合成 Host 协议对端收到对应 live-cancel；活动观察凭证撤销/轮换、旧 token 拒绝/新 token 可用；pending 离线持久化、同 payload 去重/冲突、显式 send、accepted/rejected 不重连、仅缺失精确重试、本地持久失败与只读恢复、schema 先校验与 owner 锁；EPIPE 观察者关闭后慢模型实际完成、同一 submissionId 69 在统一服务重开后恢复并完成、持久 scope 停止跨重开保留；scope 查询分页/游标与特殊消息 ID、跨 scope 隐藏；relay schema 仅 relay_devices 且无合成业务/凭证标记。
+- **兼容性说明**：冻结的 M13 基线 v1 远程 CLI 与 device-link 桥接端配合当前控制服务（位于冻结桥后）调用 `getHostInfo` 通过，验证 v1 客户端/桥接互操作；不是整个旧 Runtime 或每个旧客户端场景都冻结验证的断言。历史“远端仅十方法/远程 work 仅限本机”记录截至对应模块；M14 v2 起远端支持固定 work/memory RPC。relay 仅有界瞬时转发业务，不持久保存业务正文/工作上下文/模型与 Hindsight API 凭证或运行推理；中心仅持久保存设备登记与认证校验信息（设备 token 哈希/credentialVersion）。无通用代理、中心变更邮箱、自动重放或 E2E 作者签名/加密声明。
+- **限制保留**：未实测物理 WAN/多机、Linux/Android/arm64、Tauri/TUI 与 native-fetch UI；真实 Hindsight 互操作/语义与付费模型；全局 128-live/256 连接饱和与持续反压；穷举直接 JS AbortSignal/iterator.return/close 与跨代 teardown 交错；真实交互式控制台 SIGINT/SIGTERM 矩阵。类型检查 skipLibCheck 通过，完整检查仍有 genai 缺 `@modelcontextprotocol/sdk/client/index.js`（TS2307），不宣称全量第三方类型检查通过。统一长驻服务不是 OS 服务安装器也不保证始终在线；Android/Tauri/TUI、迁移与现有原生兼容属后续模块。TLS+认证 peer 不等于原作者 E2E 签名/加密。

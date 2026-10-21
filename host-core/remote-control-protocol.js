@@ -1,9 +1,25 @@
 // host-core/remote-control-protocol.js
 // Module 9 pure boundary parsers for authenticated remote Host JSON control.
-// Directional frame readers only: no ws/network/Runtime/storage. Imports
-// message-protocol.js only and defines its own control limits.
+// Module 14 adds v2 work/scope/memory methods and the v1/v2 negotiation
+// surface; frame readers stay directional with no ws/network/Runtime/storage.
 
-import { messageError, assertId } from './message-protocol.js';
+import { messageError, assertId, normalizePageOptions } from './message-protocol.js';
+import {
+  normalizeScopeListOptions,
+  normalizeScopeCreate,
+  normalizeScopeUpdate,
+  normalizeUserMessage,
+  normalizeReplicaListOptions,
+} from './scope-protocol.js';
+import {
+  normalizeMemoryStatus,
+  normalizeMemoryQuery,
+  normalizeMemoryRetain,
+  normalizeMemoryLookup,
+  normalizeMemorySource,
+  normalizeMemoryCorrection,
+  normalizeMemoryRetry,
+} from './hindsight-protocol.js';
 
 const INVALID_ARGUMENT = 'INVALID_ARGUMENT';
 
@@ -14,7 +30,8 @@ export const CONTROL_MAX_CLIENT_CALLS = 8;
 export const CONTROL_MAX_HOST_CALLS = 8;
 export const CONTROL_MAX_PENDING = 128;
 
-export const CONTROL_METHODS = Object.freeze([
+// Legacy v1 method table (unchanged wire shape).
+export const CONTROL_V1_METHODS = Object.freeze([
   'getHostInfo',
   'listBots',
   'createBot',
@@ -26,6 +43,47 @@ export const CONTROL_METHODS = Object.freeze([
   'abort',
   'contextStatus',
 ]);
+
+// Fixed v2 additions (module 14).
+const CONTROL_V2_METHODS = Object.freeze([
+  'getModelCatalog',
+  'getWorkContext',
+  'syncWorkContext',
+  'workHistory',
+  'workContextStatus',
+  'getWorkActivity',
+  'stopWork',
+  'resumeWork',
+  'listScopeStates',
+  'createScope',
+  'getScopeState',
+  'updateScope',
+  'publishUserMessage',
+  'listScopeReplicas',
+  'scopeHistory',
+  'getScopeMessage',
+  'getScopeMessageDelivery',
+  'memoryStatus',
+  'recallMemory',
+  'reflectMemory',
+  'retainMemory',
+  'getMemory',
+  'getMemorySource',
+  'correctMemory',
+  'retryMemory',
+]);
+
+export const CONTROL_METHODS = Object.freeze([...CONTROL_V1_METHODS, ...CONTROL_V2_METHODS]);
+
+/**
+ * Wire version of a control method: 1 for the legacy ten, 2 for the fixed
+ * v2 additions. Unknown methods throw INVALID_ARGUMENT.
+ */
+export function controlMethodVersion(method) {
+  if (CONTROL_V1_METHODS.includes(method)) return 1;
+  if (CONTROL_V2_METHODS.includes(method)) return 2;
+  throw invalid('unknown control method');
+}
 
 // Never mutate this Set; it is the complete wire error code table.
 export const CONTROL_ERROR_CODES = new Set([
@@ -63,6 +121,30 @@ export const CONTROL_ERROR_CODES = new Set([
   'CONTROL_IDENTITY_MISMATCH',
   'CONTROL_UNAUTHORIZED',
   'RESPONSE_TOO_LARGE',
+  'SCOPE_NOT_FOUND',
+  'SCOPE_FORBIDDEN',
+  'SCOPE_UNMANAGED',
+  'SCOPE_AUTHORITY_REQUIRED',
+  'WORK_CONTEXT_NOT_FOUND',
+  'MESSAGE_NOT_FOUND',
+  'DELIVERY_NOT_FOUND',
+  'STORE_FAILED',
+  'STALE_INPUT',
+  'WORK_STOPPED',
+  'WORK_CONTEXT_INACTIVE',
+  'CONTEXT_LIMIT',
+  'WORK_GENERATION_FAILED',
+  'HINDSIGHT_NOT_CONFIGURED',
+  'HINDSIGHT_SHARED_DISABLED',
+  'HINDSIGHT_CLOSED',
+  'HINDSIGHT_UNAVAILABLE',
+  'HINDSIGHT_AUTH_FAILED',
+  'HINDSIGHT_NOT_FOUND',
+  'HINDSIGHT_CONFLICT',
+  'HINDSIGHT_INVALID_REQUEST',
+  'HINDSIGHT_PROTOCOL_ERROR',
+  'HINDSIGHT_STORE_FAILED',
+  'HINDSIGHT_BINDING_MISMATCH',
 ]);
 
 // Failure outcome semantics across the control protocol.
@@ -154,6 +236,143 @@ function normalizeControlParams(method, params) {
         normalized.cursor = params.cursor;
       }
       return normalized;
+    }
+    case 'getModelCatalog': {
+      rejectUnknownFields(params, new Set(), 'params');
+      return {};
+    }
+    case 'getWorkContext':
+    case 'workContextStatus':
+    case 'getWorkActivity':
+    case 'stopWork':
+    case 'resumeWork': {
+      rejectUnknownFields(params, new Set(['botId', 'scopeId']), 'params');
+      assertId(params.botId, 'botId');
+      assertId(params.scopeId, 'scopeId');
+      return { botId: params.botId, scopeId: params.scopeId };
+    }
+    case 'syncWorkContext': {
+      rejectUnknownFields(params, new Set(['botId', 'scopeId', 'input']), 'params');
+      assertId(params.botId, 'botId');
+      assertId(params.scopeId, 'scopeId');
+      let input = {};
+      if (params.input !== undefined) {
+        if (!isPlainObject(params.input)) {
+          throw invalid('input must be an object');
+        }
+        rejectUnknownFields(params.input, new Set(['limit']), 'sync input');
+        if (params.input.limit !== undefined) {
+          if (!Number.isSafeInteger(params.input.limit) || params.input.limit < 1 || params.input.limit > 200) {
+            throw invalid('limit must be a positive integer between 1 and 200');
+          }
+          input = { limit: params.input.limit };
+        }
+      }
+      return { botId: params.botId, scopeId: params.scopeId, input };
+    }
+    case 'workHistory': {
+      rejectUnknownFields(params, new Set(['botId', 'scopeId', 'limit', 'cursor']), 'params');
+      assertId(params.botId, 'botId');
+      assertId(params.scopeId, 'scopeId');
+      const normalized = { botId: params.botId, scopeId: params.scopeId, cursor: null };
+      if (params.limit !== undefined) {
+        if (!Number.isSafeInteger(params.limit) || params.limit < 1 || params.limit > 200) {
+          throw invalid('limit must be a positive integer between 1 and 200');
+        }
+        normalized.limit = params.limit;
+      }
+      if (params.cursor !== undefined && params.cursor !== null) {
+        if (!isPlainObject(params.cursor)) {
+          throw invalid('cursor must be a plain JSON object or null');
+        }
+        rejectUnknownFields(params.cursor, new Set(['conversationId', 'position']), 'cursor');
+        assertId(params.cursor.conversationId, 'cursor.conversationId');
+        if (!isPlainObject(params.cursor.position)) {
+          throw invalid('cursor.position must be a plain JSON object');
+        }
+        normalized.cursor = { conversationId: params.cursor.conversationId, position: params.cursor.position };
+      }
+      return normalized;
+    }
+    case 'listScopeStates': {
+      rejectUnknownFields(params, new Set(['limit', 'cursor']), 'params');
+      return normalizeScopeListOptions(params);
+    }
+    case 'createScope': {
+      rejectUnknownFields(params, new Set(['input']), 'params');
+      return { input: normalizeScopeCreate(params.input) };
+    }
+    case 'getScopeState': {
+      rejectUnknownFields(params, new Set(['scopeId']), 'params');
+      assertId(params.scopeId, 'scopeId');
+      return { scopeId: params.scopeId };
+    }
+    case 'updateScope': {
+      rejectUnknownFields(params, new Set(['scopeId', 'input']), 'params');
+      assertId(params.scopeId, 'scopeId');
+      return { scopeId: params.scopeId, input: normalizeScopeUpdate(params.input) };
+    }
+    case 'publishUserMessage': {
+      rejectUnknownFields(params, new Set(['scopeId', 'input']), 'params');
+      assertId(params.scopeId, 'scopeId');
+      normalizeUserMessage(params.scopeId, params.input); // validate; never echo normalized author/category/scopeId
+      const input = { messageId: params.input.messageId, text: params.input.text };
+      if (params.input.replyTo !== undefined) input.replyTo = params.input.replyTo;
+      return { scopeId: params.scopeId, input };
+    }
+    case 'listScopeReplicas': {
+      rejectUnknownFields(params, new Set(['scopeId', 'limit', 'cursor']), 'params');
+      assertId(params.scopeId, 'scopeId');
+      return { scopeId: params.scopeId, ...normalizeReplicaListOptions({ limit: params.limit, cursor: params.cursor }) };
+    }
+    case 'scopeHistory': {
+      rejectUnknownFields(params, new Set(['scopeId', 'limit', 'cursor']), 'params');
+      assertId(params.scopeId, 'scopeId');
+      return { scopeId: params.scopeId, ...normalizePageOptions({ limit: params.limit, cursor: params.cursor }) };
+    }
+    case 'getScopeMessage':
+    case 'getScopeMessageDelivery': {
+      rejectUnknownFields(params, new Set(['scopeId', 'messageId']), 'params');
+      assertId(params.scopeId, 'scopeId');
+      assertId(params.messageId, 'messageId');
+      return { scopeId: params.scopeId, messageId: params.messageId };
+    }
+    case 'memoryStatus': {
+      rejectUnknownFields(params, new Set(['botId', 'input']), 'params');
+      assertId(params.botId, 'botId');
+      const statusInput = params.input === undefined ? {} : params.input; // explicit null stays invalid
+      return { botId: params.botId, input: normalizeMemoryStatus(statusInput) };
+    }
+    case 'recallMemory':
+    case 'reflectMemory': {
+      rejectUnknownFields(params, new Set(['botId', 'input']), 'params');
+      assertId(params.botId, 'botId');
+      return { botId: params.botId, input: normalizeMemoryQuery(params.input) };
+    }
+    case 'retainMemory': {
+      rejectUnknownFields(params, new Set(['botId', 'input']), 'params');
+      assertId(params.botId, 'botId');
+      return { botId: params.botId, input: normalizeMemoryRetain(params.input) };
+    }
+    case 'getMemory': {
+      rejectUnknownFields(params, new Set(['botId', 'input']), 'params');
+      assertId(params.botId, 'botId');
+      return { botId: params.botId, input: normalizeMemoryLookup(params.input) };
+    }
+    case 'getMemorySource': {
+      rejectUnknownFields(params, new Set(['botId', 'input']), 'params');
+      assertId(params.botId, 'botId');
+      return { botId: params.botId, input: normalizeMemorySource(params.input) };
+    }
+    case 'correctMemory': {
+      rejectUnknownFields(params, new Set(['botId', 'input']), 'params');
+      assertId(params.botId, 'botId');
+      return { botId: params.botId, input: normalizeMemoryCorrection(params.input) };
+    }
+    case 'retryMemory': {
+      rejectUnknownFields(params, new Set(['botId', 'input']), 'params');
+      assertId(params.botId, 'botId');
+      return { botId: params.botId, input: normalizeMemoryRetry(params.input) };
     }
     default:
       throw invalid('unknown control method');

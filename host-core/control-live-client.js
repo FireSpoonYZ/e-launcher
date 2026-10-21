@@ -1,5 +1,8 @@
 // SSE parser for the Host control live endpoint (web-standard only; no Node/Host imports).
 // Protocol failures throw plain Error with code 'LIVE_PROTOCOL'; client.live maps them to ControlApiError.
+// readControlLive: Bot 主私聊流（无 scopeId，conversationId 恒非空）。
+// readWorkLive: 远端工作上下文流（每帧校验 scopeId；conversationId 绑定前可为 null，
+// 绑定后过渡为非空 UUID，此后不许回退或改换；work 只发完整快照帧）。
 
 const MAX_FRAME_BYTES = 1024 * 1024; // 1 MiB upper bound per SSE frame/event (UTF-8 bytes)
 const END_REASONS = new Set([
@@ -24,6 +27,18 @@ function protocolError(message) {
 }
 
 export async function* readControlLive(response, { botId, signal } = {}) {
+  yield* readLive(response, { botId, scopeId: null, signal });
+}
+
+export async function* readWorkLive(response, { botId, scopeId, signal } = {}) {
+  if (typeof scopeId !== 'string' || scopeId.length === 0) {
+    throw protocolError('scopeId is required');
+  }
+  yield* readLive(response, { botId, scopeId, signal });
+}
+
+async function* readLive(response, { botId, scopeId, signal }) {
+  const isWork = scopeId !== null;
   if (typeof botId !== 'string' || botId.length === 0) {
     throw protocolError('botId is required');
   }
@@ -50,19 +65,44 @@ export async function* readControlLive(response, { botId, signal } = {}) {
     if (type !== 'snapshot' && type !== 'update' && type !== 'end') {
       throw protocolError('unknown frame type');
     }
+    if (isWork && type === 'update') {
+      throw protocolError('work live frames must be full snapshots');
+    }
+    if (frameCount === 0 && type !== 'snapshot') {
+      throw protocolError('first frame must be a snapshot');
+    }
     if (frame.botId !== botId) {
       throw protocolError('frame botId does not match requested botId');
     }
-    if (typeof frame.conversationId !== 'string' || frame.conversationId.length === 0) {
-      throw protocolError('frame conversationId is missing or empty');
-    }
-    if (frameCount === 0) {
-      if (type !== 'snapshot') {
-        throw protocolError('first frame must be a snapshot');
+    if (isWork) {
+      if (frame.scopeId !== scopeId) {
+        throw protocolError('frame scopeId does not match requested scopeId');
       }
-      expectedConversationId = frame.conversationId;
-    } else if (frame.conversationId !== expectedConversationId) {
-      throw protocolError('frame conversationId changed mid-stream');
+    } else if (frame.scopeId !== undefined) {
+      throw protocolError('frame must not carry scopeId');
+    }
+    if (isWork) {
+      if (frame.conversationId !== null && (typeof frame.conversationId !== 'string' || frame.conversationId.length === 0)) {
+        throw protocolError('frame conversationId is missing or empty');
+      }
+      if (frame.conversationId !== null) {
+        if (expectedConversationId === null) {
+          expectedConversationId = frame.conversationId;
+        } else if (frame.conversationId !== expectedConversationId) {
+          throw protocolError('frame conversationId changed mid-stream');
+        }
+      } else if (expectedConversationId !== null) {
+        throw protocolError('frame conversationId reverted to null after binding');
+      }
+    } else {
+      if (typeof frame.conversationId !== 'string' || frame.conversationId.length === 0) {
+        throw protocolError('frame conversationId is missing or empty');
+      }
+      if (frameCount === 0) {
+        expectedConversationId = frame.conversationId;
+      } else if (frame.conversationId !== expectedConversationId) {
+        throw protocolError('frame conversationId changed mid-stream');
+      }
     }
     if (!Number.isSafeInteger(frame.sequence) || frame.sequence < 0) {
       throw protocolError('frame sequence is not a safe nonnegative integer');

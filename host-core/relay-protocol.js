@@ -4,8 +4,11 @@
 // frames, delegated to remote-control-protocol.js helpers.
 // Module 12 adds the host-only optional scopeProtocol:1 hello/ready capability
 // and delegates managed-scope sync frames to scope-wire.js helpers.
+// Module 14 adds controlProtocol 1/2 negotiation and delegates live-* frames
+// to remote-live-protocol.js helpers.
 import { messageError, assertId, normalizeEnvelope, normalizeAck } from './message-protocol.js';
 import { readControlClientFrame, readControlHostFrame, readControlServerFrame } from './remote-control-protocol.js';
+import { readLiveClientFrame, readLiveHostFrame, readLiveServerFrame } from './remote-live-protocol.js';
 import { readScopeClientFrame, readScopeServerFrame } from './scope-wire.js';
 
 const INVALID_ARGUMENT = 'INVALID_ARGUMENT';
@@ -157,13 +160,13 @@ function readHello(frame) {
     normalized.role = frame.role;
   }
   if (frame.controlProtocol !== undefined) {
-    if (frame.controlProtocol !== 1) {
-      throw invalid('hello.controlProtocol must be 1');
+    if (frame.controlProtocol !== 1 && frame.controlProtocol !== 2) {
+      throw invalid('hello.controlProtocol must be 1 or 2');
     }
-    if (normalized.role === 'client') {
-      throw invalid('hello.controlProtocol is allowed only for the host role');
+    if (normalized.role === 'client' && frame.controlProtocol === 1) {
+      throw invalid('hello.controlProtocol 1 is not allowed for the client role');
     }
-    normalized.controlProtocol = 1;
+    normalized.controlProtocol = frame.controlProtocol;
   }
   if (frame.scopeProtocol !== undefined) {
     if (frame.scopeProtocol !== 1) {
@@ -178,7 +181,7 @@ function readHello(frame) {
 }
 
 function readReady(frame) {
-  rejectUnknownFields(frame, new Set(['type', 'protocolVersion', 'deviceId', 'role', 'scopeProtocol']), 'ready frame');
+  rejectUnknownFields(frame, new Set(['type', 'protocolVersion', 'deviceId', 'role', 'controlProtocol', 'scopeProtocol']), 'ready frame');
   if (frame.protocolVersion !== 1) throw invalid('ready.protocolVersion must be 1');
   assertId(frame.deviceId, 'deviceId');
   let role = 'host';
@@ -189,6 +192,12 @@ function readReady(frame) {
     role = frame.role;
   }
   const normalized = { type: 'ready', protocolVersion: 1, deviceId: frame.deviceId, role };
+  if (frame.controlProtocol !== undefined) {
+    if (frame.controlProtocol !== 2) {
+      throw invalid('ready.controlProtocol must be 2 when present');
+    }
+    normalized.controlProtocol = 2;
+  }
   if (frame.scopeProtocol !== undefined) {
     if (frame.scopeProtocol !== 1) {
       throw invalid('ready.scopeProtocol must be 1');
@@ -326,6 +335,13 @@ export function readClientFrame(data, isBinary = false) {
       return readControlClientFrame(frame);
     case 'control-result':
       return readControlHostFrame(frame);
+    case 'live-open':
+    case 'live-cancel':
+    case 'devices-list':
+      return readLiveClientFrame(frame);
+    case 'live-frame':
+    case 'live-end':
+      return readLiveHostFrame(frame);
     default:
       throw invalid('unknown relay frame type');
   }
@@ -356,6 +372,12 @@ export function readServerFrame(data, isBinary = false) {
     case 'control-cancel':
     case 'control-result':
       return readControlServerFrame(frame);
+    case 'live-request':
+    case 'live-cancel':
+    case 'live-frame':
+    case 'live-end':
+    case 'devices-result':
+      return readLiveServerFrame(frame);
     default:
       throw invalid('unknown relay frame type');
   }

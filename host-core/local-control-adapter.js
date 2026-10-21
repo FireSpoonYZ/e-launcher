@@ -5,7 +5,11 @@
 // fixed .code and .outcome (not-sent / unconfirmed / responded).
 import { createControlClient, ControlApiError } from './control-client.js';
 import { assertId } from './message-protocol.js';
-import { MAX_CONTROL_JSON_BYTES } from './remote-control-protocol.js';
+import {
+  MAX_CONTROL_JSON_BYTES,
+  normalizeControlCall,
+} from './remote-control-protocol.js';
+import { normalizeLiveTarget } from './remote-live-protocol.js';
 
 const TOKEN_PATTERN = /^[A-Za-z0-9_-]{32,512}$/;
 const LOOPBACK_HOSTNAMES = new Set(['127.0.0.1', '[::1]']);
@@ -25,12 +29,37 @@ const LOCAL_DOMAIN_CODES = new Set([
   'UNSUPPORTED_SCHEMA',
   'INTERNAL',
   'REQUEST_TOO_LARGE',
+  'RESPONSE_TOO_LARGE',
   'INVALID_UTF8',
   'INVALID_JSON',
   'INVALID_BODY',
   'UNSUPPORTED_MEDIA_TYPE',
   'UNAUTHORIZED',
   'ORIGIN_FORBIDDEN',
+  'SCOPE_NOT_FOUND',
+  'SCOPE_FORBIDDEN',
+  'SCOPE_UNMANAGED',
+  'SCOPE_AUTHORITY_REQUIRED',
+  'WORK_CONTEXT_NOT_FOUND',
+  'MESSAGE_NOT_FOUND',
+  'DELIVERY_NOT_FOUND',
+  'STORE_FAILED',
+  'STALE_INPUT',
+  'WORK_STOPPED',
+  'WORK_CONTEXT_INACTIVE',
+  'CONTEXT_LIMIT',
+  'WORK_GENERATION_FAILED',
+  'HINDSIGHT_NOT_CONFIGURED',
+  'HINDSIGHT_SHARED_DISABLED',
+  'HINDSIGHT_CLOSED',
+  'HINDSIGHT_UNAVAILABLE',
+  'HINDSIGHT_AUTH_FAILED',
+  'HINDSIGHT_NOT_FOUND',
+  'HINDSIGHT_CONFLICT',
+  'HINDSIGHT_INVALID_REQUEST',
+  'HINDSIGHT_PROTOCOL_ERROR',
+  'HINDSIGHT_STORE_FAILED',
+  'HINDSIGHT_BINDING_MISMATCH',
 ]);
 
 function controlError(code, outcome) {
@@ -97,10 +126,22 @@ function abortReason(signal) {
  * RESPONSE_TOO_LARGE (ControlClient would otherwise report NETWORK/BAD_RESPONSE).
  * Normal bounded bodies are returned as a fresh Response built from the bytes.
  */
-function boundedFetch(state) {
+function boundedFetch(state, options = {}) {
   return async function fetchBounded(input, init = {}) {
     const signal = init.signal;
     const response = await globalThis.fetch(input, { ...init, redirect: 'error' });
+    // 仅当请求本身是 SSE（Accept=text/event-stream）且响应 ok+SSE 时透传原始
+    // Response 给 SSE parser；JSON preflight 不论 content-type 都按 1MiB 读取。
+    const acceptHeader = init.headers && (init.headers.Accept ?? init.headers.accept);
+    const wantsSse = options.sseOk && acceptHeader === 'text/event-stream';
+    if (
+      wantsSse &&
+      response.ok &&
+      (response.headers.get('content-type') || '').split(';')[0].trim().toLowerCase() ===
+        'text/event-stream'
+    ) {
+      return response;
+    }
     if (!response.body) return response; // 204/HEAD: no body to bound
     const reader = response.body.getReader();
     const chunks = [];
@@ -140,7 +181,7 @@ function concatChunks(chunks, total) {
   return out;
 }
 
-function historyOptions(params, signal) {
+function pageOptions(params, signal) {
   const options = { signal };
   if (params.limit != null) options.limit = params.limit;
   if (params.cursor != null) options.cursor = params.cursor;
@@ -159,9 +200,40 @@ const METHOD_HANDLERS = new Map([
     control.submit(params.botId, { requestId: params.requestId, text: params.text }, { signal })],
   ['getSubmission', (control, params, signal) =>
     control.getSubmission(params.botId, params.requestId, { signal })],
-  ['history', (control, params, signal) => control.history(params.botId, historyOptions(params, signal))],
+  ['history', (control, params, signal) => control.history(params.botId, pageOptions(params, signal))],
   ['abort', (control, params, signal) => control.abort(params.botId, { signal })],
   ['contextStatus', (control, params, signal) => control.contextStatus(params.botId, { signal })],
+  ['getModelCatalog', (control, params, signal) => control.getModelCatalog({ signal })],
+  ['getWorkContext', (control, params, signal) => control.getWorkContext(params.botId, params.scopeId, { signal })],
+  ['syncWorkContext', (control, params, signal) =>
+    control.syncWorkContext(params.botId, params.scopeId, params.input ?? {}, { signal })],
+  ['workHistory', (control, params, signal) =>
+    control.workHistory(params.botId, params.scopeId, pageOptions(params, signal))],
+  ['workContextStatus', (control, params, signal) => control.workContextStatus(params.botId, params.scopeId, { signal })],
+  ['getWorkActivity', (control, params, signal) => control.getWorkActivity(params.botId, params.scopeId, { signal })],
+  ['stopWork', (control, params, signal) => control.stopWork(params.botId, params.scopeId, { signal })],
+  ['resumeWork', (control, params, signal) => control.resumeWork(params.botId, params.scopeId, { signal })],
+  ['listScopeStates', (control, params, signal) => control.listScopeStates(pageOptions(params, signal))],
+  ['createScope', (control, params, signal) => control.createScope(params.input, { signal })],
+  ['getScopeState', (control, params, signal) => control.getScopeState(params.scopeId, { signal })],
+  ['updateScope', (control, params, signal) => control.updateScope(params.scopeId, params.input, { signal })],
+  ['publishUserMessage', (control, params, signal) =>
+    control.publishUserMessage(params.scopeId, params.input, { signal })],
+  ['listScopeReplicas', (control, params, signal) =>
+    control.listScopeReplicas(params.scopeId, pageOptions(params, signal))],
+  ['scopeHistory', (control, params, signal) =>
+    control.scopeHistory(params.scopeId, pageOptions(params, signal))],
+  ['getScopeMessage', (control, params, signal) => control.getScopeMessage(params.scopeId, params.messageId, { signal })],
+  ['getScopeMessageDelivery', (control, params, signal) =>
+    control.getScopeMessageDelivery(params.scopeId, params.messageId, { signal })],
+  ['memoryStatus', (control, params, signal) => control.memoryStatus(params.botId, params.input ?? {}, { signal })],
+  ['recallMemory', (control, params, signal) => control.recallMemory(params.botId, params.input, { signal })],
+  ['reflectMemory', (control, params, signal) => control.reflectMemory(params.botId, params.input, { signal })],
+  ['retainMemory', (control, params, signal) => control.retainMemory(params.botId, params.input, { signal })],
+  ['getMemory', (control, params, signal) => control.getMemory(params.botId, params.input, { signal })],
+  ['getMemorySource', (control, params, signal) => control.getMemorySource(params.botId, params.input, { signal })],
+  ['correctMemory', (control, params, signal) => control.correctMemory(params.botId, params.input, { signal })],
+  ['retryMemory', (control, params, signal) => control.retryMemory(params.botId, params.input, { signal })],
 ]);
 
 function requireValidId(value) {
@@ -202,13 +274,17 @@ function dispatchError(err, state, signal) {
 
 async function executeCall(config, expectedDeviceId, method, params, { signal } = {}) {
   requireValidId(expectedDeviceId);
-  const handler = METHOD_HANDLERS.get(method);
-  if (!handler && method !== 'getHostInfo') throw controlError('INVALID_ARGUMENT', 'not-sent');
-  if (params === undefined || params === null) {
-    params = {};
-  } else if (typeof params !== 'object' || Array.isArray(params)) {
-    throw controlError('INVALID_ARGUMENT', 'not-sent');
+  // 先按协议表规范化（含 35 方法参数形状/未知键/1 MiB 限制）再映射。
+  let normalized;
+  try {
+    normalized = normalizeControlCall(method, params);
+  } catch (err) {
+    const code = err && err.code === 'REQUEST_TOO_LARGE' ? 'REQUEST_TOO_LARGE' : 'INVALID_ARGUMENT';
+    throw controlError(code, 'not-sent');
   }
+  method = normalized.method;
+  params = normalized.params;
+  const handler = METHOD_HANDLERS.get(method);
 
   // Per-call state + client: concurrent execute() calls must not share the
   // tooLarge flag. Preflight and dispatch of one call share the same signal.
@@ -240,9 +316,53 @@ async function executeCall(config, expectedDeviceId, method, params, { signal } 
   }
 }
 
+/**
+ * 本机 SSE 观察：先 bounded getHostInfo 身份 preflight，再按 target kind 选择
+ * control.live / control.workLive。流请求经 boundedFetch(sseOk) 仅在 200 +
+ * text/event-stream 时透传原始 Response，其余响应（含 JSON 错误）仍有界读取；
+ * 始终 redirect:error。返回 AsyncIterable，帧为 snapshot/update/end。
+ */
+async function* live(config, expectedDeviceId, target, { signal } = {}) {
+  requireValidId(expectedDeviceId);
+  let normTarget;
+  try {
+    normTarget = normalizeLiveTarget(target);
+  } catch {
+    throw controlError('INVALID_ARGUMENT', 'not-sent');
+  }
+  const state = { tooLarge: false };
+  const control = createControlClient({
+    url: config.url,
+    token: config.token,
+    fetch: boundedFetch(state, { sseOk: true }),
+  });
+  let info;
+  try {
+    info = await control.getHostInfo({ signal });
+  } catch (err) {
+    throw preflightError(err, state, signal);
+  }
+  if (state.tooLarge) throw controlError('RESPONSE_TOO_LARGE', 'not-sent');
+  if (info === null || typeof info !== 'object' || info.deviceId !== expectedDeviceId) {
+    throw controlError('CONTROL_IDENTITY_MISMATCH', 'not-sent');
+  }
+  const iter =
+    normTarget.kind === 'work'
+      ? control.workLive(normTarget.botId, normTarget.scopeId, { signal })
+      : control.live(normTarget.botId, { signal });
+  try {
+    for await (const frame of iter) yield frame;
+  } catch (err) {
+    throw dispatchError(err, state, signal);
+  }
+}
+
 export function createLocalControlAdapter(options) {
   const config = validateOptions(options);
-  return async function execute(expectedDeviceId, method, params, callOptions = {}) {
+  const execute = async function execute(expectedDeviceId, method, params, callOptions = {}) {
     return executeCall(config, expectedDeviceId, method, params, callOptions);
   };
+  execute.live = (expectedDeviceId, target, liveOptions = {}) =>
+    live(config, expectedDeviceId, target, liveOptions);
+  return execute;
 }

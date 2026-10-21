@@ -23,6 +23,7 @@ import {
   CONTROL_CLIENT_TIMEOUT_MS,
   normalizeControlCall,
 } from './remote-control-protocol.js';
+import { installRemoteLive } from './remote-live-client.js';
 
 const WATCHDOG_MS = RELAY_HEARTBEAT_MS * 3;
 
@@ -58,6 +59,10 @@ function isAbortSignal(signal) {
     typeof signal.addEventListener === 'function' &&
     typeof signal.removeEventListener === 'function'
   );
+}
+
+function isPlainObject(value) {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 export async function openRemoteControl(options) {
@@ -189,7 +194,7 @@ export async function openRemoteControl(options) {
   }
 
   async function call(targetDeviceId, method, params, options) {
-    if (client.closed) throw new RemoteControlError('NOT_CONNECTED', 'not-sent');
+    if (client.closed || client.violated) throw new RemoteControlError('NOT_CONNECTED', 'not-sent');
     let norm;
     try {
       assertId(targetDeviceId, 'targetDeviceId');
@@ -216,6 +221,7 @@ export async function openRemoteControl(options) {
 
     const callId = randomUUID();
     const record = {
+      kind: 'control',
       callId,
       targetDeviceId,
       signal: callSignal,
@@ -245,6 +251,132 @@ export async function openRemoteControl(options) {
     return record.promise;
   }
 
+  function handleDirTimeout(record) {
+    if (record.settled) return;
+    settle(record, () => ({ kind: 'reject', error: new RemoteControlError('TIMEOUT', 'unconfirmed') }));
+  }
+
+  function handleDirAbort(record) {
+    if (record.settled) return;
+    if (!record.sent) {
+      settle(record, () => ({ kind: 'reject', error: new RemoteControlError('CANCELLED', 'not-sent') }));
+      return;
+    }
+    settle(record, () => ({ kind: 'reject', error: new RemoteControlError('CANCELLED', 'unconfirmed') }));
+  }
+
+  function handleDevicesResult(frame) {
+    const record = client.pending.get(frame.callId);
+    if (!record || record.kind !== 'directory') return; // 迟到/未匹配回复：忽略
+    if (!frame.ok) {
+      settle(record, () => ({ kind: 'reject', error: new RemoteControlError(frame.code, 'responded') }));
+      return;
+    }
+    // 帧结构/字段由 readServerFrame 校验；这里只保请求绑定的 limit 与 after 检查。
+    if (!Array.isArray(frame.items) || frame.items.length > record.limit) {
+      protocolViolation();
+      return;
+    }
+    if (record.afterDeviceId !== null && frame.items.length > 0) {
+      const firstDeviceId = frame.items[0].deviceId;
+      // 首页必须严格大于请求 afterDeviceId（UTF-8 BINARY），不能接受回退页。
+      if (
+        typeof firstDeviceId !== 'string' ||
+        !firstDeviceId.isWellFormed() ||
+        Buffer.from(firstDeviceId, 'utf8').compare(Buffer.from(record.afterDeviceId, 'utf8')) <= 0
+      ) {
+        protocolViolation();
+        return;
+      }
+    }
+    settle(record, () => ({ kind: 'resolve', value: { items: frame.items, nextCursor: frame.nextCursor } }));
+  }
+
+  async function listDevices(options) {
+    if (client.closed || client.violated) throw new RemoteControlError('NOT_CONNECTED', 'not-sent');
+    let limit = 20;
+    let cursor = null;
+    let afterDeviceId = null;
+    let dirSignal;
+    if (options !== undefined && options !== null) {
+      if (typeof options !== 'object' || Array.isArray(options)) {
+        throw new RemoteControlError('INVALID_ARGUMENT', 'not-sent');
+      }
+      const allowedOptionKeys = ['limit', 'cursor', 'signal'];
+      for (const key of Object.keys(options)) {
+        if (!allowedOptionKeys.includes(key)) {
+          throw new RemoteControlError('INVALID_ARGUMENT', 'not-sent');
+        }
+      }
+      if (options.limit !== undefined) {
+        if (!Number.isSafeInteger(options.limit) || options.limit < 1 || options.limit > 200) {
+          throw new RemoteControlError('INVALID_ARGUMENT', 'not-sent');
+        }
+        limit = options.limit;
+      }
+      if (options.cursor !== undefined && options.cursor !== null) {
+        if (
+          !isPlainObject(options.cursor) ||
+          Object.keys(options.cursor).length !== 1 ||
+          !('afterDeviceId' in options.cursor)
+        ) {
+          throw new RemoteControlError('INVALID_ARGUMENT', 'not-sent');
+        }
+        try {
+          assertId(options.cursor.afterDeviceId, 'cursor.afterDeviceId');
+        } catch {
+          throw new RemoteControlError('INVALID_ARGUMENT', 'not-sent');
+        }
+        afterDeviceId = options.cursor.afterDeviceId;
+        cursor = { afterDeviceId };
+      }
+      dirSignal = options.signal;
+      if (dirSignal !== undefined && !isAbortSignal(dirSignal)) {
+        throw new RemoteControlError('INVALID_ARGUMENT', 'not-sent');
+      }
+    }
+    if (dirSignal && dirSignal.aborted) {
+      throw new RemoteControlError('CANCELLED', 'not-sent');
+    }
+    if (client.pending.size >= CONTROL_MAX_CLIENT_CALLS) {
+      throw new RemoteControlError('RPC_BUSY', 'not-sent');
+    }
+
+    const callId = randomUUID();
+    const record = {
+      kind: 'directory',
+      callId,
+      limit,
+      afterDeviceId,
+      signal: dirSignal,
+      timer: null,
+      onAbort: null,
+      sent: false,
+      settled: false,
+    };
+    record.promise = new Promise((resolve, reject) => {
+      record.resolve = resolve;
+      record.reject = reject;
+    });
+    client.pending.set(callId, record);
+
+    if (dirSignal) {
+      record.onAbort = () => handleDirAbort(record);
+      dirSignal.addEventListener('abort', record.onAbort, { once: true });
+    }
+
+    const frame = { type: 'devices-list', callId, limit };
+    if (cursor) frame.cursor = cursor;
+    const sent = sendFrame(frame);
+    if (!sent.ok) {
+      settle(record, () => ({ kind: 'reject', error: new RemoteControlError(sent.code, 'not-sent') }));
+      return record.promise;
+    }
+    record.sent = true;
+    record.timer = setTimeout(() => handleDirTimeout(record), CONTROL_CLIENT_TIMEOUT_MS);
+    return record.promise;
+  }
+
   function failOpen(error) {
     if (client.opened) return;
     client.opened = true;
@@ -256,7 +388,7 @@ export async function openRemoteControl(options) {
     if (client.opened) return;
     client.opened = true;
     removeStartAbort();
-    client.openResolve({ deviceId: client.deviceId, call, close });
+    client.openResolve({ deviceId: client.deviceId, call, close, listDevices, live: liveManager.live });
   }
 
   function rejectPending(error) {
@@ -280,7 +412,9 @@ export async function openRemoteControl(options) {
     client.violated = true;
     clearTimers();
     if (client.ws) client.ws.terminate();
-    failOpenOrPending(new RemoteControlError('BAD_FRAME', client.ready ? 'unconfirmed' : 'not-sent'));
+    const error = new RemoteControlError('BAD_FRAME', client.ready ? 'unconfirmed' : 'not-sent');
+    failOpenOrPending(error);
+    liveManager.terminateAll(error);
   }
 
   function armWatchdog(ws) {
@@ -301,9 +435,14 @@ export async function openRemoteControl(options) {
       return;
     }
     if (!client.ready) {
-      // readServerFrame 已验证 protocolVersion/deviceId；这里只要求显式 client
-      // 角色且身份匹配，其余帧（含 host ready）均视为违规。
-      if (frame.type !== 'ready' || frame.role !== 'client' || frame.deviceId !== deviceId) {
+      // readServerFrame 已验证 protocolVersion/deviceId；新 client 必须携带
+      // controlProtocol:2 并回显 2，旧 relay 无回显即失败，不静默降级。
+      if (
+        frame.type !== 'ready' ||
+        frame.role !== 'client' ||
+        frame.deviceId !== deviceId ||
+        frame.controlProtocol !== 2
+      ) {
         protocolViolation();
         return;
       }
@@ -316,22 +455,29 @@ export async function openRemoteControl(options) {
       finishOpen();
       return;
     }
-    // ready 之后只允许 control-result；重复 ready/其他帧均为违规。
-    if (frame.type !== 'control-result') {
-      protocolViolation();
+    if (frame.type === 'control-result') {
+      const record = client.pending.get(frame.callId);
+      if (!record || record.kind !== 'control') return; // 迟到/未匹配回复：忽略
+      if (frame.targetDeviceId !== record.targetDeviceId) {
+        // 活跃调用的目标不匹配：协议违规
+        protocolViolation();
+        return;
+      }
+      settle(record, () => {
+        if (frame.ok) return { kind: 'resolve', value: frame.result };
+        return { kind: 'reject', error: new RemoteControlError(frame.code, frame.outcome) };
+      });
       return;
     }
-    const record = client.pending.get(frame.callId);
-    if (!record) return; // 迟到/未匹配回复：忽略
-    if (frame.targetDeviceId !== record.targetDeviceId) {
-      // 活跃调用的目标不匹配：协议违规
-      protocolViolation();
+    if (frame.type === 'devices-result') {
+      handleDevicesResult(frame);
       return;
     }
-    settle(record, () => {
-      if (frame.ok) return { kind: 'resolve', value: frame.result };
-      return { kind: 'reject', error: new RemoteControlError(frame.code, frame.outcome) };
-    });
+    if (frame.type === 'live-frame' || frame.type === 'live-end') {
+      liveManager.handleFrame(frame);
+      return;
+    }
+    protocolViolation();
   }
 
   function onClose(ws, code) {
@@ -340,31 +486,28 @@ export async function openRemoteControl(options) {
     client.closed = true;
     clearTimers();
     removeStartAbort();
+    let error;
     if (client.violated) {
-      failOpenOrPending(new RemoteControlError('BAD_FRAME', client.ready ? 'unconfirmed' : 'not-sent'));
-      return;
+      error = new RemoteControlError('BAD_FRAME', client.ready ? 'unconfirmed' : 'not-sent');
+    } else if (client.startAborted) {
+      error = new RemoteControlError('CANCELLED', client.ready ? 'unconfirmed' : 'not-sent');
+    } else if (client.readyTimedOut && !client.ready) {
+      error = new RemoteControlError('TIMEOUT', 'not-sent');
+    } else {
+      let codeName = null;
+      if (code === RELAY_CLOSE.UNAUTHORIZED) codeName = 'UNAUTHORIZED';
+      else if (code === RELAY_CLOSE.REVOKED) codeName = 'REVOKED';
+      else if (code === RELAY_CLOSE.REPLACED) codeName = 'REPLACED';
+      else if (code === RELAY_CLOSE.BAD_FRAME) codeName = 'BAD_FRAME';
+      else if (code === RELAY_CLOSE.HELLO_TIMEOUT) codeName = 'TIMEOUT';
+      if (codeName) {
+        error = new RemoteControlError(codeName, client.ready ? 'unconfirmed' : 'not-sent');
+      } else {
+        error = new RemoteControlError(client.ready ? 'DISCONNECTED' : 'CONNECT_FAILED', client.ready ? 'unconfirmed' : 'not-sent');
+      }
     }
-    if (client.startAborted) {
-      failOpenOrPending(new RemoteControlError('CANCELLED', client.ready ? 'unconfirmed' : 'not-sent'));
-      return;
-    }
-    if (client.readyTimedOut && !client.ready) {
-      failOpenOrPending(new RemoteControlError('TIMEOUT', 'not-sent'));
-      return;
-    }
-    let codeName = null;
-    if (code === RELAY_CLOSE.UNAUTHORIZED) codeName = 'UNAUTHORIZED';
-    else if (code === RELAY_CLOSE.REVOKED) codeName = 'REVOKED';
-    else if (code === RELAY_CLOSE.REPLACED) codeName = 'REPLACED';
-    else if (code === RELAY_CLOSE.BAD_FRAME) codeName = 'BAD_FRAME';
-    else if (code === RELAY_CLOSE.HELLO_TIMEOUT) codeName = 'TIMEOUT';
-    if (codeName) {
-      failOpenOrPending(new RemoteControlError(codeName, client.ready ? 'unconfirmed' : 'not-sent'));
-      return;
-    }
-    failOpenOrPending(
-      new RemoteControlError(client.ready ? 'DISCONNECTED' : 'CONNECT_FAILED', client.ready ? 'unconfirmed' : 'not-sent')
-    );
+    failOpenOrPending(error);
+    liveManager.terminateAll(error);
   }
 
   function connect() {
@@ -393,7 +536,7 @@ export async function openRemoteControl(options) {
         }
       }, RELAY_HELLO_TIMEOUT_MS);
       armWatchdog(ws);
-      sendFrame({ type: 'hello', protocolVersion: 1, deviceId, token, role: 'client' });
+      sendFrame({ type: 'hello', protocolVersion: 1, deviceId, token, role: 'client', controlProtocol: 2 });
     });
 
     ws.on('message', (data, isBinary) => {
@@ -428,8 +571,16 @@ export async function openRemoteControl(options) {
       failOpen(new RemoteControlError('CANCELLED', 'not-sent'));
       return;
     }
-    rejectPending(new RemoteControlError('DISCONNECTED', 'unconfirmed'));
+    const error = new RemoteControlError('DISCONNECTED', 'unconfirmed');
+    rejectPending(error);
+    liveManager.terminateAll(error);
   }
+
+  const liveManager = installRemoteLive(client, {
+    error: (code, outcome) => new RemoteControlError(code, outcome),
+    send: sendFrame,
+    violate: protocolViolation,
+  });
 
   if (signal) {
     const onStartAbort = () => {

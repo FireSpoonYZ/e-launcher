@@ -94,15 +94,12 @@ function normalizeBaseUrl(raw) {
 }
 
 /**
- * Parse Host-provided hindsight options into a normalized config.
- * Returns null when undefined; rejects null/non-plain/unknown keys.
- * apiKeyEnv is resolved from the environment here (before Host writes config):
- * when explicitly provided it must be a standard environment-name and resolve
- * to a nonempty header-safe ASCII token; omitting it is the supported
- * unauthenticated local-server case.
+ * 纯 Hindsight 配置校验：不读环境变量/文件/网络。
+ * undefined -> undefined；拒 null/非 plain/未知 key；baseUrl 沿用原规则；
+ * apiKeyEnv 只校验名称，sharedMemory 默认 false。
  */
-export function parseHindsightOptions(value) {
-  if (value === undefined) return null;
+export function normalizeHindsightConfig(value) {
+  if (value === undefined) return undefined;
   if (!isPlainObject(value)) {
     throw clientError('INVALID_ARGUMENT', 'hindsight options must be a plain object');
   }
@@ -116,19 +113,12 @@ export function parseHindsightOptions(value) {
     throw clientError('INVALID_ARGUMENT', 'hindsight baseUrl is required');
   }
   const baseUrl = normalizeBaseUrl(value.baseUrl);
-  let apiKey;
+  let apiKeyEnv;
   if (value.apiKeyEnv !== undefined) {
     if (typeof value.apiKeyEnv !== 'string' || !ENV_NAME_RE.test(value.apiKeyEnv)) {
       throw clientError('INVALID_ARGUMENT', 'hindsight apiKeyEnv must be a standard environment variable name');
     }
-    const resolved = process.env[value.apiKeyEnv];
-    if (resolved === undefined || resolved.length === 0 || !HEADER_SAFE_TOKEN_RE.test(resolved)) {
-      throw clientError(
-        'INVALID_ARGUMENT',
-        `hindsight apiKeyEnv ${value.apiKeyEnv} must resolve to a nonempty header-safe ASCII token`,
-      );
-    }
-    apiKey = resolved;
+    apiKeyEnv = value.apiKeyEnv;
   }
   let sharedMemory = false;
   if (value.sharedMemory !== undefined) {
@@ -137,7 +127,33 @@ export function parseHindsightOptions(value) {
     }
     sharedMemory = value.sharedMemory;
   }
-  return { baseUrl, apiKey, sharedMemory };
+  const normalized = { baseUrl, sharedMemory };
+  if (apiKeyEnv !== undefined) normalized.apiKeyEnv = apiKeyEnv;
+  return normalized;
+}
+
+/**
+ * Parse Host-provided hindsight options into a normalized config.
+ * Returns null when undefined; rejects null/non-plain/unknown keys.
+ * 复用 normalizeHindsightConfig 纯校验后，再在此解析环境变量：
+ * 显式 apiKeyEnv 必须是标准环境名且解析为 nonempty header-safe ASCII token；
+ * 省略 apiKeyEnv 是受支持的无鉴权本地服务场景。
+ */
+export function parseHindsightOptions(value) {
+  if (value === undefined) return null;
+  const normalized = normalizeHindsightConfig(value);
+  let apiKey;
+  if (normalized.apiKeyEnv !== undefined) {
+    const resolved = process.env[normalized.apiKeyEnv];
+    if (resolved === undefined || resolved.length === 0 || !HEADER_SAFE_TOKEN_RE.test(resolved)) {
+      throw clientError(
+        'INVALID_ARGUMENT',
+        `hindsight apiKeyEnv ${normalized.apiKeyEnv} must resolve to a nonempty header-safe ASCII token`,
+      );
+    }
+    apiKey = resolved;
+  }
+  return { baseUrl: normalized.baseUrl, apiKey, sharedMemory: normalized.sharedMemory };
 }
 
 /**

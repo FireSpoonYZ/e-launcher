@@ -10,45 +10,34 @@ function invalid(message) {
 
 // 先 statSync 拒绝非普通文件（含 device/FIFO，避免阻塞打开），open 后 fstat 取真实大小，
 // 大小超限直接拒绝，缓冲/读取最多 1MiB+1，绝不无界 readFile。
-function readInputObject(file) {
+export function readTextFile(file, label = 'input file') {
   let fd;
   try {
     const st = statSync(file);
     if (!st.isFile()) {
-      throw invalid('--input must be a regular file');
+      throw invalid(`${label} must be a regular file`);
     }
     fd = openSync(file, 'r');
     const real = fstatSync(fd);
     if (!real.isFile()) {
-      throw invalid('--input must be a regular file');
+      throw invalid(`${label} must be a regular file`);
     }
     if (real.size > MAX_INPUT_BYTES) {
-      throw invalid('--input file exceeds 1MiB');
+      throw invalid(`${label} exceeds 1MiB`);
     }
     const buf = Buffer.allocUnsafe(real.size + 1);
     const bytesRead = readSync(fd, buf, 0, buf.length, 0);
     if (bytesRead !== real.size) {
-      throw invalid('--input file changed while reading');
+      throw invalid(`${label} changed while reading`);
     }
-    let text;
     try {
-      text = new TextDecoder('utf-8', { fatal: true }).decode(buf.subarray(0, bytesRead));
+      return new TextDecoder('utf-8', { fatal: true }).decode(buf.subarray(0, bytesRead));
     } catch {
-      throw invalid('--input file is not valid UTF-8');
+      throw invalid(`${label} is not valid UTF-8`);
     }
-    let parsed;
-    try {
-      parsed = JSON.parse(text);
-    } catch {
-      throw invalid('--input file must contain a single JSON object');
-    }
-    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-      throw invalid('--input file must contain a single JSON object');
-    }
-    return parsed;
   } catch (err) {
     if (err?.code === 'INVALID_ARGUMENT') throw err;
-    throw invalid(`cannot read --input file: ${err.message}`);
+    throw invalid(`cannot read ${label}: ${err.message}`);
   } finally {
     if (fd !== undefined) {
       try {
@@ -60,4 +49,18 @@ function readInputObject(file) {
   }
 }
 
-export { invalid, readInputObject };
+export function readInputObject(file) {
+  const text = readTextFile(file, '--input file');
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw invalid('--input file must contain a single JSON object');
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw invalid('--input file must contain a single JSON object');
+  }
+  return parsed;
+}
+
+export { invalid };

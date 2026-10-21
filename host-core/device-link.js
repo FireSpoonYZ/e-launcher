@@ -14,6 +14,7 @@ import { createScopeDelivery } from './scope-delivery.js';
 import { createReplicaSync } from './replica-sync.js';
 import { createLocalControlAdapter } from './local-control-adapter.js';
 import { createHostControlReceiver } from './host-control.js';
+import { createHostLiveReceiver } from './host-live.js';
 import {
   assertDeviceToken,
   parseRelayUrl,
@@ -192,6 +193,7 @@ export async function openDeviceLink(options) {
     scopeDelivery.setOnline(false);
     replicaSync.setOnline(false);
     receiver.reset();
+    liveReceiver.reset();
     setPhase('blocked');
   }
 
@@ -254,7 +256,7 @@ export async function openDeviceLink(options) {
       frame.scopeProtocol = 1;
       if (control) {
         frame.role = 'host';
-        frame.controlProtocol = 1;
+        frame.controlProtocol = 2;
       }
       sendFrame(frame);
     }
@@ -289,14 +291,22 @@ export async function openDeviceLink(options) {
     execute: control,
     send: (frame) => (ready ? sendFrame(frame) : false),
   });
+  // Module 14：live 接收器与控制接收器完全分离；observe 通过适配器 execute.live
+  // 完成本机身份核对与 SSE，send 只走已认证 ready 后的当前 socket。
+  const liveReceiver = createHostLiveReceiver({
+    deviceId: log.deviceId,
+    observe: control ? (target, { signal } = {}) => control.live(log.deviceId, target, { signal }) : null,
+    send: (frame) => (ready ? sendFrame(frame) : false),
+  });
 
   function startConnect() {
     if (closed || phase === 'blocked') return;
     const gen = ++currentGen;
     attempt += 1;
     ready = false;
-    // 新连接前作废旧代控制调用，旧代回调不会发到新 socket。
+    // 新连接前作废旧代控制/观察调用，旧代回调不会发到新 socket。
     receiver.reset();
+    liveReceiver.reset();
     scopeDelivery.setOnline(false);
     replicaSync.setOnline(false);
     setPhase('connecting');
@@ -353,6 +363,12 @@ export async function openDeviceLink(options) {
           ws.terminate();
           return;
         }
+        if (control && frame.controlProtocol !== 2) {
+          // Module 14：v2 控制必须由中继回显 controlProtocol:2；legacy 不回显视为未升级。
+          block('UNSUPPORTED_CONTROL_PROTOCOL');
+          ws.terminate();
+          return;
+        }
         ready = true;
         if (readyTimer) {
           clearTimeout(readyTimer);
@@ -379,6 +395,18 @@ export async function openDeviceLink(options) {
         try {
           receiver.handle(frame);
         } catch { /* 控制接收器内部异常不影响传输；其自身状态负责诊断 */ }
+        return;
+      }
+      if (frame.type === 'live-request' || frame.type === 'live-cancel') {
+        try {
+          liveReceiver.handle(frame);
+        } catch { /* live 接收器内部异常不影响传输；其自身状态负责诊断 */ }
+        return;
+      }
+      // Module 14：客户端方向 live 帧不允许出现在 Host 侧，视为协议违规。
+      if (frame.type === 'live-frame' || frame.type === 'live-end' || frame.type === 'devices-result') {
+        block('BAD_FRAME');
+        ws.terminate();
         return;
       }
       // Module 12：新 scope/副本帧先路由到对应泵，再走既有投递处理。
@@ -415,6 +443,7 @@ export async function openDeviceLink(options) {
       scopeDelivery.setOnline(false);
       replicaSync.setOnline(false);
       receiver.reset();
+      liveReceiver.reset();
       const blockedCode = BLOCKED_CLOSE_CODES.has(code)
         ? code === RELAY_CLOSE.UNAUTHORIZED ? 'UNAUTHORIZED'
           : code === RELAY_CLOSE.REVOKED ? 'REVOKED'
@@ -430,26 +459,32 @@ export async function openDeviceLink(options) {
     });
   }
 
-  async function close() {
-    if (closed) return;
-    closed = true;
-    cancelReconnect();
-    clearSocketTimers();
-    setPhase('closed');
-    const errors = [];
-    try { delivery.close(); } catch (err) { errors.push(err); }
-    try { scopeDelivery.close(); } catch (err) { errors.push(err); }
-    try { replicaSync.close(); } catch (err) { errors.push(err); }
-    try { receiver.close(); } catch (err) { errors.push(err); }
-    const ws = currentWs;
-    currentWs = null;
-    if (ws) {
-      try { ws.terminate(); } catch (err) { errors.push(err); }
-    }
-    try { log.close(); } catch (err) { errors.push(err); }
-    try { releaseOwner(); } catch (err) { errors.push(err); }
-    if (errors.length === 1) throw errors[0];
-    if (errors.length > 1) throw new AggregateError(errors, 'device link close failed');
+  let closePromise = null;
+  function close() {
+    if (closePromise) return closePromise;
+    closePromise = (async () => {
+      closed = true;
+      cancelReconnect();
+      clearSocketTimers();
+      setPhase('closed');
+      const errors = [];
+      try { delivery.close(); } catch (err) { errors.push(err); }
+      try { scopeDelivery.close(); } catch (err) { errors.push(err); }
+      try { replicaSync.close(); } catch (err) { errors.push(err); }
+      try { receiver.close(); } catch (err) { errors.push(err); }
+      // Module 14：live 接收器必须 await 其观察退出后再关 log/释放 owner。
+      try { await liveReceiver.close(); } catch (err) { errors.push(err); }
+      const ws = currentWs;
+      currentWs = null;
+      if (ws) {
+        try { ws.terminate(); } catch (err) { errors.push(err); }
+      }
+      try { log.close(); } catch (err) { errors.push(err); }
+      try { releaseOwner(); } catch (err) { errors.push(err); }
+      if (errors.length === 1) throw errors[0];
+      if (errors.length > 1) throw new AggregateError(errors, 'device link close failed');
+    })();
+    return closePromise;
   }
 
   startConnect();

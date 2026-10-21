@@ -9,7 +9,7 @@ import { createCodingTools } from '@earendil-works/pi-durable/tools';
 import { createHostExecutionEnv } from './host-environment.js';
 import { openHost } from './host.js';
 import { acquireRuntimeOwner } from './runtime-owner.js';
-import { parseExecutionOptions, parseModelRef } from './runtime-models.js';
+import { parseExecutionOptions, parseModelRef, describeModelCatalog } from './runtime-models.js';
 import { createGrepTool } from './grep-tool.js';
 import { createFindTool } from './find-tool.js';
 import { createLsTool } from './ls-tool.js';
@@ -19,6 +19,7 @@ import { createContextManager } from './context-manager.js';
 import { createContextTools } from './context-tools.js';
 import { BC_KERNEL_VERSION } from './context-state.js';
 import { createRuntimeLive } from './runtime-live.js';
+import { readScopeHistory, readScopeMessage, readScopeMessageDelivery } from './runtime-scope-queries.js';
 import { createWorkContextRuntime } from './runtime-work-contexts.js';
 import { createWorkDecisionRuntime } from './runtime-work-decisions.js';
 import { normalizeUserMessage } from './scope-protocol.js';
@@ -191,8 +192,20 @@ export async function openRuntime(options) {
     host.close();
     throw err;
   }
-  const live = createRuntimeLive({ host, getHarness: () => harness });
-  workContexts = createWorkContextRuntime({ host, harness, manager, context: CTX });
+  const live = createRuntimeLive({
+    host,
+    getHarness: () => harness,
+    // work watch 授权复用共享 MessageLog 的只读 resolveWorkContext（含 former-member 定向历史）。
+    resolveWorkContext: (botId, scopeId) => workContexts.resolveWorkContext(botId, scopeId),
+  });
+  workContexts = createWorkContextRuntime({
+    host,
+    harness,
+    manager,
+    context: CTX,
+    // sync 提交成功后附着等待中的 work watch（事务外，观察失败不影响导入）。
+    onBound: (botId, scopeId, binding) => live.bindWork(botId, scopeId, binding),
+  });
   return createRuntime({ host, harness, models, defaultModel, releaseOwner, manager, cleanupEnvs, live, workContexts, decisions, memory });
 }
 
@@ -338,6 +351,10 @@ function createRuntime({ host, harness, models, defaultModel, releaseOwner, mana
       await conversation.abort(CTX);
     },
 
+    async getModelCatalog() {
+      return describeModelCatalog(models, defaultModel);
+    },
+
     async contextStatus(botId) {
       assertNonBlank(botId, 'botId');
       const bot = host.getBot(botId);
@@ -372,6 +389,9 @@ function createRuntime({ host, harness, models, defaultModel, releaseOwner, mana
     listScopeStates: (options) => runMessageOperation((log) => log.listScopeStates(options)),
     publishUserMessage: (scopeId, input) => runMessageOperation((log) => log.publish(normalizeUserMessage(scopeId, input))),
     listScopeReplicas: (scopeId, options) => runMessageOperation((log) => log.listScopeReplicas(scopeId, options)),
+    scopeHistory: (scopeId, options) => runMessageOperation((log) => readScopeHistory(log, scopeId, options)),
+    getScopeMessage: (scopeId, messageId) => runMessageOperation((log) => readScopeMessage(log, scopeId, messageId)),
+    getScopeMessageDelivery: (scopeId, messageId) => runMessageOperation((log) => readScopeMessageDelivery(log, scopeId, messageId)),
 
     resume() {
       harness.resume();
@@ -381,6 +401,10 @@ function createRuntime({ host, harness, models, defaultModel, releaseOwner, mana
 
     watch(botId, options) {
       return live.watch(botId, options);
+    },
+
+    watchWork(botId, scopeId, options) {
+      return live.watchWork(botId, scopeId, options);
     },
 
     close,

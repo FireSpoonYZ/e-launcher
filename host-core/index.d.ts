@@ -312,6 +312,30 @@ export interface MemorySourceResult {
   receipt: MemoryReceipt | null;
 }
 
+/** Raw runtime JSON configuration (module 14); strict fields, credentials only as env names. */
+export interface ModelConfig {
+  id: string;
+  name?: string;
+  reasoning?: boolean;
+  contextWindow?: number;
+  maxTokens?: number;
+}
+
+export interface ProviderConfig {
+  id: string;
+  baseUrl: string;
+  apiKeyEnv?: string;
+  models: ModelConfig[];
+}
+
+export interface RuntimeConfig {
+  providers: ProviderConfig[];
+  defaultModel?: string | null;
+  hindsight?: HindsightOptions;
+  bashPath?: string;
+  toolPaths?: { rg?: string; fd?: string };
+}
+
 export interface OpenRuntimeOptions {
   dataRoot: string;
   models?: Models;
@@ -342,7 +366,7 @@ export interface Runtime {
   stopWork(botId: string, scopeId: string): Promise<WorkActivity>;
   /** Current member only; clear stop/error without consuming input. Does not activate a passive Runtime's scheduler. */
   resumeWork(botId: string, scopeId: string): Promise<WorkActivity>;
-  /** Module 12: six local-only scope methods; the remote 10 control methods stay unchanged. */
+  /** Module 12: six managed-scope methods; exposed locally and via the module 14 remote v2 table. */
   createScope(input: ScopeCreateInput): Promise<ScopeInfo>;
   updateScope(scopeId: string, input: ScopeUpdateInput): Promise<ScopeInfo>;
   /** Latest state; rejects SCOPE_NOT_FOUND when the scope is missing, never resolves null. */
@@ -351,7 +375,7 @@ export interface Runtime {
   /** Room-public user message; returns the stored ledger receipt, not a delivery/inference completion. */
   publishUserMessage(scopeId: string, input: UserMessageInput): Promise<StoredMessage>;
   listScopeReplicas(scopeId: string, options?: ReplicaListOptions): Promise<ReplicaListPage>;
-  /** Module 13: eight local-only Hindsight memory methods; hidden from the remote whitelist. */
+  /** Module 13: eight Hindsight memory methods; exposed locally and via the module 14 remote v2 table. */
   memoryStatus(botId: string, input?: MemoryStatusInput): Promise<MemoryStatus>;
   recallMemory(botId: string, input: MemoryQueryInput): Promise<MemoryRecallResult>;
   reflectMemory(botId: string, input: MemoryQueryInput): Promise<MemoryReflectResult>;
@@ -361,6 +385,15 @@ export interface Runtime {
   correctMemory(botId: string, input: MemoryCorrectionInput): Promise<MemoryCorrectionReceipt>;
   retryMemory(botId: string, input: MemoryRetryInput): Promise<MemoryReceipt>;
   watch(botId: string, options?: { signal?: AbortSignal }): Promise<BotWatch>;
+  /** Module 14: work-context live preview; same handle shape as primary watch, full snapshots only. */
+  watchWork(botId: string, scopeId: string, options?: { signal?: AbortSignal }): Promise<WorkWatch>;
+  /** Passive, authorized scope history; strict paging with the shared message cursor. */
+  scopeHistory(scopeId: string, options?: MessagePageOptions): Promise<MessageHistoryPage>;
+  /** Exact stored message; foreign-scope IDs reject MESSAGE_NOT_FOUND. */
+  getScopeMessage(scopeId: string, messageId: string): Promise<StoredMessage>;
+  getScopeMessageDelivery(scopeId: string, messageId: string): Promise<MessageDeliveryStatus>;
+  /** Read-only chat model whitelist; no credentials/base URLs/env names. */
+  getModelCatalog(): Promise<ModelCatalog>;
   /** Idempotently resume native tasks AND activate automatic room/DM processing; may submit new work. */
   resume(): void;
   close(): Promise<void>;
@@ -470,6 +503,49 @@ export interface BotWatch {
   readonly closed: Promise<BotWatchEnd>;
 }
 
+/** Module 14: work-context live preview; full snapshots only, never deltas. */
+export interface WorkLiveSnapshot {
+  type: 'snapshot';
+  botId: string;
+  scopeId: string;
+  conversationId: string | null;
+  sequence: number;
+  state: BotLiveState;
+}
+
+/** Transport-only end frame carried on the work live SSE stream. */
+export interface WorkLiveEnd {
+  type: 'end';
+  botId: string;
+  scopeId: string;
+  conversationId: string | null;
+  sequence: number;
+  reason: BotWatchEndReason;
+}
+
+export type WorkLiveFrame = WorkLiveSnapshot | WorkLiveEnd;
+
+export interface WorkWatch {
+  readonly value: WorkLiveSnapshot;
+  start(listener: (frame: WorkLiveSnapshot) => void | Promise<void>): void;
+  stop(): Promise<BotWatchEnd>;
+  readonly closed: Promise<BotWatchEnd>;
+}
+
+/** Chat model catalog projection; ordered by modelRef UTF-8 bytes. */
+export interface ModelCatalogEntry {
+  modelRef: string;
+  name: string;
+  contextWindow: number;
+  maxTokens: number;
+  reasoning: boolean;
+}
+
+export interface ModelCatalog {
+  defaultModel: string | null;
+  models: ModelCatalogEntry[];
+}
+
 export interface ControlHostInfo {
   protocolVersion: 1;
   deviceId: string;
@@ -480,6 +556,9 @@ export interface ControlHostInfo {
 export interface OpenControlServerOptions extends OpenRuntimeOptions {
   token: string;
   port?: number;
+  /** Optional local settings store backing /v1/settings; when absent those routes return CONTROL_UNAVAILABLE. */
+  settings?: { store: HostSettingsStore; activeRevision: number };
+  getServiceStatus?: () => HostServiceStatus;
 }
 
 export interface ControlServer {
@@ -489,6 +568,88 @@ export interface ControlServer {
 }
 
 export function openControlServer(options: OpenControlServerOptions): Promise<ControlServer>;
+
+/**
+ * Module 14 types: host settings store, unified local service and runtime config helpers.
+ */
+
+export interface HostRelayConfig {
+  url: string;
+  tokenEnv: string;
+  caFile?: string;
+}
+
+export interface HostSettings {
+  runtime: RuntimeConfig;
+  relay: HostRelayConfig | null;
+}
+
+export interface SettingsSnapshot {
+  deviceId: string;
+  revision: number;
+  settings: HostSettings;
+}
+
+export interface SettingsUpdate {
+  expectedRevision: number;
+  settings: HostSettings;
+}
+
+/** Synchronous persistent settings facade; replace() is CAS on expectedRevision. */
+export interface HostSettingsStore {
+  readonly deviceId: string;
+  get(): SettingsSnapshot;
+  replace(update: SettingsUpdate): SettingsSnapshot;
+  close(): void;
+}
+
+export function openHostSettings(options: { dataRoot: string; deviceId: string; initialSettings?: HostSettings }): HostSettingsStore;
+export function normalizeHostSettings(value: unknown): HostSettings;
+
+/** Local HTTP /v1/settings DTO; restartRequired compares the persisted vs active revision. */
+export interface LocalSettingsSnapshot extends SettingsSnapshot {
+  activeRevision: number;
+  restartRequired: boolean;
+}
+
+export interface HostServiceOptions {
+  dataRoot: string;
+  token: string;
+  port?: number;
+  initialSettings?: HostSettings;
+}
+
+export interface HostServiceStatus {
+  deviceId: string;
+  phase: 'starting' | 'running' | 'closing' | 'closed';
+  control: { url: string; listening: boolean };
+  relay: DeviceLinkStatus | null;
+  activeSettingsRevision: number;
+  settingsRevision: number;
+  restartRequired: boolean;
+}
+
+export interface HostService {
+  readonly deviceId: string;
+  readonly url: string;
+  getStatus(): HostServiceStatus;
+  close(): Promise<void>;
+}
+
+export function openHostService(options: HostServiceOptions): Promise<HostService>;
+
+export interface ParsedRuntimeConfig {
+  models: Models;
+  defaultModel: string | null;
+  bashPath?: string;
+  toolPaths?: { rg?: string; fd?: string };
+  hindsight?: HindsightOptions;
+}
+
+export function normalizeRuntimeConfig(raw: unknown): RuntimeConfig;
+export function parseRuntimeConfig(raw: unknown): ParsedRuntimeConfig;
+export function describeModelCatalog(models: Models, defaultModel?: string | null): ModelCatalog;
+export function loadRuntimeConfig(file: string): Promise<ParsedRuntimeConfig>;
 
 /**
  * Module 7 types: host-owned persistent message ledger (messages.sqlite) on
@@ -921,6 +1082,16 @@ export interface RelayDevice {
   revokedAt: string | null;
 }
 
+export interface RelayListActiveOptions {
+  limit?: number;
+  cursor?: { afterDeviceId: string } | null;
+}
+
+export interface RelayListActivePage {
+  items: RelayDevice[];
+  nextCursor: { afterDeviceId: string } | null;
+}
+
 export interface RelayRegistryInput {
   deviceId: string;
   token: string;
@@ -933,6 +1104,8 @@ export interface RelayRegistry {
   revoke(deviceId: string): RelayDevice;
   get(deviceId: string): RelayDevice | null;
   list(): RelayDevice[];
+  /** Active registrations only, keyset-paged by UTF-8 BINARY deviceId. */
+  listActive(options?: RelayListActiveOptions): RelayListActivePage;
   authenticate(deviceId: string, token: string): RelayDevice | null;
   close(): void;
 }
@@ -1003,7 +1176,7 @@ export interface OpenDeviceLinkOptions {
   url: string;
   token: string;
   ca?: string;
-  /** Optional local loopback Control API pair; when set, hello carries role:'host',controlProtocol:1. */
+  /** Optional local loopback Control API pair; when set, hello carries role:'host',controlProtocol:2 and the ready echo must carry controlProtocol:2. */
   control?: { url: string; token: string };
   onStatus?: (status: DeviceLinkStatus) => void;
 }
@@ -1021,13 +1194,13 @@ export function openDeviceLink(options: OpenDeviceLinkOptions): Promise<DeviceLi
  * Module 9 types: authenticated remote Host JSON control over the module 8
  * relay. The Node client opens an explicit 'client' role connection; the
  * target Host remains the sole authority for Bot cwd/create, inference,
- * tools and history. Module 10/11 work-context and activity/stop/resume
- * operations remain local-only; they do not extend these fixed 10 remote methods.
+ * tools and history. Module 14 extends the fixed v1 ten with 25 v2 methods
+ * (work-context, scope, memory, model catalog).
  */
 
 export type RemoteControlOutcome = 'not-sent' | 'unconfirmed' | 'responded';
 
-/** Fixed 10 JSON methods; params/results reuse the existing DTOs above. */
+/** Fixed 35 JSON methods (10 legacy v1 + 25 v2 additions); params/results reuse the existing DTOs above. */
 export interface RemoteControlMethodMap {
   getHostInfo: { params: Record<string, never>; result: ControlHostInfo };
   listBots: { params: Record<string, never>; result: BotRecord[] };
@@ -1039,6 +1212,32 @@ export interface RemoteControlMethodMap {
   history: { params: { botId: string; limit?: number; cursor?: Record<string, unknown> | null }; result: HistoryPage };
   abort: { params: { botId: string }; result: { botId: string } };
   contextStatus: { params: { botId: string }; result: ContextStatus };
+  /* Module 14 v2 additions; memory wire params are always {botId,input}. */
+  getModelCatalog: { params: Record<string, never>; result: ModelCatalog };
+  getWorkContext: { params: { botId: string; scopeId: string }; result: WorkContextRecord };
+  syncWorkContext: { params: { botId: string; scopeId: string; input?: WorkSyncOptions }; result: WorkSyncResult };
+  workHistory: { params: { botId: string; scopeId: string; limit?: number; cursor?: WorkHistoryCursor | null }; result: WorkHistoryPage };
+  workContextStatus: { params: { botId: string; scopeId: string }; result: WorkContextStatus };
+  getWorkActivity: { params: { botId: string; scopeId: string }; result: WorkActivity };
+  stopWork: { params: { botId: string; scopeId: string }; result: WorkActivity };
+  resumeWork: { params: { botId: string; scopeId: string }; result: WorkActivity };
+  listScopeStates: { params: { limit?: number; cursor?: ScopeListCursor | null }; result: ScopeListPage };
+  createScope: { params: { input: ScopeCreateInput }; result: ScopeInfo };
+  getScopeState: { params: { scopeId: string }; result: ScopeInfo };
+  updateScope: { params: { scopeId: string; input: ScopeUpdateInput }; result: ScopeInfo };
+  publishUserMessage: { params: { scopeId: string; input: UserMessageInput }; result: StoredMessage };
+  listScopeReplicas: { params: { scopeId: string; limit?: number; cursor?: ReplicaListCursor | null }; result: ReplicaListPage };
+  scopeHistory: { params: { scopeId: string; limit?: number; cursor?: MessageCursor | null }; result: MessageHistoryPage };
+  getScopeMessage: { params: { scopeId: string; messageId: string }; result: StoredMessage };
+  getScopeMessageDelivery: { params: { scopeId: string; messageId: string }; result: MessageDeliveryStatus };
+  memoryStatus: { params: { botId: string; input?: MemoryStatusInput }; result: MemoryStatus };
+  recallMemory: { params: { botId: string; input: MemoryQueryInput }; result: MemoryRecallResult };
+  reflectMemory: { params: { botId: string; input: MemoryQueryInput }; result: MemoryReflectResult };
+  retainMemory: { params: { botId: string; input: MemoryRetainInput }; result: MemoryRetainReceipt };
+  getMemory: { params: { botId: string; input: MemoryLookupInput }; result: MemoryGetResult };
+  getMemorySource: { params: { botId: string; input: MemorySourceInput }; result: MemorySourceResult };
+  correctMemory: { params: { botId: string; input: MemoryCorrectionInput }; result: MemoryCorrectionReceipt };
+  retryMemory: { params: { botId: string; input: MemoryRetryInput }; result: MemoryReceipt };
 }
 
 export interface OpenRemoteControlOptions {
@@ -1050,6 +1249,35 @@ export interface OpenRemoteControlOptions {
   signal?: AbortSignal;
 }
 
+export interface DevicesDirectoryItem {
+  deviceId: string;
+  online: boolean;
+  controlProtocol: 0 | 1 | 2;
+  scopeProtocol: 0 | 1;
+}
+
+export interface DevicesDirectoryPage {
+  items: DevicesDirectoryItem[];
+  nextCursor: { afterDeviceId: string } | null;
+}
+
+export type LiveTarget =
+  | { kind: 'primary'; botId: string }
+  | { kind: 'work'; botId: string; scopeId: string };
+
+/**
+ * Remote live snapshot: strictly a primary snapshot (no scopeId, non-null
+ * conversationId) or a work snapshot; an illegal primary-null blend is never
+ * representable. The primary arm is discriminated by the absence of scopeId
+ * (scopeId?: never), so consumers can branch on the presence of scopeId.
+ */
+export type RemoteLiveSnapshot = (BotLiveSnapshot & { scopeId?: never }) | WorkLiveSnapshot;
+
+export interface RemoteLiveEnd {
+  type: 'end';
+  reason: BotWatchEndReason;
+}
+
 export interface RemoteControl {
   readonly deviceId: string;
   call<K extends keyof RemoteControlMethodMap>(
@@ -1058,6 +1286,10 @@ export interface RemoteControl {
     params: RemoteControlMethodMap[K]['params'],
     options?: { signal?: AbortSignal },
   ): Promise<RemoteControlMethodMap[K]['result']>;
+  /** Active device directory over the same authenticated relay connection; reads only. */
+  listDevices(options?: { limit?: number; cursor?: { afterDeviceId: string } | null; signal?: AbortSignal }): Promise<DevicesDirectoryPage>;
+  /** Live preview subscription; error ends throw RemoteControlError instead of being yielded. */
+  live(targetDeviceId: string, target: LiveTarget, options?: { signal?: AbortSignal }): AsyncIterable<RemoteLiveSnapshot | RemoteLiveEnd>;
   close(): void;
 }
 
@@ -1068,3 +1300,65 @@ export class RemoteControlError extends Error {
   readonly code: string;
   readonly outcome: RemoteControlOutcome;
 }
+
+/**
+ * Module 14 types: client-side pending outbox for fixed business operations.
+ */
+
+export type PendingState = 'pending' | 'sending' | 'unconfirmed' | 'accepted' | 'rejected';
+
+export type PendingEnqueueInput =
+  | { kind: 'primary'; targetDeviceId: string; botId: string; requestId: string; text: string }
+  | { kind: 'room'; targetDeviceId: string; scopeId: string; messageId: string; text: string; replyTo?: string | null };
+
+export interface PendingRecordBase {
+  id: string;
+  deviceId: string;
+  targetDeviceId: string;
+  text: string;
+  state: PendingState;
+  receipt: Record<string, unknown> | null;
+  lastError: { code: string; outcome: RemoteControlOutcome } | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type PendingRecord =
+  | (PendingRecordBase & { kind: 'primary'; botId: string; requestId: string })
+  | (PendingRecordBase & { kind: 'room'; scopeId: string; messageId: string; replyTo: string | null });
+
+export interface PendingCursor {
+  deviceId: string;
+  state: PendingState | null;
+  afterId: string;
+}
+
+export interface PendingListOptions {
+  state?: PendingState | null;
+  limit?: number;
+  cursor?: PendingCursor | null;
+}
+
+export interface PendingListPage {
+  items: PendingRecord[];
+  nextCursor: PendingCursor | null;
+}
+
+/** Fixed injected transport: four business operations only, never an arbitrary proxy. */
+export interface PendingCall {
+  (targetDeviceId: string, method: 'submit', params: { botId: string; requestId: string; text: string }, options?: { signal?: AbortSignal }): Promise<PrimarySubmission>;
+  (targetDeviceId: string, method: 'getSubmission', params: { botId: string; requestId: string }, options?: { signal?: AbortSignal }): Promise<PrimarySubmission | null>;
+  (targetDeviceId: string, method: 'publishUserMessage', params: { scopeId: string; input: UserMessageInput }, options?: { signal?: AbortSignal }): Promise<StoredMessage>;
+  (targetDeviceId: string, method: 'getScopeMessage', params: { scopeId: string; messageId: string }, options?: { signal?: AbortSignal }): Promise<StoredMessage | null>;
+}
+
+export interface PendingClient {
+  enqueue(input: PendingEnqueueInput): Promise<PendingRecord>;
+  get(id: string): Promise<PendingRecord | null>;
+  list(options?: PendingListOptions): Promise<PendingListPage>;
+  send(id: string, options?: { signal?: AbortSignal }): Promise<PendingRecord>;
+  reconcile(id: string, options?: { signal?: AbortSignal }): Promise<PendingRecord>;
+  close(): Promise<void>;
+}
+
+export function openPendingClient(options: { dataRoot: string; deviceId: string; call: PendingCall }): PendingClient;

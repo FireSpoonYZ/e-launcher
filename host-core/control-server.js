@@ -11,7 +11,7 @@ import {
   writeControlJson,
   writeControlError,
 } from './control-http.js';
-import { serveBotLive } from './control-live.js';
+import { serveBotLive, serveWorkLive } from './control-live.js';
 
 const BIND_HOST = '127.0.0.1';
 const DEFAULT_PORT = 8787;
@@ -46,8 +46,16 @@ const routes = [
   { method: 'GET', key: '/v1/bots/:botId/work-contexts/:scopeKey/activity', pattern: /^\/v1\/bots\/([^/]+)\/work-contexts\/([^/]+)\/activity\/?$/, params: ['botId', 'scopeKey'], hasBody: false, handler: getWorkActivity },
   { method: 'POST', key: '/v1/bots/:botId/work-contexts/:scopeKey/stop', pattern: /^\/v1\/bots\/([^/]+)\/work-contexts\/([^/]+)\/stop\/?$/, params: ['botId', 'scopeKey'], hasBody: true, handler: stopWork },
   { method: 'POST', key: '/v1/bots/:botId/work-contexts/:scopeKey/resume', pattern: /^\/v1\/bots\/([^/]+)\/work-contexts\/([^/]+)\/resume\/?$/, params: ['botId', 'scopeKey'], hasBody: true, handler: resumeWork },
+  { method: 'GET', key: '/v1/models', pattern: /^\/v1\/models\/?$/, params: [], hasBody: false, handler: models },
+  { method: 'GET', key: '/v1/bots/:botId/work-contexts/:scopeKey/live', pattern: /^\/v1\/bots\/([^/]+)\/work-contexts\/([^/]+)\/live\/?$/, params: ['botId', 'scopeKey'], hasBody: false, handler: workLive },
   { method: 'GET', key: '/v1/scopes', pattern: /^\/v1\/scopes\/?$/, params: [], hasBody: false, handler: listScopes },
   { method: 'POST', key: '/v1/scopes', pattern: /^\/v1\/scopes\/?$/, params: [], hasBody: true, handler: createScope },
+  { method: 'GET', key: '/v1/scopes/:scopeKey/history', pattern: /^\/v1\/scopes\/([^/]+)\/history\/?$/, params: ['scopeKey'], hasBody: false, handler: scopeHistory },
+  { method: 'GET', key: '/v1/scopes/:scopeKey/messages/:messageKey', pattern: /^\/v1\/scopes\/([^/]+)\/messages\/([^/]+)\/?$/, params: ['scopeKey', 'messageKey'], hasBody: false, handler: scopeMessage },
+  { method: 'GET', key: '/v1/scopes/:scopeKey/messages/:messageKey/delivery', pattern: /^\/v1\/scopes\/([^/]+)\/messages\/([^/]+)\/delivery\/?$/, params: ['scopeKey', 'messageKey'], hasBody: false, handler: scopeMessageDelivery },
+  { method: 'GET', key: '/v1/settings', pattern: /^\/v1\/settings\/?$/, params: [], hasBody: false, handler: getSettings },
+  { method: 'PUT', key: '/v1/settings', pattern: /^\/v1\/settings\/?$/, params: [], hasBody: true, handler: putSettings },
+  { method: 'GET', key: '/v1/service', pattern: /^\/v1\/service\/?$/, params: [], hasBody: false, handler: serviceStatus },
   { method: 'GET', key: '/v1/scopes/:scopeKey', pattern: /^\/v1\/scopes\/([^/]+)\/?$/, params: ['scopeKey'], hasBody: false, handler: getScopeState },
   { method: 'POST', key: '/v1/scopes/:scopeKey/members', pattern: /^\/v1\/scopes\/([^/]+)\/members\/?$/, params: ['scopeKey'], hasBody: true, handler: updateScopeMembers },
   { method: 'POST', key: '/v1/scopes/:scopeKey/messages', pattern: /^\/v1\/scopes\/([^/]+)\/messages\/?$/, params: ['scopeKey'], hasBody: true, handler: publishUserMessage },
@@ -59,7 +67,33 @@ const routes = [
  * 只固定绑定 127.0.0.1；单个 openRuntime + 单独 openHost 登记连接。
  */
 export async function openControlServer(options) {
-  const { token, port = DEFAULT_PORT, ...runtimeOptions } = options ?? {};
+  const { token, port = DEFAULT_PORT, settings, getServiceStatus, ...runtimeOptions } = options ?? {};
+  // 可选 settings/callback 一旦提供必须完整合法，否则 INVALID_ARGUMENT，不静默当未配置。
+  let settingsStore = null;
+  let activeRevision = null;
+  if (settings !== undefined) {
+    if (typeof settings !== 'object' || settings === null || Array.isArray(settings)) {
+      throw new ControlHttpError(400, 'INVALID_ARGUMENT', 'settings must be an object');
+    }
+    const store = settings.store;
+    if (typeof store !== 'object' || store === null ||
+        typeof store.get !== 'function' || typeof store.replace !== 'function' || typeof store.close !== 'function') {
+      throw new ControlHttpError(400, 'INVALID_ARGUMENT', 'settings.store must expose get/replace/close');
+    }
+    if (!Number.isSafeInteger(settings.activeRevision) || settings.activeRevision <= 0) {
+      throw new ControlHttpError(400, 'INVALID_ARGUMENT', 'settings.activeRevision must be a positive safe integer');
+    }
+    settingsStore = store;
+    activeRevision = settings.activeRevision;
+  }
+  if (getServiceStatus !== undefined && typeof getServiceStatus !== 'function') {
+    throw new ControlHttpError(400, 'INVALID_ARGUMENT', 'getServiceStatus must be a function');
+  }
+  const ctx = {
+    settingsStore,
+    activeRevision,
+    getServiceStatus: getServiceStatus ?? null,
+  };
   assertPort(port);
   // token 格式由 createControlAuthorizer 校验；在打开任何数据前调用并保留结果。
   const authorize = createControlAuthorizer(token);
@@ -91,7 +125,7 @@ export async function openControlServer(options) {
     }
     track((async () => {
       try {
-        await dispatch(host, runtime, authorize, req, res);
+        await dispatch(host, runtime, authorize, req, res, ctx);
       } catch (err) {
         if (!res.writableEnded) {
           try { writeControlError(res, err); } catch { res.destroy(); }
@@ -147,7 +181,7 @@ export async function openControlServer(options) {
   return { deviceId: host.deviceId, url, close };
 }
 
-async function dispatch(host, runtime, authorize, req, res) {
+async function dispatch(host, runtime, authorize, req, res, ctx) {
   authorize(req);
   let url;
   try {
@@ -181,7 +215,7 @@ async function dispatch(host, runtime, authorize, req, res) {
   } else {
     req.resume(); // 排空多余请求体，避免占用保活连接
   }
-  await match.route.handler(host, runtime, params, body, req, res);
+  await match.route.handler(host, runtime, params, body, req, res, ctx);
 }
 
 async function getHostInfo(host, runtime, params, body, req, res) {
@@ -344,6 +378,81 @@ async function publishUserMessage(host, runtime, params, body, req, res) {
 async function listScopeReplicas(host, runtime, params, body, req, res) {
   const options = parseScopeQuery(new URL(req.url, 'http://' + BIND_HOST).searchParams, ['limit', 'cursor']);
   writeControlJson(res, 200, await runtime.listScopeReplicas(workScopeId(params.scopeKey), options));
+}
+
+async function models(host, runtime, params, body, req, res) {
+  assertNoQuery(req);
+  writeControlJson(res, 200, await runtime.getModelCatalog());
+}
+
+async function workLive(host, runtime, params, body, req, res) {
+  assertNoQuery(req);
+  await serveWorkLive(req, res, runtime, params.botId, workScopeId(params.scopeKey));
+}
+
+async function scopeHistory(host, runtime, params, body, req, res) {
+  const options = parseScopeQuery(new URL(req.url, 'http://' + BIND_HOST).searchParams, ['limit', 'cursor']);
+  writeControlJson(res, 200, await runtime.scopeHistory(workScopeId(params.scopeKey), options));
+}
+
+async function scopeMessage(host, runtime, params, body, req, res) {
+  assertNoQuery(req);
+  // messageKey 也固定 ~ 前缀（与 scopeKey 同一套保护/解码）。
+  const message = await runtime.getScopeMessage(workScopeId(params.scopeKey), workScopeId(params.messageKey));
+  if (!message) throw new ControlHttpError(404, 'MESSAGE_NOT_FOUND', 'message not found');
+  writeControlJson(res, 200, message);
+}
+
+async function scopeMessageDelivery(host, runtime, params, body, req, res) {
+  assertNoQuery(req);
+  const delivery = await runtime.getScopeMessageDelivery(workScopeId(params.scopeKey), workScopeId(params.messageKey));
+  if (!delivery) throw new ControlHttpError(404, 'DELIVERY_NOT_FOUND', 'delivery not found');
+  writeControlJson(res, 200, delivery);
+}
+
+async function getSettings(host, runtime, params, body, req, res, ctx) {
+  assertNoQuery(req);
+  if (!ctx.settingsStore) throw new ControlHttpError(503, 'CONTROL_UNAVAILABLE', 'settings store is not configured');
+  const snapshot = ctx.settingsStore.get();
+  writeControlJson(res, 200, {
+    ...snapshot,
+    activeRevision: ctx.activeRevision,
+    restartRequired: snapshot.revision !== ctx.activeRevision,
+  });
+}
+
+async function putSettings(host, runtime, params, body, req, res, ctx) {
+  assertNoQuery(req);
+  if (!ctx.settingsStore) throw new ControlHttpError(503, 'CONTROL_UNAVAILABLE', 'settings store is not configured');
+  const snapshot = ctx.settingsStore.replace(validateSettingsUpdate(body));
+  writeControlJson(res, 200, {
+    ...snapshot,
+    activeRevision: ctx.activeRevision,
+    restartRequired: snapshot.revision !== ctx.activeRevision,
+  });
+}
+
+function validateSettingsUpdate(body) {
+  if (typeof body !== 'object' || body === null || Array.isArray(body)) {
+    throw new ControlHttpError(400, 'INVALID_ARGUMENT', 'settings update must be a JSON object');
+  }
+  const keys = Object.keys(body);
+  if (keys.length !== 2 || !keys.includes('expectedRevision') || !keys.includes('settings')) {
+    throw new ControlHttpError(400, 'INVALID_ARGUMENT', 'settings update must contain exactly expectedRevision and settings');
+  }
+  if (!Number.isSafeInteger(body.expectedRevision) || body.expectedRevision <= 0) {
+    throw new ControlHttpError(400, 'INVALID_ARGUMENT', 'expectedRevision must be a positive safe integer');
+  }
+  if (typeof body.settings !== 'object' || body.settings === null || Array.isArray(body.settings)) {
+    throw new ControlHttpError(400, 'INVALID_ARGUMENT', 'settings must be a JSON object');
+  }
+  return { expectedRevision: body.expectedRevision, settings: body.settings };
+}
+
+async function serviceStatus(host, runtime, params, body, req, res, ctx) {
+  assertNoQuery(req);
+  if (!ctx.getServiceStatus) throw new ControlHttpError(503, 'CONTROL_UNAVAILABLE', 'service status is not configured');
+  writeControlJson(res, 200, await ctx.getServiceStatus());
 }
 
 function workScopeId(scopeKey) {

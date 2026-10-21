@@ -1,8 +1,8 @@
-import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { createModels, createProvider } from '@earendil-works/pi-ai/models';
 import { openAICompletionsApi } from '@earendil-works/pi-ai/api/openai-completions.lazy';
-import { parseHindsightOptions } from './hindsight-client.js';
+import { normalizeHindsightConfig, parseHindsightOptions } from './hindsight-client.js';
+import { readInputObject } from './cli-input.js';
 
 const DEFAULT_CONTEXT_WINDOW = 32768;
 const DEFAULT_MAX_TOKENS = 1024;
@@ -18,13 +18,38 @@ function invalidArgument(message) {
   return errWithCode(message, 'INVALID_ARGUMENT');
 }
 
-function isHttpUrl(value) {
-  try {
-    const url = new URL(value);
-    return url.protocol === 'http:' || url.protocol === 'https:';
-  } catch {
-    return false;
+function isPlainObject(value) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+}
+
+function rejectUnknownFields(value, allowed, label) {
+  for (const key of Object.keys(value)) {
+    if (!allowed.has(key)) {
+      throw invalidArgument(`${label} has unknown field: ${key}`);
+    }
   }
+}
+
+/** Provider baseUrl 仅 http(s)，拒 userinfo/query/fragment；错误不回显 URL。 */
+function normalizeProviderBaseUrl(raw) {
+  let url;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw invalidArgument('runtime config: provider baseUrl must be an http(s) URL');
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw invalidArgument('runtime config: provider baseUrl must be an http(s) URL');
+  }
+  if (url.username !== '' || url.password !== '') {
+    throw invalidArgument('runtime config: provider baseUrl must not contain user info');
+  }
+  if (url.search !== '' || url.hash !== '') {
+    throw invalidArgument('runtime config: provider baseUrl must not contain query or fragment');
+  }
+  return url.href.replace(/\/+$/, '');
 }
 
 /**
@@ -82,52 +107,52 @@ export function parseModelRef(value) {
   return { provider, modelId };
 }
 
-/**
- * Read a user-provided runtime config JSON file and register its providers in a
- * fresh pi-ai Models collection. Only the given file is read; nothing is
- * scanned or written. Returns { models, defaultModel, bashPath, toolPaths, hindsight },
- * where defaultModel is the config value as written (null when omitted) and hindsight
- * is the raw config field (undefined when absent), validated before any data is opened.
- */
-export async function loadRuntimeConfig(file) {
-  let text;
-  try {
-    text = await readFile(file, 'utf8');
-  } catch (err) {
-    if (err?.code === 'ENOENT' || err?.code === 'ENOTDIR' || err?.code === 'EISDIR') {
-      throw invalidArgument(`runtime config file not found: ${file}`);
+/** 纯运行时配置校验：不读 env/文件/网络；拒未知字段，不悄悄存 apiKey/headers。 */
+export function normalizeRuntimeConfig(raw) {
+  if (!isPlainObject(raw)) throw invalidArgument('runtime config must be a JSON object');
+  rejectUnknownFields(raw, new Set(['providers', 'defaultModel', 'hindsight', 'bashPath', 'toolPaths']), 'runtime config');
+  const providers = validateProviders(raw.providers);
+  let defaultModel = null;
+  if (raw.defaultModel !== undefined && raw.defaultModel !== null) {
+    const ref = parseModelRef(raw.defaultModel);
+    const provider = providers.find((p) => p.id === ref.provider);
+    if (!provider || !provider.models.some((m) => m.id === ref.modelId)) {
+      throw errWithCode(`defaultModel not in registered models: ${raw.defaultModel}`, 'MODEL_NOT_FOUND');
     }
-    throw err;
+    defaultModel = raw.defaultModel;
   }
-  let config;
-  try {
-    config = JSON.parse(text);
-  } catch (err) {
-    throw invalidArgument(`runtime config is not valid JSON: ${err.message}`);
-  }
-  if (typeof config !== 'object' || config === null || Array.isArray(config)) {
-    throw invalidArgument('runtime config must be a JSON object');
-  }
+  const execution = parseExecutionOptions(raw);
+  const normalized = { providers, defaultModel };
+  const hindsight = normalizeHindsightConfig(raw.hindsight);
+  if (hindsight !== undefined) normalized.hindsight = hindsight;
+  if (execution.bashPath !== undefined) normalized.bashPath = execution.bashPath;
+  if (execution.toolPaths !== undefined) normalized.toolPaths = execution.toolPaths;
+  return normalized;
+}
 
-  const providers = validateProviders(config.providers);
+/** 解析运行时配置并构建 pi-ai Models；hindsight 返回原始配置，凭证解析结果不外泄。 */
+export function parseRuntimeConfig(raw) {
+  const normalized = normalizeRuntimeConfig(raw);
   const models = createModels();
-  for (const provider of providers) {
+  for (const provider of normalized.providers) {
     models.setProvider(buildProvider(provider));
   }
+  parseHindsightOptions(normalized.hindsight);
+  return {
+    models,
+    defaultModel: normalized.defaultModel,
+    bashPath: normalized.bashPath,
+    toolPaths: normalized.toolPaths,
+    hindsight: normalized.hindsight,
+  };
+}
 
-  let defaultModel = null;
-  if (config.defaultModel !== undefined && config.defaultModel !== null) {
-    const ref = parseModelRef(config.defaultModel);
-    if (!models.getModel(ref.provider, ref.modelId)) {
-      throw errWithCode(`defaultModel not in registered models: ${config.defaultModel}`, 'MODEL_NOT_FOUND');
-    }
-    defaultModel = config.defaultModel;
-  }
-
-  // hindsight 配置在 CLI 打开任何数据前先校验；原始值回传，归一化在 openRuntime 内完成。
-  parseHindsightOptions(config.hindsight);
-  const execution = parseExecutionOptions(config);
-  return { models, defaultModel, bashPath: execution.bashPath, toolPaths: execution.toolPaths, hindsight: config.hindsight };
+/**
+ * 读取用户显式 runtime 配置文件（复用 cli-input.readInputObject 的有界读取：
+ * 普通文件/1MiB/严格 UTF-8/单纯 JSON 对象），解析并构建 pi-ai Models。
+ */
+export async function loadRuntimeConfig(file) {
+  return parseRuntimeConfig(readInputObject(file));
 }
 
 function validateProviders(providers) {
@@ -135,19 +160,21 @@ function validateProviders(providers) {
   const seenProviders = new Set();
   const out = [];
   for (const p of providers) {
-    if (typeof p !== 'object' || p === null || Array.isArray(p)) {
+    if (!isPlainObject(p)) {
       throw invalidArgument('runtime config: each provider must be an object');
     }
+    rejectUnknownFields(p, new Set(['id', 'baseUrl', 'apiKeyEnv', 'models']), 'runtime config provider');
     const id = p.id;
-    if (typeof id !== 'string' || id.trim() === '') {
-      throw invalidArgument('runtime config: provider id must be a non-empty string');
+    if (typeof id !== 'string' || id.trim() === '' || !id.isWellFormed()) {
+      throw invalidArgument('runtime config: provider id must be a non-empty well-formed string');
+    }
+    if (id.includes('/')) {
+      throw invalidArgument(`runtime config: provider id must not contain "/": ${id}`);
     }
     if (seenProviders.has(id)) throw invalidArgument(`runtime config: duplicate provider id: ${id}`);
     seenProviders.add(id);
 
-    if (typeof p.baseUrl !== 'string' || !isHttpUrl(p.baseUrl)) {
-      throw invalidArgument(`runtime config: provider baseUrl must be an http(s) URL: ${String(p.baseUrl)}`);
-    }
+    const baseUrl = normalizeProviderBaseUrl(p.baseUrl);
     let apiKeyEnv;
     if (p.apiKeyEnv !== undefined) {
       if (typeof p.apiKeyEnv !== 'string' || !ENV_NAME.test(p.apiKeyEnv)) {
@@ -160,35 +187,43 @@ function validateProviders(providers) {
     const seenModels = new Set();
     const models = [];
     for (const m of p.models) {
-      if (typeof m !== 'object' || m === null || Array.isArray(m)) {
+      if (!isPlainObject(m)) {
         throw invalidArgument(`runtime config: each model of provider "${id}" must be an object`);
       }
+      rejectUnknownFields(m, new Set(['id', 'name', 'reasoning', 'contextWindow', 'maxTokens']), 'runtime config model');
       const modelId = m.id;
-      if (typeof modelId !== 'string' || modelId.trim() === '') {
-        throw invalidArgument('runtime config: model id must be a non-empty string');
+      if (typeof modelId !== 'string' || modelId.trim() === '' || !modelId.isWellFormed()) {
+        throw invalidArgument('runtime config: model id must be a non-empty well-formed string');
       }
       if (seenModels.has(modelId)) throw invalidArgument(`runtime config: duplicate model id in provider "${id}": ${modelId}`);
       seenModels.add(modelId);
-      if (m.name !== undefined && (typeof m.name !== 'string' || m.name.trim() === '')) {
+      if (m.name !== undefined && (typeof m.name !== 'string' || m.name.trim() === '' || !m.name.isWellFormed())) {
         throw invalidArgument(`runtime config: model "${modelId}" name must be a non-empty string`);
       }
       if (m.reasoning !== undefined && typeof m.reasoning !== 'boolean') {
         throw invalidArgument(`runtime config: model "${modelId}" reasoning must be a boolean`);
       }
-      const contextWindow = m.contextWindow ?? DEFAULT_CONTEXT_WINDOW;
-      const maxTokens = m.maxTokens ?? DEFAULT_MAX_TOKENS;
-      if (!Number.isInteger(contextWindow) || contextWindow <= 0) {
-        throw invalidArgument(`runtime config: model "${modelId}" contextWindow must be a positive integer`);
+      // 仅 undefined 缺省；显式 null 按预算类型拒绝。
+      const contextWindow = m.contextWindow !== undefined ? m.contextWindow : DEFAULT_CONTEXT_WINDOW;
+      const maxTokens = m.maxTokens !== undefined ? m.maxTokens : DEFAULT_MAX_TOKENS;
+      if (!Number.isSafeInteger(contextWindow) || contextWindow <= 0) {
+        throw invalidArgument(`runtime config: model "${modelId}" contextWindow must be a positive safe integer`);
       }
-      if (!Number.isInteger(maxTokens) || maxTokens <= 0) {
-        throw invalidArgument(`runtime config: model "${modelId}" maxTokens must be a positive integer`);
+      if (!Number.isSafeInteger(maxTokens) || maxTokens <= 0) {
+        throw invalidArgument(`runtime config: model "${modelId}" maxTokens must be a positive safe integer`);
       }
       if (maxTokens > contextWindow) {
         throw invalidArgument(`runtime config: model "${modelId}" maxTokens must not exceed contextWindow`);
       }
-      models.push({ id: modelId, name: m.name, reasoning: m.reasoning, contextWindow, maxTokens });
+      const model = { id: modelId, contextWindow, maxTokens };
+      if (m.name !== undefined) model.name = m.name;
+      if (m.reasoning !== undefined) model.reasoning = m.reasoning;
+      models.push(model);
     }
-    out.push({ id, baseUrl: p.baseUrl, apiKeyEnv, models });
+    // 规范结果不带 undefined 属性，保证 normalize -> stringify/parse -> normalize 等价。
+    const provider = { id, baseUrl, models };
+    if (apiKeyEnv !== undefined) provider.apiKeyEnv = apiKeyEnv;
+    out.push(provider);
   }
   return out;
 }
@@ -229,4 +264,20 @@ function createApiKeyAuth(apiKeyEnv) {
       return { auth: { apiKey: key }, source: apiKeyEnv };
     },
   };
+}
+
+/** 只读 chat 模型白名单，六字段投影，按 modelRef UTF-8 字节序排序，无凭证/baseUrl/env。 */
+export function describeModelCatalog(models, defaultModel) {
+  const entries = [];
+  for (const model of models.getModels()) {
+    entries.push({
+      modelRef: `${model.provider}/${model.id}`,
+      name: model.name,
+      contextWindow: model.contextWindow,
+      maxTokens: model.maxTokens,
+      reasoning: model.reasoning,
+    });
+  }
+  entries.sort((a, b) => Buffer.compare(Buffer.from(a.modelRef, 'utf8'), Buffer.from(b.modelRef, 'utf8')));
+  return { defaultModel: defaultModel ?? null, models: entries };
 }

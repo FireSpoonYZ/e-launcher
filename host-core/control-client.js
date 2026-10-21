@@ -1,6 +1,6 @@
 // Control API client for the standalone Host control server (web-standard fetch only; no Node/Host imports).
 
-import { readControlLive } from './control-live-client.js';
+import { readControlLive, readWorkLive } from './control-live-client.js';
 
 export class ControlApiError extends Error {
   constructor(message, options = {}) {
@@ -111,6 +111,51 @@ export function createControlClient({ url, token, fetch: fetchImpl = globalThis.
       );
     }
     return data;
+  }
+
+  // 共用 live 端点发送/错误清理：primary live 与 work live 只差路径与解析器。
+  async function* liveStream(segments, parser, { botId, scopeId, signal } = {}) {
+    const target = new URL(segments.map(encodeURIComponent).join('/'), base);
+    const headers = {
+      Accept: 'text/event-stream',
+      Authorization: `Bearer ${token}`
+    };
+    let response;
+    try {
+      response = await fetchImpl(target, { method: 'GET', headers, signal });
+    } catch (err) {
+      if (signal && signal.aborted) throw err;
+      throw new ControlApiError(
+        `Cannot reach host control API at ${host}`,
+        { code: 'NETWORK' }
+      );
+    }
+    await ensureOk(response, signal);
+    const contentType = (response.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+    if (contentType !== 'text/event-stream') {
+      try {
+        await response.body?.cancel();
+      } catch { /* body already gone */ }
+      throw new ControlApiError(
+        `Host control API live response is not text/event-stream (HTTP ${response.status})`,
+        { status: response.status, code: 'BAD_RESPONSE' }
+      );
+    }
+    try {
+      for await (const frame of parser(response, { botId, scopeId, signal })) {
+        yield frame;
+      }
+    } catch (err) {
+      if (signal && signal.aborted) throw err;
+      if (err && err.name === 'AbortError') throw err;
+      if (err && err.code === 'LIVE_PROTOCOL') {
+        throw new ControlApiError(err.message, { code: 'BAD_RESPONSE' });
+      }
+      throw new ControlApiError(
+        `Host control live stream failed at ${host}`,
+        { code: 'NETWORK' }
+      );
+    }
   }
 
   return {
@@ -231,48 +276,38 @@ export function createControlClient({ url, token, fetch: fetchImpl = globalThis.
       return request('GET', ['v1', 'scopes', '~' + scopeId, 'replicas'], { signal: options && options.signal, query });
     },
     async *live(botId, options = {}) {
-      const signal = options.signal;
-      const target = new URL(['v1', 'bots', botId, 'live'].map(encodeURIComponent).join('/'), base);
-      const headers = {
-        Accept: 'text/event-stream',
-        Authorization: `Bearer ${token}`
-      };
-      let response;
-      try {
-        response = await fetchImpl(target, { method: 'GET', headers, signal });
-      } catch (err) {
-        if (signal && signal.aborted) throw err;
-        throw new ControlApiError(
-          `Cannot reach host control API at ${host}`,
-          { code: 'NETWORK' }
-        );
+      for await (const frame of liveStream(['v1', 'bots', botId, 'live'], readControlLive, { botId, signal: options.signal })) {
+        yield frame;
       }
-      await ensureOk(response, signal);
-      const contentType = (response.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
-      if (contentType !== 'text/event-stream') {
-        try {
-          await response.body?.cancel();
-        } catch { /* body already gone */ }
-        throw new ControlApiError(
-          `Host control API live response is not text/event-stream (HTTP ${response.status})`,
-          { status: response.status, code: 'BAD_RESPONSE' }
-        );
+    },
+    async *workLive(botId, scopeId, options = {}) {
+      for await (const frame of liveStream(['v1', 'bots', botId, 'work-contexts', '~' + scopeId, 'live'], readWorkLive, { botId, scopeId, signal: options.signal })) {
+        yield frame;
       }
-      try {
-        for await (const frame of readControlLive(response, { botId, signal })) {
-          yield frame;
-        }
-      } catch (err) {
-        if (signal && signal.aborted) throw err;
-        if (err && err.name === 'AbortError') throw err;
-        if (err && err.code === 'LIVE_PROTOCOL') {
-          throw new ControlApiError(err.message, { code: 'BAD_RESPONSE' });
-        }
-        throw new ControlApiError(
-          `Host control live stream failed at ${host}`,
-          { code: 'NETWORK' }
-        );
-      }
+    },
+    getModelCatalog(options) {
+      return request('GET', ['v1', 'models'], callOptions(options));
+    },
+    scopeHistory(scopeId, options) {
+      const query = new URLSearchParams();
+      if (options && options.limit != null) query.set('limit', String(options.limit));
+      if (options && options.cursor != null) query.set('cursor', JSON.stringify(options.cursor));
+      return request('GET', ['v1', 'scopes', '~' + scopeId, 'history'], { signal: options && options.signal, query });
+    },
+    getScopeMessage(scopeId, messageId, options) {
+      return request('GET', ['v1', 'scopes', '~' + scopeId, 'messages', '~' + messageId], callOptions(options));
+    },
+    getScopeMessageDelivery(scopeId, messageId, options) {
+      return request('GET', ['v1', 'scopes', '~' + scopeId, 'messages', '~' + messageId, 'delivery'], callOptions(options));
+    },
+    getLocalSettings(options) {
+      return request('GET', ['v1', 'settings'], callOptions(options));
+    },
+    replaceLocalSettings({ expectedRevision, settings }, options) {
+      return request('PUT', ['v1', 'settings'], { ...callOptions(options), body: { expectedRevision, settings } });
+    },
+    getServiceStatus(options) {
+      return request('GET', ['v1', 'service'], callOptions(options));
     }
   };
 }

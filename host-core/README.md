@@ -1,6 +1,6 @@
 # @e-launcher/host-core
 
-本机 Bot/Host 核心。模块 1 提供 Bot 定义与主私聊身份登记；模块 2 接入 Pi Durable 长期主私聊、历史与执行恢复；模块 3 内嵌 Billion Context；模块 4 接入本机工具（read/write/edit/bash 与 grep/find/ls）；模块 5 接入本机长驻控制 API 与客户端；模块 6 接入 Bot 主私聊直播预览（认证本地 SSE、运行时 watch、客户端与 CLI）；模块 7 接入本机持久消息账本（messages.sqlite：作用域/成员修订、不可变信封、outbox、落地去重 ACK、本地收件/历史/缺口、特权离线 CLI）；模块 8 接入认证设备中继与 Host 消息投递（中心只存设备注册；复用模块 7 outbox，本机进程网络端到端）；模块 9 在认证中继上增加固定 10 个 JSON 方法的远程 Host 控制（独立多客户端角色、Node 客户端与一次性 CLI；父助手已完成本机独立进程 171/171 个端到端检查点验收，范围见下文）；模块 10 已完成群与 Bot DM 的独立工作上下文（显式被动导入、独立 Durable/BC、本机 API/CLI；父助手完成 149/149 个检查点，实测范围与限制见下文）。模块 11 已完成自然群聊决策与 Bot 通信工具（父助手完成 161/161 个端到端检查点，含 18 份数据库完整性/外键检查；限定环境与未实测范围见下文）。模块 12（成员范围管理与历史补齐）已完成父助手限定范围验收：实际运行 122/122 个检查点通过，总完成数 **12/20**。模块 13（Hindsight → Pi Durable 可追溯长期记忆）已完成 Host 侧适配及限定范围验收，总完成数 **13/20**。模块 14–20 共 7 个待交付。运行时由单 Host 所有者持有，跨进程身份稳定。包正式名为 `@e-launcher/host-core`；当前仓库尚无 workspace/包安装连接，示例直接从仓库根导入本地文件（见下文）。
+本机 Bot/Host 核心。模块 1 提供 Bot 定义与主私聊身份登记；模块 2 接入 Pi Durable 长期主私聊、历史与执行恢复；模块 3 内嵌 Billion Context；模块 4 接入本机工具（read/write/edit/bash 与 grep/find/ls）；模块 5 接入本机长驻控制 API 与客户端；模块 6 接入 Bot 主私聊直播预览（认证本地 SSE、运行时 watch、客户端与 CLI）；模块 7 接入本机持久消息账本（messages.sqlite：作用域/成员修订、不可变信封、outbox、落地去重 ACK、本地收件/历史/缺口、特权离线 CLI）；模块 8 接入认证设备中继与 Host 消息投递（中心只存设备注册；复用模块 7 outbox，本机进程网络端到端）；模块 9 在认证中继上增加固定 10 个 JSON 方法的远程 Host 控制（独立多客户端角色、Node 客户端与一次性 CLI；父助手已完成本机独立进程 171/171 个端到端检查点验收，范围见下文）；模块 10 已完成群与 Bot DM 的独立工作上下文（显式被动导入、独立 Durable/BC、本机 API/CLI；父助手完成 149/149 个检查点，实测范围与限制见下文）。模块 11 已完成自然群聊决策与 Bot 通信工具（父助手完成 161/161 个端到端检查点，含 18 份数据库完整性/外键检查；限定环境与未实测范围见下文）。模块 12（成员范围管理与历史补齐）已完成父助手限定范围验收：实际运行 122/122 个检查点通过，总完成数 **12/20**。模块 13（Hindsight → Pi Durable 可追溯长期记忆）已完成 Host 侧适配及限定范围验收，总完成数 **13/20**。模块 14（统一 Host 服务与设备接入）已完成父助手限定范围验收（139/139 检查点，范围见下文），总完成数 **14/20**；模块 15–20 共 6 个待交付。运行时由单 Host 所有者持有，跨进程身份稳定。包正式名为 `@e-launcher/host-core`；当前仓库尚无 workspace/包安装连接，示例直接从仓库根导入本地文件（见下文）。
 
 整体方向见 [下一代多端 Bot 架构设计](../docs/next-generation-architecture.md)（目标架构，部分已实现），交付计划与完成/剩余模块见 [重构路线图](../docs/refactor-roadmap.md)。
 
@@ -95,7 +95,7 @@ node host-core/cli.js create   --data-root '/path/to/data-root'   --request-id r
 - `store.js`：openStore(dataRoot)，返回 {deviceId, createBot, getBot, findByRequest, listBots, close}。
 - `host.js`：openHost({dataRoot})，返回 {deviceId, dataRoot, createBot, getBot, findByRequest, listBots, close}。
 - `cli.js`：CLI 入口。
-- `index.js`：导出 `openHost`、`openRuntime`、`openControlServer`、`openMessageLog`、`openRelayRegistry`、`openRelayServer`、`openDeviceLink`、`openRemoteControl`、`RemoteControlError` 与控制 IO 辅助（`ControlHttpError`、`createControlAuthorizer`、`readControlBody`、`writeControlJson`、`writeControlError`）。
+- `index.js`：导出 `openHost`、`openRuntime`、`openControlServer`、`openMessageLog`、`openRelayRegistry`、`openRelayServer`、`openDeviceLink`、`openRemoteControl`、`RemoteControlError` 与控制 IO 辅助（`ControlHttpError`、`createControlAuthorizer`、`readControlBody`、`writeControlJson`、`writeControlError`）；模块 14 起另导出 `openHostService`、`openPendingClient`、`openHostSettings`/`normalizeHostSettings`、`normalizeRuntimeConfig`/`parseRuntimeConfig`/`describeModelCatalog`/`loadRuntimeConfig`（随父助手集成）。
 - `index.d.ts`：登记接口，以及 `Runtime`、`PrimarySubmission`、`HistoryPage`、`OpenRuntimeOptions`（含可选 `bashPath`/`toolPaths`）、模块 6 直播预览类型（`LiveMessage`/`LiveHistoryItem`/`LiveTool`/`LiveGeneration`/`BotLiveState`/`BotLiveChanges`/`BotLiveSnapshot`/`BotLiveUpdate`/`BotLiveDataFrame`/`BotLiveEnd`/`BotLiveFrame`/`BotWatchEnd`/`BotWatch`）、模块 7 消息账本类型（`MessageMember`/`MessageAuthor`/`MessageScope`/`PublishMessageInput`/`MessageEnvelope`/`MessagePeer`/`MessageAck`/`StoredMessage`/`MessageCursor`/`MessagePageOptions`/`MessageOutboxOptions`/`MessageStreamStatus`/`MessageHistoryPage`/`MessageInboxPage`/`MessageOutboxPage`/`MessageDeliveryStatus`/`MessageLog`/`openMessageLog`）、模块 8 中继类型（`RelayDevice`/`RelayRegistry`/`RelayServerStatus`/`RelayServer`/`DeliveryPumpStatus`/`DeviceLinkStatus`/`DeviceLink`/`openRelayRegistry`/`openRelayServer`/`openDeviceLink`，`OpenDeviceLinkOptions.control` 可选）、模块 9 远程控制类型（`RemoteControlOutcome`/`RemoteControlMethodMap`/`OpenRemoteControlOptions`/`RemoteControl`/`RemoteControlError`/`openRemoteControl`）等类型。模块 12 的类型增量（`ScopeCreateInput`/`ScopeUpdateInput`/`ScopeRecord`/`ScopeInfo`/`ScopeAck`/`ScopeListOptions`/`ScopeListPage`/`ScopeOfferOptions`/`ScopeOfferPage`/`ReplicaStream`/`InventoryQuery`/`InventoryPage`/`ReplicaHistoryQuery`/`ReplicaHistoryPage`/`MissingRangeQuery`/`ReplicaListOptions`/`ReplicaListPage`/`UserMessageInput`、MessageLog 新增 17 个门面方法、Runtime 与 ControlClient 各六个方法、`DeviceLinkStatus.scopeDelivery`/`replicaSync`）由模块 12 类型 lane 在 `index.d.ts`/`control-client.d.ts` 补充，随父助手集成。
 - 模块 13 的 Hindsight 配置、target、游标、投递/纠正回执类型和八个 Runtime 记忆方法签名，见 `index.d.ts` 与 `control-client.d.ts`。- `index.d.ts` 的模块 10 增量：`MessageInboxOptions`、`WorkContextRecord`、`WorkSyncOptions`、`WorkSyncResult`、`WorkHistoryCursor`、`WorkHistoryPage`、`WorkContextStatus` 与 Runtime 的四个工作上下文方法；不新增根 JS 导出。
 - `work-context-docs.js` / `work-context-codec.js` / `runtime-work-contexts.js`：模块 10 的内部持久文档、来源事件编码与被动导入引擎，不作为根 API 导出。
@@ -106,7 +106,7 @@ node host-core/cli.js create   --data-root '/path/to/data-root'   --request-id r
 - `message-store.js`：`openMessageStore(dataRoot, deviceId)`，建库 `messages.sqlite`（user_version=2）：v0 全新库在初始化事务内一次性建 M7+M12 表；v1 旧库先校验身份行且 deviceId 匹配，再原子执行 `SCOPE_SCHEMA_SQL` 增量迁移到 v2；更高版本拒绝且不 drop/reset。模块 12 在此实现托管作用域存储与副本导入（`createScope`/`updateScope`/`getScopeState`/`listScopeStates`/`getScopeRecord`/`acceptScopeOffer`/`acknowledgeScope`/`recordScopeError`/`scopeOffers`/`replicaInventory`/`replicaHistory`/`nextMissingRange`/`listScopeReplicas`/`listReplicaPeers`/`recordReplicaInventory`/`importReplicaHistory`/`recordReplicaScan`，共 17 个 M12 门面方法）。
 - `message-queries.js`：`createMessageQueries(db, {deviceId})` 只读查询（getScope/listScopes/getMessage/history/inbox/replies/outbox/deliveryStatus/streamStatus）；replies 为模块 11 的 DM 直接关联回复查询。
 - `message-cli.js`：模块 7 特权离线 CLI（scope/get-scope/scopes/publish/get/receive/ack/history/inbox/outbox/delivery/stream）；输入文件读取复用模块 12 新增的 `cli-input.js`（`readInputObject`）。
-- `cli-input.js`：模块 12 抽出的共享输入读取（`invalid`/`readInputObject`，≤1MiB 普通 UTF-8 JSON 文件，保留原有大小/竞态/关闭错误处理），`message-cli.js` 与 `control-cli.js` 共用。
+- `cli-input.js`：模块 12 抽出的共享输入读取（`invalid`/`readInputObject`，≤1MiB 普通 UTF-8 JSON 文件，保留原有大小/竞态/关闭错误处理），`message-cli.js`、`control-cli.js`、`remote-control-cli.js`、`pending-cli.js` 与 `host-service.js` 共用；模块 14 起新增 `readTextFile`（普通文件 state/open/fstat、≤1MiB+1 有界 read、严格 UTF-8、size change/FD cleanup），供 CA 与 caFile 读取。
 - `scope-protocol.js`：模块 12 协议校验与规范化（`MAX_SCOPE_SYNC_BYTES`/`MAX_SCOPE_CONTROL_BYTES`、`normalizeScopeCreate`/`normalizeScopeUpdate`/`normalizeScopeRecord`/`normalizeScopeListOptions`/`normalizeScopeOfferOptions`/`normalizeScopeAck`/`normalizeInventoryQuery`/`normalizeReplicaStream`/`normalizeInventoryPage`/`normalizeHistoryQuery`/`normalizeHistoryPage`/`normalizeMissingRangeQuery`/`normalizeReplicaListOptions`/`normalizeUserMessage`）。
 - `scope-store.js`：模块 12 托管作用域存储（`SCOPE_SCHEMA_SQL` 与 `createScopeStore(db,{deviceId,transaction,queries,installScopeRevision})`，12 个方法）。
 - `replica-queries.js`：模块 12 只读副本查询（`createReplicaQueries`：inventory/historyPage/nextMissingRange/listScopeReplicas）。
@@ -116,8 +116,8 @@ node host-core/cli.js create   --data-root '/path/to/data-root'   --request-id r
 - `host-environment.js`：HostExecutionEnv（NodeExecutionEnv 子类）；仅命令字符串经 Git Bash/bash 执行，argv 数组与文件操作直接透传。
 - `grep-tool.js` / `find-tool.js` / `ls-tool.js`：grep（rg）、find（fd）、ls 工具。
 - `search-bin.js`：rg/fd 固定版本、asset 规格与解析顺序；`prepare-tools.js`：显式下载并安装 rg/fd 的 CLI。
-- `control-client.js` / `control-client.d.ts`：控制客户端（`./control-client` 子路径导出），由协作任务提供；模块 12 增加 `listScopeStates`/`createScope`/`getScopeState`/`updateScope`/`publishUserMessage`/`listScopeReplicas` 六个方法（scope 段沿用 `'~'+encodeURIComponent(scopeId)`，无 Node 导入）。
-- `control-server-cli.js` / `control-cli.js`：模块 5 两个 CLI；`control-cli.js` 的 `live` 子命令在模块 6 增加，模块 10 增加 `work-get`/`work-sync`/`work-history`/`work-context`，模块 11 增加 `work-activity`/`work-stop`/`work-resume`，模块 12 增加 `scope-list`/`scope-get`/`scope-create`/`scope-update`/`scope-send`/`scope-replicas`（新增通用 `--input` 标志），仍经同一本机 HTTP 服务调用。
+- `control-client.js` / `control-client.d.ts`：控制客户端（`./control-client` 子路径导出），由协作任务提供；模块 12 增加 `listScopeStates`/`createScope`/`getScopeState`/`updateScope`/`publishUserMessage`/`listScopeReplicas` 六个方法（scope 段沿用 `'~'+encodeURIComponent(scopeId)`，无 Node 导入）；模块 14 增加 `getModelCatalog`/`workLive`/`scopeHistory`/`getScopeMessage`/`getScopeMessageDelivery`/`getLocalSettings`/`replaceLocalSettings`/`getServiceStatus`，仍为 web-standard fetch only。
+- `control-server-cli.js` / `control-cli.js`：模块 5 两个 CLI；`control-cli.js` 的 `live` 子命令在模块 6 增加，模块 10 增加 `work-get`/`work-sync`/`work-history`/`work-context`，模块 11 增加 `work-activity`/`work-stop`/`work-resume`，模块 12 增加 `scope-list`/`scope-get`/`scope-create`/`scope-update`/`scope-send`/`scope-replicas`（新增通用 `--input` 标志），模块 14 再增加 `models`/`service-status`/`settings-get`/`settings-set`/`work-live`/`scope-history`/`scope-message`/`scope-delivery`，仍经同一本机 HTTP 服务调用；新增命令拒绝无关 flag，重复歧义 flag 拒绝（parseArgs tokens）。
 - `runtime-live-projection.js` / `runtime-live.js`：模块 6 直播预览投影与 `Runtime.watch`。
 - `control-live.js`：模块 6 SSE 路由 `GET /v1/bots/:botId/live`。
 - `control-live-client.js`：模块 6 SSE 流式解析与 `readControlLive`。
@@ -126,12 +126,12 @@ node host-core/cli.js create   --data-root '/path/to/data-root'   --request-id r
 - `relay-server.js` / `relay-server-cli.js`：认证中继服务（WebSocketServer noServer + TLS/loopback 规则）与其 CLI。
 - `message-delivery.js`：内部投递泵（不导出），在线扫描 outbox、退避与诊断。
 - `device-link.js` / `device-link-cli.js`：Host 链路（ws 客户端、Hello/ready、所有权锁、重连/blocked）与其 CLI；模块 9 起 `device-link-cli` 增加可选配对 `--control-url` 与 `--control-token-env`，配置控制适配器后 hello 带 `role:'host',controlProtocol:1`。模块 12 起 hello 恒带 `scopeProtocol:1`，ready 必须回显 `scopeProtocol:1` 否则以 `UNSUPPORTED_SCOPE_PROTOCOL` 永久阻塞；内部实例化 `scope-delivery.js`/`replica-sync.js` 两泵，`getStatus()` 新增 `scopeDelivery`/`replicaSync` 两节，公共 `wake()` 唤醒三泵。
-- `remote-control-protocol.js`：模块 9 协议常量与方向性帧校验（`CONTROL_METHODS`/`CONTROL_ERROR_CODES`/`MAX_CONTROL_JSON_BYTES`/`CONTROL_TIMEOUT_MS`/`CONTROL_CLIENT_TIMEOUT_MS`/`CONTROL_MAX_CLIENT_CALLS`/`CONTROL_MAX_HOST_CALLS`/`CONTROL_MAX_PENDING`/`normalizeControlCall`/`readControlClientFrame`/`readControlServerFrame`）。
+- `remote-control-protocol.js`：模块 9 协议常量与方向性帧校验（`CONTROL_METHODS`/`CONTROL_ERROR_CODES`/`MAX_CONTROL_JSON_BYTES`/`CONTROL_TIMEOUT_MS`/`CONTROL_CLIENT_TIMEOUT_MS`/`CONTROL_MAX_CLIENT_CALLS`/`CONTROL_MAX_HOST_CALLS`/`CONTROL_MAX_PENDING`/`normalizeControlCall`/`readControlClientFrame`/`readControlServerFrame`）；模块 14 起 `CONTROL_METHODS` 为旧十方法 + 固定 25 方法（共 35，`CONTROL_V1_METHODS`/`controlMethodVersion` 见同文件）。
 - `relay-server.js`：模块 8/9 认证中继服务（WebSocketServer noServer + TLS/loopback 规则、control-* 有界路由与清理）。模块 12 增加 scope 业务帧路由：仅已协商 `scopeProtocol:1` 的 host 连接可发送；来源注入 `fromDeviceId`；离线/吊销回 `scope-unavailable`/`replica-unavailable` OFFLINE，目标无能力回 UNSUPPORTED，高水位/编码失败回 BACKPRESSURE；ack/reject/result 为临时帧，目标不可用时静默丢弃；不保存任何 scope/成员/历史状态。
 - `local-control-adapter.js`：`createLocalControlAdapter({url,token})`，目标本机回环 Control API 适配（仅字面 `http://127.0.0.1` 或 `http://[::1]`，路径 `/`）。
 - `host-control.js`：`createHostControlReceiver({deviceId,execute,send})`，Host 侧控制接收器（最多 8 个活动调用、无队列）。
 - `remote-control-client.js`：模块 9 Node 控制客户端（`openRemoteControl`/`RemoteControlError`）。
-- `remote-control-cli.js`：模块 9 一次性控制 CLI（10 个固定方法）。
+- `remote-control-cli.js`：模块 9 一次性控制 CLI；模块 14 起支持 35 个固定方法（从 `CONTROL_METHODS` 动态列出）与保留命令 `listDevices`/`live`（非 Host JSON 方法），`--input` 经 `normalizeControlCall`/`normalizeDevicesOptions`/`normalizeLiveTarget` 校验；SIGINT/SIGTERM 退出 130/143，EPIPE 取消观察正常退 0，任何取消不发送 abort 控制方法。
 
 ## 本次模块验收
 
@@ -659,7 +659,7 @@ node host-core/remote-control-cli.js listBots \
   [--input control-input.json] [--ca /path/to/ca.pem]
 ```
 
-- METHOD 必须精确等于上述 10 个方法名之一，无别名；`--input` 可选，缺省 `{}`，为 ≤1MiB 的普通 UTF-8 JSON 对象。
+- METHOD 必须精确等于上述 10 个方法名之一，无别名；`--input` 可选，缺省 `{}`，为 ≤1MiB 的普通 UTF-8 JSON 对象。（模块 14 起该方法表扩展为 35 个固定方法并新增保留命令 `listDevices`/`live`，见[模块 14](#模块-14统一-host-服务与设备接入已完成父助手限定范围验收)一节。）
 - 成功：stdout 输出一行原始 JSON 结果，exit 0。失败：stderr 输出 `{"error":{"code":...,"message":...,"outcome":...}}`；unconfirmed 结果 exit 2，其他错误 exit 1，`--help` exit 0。信号只关闭客户端，绝不发送 abort 方法；错误输出不含令牌/调用负载。
 
 ### JS API（`./host-core/index.js` 新增导出）
@@ -803,8 +803,8 @@ node host-core/control-cli.js work-context --url http://127.0.0.1:8787 \
 
 ### 后续边界与未实测
 
-- 上述模块 10 验收不覆盖模块 11 的自动收件调度、工作上下文推理/发言或沉默、Bot 通信工具；模块 11 已独立完成父助手验收，接口与实测范围见下节。模块 12 的成员同步/历史补齐已完成父助手限定范围验收（122/122 检查点，见下节）；模块 13 的长期事实记忆仍未交付，不新增 Session 产品或 UI。
-- 模块 9 远程协议保持原 **10 个方法**，未增加远程工作上下文控制；版本化接线属于模块 14。
+- 上述模块 10 验收不覆盖模块 11 的自动收件调度、工作上下文推理/发言或沉默、Bot 通信工具；模块 11 已独立完成父助手验收，接口与实测范围见下节。模块 12 的成员同步/历史补齐已完成父助手限定范围验收（122/122 检查点，见下节）；模块 13 已完成 Host 侧适配及限定范围验收，不新增 Session 产品或 UI。
+- 模块 9 远程协议保持原 **10 个方法**，未增加远程工作上下文控制；版本化接线属于模块 14（截至 M9–M12；M14 v2 起已扩展为 35 个固定方法，见[模块 14](#模块-14统一-host-服务与设备接入已完成父助手限定范围验收)一节）。
 - 未实测：跨物理设备/WAN、Linux、Android、arm64、Tauri/TUI、浏览器 native-fetch 适配集成、真实外部付费模型。
 - 未实测直接 JS AbortSignal 与直接 `Runtime.close` 并发调用/关闭竞态；已实跑服务端 HTTP 断连继续导入和进程优雅关闭。全局 128 pending/256 连接负载、中继慢接收者压力测试及模块 9 原有未实测项继续保留。
 
@@ -929,7 +929,7 @@ node host-core/control-cli.js work-resume --url http://127.0.0.1:8787 \
 - **原生重试与来源水位**：同一重试 task **852** 的请求 cutoff 为 **858**、缓存 BC cutoff 仍为 **856** 时正常完成；task **913** 在第 2 次尝试把来源水位 **66 → 67**，实际模型 HTTP 请求正文也更新。既未把旧 BC 缓存 cutoff 差异误判为失败，也未把新来源漏掉。
 - **请求前阻断**：超大准备投影在 provider 调用前被拒，原文及未处理水位保留。工作上下文中的未知 BC kernelVersion 暴露 fatal，主私聊仍独立可用；主私聊 BC prepare 失败取消当前原生 task，**没有原文回退模型请求**，工作驱动不被该主私聊错误停止，恢复 BC 状态后可继续。
 - **有界预览与本机接口**：8 条预览消息分页恰好各返回一次，输出 ≤50KiB，Unicode 截断安全，完整原文保留。scope 列表先返回可用前缀，再对放不下的单项返回 `RESPONSE_TOO_LARGE`。零字节 stop body、resume 请求体校验、Origin/方法/路径、特殊 scope 标识、CLI 无关参数及范围游标隔离均有实跑证据。
-- **网络与原能力回归**：本机 Host A/B 经 WSS 完成实际模型协议 request/reply；B Runtime 关闭时，其独立链路仍保存新 notice 并 ACK，重开后只导入而不新建决策。原远端十方法通过，新 work 远端方法仍被拒；M10 被动方法不建推理任务，空 Host 不因扫描创建消息库，运行时独占以及 primary history/live 保留。
+- **网络与原能力回归**：本机 Host A/B 经 WSS 完成实际模型协议 request/reply；B Runtime 关闭时，其独立链路仍保存新 notice 并 ACK，重开后只导入而不新建决策。原远端十方法通过，新 work 远端方法仍被拒（截至 M11；M14 v2 起已支持，见模块 14 一节）；M10 被动方法不建推理任务，空 Host 不因扫描创建消息库，运行时独占以及 primary history/live 保留。
 
 公开声明通过父助手的 **strict NodeNext + `--skipLibCheck`** 检查；skipLibCheck 是针对既有第三方声明依赖，不表示检查了全部上游声明。**18 份 SQLite 数据库**完整性/外键检查通过，中心仍仅设备注册表，最终无活动原生任务或故障触发器残留。**7 个最终服务均 exit 0**，验收夹具进程全部清理，剩余进程数为 0。
 
@@ -992,19 +992,19 @@ node host-core/control-cli.js work-resume --url http://127.0.0.1:8787 \
 - **迁移/原子性**：M11 v1 真实数据在 Node 22 迁移、owner/缺身份/未来/未知拒绝且失败后 schema 原样；迁移中注入 schema 冲突后事务回滚，移除故障后重试成功；副本导入中第二个封套的冻结目标非法时，元数据、消息和来源记录整页回滚，合法页重试成功；含转义字符的 JSON 分页精确字节预算与整项前缀、非空耗尽页 null cursor、迭代器在后续写入前释放。
 - **收据修正**：恢复 authority 修订（无本地操作）返回 `delivery:null`，已知 pending/acked 保留，本地空目标 ACK 合法。
 - **协议边界**：scope-wire 畸形帧/未知操作/伪造 from/authority/原始源/未知码/null authority、client 能力、真 M11 relay 拒新 hello、ready 缺能力阻塞、旧目标 UNSUPPORTED、未协商源 REVOKED、同 peer 公平调度。
-- **回归**：stop/resume 保留输入、被动元数据/只读操作零原生任务、被动 sync 绑定不建任务、BC 不准备、超大输入 CONTEXT_LIMIT 零 provider 请求、primary live 隔离、远端十方法通过且白名单未扩。
+- **回归**：stop/resume 保留输入、被动元数据/只读操作零原生任务、被动 sync 绑定不建任务、BC 不准备、超大输入 CONTEXT_LIMIT 零 provider 请求、primary live 隔离、远端十方法通过且白名单未扩（截至 M12；M14 v2 起已扩展，见模块 14 一节）。
 
 公开声明以 **strict NodeNext + `--skipLibCheck`** 通过；**42 份 SQLite** 完整性/外键通过（含备份/迁移夹具）；**7 个原生任务**全部终态、无活动任务/故障触发器；**18 份 BC 基础快照**的版本均为 acp-kernel **0.0.101**；夹具进程清理完成，relay 仅存设备注册表。
 
 剩余限制：未验证物理 WAN/Linux/Android/arm64/Tauri/TUI；M7–M11 为选定回归而非全量历史场景重跑；M12 高水位/反压分支未单独饱和测试（沿用 M8 共享路径）；未穷尽并发微观交错；原始作者端到端签名/加密**未实现**，当前信任模型是认证通道+TLS 认证 peer；Mockoon 夹具不代表付费/智能模型验收。
 
-模块 **13** 已完成 Host 侧适配交付。模块 **14–20 共 7 个** 仍待交付：远程 work/实时接线及后续跨平台/迁移/外壳/真机集成；远端仍只开放原十方法。不引入中央决策、自动 routine、Session 管理或新的后台任务产品。
+模块 **13** 已完成 Host 侧适配交付。模块 **14**（远程 work/实时接线、统一服务与本机设置、客户端待发送/对账）已完成父助手限定范围验收（139/139 检查点，见下节），总完成数 **14/20**；模块 **15–20 共 6 个**仍待交付：跨平台/迁移/外壳/真机集成。不引入中央决策、自动 routine、Session 管理或新的后台任务产品。
 
 <a id="hindsight-memory"></a>
 
 ## 模块 13：可追溯长期记忆（Hindsight → Pi Durable，Host 侧适配交付）
 
-模块 13 为每个 Bot 接入 Hindsight 的长期事实提取、召回与纠正能力，保留来源和适用范围。Host 侧适配已交付，累计完成 **13/20**；运行环境与后端联调范围见本节末尾。
+模块 13 为每个 Bot 接入 Hindsight 的长期事实提取、召回与纠正能力，保留来源和适用范围。Host 侧适配已交付（M13 交付时为 13/20；当前含 M14 为 14/20）；运行环境与后端联调范围见本节末尾。
 
 ### 版本与外接方式
 
@@ -1062,7 +1062,7 @@ node host-core/control-cli.js work-resume --url http://127.0.0.1:8787 \
 | `correctMemory(botId, input)` | `memory-correct` | `hindsight_correct` |
 | `retryMemory(botId, input)` | `memory-retry` | `hindsight_retry` |
 
-HTTP 状态入口为 GET `/v1/bots/:botId/memory`，其余七个操作为 POST `/v1/bots/:botId/memory/{recall,reflect,retain,get,source,correct,retry}`。retain/correct/retry 返回 202 回执，其他操作返回 200。原远端十方法白名单保持不变，远端记忆与实时接线留给模块 14。
+HTTP 状态入口为 GET `/v1/bots/:botId/memory`，其余七个操作为 POST `/v1/bots/:botId/memory/{recall,reflect,retain,get,source,correct,retry}`。retain/correct/retry 返回 202 回执，其他操作返回 200。原远端十方法白名单保持不变，远端记忆与实时接线留给模块 14（模块 14 v2 起已扩展为 35 方法并加入远端记忆/实时接线，见[模块 14](#模块-14统一-host-服务与设备接入已完成父助手限定范围验收)一节）。
 
 `memoryStatus` 输入为 `{target?,state?,limit?,cursor?}`，state 为 pending/accepted/completed/failed，limit 为 1–200（默认 20）。游标 `{bankId,state,afterOperationId}` 绑定派生记忆库与过滤条件，不赋予跨库权限。计数覆盖整个上下文，state 只过滤分页 jobs；返回 `jobs/nextCursor` 可发现自动投递失败的 operation ID。状态查询不创建记忆库、不发起后端请求，可读取已有库。禁用时计数与 jobs 为 null；配置但未建库时计数为 0、jobs 为 []。
 
@@ -1089,3 +1089,148 @@ CLI 均要求 `--bot-id`。`memory-status` 可选 `--input`，其余命令必须
 公开声明通过 strict NodeNext + `--skipLibCheck`；**16 份 SQLite** 完整性/外键检查通过，**77 个原生任务**全部终态，两个启用记忆的 Host 分别完成 **206 和 4 个投递 job**。**11 次 Host 服务进程退出码均为 0**，夹具进程已清理。
 
 真实 Hindsight 服务部署、API 互通与事实抽取/召回/reflect 质量尚待联调，未访问真实记忆库。本轮未覆盖 Linux、Android、arm64、Tauri/TUI 或物理 WAN；并发提交产生了 12 个不同回答，共用最终回答的运行场景未单独验证。M1–M12 保留原有验收记录，本轮只回归相关路径。
+
+## 模块 14：统一 Host 服务与设备接入（已完成父助手限定范围验收）
+
+模块 14 把模块 5 本机控制面、模块 8/9 认证中继与远程控制、模块 10–12 工作上下文/scope、模块 13 记忆整合为**统一本机服务**（`openHostService`），并新增本机设置持久化、远端协议 v2（35 方法）、受控远端实时预览与客户端待发送/对账。
+
+**状态**：模块 14 已完成交付并获父助手限定范围验收，总完成数 **14/20**；模块 15–20 共 6 个待交付，未开始任何 M15 工作。
+
+### 验收覆盖
+
+- 环境：Windows x64 / Git Bash、Node 26.8.2 与 22.19.0、真实本地 HTTP/CLI/TLS/WSS、持久 SQLite、Pi Durable 1.3.0 + acp-kernel 0.0.101；模型与 Hindsight wire 响应来自隔离 Mockoon OpenAI-compatible SSE/Hindsight 协议夹具。无新增依赖、无仓库测试或临时脚本。
+- 结果：139/139 检查点通过，失败 0；53 份 SQLite 完整性/外键通过（含刻意构造的畸形 schema 夹具，SQLite 一致性不代表这些 schema 被接受）；8 个 Native tasks 全部 terminal、0 active；30 个 tail readers 清理、夹具进程剩余 0。
+- 覆盖要点：统一服务/离线 settings/CAS/重开/重复 owner、null 与 512KiB 启动边界、缺 memory-env 离线救援、settings 存储错误与关闭恢复；35 个固定 v2 方法（含 8 个 memory 方法）；冻结 v1 客户端与 Host 桥兼容及能力拒绝；primary/work 安全快照、冷被动、null→公开绑定、normal/error 帧结束、sequence/目标/私有字段拒绝、1MiB JSON preflight（含误标 SSE）；pending 离线持久化、同 payload 去重/冲突、显式 send、accepted/rejected 不重连、畸形回复/读、仅缺失精确重试、本地持久失败与只读恢复、schema 先校验与 owner 锁；EPIPE 观察者关闭后慢模型实际完成、同一 submissionId 69 在统一服务重开后恢复并完成、持久 scope 停止跨重开保留；scope 查询分页/游标绑定与含斜杠/点/中文/emoji 消息 ID、跨 scope 查找隐藏；relay schema 仅 relay_devices 且无合成业务/凭证标记。
+- 兼容性说明：冻结的 M13 基线 v1 远程 CLI 与 device-link 桥接端配合当前控制服务（位于冻结桥后）实际调用 `getHostInfo`，验证 v1 客户端/桥接互操作；这不是整个旧 Runtime 或每个旧客户端场景都冻结验证的断言。
+- 开流超时实测：无首帧时约 20.159 秒触发超时，合成 Host 协议对端收到对应 live-cancel；活动观察期间凭证撤销/轮换生效，旧 token 拒绝、新 token 可用；8-live 容量通过。
+
+### 统一本机服务（openHostService / host-service-cli）
+
+- `openHostService({dataRoot, token, port?, initialSettings?})` 返回 `{deviceId, url, getStatus(), close()}`。启动顺序：先在任何数据打开前完整校验显式 token/port/initialSettings；openHost 取本机 identity（随即关闭）；openHostSettings 读取设置快照；parseRuntimeConfig 解析运行时配置；解析 relay 配置（tokenEnv 变量名合法性并从环境读值，caFile 绝对路径显式读取 CA PEM）；再 openControlServer（同一进程唯一 Runtime，监听成功后调用 resume），监听成功后才 openDeviceLink 连接 relay。同进程一个 Runtime 复用同一个 DeviceLink，绝不 spawn 第二个进程。
+- 默认命令为 `serve`，也支持显式 `serve` 与离线 `settings-get`/`settings-set`。启动仅输出一行 JSONL `{"event":"listening","deviceId":...,"url":...}`——只表示本机回环控制监听成功，不声称 relay 在线/ready。stdin 一行 `shutdown`、SIGINT、SIGTERM 走同一幂等 `close()`：成功 exit 0，失败 stderr 输出 `{"error":{"code":...,"message":...}}` 后 exit 1；stdin EOF 不关服务；关闭不持久 abort Agent。
+- 状态 `getStatus()`/GET `/v1/service`：`{deviceId, phase:'starting'|'running'|'closing'|'closed', control:{url,listening}, relay:<DeviceLinkStatus|null>, activeSettingsRevision, settingsRevision, restartRequired}`。`phase:'running'` 只表示本机服务在运行；**远端在线以 `relay.phase==='online'` 为准**，connecting/backoff/blocked 一律不虚报 online/ready。无 relay 配置时 relay=null；认证 blocked 仍保留本机服务以便改配置。关闭后 getStatus 冻结最终 revision/状态，不再查询已关数据库，也不虚报 listening。`getHostInfo` 旧字段形状保持。
+- 局部启动失败按已打开资源反向关闭；link 异步 connecting/backoff 不算启动失败。保留既有独立 `control-server-cli`/`device-link-cli` 可用，统一服务不删除 legacy 用法。
+
+### 本机设置持久化（host-settings.sqlite）
+
+- `host-settings.sqlite` schema v1 只两张表：`settings_identity`（id=1 + device_id）与 `host_settings`（id=1 + revision + settings_json，规范 JSON ≤512KiB）。schema0 仅空库初始化；未知版本/表清单/缺列/identity 不匹配在写前拒绝，不 reset/drop。默认 revision 1。同步 BEGIN IMMEDIATE CAS 替换：expectedRevision 为正安全整数且精确匹配，递增不溢出，失败回滚保留原完整 JSON。Store.get() 返回重新解析副本，close 后封口。
+- Settings 形状 `{runtime:<严格原始运行时配置>, relay:null|{url,tokenEnv,caFile?}}`，规范 JSON 持久保存配置本身（含 URL、模型目录、预算、CA 路径等）；**仅凭证字段以环境变量名表示**（apiKeyEnv/tokenEnv），值不写入库、不进中继；caFile 是绝对路径引用，读取发生在服务启动时。relay.url 用 parseRelayUrl 校验；tokenEnv 只校验合法 env 名不读值；null 表示停用。`normalizeHostSettings` 纯校验，无 env/文件/网络。
+- `--initial-settings` 用于初始化设置；已有库也接受规范化后相同的 seed（相同 seed 可重开），差异报 REQUEST_CONFLICT 且不覆盖已有设置。
+- HTTP 更新与本机离线 CLI 都可用：GET/PUT `/v1/settings`（Bearer + 拒任何 Origin；PUT 严格 `{expectedRevision,settings}`，无 query）；离线 `host-service-cli settings-get/settings-set` 只需 `--data-root`（settings-set 另需 `--input`），不启动 Runtime/模型/链路、不解析 env——上次服务因 Hindsight/tokenEnv 缺失启动失败后也能读取并修正本机设置，是配置错误救援入口。
+- DTO `LocalSettingsSnapshot = {...Snapshot, activeRevision, restartRequired:revision!==activeRevision}`。更新只持久化、下次重开生效；不热替换 Models/Runtime/链路、不自动重启、不修改已持久会话的 model。未配置 store/callback 时新设置路由返回 CONTROL_UNAVAILABLE 503，不影响旧服务；activeSettingsRevision 固定于本次启动，getStatus 实时读当前持久 revision 对比。
+- 模型目录白名单：`getModelCatalog`/GET `/v1/models` 只返回 `{defaultModel, models:[{modelRef,name,contextWindow,maxTokens,reasoning}]}`，无 baseUrl/header/secret/env 名；同步 getModels 白名单仅 chat，不 refresh/getAuth/网络，不唤醒模型。
+
+### 本机控制面新增路由
+
+| 方法与路径 | 说明 |
+| --- | --- |
+| GET `/v1/models` | 模型目录（被动，不唤醒模型） |
+| GET `/v1/bots/:botId/work-contexts/:scopeKey/live` | 工作上下文实时预览 SSE（事件名仍 bot-live） |
+| GET `/v1/scopes/:scopeKey/history` | scope 消息历史（1MiB 整项前缀响应，零项放不下报 RESPONSE_TOO_LARGE） |
+| GET `/v1/scopes/:scopeKey/messages/:messageKey` | 单条存储消息；缺失 404 MESSAGE_NOT_FOUND |
+| GET `/v1/scopes/:scopeKey/messages/:messageKey/delivery` | 投递状态；缺失 404 DELIVERY_NOT_FOUND |
+| GET/PUT `/v1/settings` | 本机设置快照/更新（可选 store，见上节） |
+| GET `/v1/service` | 统一服务状态 |
+
+scopeKey/messageKey 固定 `~` 前缀再逐段编码，保护 `.`/`..`/Unicode/斜杠；新路径拒绝无关 query；history 严格 limit(1..200)/cursor 对象，拒未知/重复键。
+
+### 远程协议与握手（35 方法）
+
+- relay 协议不变：protocolVersion 1；scopeProtocol 仅 host 侧 1。Host hello controlProtocol 可为 1 或 2，client hello 可省略（legacy）或声明 2（client 声明 1 无效）。ready 可带 controlProtocol:2，省略即 legacy。**v2 client/link 必须要求 ready 回显 2**；旧 client/host 经 v1 方法兼容。
+- 控制方法表 `CONTROL_METHODS` 共 35 个：旧 v1 十方法（getHostInfo/listBots/createBot/getBot/findByRequest/submit/getSubmission/history/abort/contextStatus）+ v2 新增 25 个（getModelCatalog/getWorkContext/syncWorkContext/workHistory/workContextStatus/getWorkActivity/stopWork/resumeWork/listScopeStates/createScope/getScopeState/updateScope/publishUserMessage/listScopeReplicas/scopeHistory/getScopeMessage/getScopeMessageDelivery/memoryStatus/recallMemory/reflectMemory/retainMemory/getMemory/getMemorySource/correctMemory/retryMemory）。memory 方法 wire params 均为 `{botId,input}`；分页/scope 参数提取 limit/cursor。
+- 能力门控：legacy client（省略 controlProtocol）只能 v1 方法；v2 client 可用 v1/v2，但目标 host.controlProtocol 必须 ≥ controlMethodVersion。无 capability 回 CONTROL_UNAVAILABLE/not-sent；离线 OFFLINE/not-sent；不转发不支持的方法、不创建中央邮箱。settings/status 不加入远端表，无通用代理。结果三态（not-sent/unconfirmed/responded）沿用。
+- 阶段澄清：M10–M13 历史验收记录的“远端仅十方法/远程 work 不可用”在该时间点成立；M14 v2 起远端已是固定 35 方法，支持固定 work/memory RPC。relay 仅有界瞬时转发业务，不持久保存业务正文/工作上下文/模型与 Hindsight API 凭证，也不运行推理；中心仅持久保存设备登记与认证校验信息（设备 token 哈希/credentialVersion），设备认证校验数据不与模型/Hindsight 业务凭证混同。无通用代理、中心变更邮箱、自动重放或 E2E 作者签名/加密声明。
+- 设备目录：`devices-list` 是中继自有帧，绝不作为 Host 方法转发；registry 内部 `listActive` 只返回既有 RelayDevice DTO。remote `listDevices`/`devices-list` wire 投影仅四字段白名单 `{deviceId, online, controlProtocol:0|1|2, scopeProtocol:0|1}`（最多 200 条升序，keyset cursor `{afterDeviceId}`），online 仅有效 Host 连接，离线能力全 0，client socket 不算 Host online；无 token/hash/credentialVersion/时间戳。注册/轮换/撤销仍是本地 `relay-registry-cli` 特权动作，中心不新增自助注册端点。
+
+### 远端实时预览（remote live）
+
+- 订阅目标精确为 `{kind:'primary',botId}` 或 `{kind:'work',botId,scopeId}`；work scopeId 恒非空，conversationId 可 null（未绑定）后一次性转为公开 UUID，不可回退/更换；primary 不带 scopeId 且 conversationId 恒非空。
+- 帧为**完整快照**：`{type:'snapshot',botId,conversationId,sequence,state,scopeId?}`；state 精确复用投影 8 键（history/historyTruncated/lastEntryId/generation/tools/toolsTruncated/busy/queuedCount），每帧 ≤1MiB，不做枚举假设；work 只发完整快照（无 update）。取消/断流只结束观察，不执行 Agent abort，不自动重连/重放。
+- 容量与打开：有界路由 8/client、8/host、128 总槽位；opening 期限 20s（首合法 snapshot 后移除），不是持续观察 lifetime；sequence 严格递增（第一帧允许 0）；正常结束 end 帧理由限 stopped/cancelled/session_closed/retired/listener_error/session_failed，不含 error；error 结束是单独异常（带固定 CONTROL_ERROR_CODES 码）。客户端反压不能无界排队或静默丢必要结束。验收实测见上节“实时预览实测”。
+- 本机控制面回环 HTTP 继续拒任何 Origin；浏览器/WebView 需要 native fetch 适配器（不发送 Origin）。
+
+### 客户端待发送与对账（pending client / pending-cli）
+
+- `openPendingClient({dataRoot,deviceId,call})` 同步构造；dataRoot 是客户端自己的绝对状态目录（非 Host），deviceId 显式本机身份；call(targetDeviceId,method,params,{signal}) 是注入的固定操作传输，不存凭证。
+- `client-pending.sqlite` schema v1：identity + pending 行（唯一规范化 target/业务 key + 正文指纹）；专用 `pending-owner.sqlite` 独占生命周期 BEGIN IMMEDIATE lease（沿用 runtime-owner 模式），防两个客户端 writer/恢复竞争。不支持/损坏/异设备数据拒绝，不 reset/drop；重开取得独占锁后，遗留 sending 行转为 unconfirmed；open/list/get/enqueue 无网络（reconcile 属显式只读 RPC，见下）。
+- enqueue 幂等按 targetDeviceId+kind+(botId/scopeId)+(requestId/messageId)；同规范化 payload 返回当前行，不同 text/replyTo 冲突。调用方用唯一业务 request/message ID per intent；本地行 id 随机 UUID。持久化在变更派发前；本地写失败向上抛，绝不改写为远端拒绝；崩溃后仍可对账。
+- states：pending/sending/unconfirmed/accepted/rejected。list 默认 20（1..200），可选 state 精确枚举，keyset cursor `{deviceId,state,afterId}`。
+- call 只用 submit/getSubmission/publishUserMessage/getScopeMessage；primary submit 扁平 `{botId,requestId,text}`，查询 `{botId,requestId}`；room publish `{scopeId,input:{messageId,text,replyTo}}`，查询 `{scopeId,messageId}`。无 wait/abort/任意队列。
+- **无自动投递/重放**：open/重连/list/后台定时器不发请求，send 是显式用户动作；reconcile 只发起只读查询 RPC，不派发变更、不触发模型。已 accepted 的 send 直接返回保存记录，不再发起另一次变更（accepted 重复 send 不连 relay 传输）。并发重复 send 在首次受理后不得发重复请求。
+- unconfirmed 显式 send 先只读 reconcile；匹配到回执标 accepted，缺失 SUBMISSION_NOT_FOUND/MESSAGE_NOT_FOUND 保留 unconfirmed，随后该次显式 send 可重试同一冻结业务 ID/payload。失败/不支持的对账不触发变更。reconcile 只读：primary 匹配 botId/requestId 与有效回执状态；room 匹配 sourceDeviceId===targetDeviceId、scopeId/messageId、author.kind==='user'、category==='public'、text/replyTo；矛盾 → REQUEST_CONFLICT/rejected，绝不静默替换 payload。**accepted 是 Host 受理，不是模型完成或 peer ACK**。
+- 变更错误映射：明确 not-sent → pending；unconfirmed → unconfirmed；仅确定校验/归属/冲突码（INVALID_ARGUMENT/INVALID_CWD/REQUEST_CONFLICT/BOT_NOT_FOUND/SCOPE_NOT_FOUND/SCOPE_FORBIDDEN/MODEL_REQUIRED/MODEL_NOT_FOUND）且 responded 或本地 4xx → rejected；NETWORK/BAD_RESPONSE/INTERNAL/STORE_FAILED/RESPONSE_TOO_LARGE 及歧义失败即使服务端已回 → unconfirmed。lastError 只用稳定码，无自由文本 message/stack。
+- close 封口 enqueue/send/reconcile，中止观察传输请求，join 已受理 inflight 持久化，关闭库并释放 owner；不取消目标 Agent。调用方取消在派发前留 pending，派发后除非确认 not-sent 否则 unconfirmed。sourceDeviceId 与真实作者/role 分离：room 对账校验来源与正文；callId 只是传输关联，不是业务幂等键。
+
+### CLI 示例（不含真实凭证）
+
+```bash
+# 示意语法：取值按需设置为 shell 变量（DATA_ROOT、BOT_ID、SCOPE_ID、SOURCE_DEVICE_ID、
+# TARGET_DEVICE_ID、RELAY_URL、CLIENT_STATE、CLIENT_DEVICE_ID、RECORD_ID）；[ ] 表示可选参数，
+# 复制时按需取舍。
+
+# 统一本机服务（默认 serve；--initial-settings 用于初始化，已有库相同 seed 可重开）
+node host-core/host-service-cli.js --data-root "$DATA_ROOT" --token-env CONTROL_TOKEN \
+  [--initial-settings initial-settings.json] [--port 8787]
+# 离线设置读取/修复（不启动 Runtime/模型/链路）
+node host-core/host-service-cli.js settings-get --data-root "$DATA_ROOT"
+node host-core/host-service-cli.js settings-set --data-root "$DATA_ROOT" --input settings-update.json
+# settings-update.json 完整合法内容示例：
+# {
+#   "expectedRevision": 1,
+#   "settings": {
+#     "runtime": { "providers": [] },
+#     "relay": {
+#       "url": "wss://relay.example/v1/link",
+#       "tokenEnv": "RELAY_TOKEN",
+#       "caFile": "/path/to/ca.pem"
+#     }
+#   }
+# }
+
+# 本机控制命令（新增命令；仍要求 --url/--token-env）
+node host-core/control-cli.js models --url http://127.0.0.1:8787 --token-env CONTROL_TOKEN
+node host-core/control-cli.js service-status --url http://127.0.0.1:8787 --token-env CONTROL_TOKEN
+node host-core/control-cli.js settings-get --url http://127.0.0.1:8787 --token-env CONTROL_TOKEN
+node host-core/control-cli.js settings-set --url http://127.0.0.1:8787 --token-env CONTROL_TOKEN --input settings-update.json
+node host-core/control-cli.js work-live --url http://127.0.0.1:8787 --token-env CONTROL_TOKEN --bot-id "$BOT_ID" --scope-id "$SCOPE_ID"
+node host-core/control-cli.js scope-history --url http://127.0.0.1:8787 --token-env CONTROL_TOKEN --scope-id "$SCOPE_ID" --limit 50
+node host-core/control-cli.js scope-message --url http://127.0.0.1:8787 --token-env CONTROL_TOKEN --scope-id "$SCOPE_ID" --message-id m-1
+node host-core/control-cli.js scope-delivery --url http://127.0.0.1:8787 --token-env CONTROL_TOKEN --scope-id "$SCOPE_ID" --message-id m-1
+
+# 远端控制（35 方法 + listDevices/live）——--input 一律指向文件，不用 inline JSON
+node host-core/remote-control-cli.js listBots --device-id "$SOURCE_DEVICE_ID" --target-device-id "$TARGET_DEVICE_ID" \
+  --url "$RELAY_URL" --token-env REMOTE_CONTROL_TOKEN [--input control-input.json] [--ca /path/to/ca.pem]
+node host-core/remote-control-cli.js listDevices --device-id "$SOURCE_DEVICE_ID" \
+  --url "$RELAY_URL" --token-env REMOTE_CONTROL_TOKEN [--input devices-input.json]
+node host-core/remote-control-cli.js live --device-id "$SOURCE_DEVICE_ID" --target-device-id "$TARGET_DEVICE_ID" \
+  --url "$RELAY_URL" --token-env REMOTE_CONTROL_TOKEN --input live-work.json
+# devices-input.json 完整合法内容示例：
+# { "limit": 50 }
+# live-work.json 完整合法内容示例（把 botId/scopeId 替换为实际值）：
+# {
+#   "kind": "work",
+#   "botId": "b-xxxx",
+#   "scopeId": "room-1"
+# }
+
+# 客户端待发送（--data-root 是客户端状态目录，非 Host；--input 同理指向文件）
+node host-core/pending-cli.js enqueue --data-root "$CLIENT_STATE" --device-id "$CLIENT_DEVICE_ID" --input enqueue.json
+node host-core/pending-cli.js list --data-root "$CLIENT_STATE" --device-id "$CLIENT_DEVICE_ID" --state pending --limit 20
+node host-core/pending-cli.js get --data-root "$CLIENT_STATE" --device-id "$CLIENT_DEVICE_ID" --id "$RECORD_ID"
+# send/reconcile 必须且只能指定一种传输：
+node host-core/pending-cli.js send --data-root "$CLIENT_STATE" --device-id "$CLIENT_DEVICE_ID" --id "$RECORD_ID" \
+  --local-url http://127.0.0.1:8787 --token-env CONTROL_TOKEN
+node host-core/pending-cli.js reconcile --data-root "$CLIENT_STATE" --device-id "$CLIENT_DEVICE_ID" --id "$RECORD_ID" \
+  --url "$RELAY_URL" --token-env RELAY_TOKEN [--ca /path/to/ca.pem]
+```
+
+### 限制与未实测边界
+
+- 未实测：物理 WAN/多机、Linux/Android/arm64、Tauri/TUI 与 native-fetch UI 集成。
+- 真实 Hindsight 互操作/语义质量与真实外部付费模型行为未验收。
+- 全局 128-live/256 连接饱和与持续慢读/反压压力未验收。
+- 穷举直接 JS AbortSignal/iterator.return/close 与跨代延迟 teardown 交错未做。
+- 真实交互式 Windows/Linux 控制台 SIGINT/SIGTERM 矩阵未穷尽。
+- 类型检查：skipLibCheck 通过；完整检查仍有既有 genai 声明缺 `@modelcontextprotocol/sdk/client/index.js`（TS2307），不宣称全量第三方类型检查通过。
+- 统一长驻服务不是操作系统服务安装器，也不保证始终在线；Android/Tauri/TUI、迁移与既有原生兼容属于后续模块。
+- TLS+认证通道 peer 不等于原始作者的端到端签名/加密；relay 仅有界瞬时转发业务，不持久保存业务正文/工作上下文/模型与 Hindsight API 凭证或运行推理；中心仅持久保存设备登记与认证校验信息（设备 token 哈希/credentialVersion）。模块 13 的记忆接线与限制保留，不改路线 M15–M20。

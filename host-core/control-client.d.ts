@@ -38,7 +38,15 @@ import type {
   MemoryCorrectionInput,
   MemoryCorrectionReceipt,
   MemoryRetryInput,
-  MemoryReceipt
+  MemoryReceipt,
+  MessageCursor,
+  MessageHistoryPage,
+  MessageDeliveryStatus,
+  ModelCatalog,
+  LocalSettingsSnapshot,
+  SettingsUpdate,
+  HostServiceStatus,
+  WorkLiveFrame
 } from './index.js';
 
 export class ControlApiError extends Error {
@@ -82,6 +90,11 @@ export interface ReplicaListClientOptions extends ReplicaListOptions {
   signal?: AbortSignal;
 }
 
+export interface ScopeHistoryClientOptions extends ControlClientCallOptions {
+  limit?: number;
+  cursor?: MessageCursor | null;
+}
+
 export interface ControlClient {
   getHostInfo(options?: ControlClientCallOptions): Promise<ControlHostInfo>;
   listBots(options?: ControlClientCallOptions): Promise<BotRecord[]>;
@@ -97,13 +110,13 @@ export interface ControlClient {
   syncWorkContext(botId: string, scopeId: string, input?: WorkSyncOptions, options?: ControlClientCallOptions): Promise<WorkSyncResult>;
   workHistory(botId: string, scopeId: string, options?: WorkHistoryClientOptions): Promise<WorkHistoryPage>;
   workContextStatus(botId: string, scopeId: string, options?: ControlClientCallOptions): Promise<WorkContextStatus>;
-  /** Local-only passive query; an authorized unbound scope returns status:'unbound'. */
+  /** Passive query; an authorized unbound scope returns status:'unbound'. */
   getWorkActivity(botId: string, scopeId: string, options?: ControlClientCallOptions): Promise<WorkActivity>;
-  /** Local-only persistent stop for this work context; does not affect primary/other scopes. */
+  /** Persistent stop for this work context; does not affect primary/other scopes. */
   stopWork(botId: string, scopeId: string, options?: ControlClientCallOptions): Promise<WorkActivity>;
-  /** Local-only explicit resume for a current member; posts {}, not a global Runtime.resume(). */
+  /** Explicit resume for a current member; posts {}, not a global Runtime.resume(). */
   resumeWork(botId: string, scopeId: string, options?: ControlClientCallOptions): Promise<WorkActivity>;
-  /* Module 12: six local-only scope methods; the fixed 10 remote control methods stay unchanged. */
+  /* Module 12: six managed-scope methods; also exposed via the module 14 remote v2 table. */
   listScopeStates(options?: ScopeListClientOptions): Promise<ScopeListPage>;
   createScope(input: ScopeCreateInput, options?: ControlClientCallOptions): Promise<ScopeInfo>;
   /** Latest state; a missing scope rejects with ControlApiError (404 SCOPE_NOT_FOUND), never null success. */
@@ -112,7 +125,7 @@ export interface ControlClient {
   /** Room-public user message ledger receipt; not delivery/inference completion. */
   publishUserMessage(scopeId: string, input: UserMessageInput, options?: ControlClientCallOptions): Promise<StoredMessage>;
   listScopeReplicas(scopeId: string, options?: ReplicaListClientOptions): Promise<ReplicaListPage>;
-  /* Module 13: eight local-only Hindsight memory methods. */
+  /* Module 13: eight Hindsight memory methods; also exposed via the module 14 remote v2 table. */
   memoryStatus(botId: string, input?: MemoryStatusInput, options?: ControlClientCallOptions): Promise<MemoryStatus>;
   recallMemory(botId: string, input: MemoryQueryInput, options?: ControlClientCallOptions): Promise<MemoryRecallResult>;
   reflectMemory(botId: string, input: MemoryQueryInput, options?: ControlClientCallOptions): Promise<MemoryReflectResult>;
@@ -123,6 +136,16 @@ export interface ControlClient {
   retryMemory(botId: string, input: MemoryRetryInput, options?: ControlClientCallOptions): Promise<MemoryReceipt>;
   /** Consume the authenticated live SSE stream for a bot; ends on an end frame, break/return, or signal abort. */
   live(botId: string, options?: LiveClientOptions): AsyncIterable<BotLiveFrame>;
+  /* Module 14: model catalog, scope message queries, settings and service status. */
+  getModelCatalog(options?: ControlClientCallOptions): Promise<ModelCatalog>;
+  scopeHistory(scopeId: string, options?: ScopeHistoryClientOptions): Promise<MessageHistoryPage>;
+  getScopeMessage(scopeId: string, messageId: string, options?: ControlClientCallOptions): Promise<StoredMessage>;
+  getScopeMessageDelivery(scopeId: string, messageId: string, options?: ControlClientCallOptions): Promise<MessageDeliveryStatus>;
+  /** Work-context live SSE; full snapshots plus the transport end frame. */
+  workLive(botId: string, scopeId: string, options?: LiveClientOptions): AsyncIterable<WorkLiveFrame>;
+  getLocalSettings(options?: ControlClientCallOptions): Promise<LocalSettingsSnapshot>;
+  replaceLocalSettings(input: SettingsUpdate, options?: ControlClientCallOptions): Promise<LocalSettingsSnapshot>;
+  getServiceStatus(options?: ControlClientCallOptions): Promise<HostServiceStatus>;
 }
 
 export function createControlClient(options: ControlClientOptions): ControlClient;

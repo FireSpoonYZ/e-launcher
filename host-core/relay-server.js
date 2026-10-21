@@ -32,6 +32,13 @@ import {
   CONTROL_MAX_HOST_CALLS,
   CONTROL_MAX_PENDING
 } from './relay-control.js';
+import {
+  openLiveRoutes,
+  LIVE_MAX_CLIENT_SUBSCRIPTIONS,
+  LIVE_MAX_HOST_SUBSCRIPTIONS,
+  LIVE_MAX_SUBSCRIPTIONS
+} from './relay-live.js';
+import { controlMethodVersion } from './remote-control-protocol.js';
 
 const DEFAULT_PORT = 8790;
 const DEFAULT_LISTEN_HOST = '127.0.0.1';
@@ -155,6 +162,7 @@ export async function openRelayServer(options = {}) {
   const allConns = new Set();  // every accepted WS, authenticated or not
   const upgradeSockets = new Set();
   const controlRoutes = openControlRoutes(); // bounded control-call correlation
+  const liveRoutes = openLiveRoutes(); // bounded live-observation correlation
   let closed = false;
 
   function connCleanup(conn) {
@@ -162,10 +170,12 @@ export async function openRelayServer(options = {}) {
     if (conn.deviceId !== null && deviceMap.get(conn.deviceId) === conn) {
       deviceMap.delete(conn.deviceId);
     }
-    // A leaving client abandons its pending calls (best-effort host cancel);
-    // a leaving host fails its pending calls as unconfirmed.
+    // A leaving client abandons its pending calls and live watches (best-effort
+    // host cancel); a leaving host fails its pending calls and live watches.
     cancelClientControlRoutes(conn);
     failHostControlRoutes(conn);
+    cancelClientLiveRoutes(conn);
+    failHostLiveRoutes(conn);
   }
 
   function closeWith(conn, code) {
@@ -435,6 +445,18 @@ export async function openRelayServer(options = {}) {
     if (controlRoutes.findByClientCall(conn, frame.callId)) {
       return closeWith(conn, RELAY_CLOSE.BAD_FRAME);
     }
+    let methodVersion;
+    try {
+      methodVersion = controlMethodVersion(frame.method);
+    } catch {
+      return closeWith(conn, RELAY_CLOSE.BAD_FRAME);
+    }
+    // Legacy clients (no controlProtocol) may still call v1 methods; a method
+    // additionally requires each peer to declare controlProtocol >= its version.
+    const clientCap = conn.controlProtocol === 2 ? 2 : 1;
+    if (clientCap < methodVersion) {
+      return sendControlFailure(conn, frame.callId, frame.targetDeviceId, 'CONTROL_UNAVAILABLE', 'not-sent');
+    }
     if (
       controlRoutes.size() >= CONTROL_MAX_PENDING ||
       controlRoutes.countClient(conn) >= CONTROL_MAX_CLIENT_CALLS
@@ -445,7 +467,7 @@ export async function openRelayServer(options = {}) {
     if (!peer || !peerUsable(peer)) {
       return sendControlFailure(conn, frame.callId, frame.targetDeviceId, 'OFFLINE', 'not-sent');
     }
-    if (peer.controlProtocol !== 1) {
+    if (peer.controlProtocol < methodVersion) {
       return sendControlFailure(conn, frame.callId, frame.targetDeviceId, 'CONTROL_UNAVAILABLE', 'not-sent');
     }
     if (controlRoutes.countHost(peer) >= CONTROL_MAX_HOST_CALLS) {
@@ -515,6 +537,180 @@ export async function openRelayServer(options = {}) {
     return true;
   }
 
+  // ---- Module 14 live observation routing ----
+
+  function sendLiveEnd(conn, watchId, targetDeviceId, reason, code) {
+    // No stream frame to a client that is no longer authenticated at the same
+    // credential version; the route is already removed by the caller.
+    if (!peerUsable(conn)) return false;
+    const frame = code === undefined
+      ? { type: 'live-end', watchId, targetDeviceId, reason }
+      : { type: 'live-end', watchId, targetDeviceId, reason, code };
+    if (!writeFrame(conn.ws, frame, noop)) {
+      try { conn.ws.terminate(); } catch { /* socket gone */ }
+      return false;
+    }
+    return true;
+  }
+
+  function sendLiveEndFixed(conn, watchId, targetDeviceId, code) {
+    return sendLiveEnd(conn, watchId, targetDeviceId, 'error', code);
+  }
+
+  function routeLiveOpen(conn, frame) {
+    if (liveRoutes.findByClientWatch(conn, frame.watchId)) {
+      return closeWith(conn, RELAY_CLOSE.BAD_FRAME);
+    }
+    const peer = deviceMap.get(frame.targetDeviceId);
+    if (!peer || !peerUsable(peer) || peer.controlProtocol !== 2) {
+      const code = !peer || !peerUsable(peer) ? 'OFFLINE' : 'CONTROL_UNAVAILABLE';
+      return sendLiveEndFixed(conn, frame.watchId, frame.targetDeviceId, code);
+    }
+    if (
+      liveRoutes.size() >= LIVE_MAX_SUBSCRIPTIONS ||
+      liveRoutes.countClient(conn) >= LIVE_MAX_CLIENT_SUBSCRIPTIONS ||
+      liveRoutes.countHost(peer) >= LIVE_MAX_HOST_SUBSCRIPTIONS
+    ) {
+      return sendLiveEndFixed(conn, frame.watchId, frame.targetDeviceId, 'RPC_BUSY');
+    }
+    const record = liveRoutes.open(conn, frame.watchId, peer, frame.targetDeviceId, frame.target);
+    if (!record) {
+      return sendLiveEndFixed(conn, frame.watchId, frame.targetDeviceId, 'RPC_BUSY');
+    }
+    if (!writeFrame(peer.ws, {
+      type: 'live-request',
+      routeId: record.routeId,
+      fromDeviceId: conn.deviceId,
+      target: record.target
+    }, (err) => {
+      if (err) {
+        try { peer.ws.terminate(); } catch { /* socket gone */ }
+      }
+    })) {
+      liveRoutes.remove(record.routeId);
+      const code = peer.dead || peer.ws.readyState !== WS_OPEN ? 'OFFLINE' : 'BACKPRESSURE';
+      sendLiveEndFixed(conn, frame.watchId, frame.targetDeviceId, code);
+    }
+  }
+
+  function routeLiveCancel(conn, frame) {
+    const record = liveRoutes.findByClientWatch(conn, frame.watchId);
+    if (!record) return; // duplicate/late cancel is harmless
+    liveRoutes.remove(record.routeId);
+    if (peerUsable(record.host)) {
+      writeFrame(record.host.ws, {
+        type: 'live-cancel',
+        routeId: record.routeId
+      }, noop);
+    }
+  }
+
+  function routeLiveFrame(conn, frame) {
+    const record = liveRoutes.findByRoute(frame.routeId);
+    // Only the exact host conn a watch was opened against may feed it; stale,
+    // late, duplicate or wrong-host frames are ignored.
+    if (!record || record.host !== conn) return;
+    if (!peerUsable(record.client)) {
+      liveRoutes.remove(record.routeId);
+      if (peerUsable(record.host)) {
+        writeFrame(record.host.ws, {
+          type: 'live-cancel',
+          routeId: record.routeId
+        }, noop);
+      }
+      return;
+    }
+    const applied = liveRoutes.applyFrame(record, frame.frame);
+    if (!applied.ok) {
+      return closeWith(conn, RELAY_CLOSE.BAD_FRAME);
+    }
+    if (!writeFrame(record.client.ws, {
+      type: 'live-frame',
+      watchId: record.watchId,
+      targetDeviceId: record.targetDeviceId,
+      frame: applied.snapshot
+    }, noop)) {
+      // Backpressured client cannot receive the stream: cancel the host and
+      // terminate rather than queue unboundedly or silently drop frames.
+      liveRoutes.remove(record.routeId);
+      if (peerUsable(record.host)) {
+        writeFrame(record.host.ws, {
+          type: 'live-cancel',
+          routeId: record.routeId
+        }, noop);
+      }
+      try { record.client.ws.terminate(); } catch { /* socket gone */ }
+    }
+  }
+
+  function routeLiveEnd(conn, frame) {
+    const record = liveRoutes.findByRoute(frame.routeId);
+    if (!record || record.host !== conn) return;
+    liveRoutes.remove(record.routeId);
+    sendLiveEnd(record.client, record.watchId, record.targetDeviceId, frame.reason, frame.code);
+  }
+
+  function routeDevicesList(conn, frame) {
+    let page;
+    try {
+      page = registry.listActive({
+        limit: frame.limit === undefined ? 20 : frame.limit,
+        cursor: frame.cursor === undefined ? null : frame.cursor
+      });
+    } catch {
+      return sendDevicesResult(conn, frame.callId, { ok: false, code: 'INTERNAL' });
+    }
+    const items = [];
+    for (const device of page.items) {
+      const host = deviceMap.get(device.deviceId);
+      const online = host !== undefined && peerUsable(host);
+      if (online) {
+        items.push({
+          deviceId: device.deviceId,
+          online: true,
+          controlProtocol: host.controlProtocol,
+          scopeProtocol: host.scopeProtocol
+        });
+      } else {
+        items.push({
+          deviceId: device.deviceId,
+          online: false,
+          controlProtocol: 0,
+          scopeProtocol: 0
+        });
+      }
+    }
+    sendDevicesResult(conn, frame.callId, { ok: true, items, nextCursor: page.nextCursor });
+  }
+
+  function sendDevicesResult(conn, callId, result) {
+    const outbound = result.ok
+      ? { type: 'devices-result', callId, ok: true, items: result.items, nextCursor: result.nextCursor }
+      : { type: 'devices-result', callId, ok: false, code: result.code };
+    if (!writeFrame(conn.ws, outbound, noop)) {
+      try { conn.ws.terminate(); } catch { /* socket gone */ }
+    }
+  }
+
+  function cancelClientLiveRoutes(conn) {
+    for (const record of liveRoutes.listForClient(conn)) {
+      liveRoutes.remove(record.routeId);
+      if (peerUsable(record.host)) {
+        writeFrame(record.host.ws, {
+          type: 'live-cancel',
+          routeId: record.routeId
+        }, noop);
+      }
+    }
+  }
+
+  function failHostLiveRoutes(conn) {
+    for (const record of liveRoutes.listForHost(conn)) {
+      liveRoutes.remove(record.routeId);
+      sendLiveEndFixed(record.client, record.watchId, record.targetDeviceId, 'DISCONNECTED');
+    }
+  }
+
   function cancelClientControlRoutes(conn) {
     for (const record of controlRoutes.listForClient(conn)) {
       controlRoutes.remove(record.routeId);
@@ -559,7 +755,7 @@ export async function openRelayServer(options = {}) {
       conn.version = device.credentialVersion;
       conn.alive = true;
       conn.role = frame.role === 'client' ? 'client' : 'host';
-      conn.controlProtocol = frame.controlProtocol === 1 ? 1 : 0;
+      conn.controlProtocol = frame.controlProtocol === 2 ? 2 : (frame.controlProtocol === 1 ? 1 : 0);
       conn.scopeProtocol = frame.scopeProtocol === 1 ? 1 : 0;
       clearTimeout(conn.helloTimer);
 
@@ -580,6 +776,7 @@ export async function openRelayServer(options = {}) {
       };
       if (conn.role === 'client') ready.role = 'client';
       if (conn.scopeProtocol === 1) ready.scopeProtocol = 1;
+      if (conn.controlProtocol === 2) ready.controlProtocol = 2;
       if (!writeFrame(conn.ws, ready, noop)) {
         closeWith(conn, 1009);
       }
@@ -610,14 +807,24 @@ export async function openRelayServer(options = {}) {
     // place/cancel control calls; hosts only send legacy frames and control
     // results. Role violations close 4403 (REVOKED) without routing.
     if (conn.role === 'client') {
-      if (frame.type !== 'control-call' && frame.type !== 'control-cancel') {
+      if (frame.type === 'control-call' || frame.type === 'control-cancel') {
+        // v1 control: any authenticated client
+      } else if (
+        (frame.type === 'live-open' || frame.type === 'live-cancel' || frame.type === 'devices-list') &&
+        conn.controlProtocol === 2
+      ) {
+        // v2 live client frames
+      } else {
         return closeWith(conn, RELAY_CLOSE.REVOKED);
       }
     } else if (SCOPE_BUSINESS_FRAME_TYPES.has(frame.type)) {
       if (conn.scopeProtocol !== 1) {
         return closeWith(conn, RELAY_CLOSE.REVOKED);
       }
-    } else if (frame.type === 'control-call' || frame.type === 'control-cancel') {
+    } else if (frame.type === 'control-call' || frame.type === 'control-cancel' ||
+               frame.type === 'live-open' || frame.type === 'live-cancel' || frame.type === 'devices-list') {
+      return closeWith(conn, RELAY_CLOSE.REVOKED);
+    } else if ((frame.type === 'live-frame' || frame.type === 'live-end') && conn.controlProtocol !== 2) {
       return closeWith(conn, RELAY_CLOSE.REVOKED);
     }
 
@@ -662,6 +869,16 @@ export async function openRelayServer(options = {}) {
         return routeControlCancel(conn, frame);
       case 'control-result':
         return routeControlResult(conn, frame);
+      case 'live-open':
+        return routeLiveOpen(conn, frame);
+      case 'live-cancel':
+        return routeLiveCancel(conn, frame);
+      case 'devices-list':
+        return routeDevicesList(conn, frame);
+      case 'live-frame':
+        return routeLiveFrame(conn, frame);
+      case 'live-end':
+        return routeLiveEnd(conn, frame);
       default:
         return closeWith(conn, RELAY_CLOSE.BAD_FRAME);
     }
@@ -776,8 +993,9 @@ export async function openRelayServer(options = {}) {
     }
   }, RELAY_HEARTBEAT_MS);
 
-  // Control-call TTL scan (<=1s granularity): expire -> TIMEOUT/unconfirmed,
-  // then best-effort host cancellation.
+  // Shared expiry scan (<=1s granularity): control calls expire ->
+  // TIMEOUT/unconfirmed; live opening watchers that got no valid snapshot
+  // within the deadline expire -> TIMEOUT end + best-effort host cancel.
   const controlTimer = setInterval(() => {
     const now = Date.now();
     for (const record of controlRoutes.expired(now)) {
@@ -789,6 +1007,16 @@ export async function openRelayServer(options = {}) {
           routeId: record.routeId
         }, noop);
       }
+    }
+    for (const record of liveRoutes.expiredOpening(now)) {
+      liveRoutes.remove(record.routeId);
+      if (peerUsable(record.host)) {
+        writeFrame(record.host.ws, {
+          type: 'live-cancel',
+          routeId: record.routeId
+        }, noop);
+      }
+      sendLiveEndFixed(record.client, record.watchId, record.targetDeviceId, 'TIMEOUT');
     }
   }, 1000);
 
@@ -811,6 +1039,7 @@ export async function openRelayServer(options = {}) {
         }
         deviceMap.clear();
         controlRoutes.clear();
+        liveRoutes.clear();
         for (const socket of upgradeSockets) {
           capture(() => socket.destroy());
         }
@@ -864,6 +1093,7 @@ export async function openRelayServer(options = {}) {
     clearInterval(heartbeatTimer);
     clearInterval(controlTimer);
     controlRoutes.clear();
+    liveRoutes.clear();
     for (const conn of allConns) {
       clearTimeout(conn.helloTimer);
       try { conn.ws.terminate(); } catch { /* ignore */ }

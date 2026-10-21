@@ -13,7 +13,7 @@ function isPlainObject(value) {
 }
 
 /** 被动工作上下文：只读取定向账本、追加原文，不提交输入或启动生成。 */
-export function createWorkContextRuntime({ host, harness, manager, context }) {
+export function createWorkContextRuntime({ host, harness, manager, context, onBound }) {
   let log = null;
   let closing = false;
   let closed = false;
@@ -83,8 +83,9 @@ export function createWorkContextRuntime({ host, harness, manager, context }) {
       }
       const { limit } = normalizeHistoryOptions(options);
       const { bot, scope } = await authorize(botId, scopeId);
-      return harness.commit(async (tx) => {
-        const binding = await ensureWorkBinding(tx, host.deviceId, bot, scope);
+      let binding = null;
+      const result = await harness.commit(async (tx) => {
+        binding = await ensureWorkBinding(tx, host.deviceId, bot, scope);
         const state = await tx.doc(WorkContextState, binding.nativeId);
         const pageOptions = { scopeId, limit };
         if (state.lastImportedLocalId > 0) {
@@ -105,6 +106,15 @@ export function createWorkContextRuntime({ host, harness, manager, context }) {
         state.importedCount += imported;
         return { context: toWorkContextRecord(state), imported, hasMore: page.nextCursor !== null };
       }, context);
+      // 提交成功后（事务外）通知 live 附着等待中的 work watch；观察失败只停止受影响
+      // watch，绝不失败/回滚已提交导入。用 Promise.resolve().then 隔离 onBound 的
+      // 同步/异步异常，仅传 {nativeId, conversationId}。
+      if (binding) {
+        void Promise.resolve()
+          .then(() => onBound?.(botId, scopeId, { nativeId: binding.nativeId, conversationId: binding.conversationId }))
+          .catch(() => {});
+      }
+      return result;
     });
   }
 

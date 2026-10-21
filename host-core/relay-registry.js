@@ -124,6 +124,10 @@ export function openRelayRegistry(options) {
     const stmtRevoke = db.prepare(
       'UPDATE relay_devices SET credential_version = ?, updated_at = ?, revoked_at = ? WHERE device_id = ?'
     );
+    // Active-only UTF-8 BINARY keyset page; cursor is {afterDeviceId} or null.
+    const stmtListActive = db.prepare(
+      'SELECT * FROM relay_devices WHERE revoked_at IS NULL AND device_id COLLATE BINARY > ? ORDER BY device_id COLLATE BINARY LIMIT ?'
+    );
 
     const register = (input) => {
       const { deviceId, tokenHash } = normalizeCredentialInput(input, 'register');
@@ -187,6 +191,40 @@ export function openRelayRegistry(options) {
 
     const list = () => stmtList.all().map(toDevice);
 
+    const listActive = (options = {}) => {
+      if (typeof options !== 'object' || options === null || Array.isArray(options)) {
+        throw messageError('INVALID_ARGUMENT', 'listActive options must be an object');
+      }
+      for (const key of Object.keys(options)) {
+        if (key !== 'limit' && key !== 'cursor') {
+          throw messageError('INVALID_ARGUMENT', `listActive has unknown option: ${key}`);
+        }
+      }
+      const limit = options.limit === undefined ? 20 : options.limit;
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 200) {
+        throw messageError('INVALID_ARGUMENT', 'limit must be an integer between 1 and 200');
+      }
+      let after = '';
+      if (options.cursor !== undefined && options.cursor !== null) {
+        if (typeof options.cursor !== 'object' || Array.isArray(options.cursor)) {
+          throw messageError('INVALID_ARGUMENT', 'cursor must be null or an object');
+        }
+        const keys = Object.keys(options.cursor);
+        if (keys.length !== 1 || keys[0] !== 'afterDeviceId') {
+          throw messageError('INVALID_ARGUMENT', 'cursor must contain only afterDeviceId');
+        }
+        assertId(options.cursor.afterDeviceId, 'afterDeviceId');
+        after = options.cursor.afterDeviceId;
+      }
+      const rows = stmtListActive.all(after, limit + 1);
+      const items = rows.slice(0, limit).map(toDevice);
+      let nextCursor = null;
+      if (rows.length > limit) {
+        nextCursor = { afterDeviceId: items[items.length - 1].deviceId };
+      }
+      return { items, nextCursor };
+    };
+
     const authenticate = (deviceId, token) => {
       let hash;
       try {
@@ -214,6 +252,7 @@ export function openRelayRegistry(options) {
       revoke,
       get,
       list,
+      listActive,
       authenticate,
       close,
     };

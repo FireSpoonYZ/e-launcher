@@ -39,19 +39,28 @@ commands:
   memory-source     get a memory source/receipt; requires --bot-id --input
   memory-correct    correct/invalidate a memory fact (admission only); requires --bot-id --input
   memory-retry      retry an outbox operation (admission only); requires --bot-id --input
+  models           print the chat model catalog (no backend request)
+  service-status    print the unified host service status
+  settings-get      print the local host settings snapshot
+  settings-set      replace persisted local host settings (takes effect next startup); requires --input
+  work-live        stream live work frames, one JSON line per frame; requires --bot-id --scope-id
+  scope-history     list scope message history; requires --scope-id [--limit] [--cursor]
+  scope-message     print one stored scope message; requires --scope-id --message-id
+  scope-delivery    print delivery status for one scope message; requires --scope-id --message-id
 
 options:
   --url <url>         host control server URL (required, except --help)
   --token-env <name>  environment variable holding the bearer token (required, except --help)
   --bot-id <id>
   --scope-id <id>     scope (work-*/scope-* commands only)
+  --message-id <id>
   --request-id <id>
   --role <text>
   --cwd <dir>
   --model-ref <value>
   --text <text>
   --input <file>       input JSON file: max 1MiB, UTF-8, a single plain object (never stdin) (scope-create/scope-update/scope-send and memory-* commands)
-  --limit <int>       strict decimal positive integer (history, work-sync, work-history, scope-list, scope-replicas)
+  --limit <int>       strict decimal positive integer (1..200 for scope-history; history, work-sync, work-history, scope-list, scope-replicas)
   --cursor <json>     JSON object cursor (history, work-history, scope-list, scope-replicas)
   -h, --help          show this help
 `;
@@ -61,6 +70,7 @@ const OPTIONS = {
   'token-env': { type: 'string' },
   'bot-id': { type: 'string' },
   'scope-id': { type: 'string' },
+  'message-id': { type: 'string' },
   'request-id': { type: 'string' },
   role: { type: 'string' },
   cwd: { type: 'string' },
@@ -105,18 +115,30 @@ const REQUIRED = {
   'scope-update': ['scope-id', 'input'],
   'scope-send': ['scope-id', 'input'],
   'scope-replicas': ['scope-id'],
+  models: [],
+  'service-status': [],
+  'settings-get': [],
+  'settings-set': ['input'],
+  'work-live': ['bot-id', 'scope-id'],
+  'scope-history': ['scope-id'],
+  'scope-message': ['scope-id', 'message-id'],
+  'scope-delivery': ['scope-id', 'message-id'],
 };
 
 // host/list 不接受资源参数；work-* 只接受各自的必需项及分页项。
-const RESOURCE_OPTIONS = ['bot-id', 'scope-id', 'request-id', 'role', 'cwd', 'model-ref', 'text', 'input', 'limit', 'cursor'];
+const RESOURCE_OPTIONS = ['bot-id', 'scope-id', 'message-id', 'request-id', 'role', 'cwd', 'model-ref', 'text', 'input', 'limit', 'cursor'];
 
 const ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
-function parseLimit(value) {
+function parseLimit(value, max) {
   if (!/^[1-9][0-9]*$/.test(value) || !Number.isSafeInteger(Number(value))) {
     throw invalid('--limit must be a strict decimal positive integer');
   }
-  return Number(value);
+  const limit = Number(value);
+  if (max !== undefined && limit > max) {
+    throw invalid(`--limit must be at most ${max}`);
+  }
+  return limit;
 }
 
 function parseCursor(value) {
@@ -141,6 +163,24 @@ function tokenFromEnv(name) {
     throw invalid(`environment variable ${name} is not set`);
   }
   return token;
+}
+
+// settings-set 输入必须精确 {expectedRevision,settings}：未知/缺失键、非正整数
+// expectedRevision、非对象 settings 均在调用 API 前拒绝，防止解构静默丢弃。
+function validateSettingsPatch(input) {
+  if (typeof input !== 'object' || input === null || Array.isArray(input)) {
+    throw invalid('--input must be a plain object');
+  }
+  const keys = Object.keys(input);
+  if (keys.length !== 2 || !keys.includes('expectedRevision') || !keys.includes('settings')) {
+    throw invalid('--input must contain exactly expectedRevision and settings');
+  }
+  if (!Number.isSafeInteger(input.expectedRevision) || input.expectedRevision <= 0) {
+    throw invalid('expectedRevision must be a positive safe integer');
+  }
+  if (typeof input.settings !== 'object' || input.settings === null || Array.isArray(input.settings)) {
+    throw invalid('settings must be a plain object');
+  }
 }
 
 async function main() {
@@ -179,11 +219,18 @@ async function main() {
   const workCommand = command.startsWith('work-');
   const scopeCommand = command.startsWith('scope-');
   const memoryCommand = command.startsWith('memory-');
-  if (command === 'host' || command === 'list' || workCommand || scopeCommand) {
+  if (command === 'host' || command === 'list' || command === 'models' || command === 'service-status' || command === 'settings-get' || workCommand || scopeCommand) {
     const allowed = [...REQUIRED[command]];
     if (command === 'work-sync' || command === 'work-history') allowed.push('limit');
     if (command === 'work-history') allowed.push('cursor');
-    if (command === 'scope-list' || command === 'scope-replicas') allowed.push('limit', 'cursor');
+    if (command === 'scope-list' || command === 'scope-replicas' || command === 'scope-history') allowed.push('limit', 'cursor');
+    for (const key of RESOURCE_OPTIONS) {
+      if (values[key] !== undefined && !allowed.includes(key)) {
+        throw invalid(`${command} does not take --${key}`);
+      }
+    }
+  } else if (command === 'settings-set') {
+    const allowed = ['input'];
     for (const key of RESOURCE_OPTIONS) {
       if (values[key] !== undefined && !allowed.includes(key)) {
         throw invalid(`${command} does not take --${key}`);
@@ -201,17 +248,23 @@ async function main() {
     if (values['scope-id'] !== undefined) {
       throw invalid(`${command} does not take --scope-id`);
     }
+    if (values['message-id'] !== undefined) {
+      throw invalid(`${command} does not take --message-id`);
+    }
     if (values.input !== undefined) {
       throw invalid(`${command} does not take --input`);
     }
   }
   const pageOptions = {};
-  if (command === 'history' || command === 'work-history' || command === 'work-sync' || command === 'scope-list' || command === 'scope-replicas') {
-    if (values.limit !== undefined) pageOptions.limit = parseLimit(values.limit);
+  if (command === 'history' || command === 'work-history' || command === 'work-sync' || command === 'scope-list' || command === 'scope-replicas' || command === 'scope-history') {
+    if (values.limit !== undefined) {
+      pageOptions.limit = command === 'scope-history' ? parseLimit(values.limit, 200) : parseLimit(values.limit);
+    }
     if (values.cursor !== undefined) pageOptions.cursor = parseCursor(values.cursor);
   }
 
   const input = values.input !== undefined ? readInputObject(values.input) : undefined;
+  if (command === 'settings-set') validateSettingsPatch(input);
 
   const client = createControlClient({ url: values.url, token: tokenFromEnv(values['token-env']) });
 
@@ -315,8 +368,32 @@ async function main() {
     case 'memory-retry':
       result = await client.retryMemory(values['bot-id'], input);
       break;
+    case 'models':
+      result = await client.getModelCatalog();
+      break;
+    case 'service-status':
+      result = await client.getServiceStatus();
+      break;
+    case 'settings-get':
+      result = await client.getLocalSettings();
+      break;
+    case 'settings-set':
+      result = await client.replaceLocalSettings(input);
+      break;
+    case 'scope-history':
+      result = await client.scopeHistory(values['scope-id'], pageOptions);
+      break;
+    case 'scope-message':
+      result = await client.getScopeMessage(values['scope-id'], values['message-id']);
+      break;
+    case 'scope-delivery':
+      result = await client.getScopeMessageDelivery(values['scope-id'], values['message-id']);
+      break;
+    case 'work-live':
+      await streamFrames((signal) => client.workLive(values['bot-id'], values['scope-id'], { signal }));
+      return;
     case 'live':
-      await streamLive(client, values['bot-id']);
+      await streamFrames((signal) => client.live(values['bot-id'], { signal }));
       return;
   }
   process.stdout.write(JSON.stringify(result) + '\n');
@@ -325,8 +402,8 @@ async function main() {
   }
 }
 
-// live 是唯一流式命令：逐帧一行 JSON。SIGINT/SIGTERM/EPIPE 只取消本流并正常退出。
-async function streamLive(client, botId) {
+// live/work-live 共用流式输出：逐帧一行 JSON。SIGINT/SIGTERM/EPIPE 只取消本流并正常退出。
+async function streamFrames(makeIterable) {
   const ac = new AbortController();
   let writeError = null;
   const stop = () => ac.abort();
@@ -338,7 +415,7 @@ async function streamLive(client, botId) {
   process.on('SIGTERM', stop);
   process.stdout.on('error', onStdoutError);
   try {
-    for await (const frame of client.live(botId, { signal: ac.signal })) {
+    for await (const frame of makeIterable(ac.signal)) {
       if (!process.stdout.write(JSON.stringify(frame) + '\n')) {
         // 背压：等待 drain；AbortSignal 保证信号/EPIPE 可打断，不会无限挂起。
         await once(process.stdout, 'drain', { signal: ac.signal });
