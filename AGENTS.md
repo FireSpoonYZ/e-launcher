@@ -86,3 +86,10 @@ exit $LASTEXITCODE
 - 构建与测试的生成文件放在已忽略的 `build/` 目录；可重复运行的验证脚本保留在 `scripts/`。
 - **不要提交 `local.properties`**。需要代理时写在用户级 `~/.gradle/gradle.properties`。
 - **不要提交或重新生成 `debug.keystore`**；缺失时从其他开发机复制。
+
+## Scout 子代理约定
+
+- 本项目的 scout 使用 `inception/mercury-3`，默认配置在 `.pi/agents/scout.md`。
+- 每次启动 scout 必须读取 `.pi/agents/scout-output.schema.json`，将解析后的对象传入调用的 `outputSchema`（单次调用放在 `options` 中，workflow 子项直接指定）。只写提示词不算格式约束。
+- 输出由框架保存到仓库外的任务产物目录，不能让 scout 写 `context.md`、`progress.md` 或修改代码；其工具仅限静态读取与联系父助手。
+- 接收结果时检查真实模型、Schema、精确源码行号、factIds 引用及事实/建议分离；不合格时要求原子代理修正，不直接交给开发 worker。静态盘点不记为运行验收。
