@@ -23,6 +23,9 @@ import { createWorkContextRuntime } from './runtime-work-contexts.js';
 import { createWorkDecisionRuntime } from './runtime-work-decisions.js';
 import { normalizeUserMessage } from './scope-protocol.js';
 import { createCommunicationTools } from './communication-tools.js';
+import { parseHindsightOptions } from './hindsight-client.js';
+import { createRuntimeHindsight } from './runtime-hindsight.js';
+import { createHindsightTools } from './hindsight-tools.js';
 
 const CTX = BACKGROUND_CONTEXT;
 
@@ -45,6 +48,8 @@ function assertNonBlank(value, name) {
 export async function openRuntime(options) {
   // 执行选项先于任何写数据校验：bashPath/toolPaths 类型错误在打开 host 前拒绝。
   const execution = parseExecutionOptions(options);
+  // hindsight 配置在打开 host/任何写入前归一化；未配置返回 null，控制器仍创建为禁用态。
+  const hindsightOptions = parseHindsightOptions(options?.hindsight);
   const host = openHost({ dataRoot: options?.dataRoot });
   const models = options?.models ?? createModels();
   const defaultModel = options?.defaultModel ?? null;
@@ -52,6 +57,7 @@ export async function openRuntime(options) {
   let storage = null;
   let harness = null;
   let workContexts = null;
+  let memory = null;
 
   // 每 conversationId+cwd 一个执行环境；绝不 process.chdir 或默认 process.cwd，缺 cwd 明确报错。
   const envCache = new Map();
@@ -88,6 +94,15 @@ export async function openRuntime(options) {
     defaultModel,
     context: CTX,
   });
+  // 始终创建禁用兼容控制器（config:null 不产生网络/存储/listener）；工具仅配置时注册。
+  memory = createRuntimeHindsight({
+    host,
+    getHarness: () => harness,
+    getWorkContexts: () => workContexts,
+    getWorkActivity: decisions.getWorkActivity,
+    config: hindsightOptions,
+    context: CTX,
+  });
   const registry = createRegistry();
   registry.install(createCodingTools());
   registry.install(defineExtension({
@@ -112,6 +127,12 @@ export async function openRuntime(options) {
       publishWork: decisions.publishWork,
     }),
   }));
+  if (hindsightOptions) {
+    registry.install(defineExtension({
+      name: 'host.hindsight',
+      tools: createHindsightTools(memory),
+    }));
+  }
   registry.install(defineExtension({
     name: 'host.billion-context',
     tools: createContextTools(manager),
@@ -120,8 +141,12 @@ export async function openRuntime(options) {
       async beforeRequest(request, api, context) {
         try {
           await decisions.beforeRequest(request, api, context);
-          const result = await manager.prepare(request, api, context);
-          await decisions.checkBudget(request, api, context);
+          const prepared = await manager.prepare(request, api, context);
+          // BC 消息作为实际首参：合并 request 与 prepared，不发明第 4 参。
+          const requestView = { ...request, ...prepared };
+          const memoryResult = await memory.beforeRequest(requestView, api, context);
+          const result = memoryResult ?? prepared;
+          await decisions.checkBudget(requestView, api, context);
           return result;
         } catch (err) {
           if (!context.abortSignal?.aborted) {
@@ -157,6 +182,10 @@ export async function openRuntime(options) {
     } else if (storage) {
       try { await storage.close(CTX); } catch { /* close 失败不掩盖原错误 */ }
     }
+    if (memory) {
+      try { await memory.quiesce(); } catch { /* quiesce 失败不掩盖原错误 */ }
+      try { await memory.close(); } catch { /* close 失败不掩盖原错误 */ }
+    }
     try { await cleanupEnvs(); } catch { /* open 失败清理不掩盖原错误 */ }
     try { releaseOwner?.(); } catch { /* release 失败不掩盖原错误 */ }
     host.close();
@@ -164,10 +193,10 @@ export async function openRuntime(options) {
   }
   const live = createRuntimeLive({ host, getHarness: () => harness });
   workContexts = createWorkContextRuntime({ host, harness, manager, context: CTX });
-  return createRuntime({ host, harness, models, defaultModel, releaseOwner, manager, cleanupEnvs, live, workContexts, decisions });
+  return createRuntime({ host, harness, models, defaultModel, releaseOwner, manager, cleanupEnvs, live, workContexts, decisions, memory });
 }
 
-function createRuntime({ host, harness, models, defaultModel, releaseOwner, manager, cleanupEnvs, live, workContexts, decisions }) {
+function createRuntime({ host, harness, models, defaultModel, releaseOwner, manager, cleanupEnvs, live, workContexts, decisions, memory }) {
   let closePromise = null;
   let closing = false;
   const close = () => {
@@ -179,7 +208,13 @@ function createRuntime({ host, harness, models, defaultModel, releaseOwner, mana
       // 排空已接纳导入，但共享消息账本须保留到原生工具退出。
       try { await workContexts.quiesce(); } catch (err) { errors.push(err); }
       try { await live.close(); } catch (err) { errors.push(err); }
-      try { await harness.close(CTX); } catch (err) { errors.push(err); }
+      // Seal Durable first so memory cancellation cannot turn shutdown into a persistent task abort.
+      const nativeClose = harness.close(CTX);
+      const memoryQuiesce = memory.quiesce();
+      for (const result of await Promise.allSettled([nativeClose, memoryQuiesce])) {
+        if (result.status === 'rejected') errors.push(result.reason);
+      }
+      try { await memory.close(); } catch (err) { errors.push(err); }
       try { await workContexts.close(); } catch (err) { errors.push(err); }
       try { await cleanupEnvs(); } catch (err) { errors.push(err); }
       try { host.close(); } catch (err) { errors.push(err); }
@@ -196,6 +231,7 @@ function createRuntime({ host, harness, models, defaultModel, releaseOwner, mana
     return workContexts.runMessageOperation(operation);
   };
 
+  // Hindsight 8 方法直接转发（read 方法直传，retain/correct 显式双参包装，内部 actor 不暴露）。
   return {
     async submit(botId, input) {
       assertNonBlank(botId, 'botId');
@@ -313,6 +349,15 @@ function createRuntime({ host, harness, models, defaultModel, releaseOwner, mana
       return { botId, conversationId: bot.primaryConversationId, ...status };
     },
 
+    memoryStatus: (botId, input) => memory.memoryStatus(botId, input),
+    recallMemory: (botId, input) => memory.recallMemory(botId, input),
+    reflectMemory: (botId, input) => memory.reflectMemory(botId, input),
+    retainMemory: (botId, input) => memory.retainMemory(botId, input),
+    getMemory: (botId, input) => memory.getMemory(botId, input),
+    getMemorySource: (botId, input) => memory.getMemorySource(botId, input),
+    correctMemory: (botId, input) => memory.correctMemory(botId, input),
+    retryMemory: (botId, input) => memory.retryMemory(botId, input),
+
     getWorkContext: workContexts.getWorkContext,
     syncWorkContext: workContexts.syncWorkContext,
     workHistory: workContexts.workHistory,
@@ -331,6 +376,7 @@ function createRuntime({ host, harness, models, defaultModel, releaseOwner, mana
     resume() {
       harness.resume();
       decisions.resume();
+      memory.resume();
     },
 
     watch(botId, options) {

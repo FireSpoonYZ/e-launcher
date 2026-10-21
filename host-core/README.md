@@ -1,6 +1,6 @@
 # @e-launcher/host-core
 
-本机 Bot/Host 核心。模块 1 提供 Bot 定义与主私聊身份登记；模块 2 接入 Pi Durable 长期主私聊、历史与执行恢复；模块 3 内嵌 Billion Context；模块 4 接入本机工具（read/write/edit/bash 与 grep/find/ls）；模块 5 接入本机长驻控制 API 与客户端；模块 6 接入 Bot 主私聊直播预览（认证本地 SSE、运行时 watch、客户端与 CLI）；模块 7 接入本机持久消息账本（messages.sqlite：作用域/成员修订、不可变信封、outbox、落地去重 ACK、本地收件/历史/缺口、特权离线 CLI）；模块 8 接入认证设备中继与 Host 消息投递（中心只存设备注册；复用模块 7 outbox，本机进程网络端到端）；模块 9 在认证中继上增加固定 10 个 JSON 方法的远程 Host 控制（独立多客户端角色、Node 客户端与一次性 CLI；父助手已完成本机独立进程 171/171 个端到端检查点验收，范围见下文）；模块 10 已完成群与 Bot DM 的独立工作上下文（显式被动导入、独立 Durable/BC、本机 API/CLI；父助手完成 149/149 个检查点，实测范围与限制见下文）。模块 11 已完成自然群聊决策与 Bot 通信工具（父助手完成 161/161 个端到端检查点，含 18 份数据库完整性/外键检查；限定环境与未实测范围见下文）。模块 12（成员范围管理与历史补齐）已完成父助手限定范围验收：实际运行 122/122 个检查点通过，总完成数 **12/20**。总计划 20 个模块、已完成 12 个。运行时由单 Host 所有者持有，跨进程身份稳定。包正式名为 `@e-launcher/host-core`；当前仓库尚无 workspace/包安装连接，示例直接从仓库根导入本地文件（见下文）。
+本机 Bot/Host 核心。模块 1 提供 Bot 定义与主私聊身份登记；模块 2 接入 Pi Durable 长期主私聊、历史与执行恢复；模块 3 内嵌 Billion Context；模块 4 接入本机工具（read/write/edit/bash 与 grep/find/ls）；模块 5 接入本机长驻控制 API 与客户端；模块 6 接入 Bot 主私聊直播预览（认证本地 SSE、运行时 watch、客户端与 CLI）；模块 7 接入本机持久消息账本（messages.sqlite：作用域/成员修订、不可变信封、outbox、落地去重 ACK、本地收件/历史/缺口、特权离线 CLI）；模块 8 接入认证设备中继与 Host 消息投递（中心只存设备注册；复用模块 7 outbox，本机进程网络端到端）；模块 9 在认证中继上增加固定 10 个 JSON 方法的远程 Host 控制（独立多客户端角色、Node 客户端与一次性 CLI；父助手已完成本机独立进程 171/171 个端到端检查点验收，范围见下文）；模块 10 已完成群与 Bot DM 的独立工作上下文（显式被动导入、独立 Durable/BC、本机 API/CLI；父助手完成 149/149 个检查点，实测范围与限制见下文）。模块 11 已完成自然群聊决策与 Bot 通信工具（父助手完成 161/161 个端到端检查点，含 18 份数据库完整性/外键检查；限定环境与未实测范围见下文）。模块 12（成员范围管理与历史补齐）已完成父助手限定范围验收：实际运行 122/122 个检查点通过，总完成数 **12/20**。模块 13（Hindsight → Pi Durable 可追溯长期记忆）已完成 Host 侧适配及限定范围验收，总完成数 **13/20**。模块 14–20 共 7 个待交付。运行时由单 Host 所有者持有，跨进程身份稳定。包正式名为 `@e-launcher/host-core`；当前仓库尚无 workspace/包安装连接，示例直接从仓库根导入本地文件（见下文）。
 
 整体方向见 [下一代多端 Bot 架构设计](../docs/next-generation-architecture.md)（目标架构，部分已实现），交付计划与完成/剩余模块见 [重构路线图](../docs/refactor-roadmap.md)。
 
@@ -97,7 +97,7 @@ node host-core/cli.js create   --data-root '/path/to/data-root'   --request-id r
 - `cli.js`：CLI 入口。
 - `index.js`：导出 `openHost`、`openRuntime`、`openControlServer`、`openMessageLog`、`openRelayRegistry`、`openRelayServer`、`openDeviceLink`、`openRemoteControl`、`RemoteControlError` 与控制 IO 辅助（`ControlHttpError`、`createControlAuthorizer`、`readControlBody`、`writeControlJson`、`writeControlError`）。
 - `index.d.ts`：登记接口，以及 `Runtime`、`PrimarySubmission`、`HistoryPage`、`OpenRuntimeOptions`（含可选 `bashPath`/`toolPaths`）、模块 6 直播预览类型（`LiveMessage`/`LiveHistoryItem`/`LiveTool`/`LiveGeneration`/`BotLiveState`/`BotLiveChanges`/`BotLiveSnapshot`/`BotLiveUpdate`/`BotLiveDataFrame`/`BotLiveEnd`/`BotLiveFrame`/`BotWatchEnd`/`BotWatch`）、模块 7 消息账本类型（`MessageMember`/`MessageAuthor`/`MessageScope`/`PublishMessageInput`/`MessageEnvelope`/`MessagePeer`/`MessageAck`/`StoredMessage`/`MessageCursor`/`MessagePageOptions`/`MessageOutboxOptions`/`MessageStreamStatus`/`MessageHistoryPage`/`MessageInboxPage`/`MessageOutboxPage`/`MessageDeliveryStatus`/`MessageLog`/`openMessageLog`）、模块 8 中继类型（`RelayDevice`/`RelayRegistry`/`RelayServerStatus`/`RelayServer`/`DeliveryPumpStatus`/`DeviceLinkStatus`/`DeviceLink`/`openRelayRegistry`/`openRelayServer`/`openDeviceLink`，`OpenDeviceLinkOptions.control` 可选）、模块 9 远程控制类型（`RemoteControlOutcome`/`RemoteControlMethodMap`/`OpenRemoteControlOptions`/`RemoteControl`/`RemoteControlError`/`openRemoteControl`）等类型。模块 12 的类型增量（`ScopeCreateInput`/`ScopeUpdateInput`/`ScopeRecord`/`ScopeInfo`/`ScopeAck`/`ScopeListOptions`/`ScopeListPage`/`ScopeOfferOptions`/`ScopeOfferPage`/`ReplicaStream`/`InventoryQuery`/`InventoryPage`/`ReplicaHistoryQuery`/`ReplicaHistoryPage`/`MissingRangeQuery`/`ReplicaListOptions`/`ReplicaListPage`/`UserMessageInput`、MessageLog 新增 17 个门面方法、Runtime 与 ControlClient 各六个方法、`DeviceLinkStatus.scopeDelivery`/`replicaSync`）由模块 12 类型 lane 在 `index.d.ts`/`control-client.d.ts` 补充，随父助手集成。
-- `index.d.ts` 的模块 10 增量：`MessageInboxOptions`、`WorkContextRecord`、`WorkSyncOptions`、`WorkSyncResult`、`WorkHistoryCursor`、`WorkHistoryPage`、`WorkContextStatus` 与 Runtime 的四个工作上下文方法；不新增根 JS 导出。
+- 模块 13 的 Hindsight 配置、target、游标、投递/纠正回执类型和八个 Runtime 记忆方法签名，见 `index.d.ts` 与 `control-client.d.ts`。- `index.d.ts` 的模块 10 增量：`MessageInboxOptions`、`WorkContextRecord`、`WorkSyncOptions`、`WorkSyncResult`、`WorkHistoryCursor`、`WorkHistoryPage`、`WorkContextStatus` 与 Runtime 的四个工作上下文方法；不新增根 JS 导出。
 - `work-context-docs.js` / `work-context-codec.js` / `runtime-work-contexts.js`：模块 10 的内部持久文档、来源事件编码与被动导入引擎，不作为根 API 导出。
 - `index.d.ts` 的模块 11 增量：`MessagePublishGuard`、`MessageInboxItem`、`MessageRepliesPage`、`WorkActivity`；`MessageLog.publish(input, guard?)`、`MessageLog.replies` 和 Runtime 的 `getWorkActivity`/`stopWork`/`resumeWork`。`control-client.d.ts` 为三个本机控制方法复用 `WorkActivity`；不扩展远端方法或根 JS 导出。
 - 模块 11 内部模块：`work-decision-state.js` / `work-decision-codec.js`（持久决策与 Host 处理信号）、`runtime-work-decisions.js`（自动处理）、`bot-identity.js` / `communication-tools.js`（权威身份与通信工具）；不作为根 API 导出。
@@ -998,4 +998,94 @@ node host-core/control-cli.js work-resume --url http://127.0.0.1:8787 \
 
 剩余限制：未验证物理 WAN/Linux/Android/arm64/Tauri/TUI；M7–M11 为选定回归而非全量历史场景重跑；M12 高水位/反压分支未单独饱和测试（沿用 M8 共享路径）；未穷尽并发微观交错；原始作者端到端签名/加密**未实现**，当前信任模型是认证通道+TLS 认证 peer；Mockoon 夹具不代表付费/智能模型验收。
 
-模块 **13–20** 仍待交付，包括模块 13 长期事实记忆、模块 14 远程 work/实时接线及后续跨平台/迁移/外壳/真机集成；远端仍只开放原十方法。不引入中央决策、自动 routine、Session 管理或新的后台任务产品。
+模块 **13** 已完成 Host 侧适配交付。模块 **14–20 共 7 个** 仍待交付：远程 work/实时接线及后续跨平台/迁移/外壳/真机集成；远端仍只开放原十方法。不引入中央决策、自动 routine、Session 管理或新的后台任务产品。
+
+<a id="hindsight-memory"></a>
+
+## 模块 13：可追溯长期记忆（Hindsight → Pi Durable，Host 侧适配交付）
+
+模块 13 为每个 Bot 接入 Hindsight 的长期事实提取、召回与纠正能力，保留来源和适用范围。Host 侧适配已交付，累计完成 **13/20**；运行环境与后端联调范围见本节末尾。
+
+### 版本与外接方式
+
+参考 Pi Hindsight **0.13.0** 的召回、投递和去重策略，以及 REST 客户端 **0.9.2** 的接口定义，独立实现适配器，接入 pi-durable **1.3.0** 与 acp-kernel **0.0.101**。这些是已核实的插件、客户端和 SDK 版本，服务端版本尚待真实后端联调确认。
+
+### 显式服务配置与数据归属
+
+省略 `options.hindsight` 时记忆功能关闭。启用时由 Host 显式提供 `{baseUrl, apiKeyEnv?, sharedMemory?}`：
+
+```json
+{
+  "hindsight": {
+    "baseUrl": "http://127.0.0.1:8888",
+    "apiKeyEnv": "HINDSIGHT_API_KEY",
+    "sharedMemory": false
+  }
+}
+```
+
+`apiKeyEnv` 是环境变量名。Runtime 打开前解析其值，凭证只用于后端请求认证，不写入数据库或通过本机控制 API 返回；修改凭证后需重新打开 Runtime。显式指定的变量必须存在且包含非空、可用于请求头的 ASCII token；省略该字段可使用无认证服务。远端地址要求 HTTPS，HTTP 仅允许回环地址，拒绝 URL 内的凭证、查询串和 fragment。
+
+事实提取与检索由 Hindsight 执行。本机 `hindsight.sqlite` 保存输入关联、持久投递队列、有限的召回缓存、来源和纠正审计，不建立另一套事实检索系统。原始 Durable Entry 和 `messages.sqlite` 历史保持完整。适配器绑定服务 URL 的哈希，拒绝把已有队列改投其他端点。
+
+服务和凭证由各 Host 持有；relay 不接收记忆数据或凭证。不继承当前 Pi 的个人、项目、全局记忆库、HOME 配置或会话文件身份。
+
+### 私有与共享记忆库（bank）
+
+记忆库按 `(deviceId, botId, target)` 确定，target 为 `{kind:'primary'}`、`{kind:'scope',scopeId}` 或 `{kind:'shared'}`。主私聊、各 room 和各 Bot DM 分开。
+
+`sharedMemory` 默认关闭。开启后，仅显式笔记可进入同一 Bot 自己的 shared bank：本机 API/CLI 使用 shared target，模型工具使用 `shared:true`。自动转录不进入 shared bank。模型工具的 Bot、来源 scope 和请求身份由 Host 注入；scope 中的写入、纠正、重试与 reflect 仍检查来源 scope 的成员和停止状态。历史读取沿用已有工作绑定的授权。
+
+### 自动召回与来源
+
+- 请求模型前持久记录输入关联；只在 submission 完成后收集输入、最终回答及冻结的 scope 消息。未回答 submission 不触发自动投递，原始输入仍保留。
+- 自动召回在 BC prepare 后按剩余预算临时加入请求，不写入 Durable 条目或 BC 源。当前明确输入和原始证据优先。
+- 真实来源与模型 role 分开记录。主私聊来源标记为控制调用方，不据 `role:user` 认证人类；scope 来源保留账本的作者、消息 ID、修订、目标和摘要。
+- 显式记忆工具调用及结果属于普通 Durable 工具历史，但不作为自动转录来源。发送的文本先做常见秘密脱敏，再完整分块；脱敏规则不覆盖所有秘密形态。
+
+### 投递与纠正
+
+异步受理后通过 operation 状态确认抽取结果。投递前先查询原 operation；需要重投时沿用冻结 payload、operation ID 和 document ID。失败抽取只慢速查询状态，显式 retry 才请求重试；服务端抽取和 retry 不承诺 exactly-once。
+
+纠正、失效和恢复只修改 Hindsight 派生事实，保留意图、before/after 快照和回执。PATCH 结果不确定时记录 `unconfirmed`，同一请求不再发送 PATCH；明确 HTTP 4xx 拒绝记录 `rejected/responded`。支持纠正 `world` / `experience` 事实，派生 observation 应追溯来源事实。
+
+### 八个本机 API/CLI 与八个模型工具
+
+| Runtime API | 控制 CLI | 模型工具 |
+| --- | --- | --- |
+| `memoryStatus(botId, input?)` | `memory-status` | `hindsight_status` |
+| `recallMemory(botId, input)` | `memory-recall` | `hindsight_recall` |
+| `reflectMemory(botId, input)` | `memory-reflect` | `hindsight_reflect` |
+| `retainMemory(botId, input)` | `memory-retain` | `hindsight_retain` |
+| `getMemory(botId, input)` | `memory-get` | `hindsight_get` |
+| `getMemorySource(botId, input)` | `memory-source` | `hindsight_source` |
+| `correctMemory(botId, input)` | `memory-correct` | `hindsight_correct` |
+| `retryMemory(botId, input)` | `memory-retry` | `hindsight_retry` |
+
+HTTP 状态入口为 GET `/v1/bots/:botId/memory`，其余七个操作为 POST `/v1/bots/:botId/memory/{recall,reflect,retain,get,source,correct,retry}`。retain/correct/retry 返回 202 回执，其他操作返回 200。原远端十方法白名单保持不变，远端记忆与实时接线留给模块 14。
+
+`memoryStatus` 输入为 `{target?,state?,limit?,cursor?}`，state 为 pending/accepted/completed/failed，limit 为 1–200（默认 20）。游标 `{bankId,state,afterOperationId}` 绑定派生记忆库与过滤条件，不赋予跨库权限。计数覆盖整个上下文，state 只过滤分页 jobs；返回 `jobs/nextCursor` 可发现自动投递失败的 operation ID。状态查询不创建记忆库、不发起后端请求，可读取已有库。禁用时计数与 jobs 为 null；配置但未建库时计数为 0、jobs 为 []。
+
+CLI 均要求 `--bot-id`。`memory-status` 可选 `--input`，其余命令必须提供输入 JSON 文件。
+
+### 内部文件与关闭
+
+`hindsight-client.js`、`hindsight-format.js`、`hindsight-protocol.js` 分别负责固定 REST 接口、脱敏/渲染和参数规范化；`hindsight-store.js`、`hindsight-sources.js` 负责持久状态与来源；`hindsight-service.js`、`runtime-hindsight.js`、`hindsight-tools.js` 负责服务、生命周期和模型工具。
+
+关闭时先启动 Durable 的 close，再取消网络请求并等待记忆调用结束，最后关闭记忆库，避免把普通关闭写成持久任务中止。
+
+### 验收状态
+
+**79/79 个检查点通过**。环境为 Windows、Node **26.8.2 / 22.19.0**，实际运行 Durable、BC、HTTP、CLI 和 SQLite；模型与 Hindsight 响应使用隔离 Mockoon 协议夹具。覆盖：
+
+- 八个 API/CLI/模型工具、独立 runtime-cli，禁用与配置边界，Bot/primary/room/DM 隔离、显式 shared 笔记及作者来源。
+- 120 条 scope 消息与两条回答生成 122 个 job；每页 50 条来源收集；58850 字节状态页完整返回；12 个并发主私聊提交全部收集。
+- 脱敏来源完整重建为三个不拆 Unicode 代理对的文本块；转义引号秘密脱敏；51197 字节工具预览保持合法 JSON。
+- BC 实际压缩一个块、节省 6629 token；后续模型请求同时保留压缩摘要与临时召回，BC 摘要未自动投递为长期记忆。预算不足跳过召回，认证失败时自动召回退回无记忆运行。
+- 稳定投递身份、当前状态去重回执、失败抽取与显式重试；纠正审计、HTTP 500/畸形 2xx 的不确定状态、明确拒绝及 pending 审计恢复。
+- 本地快照失败时零 PATCH、阻断模型请求并保留原始输入；未来 schema、缺列、设备与端点错配先拒绝再恢复。
+- 召回期间关闭后保留可恢复任务；Node 22 重开完成原 submission；2 MiB 后端响应上限与后续调用恢复。
+
+公开声明通过 strict NodeNext + `--skipLibCheck`；**16 份 SQLite** 完整性/外键检查通过，**77 个原生任务**全部终态，两个启用记忆的 Host 分别完成 **206 和 4 个投递 job**。**11 次 Host 服务进程退出码均为 0**，夹具进程已清理。
+
+真实 Hindsight 服务部署、API 互通与事实抽取/召回/reflect 质量尚待联调，未访问真实记忆库。本轮未覆盖 Linux、Android、arm64、Tauri/TUI 或物理 WAN；并发提交产生了 12 个不同回答，共用最终回答的运行场景未单独验证。M1–M12 保留原有验收记录，本轮只回归相关路径。

@@ -72,11 +72,12 @@ async function main() {
   }
   const options = { dataRoot: values['data-root'], token };
   if (values.port !== undefined) options.port = parsePort(values.port);
-  const { models, defaultModel, bashPath, toolPaths } = await loadRuntimeConfig(values.config);
+  const { models, defaultModel, bashPath, toolPaths, hindsight } = await loadRuntimeConfig(values.config);
   options.models = models;
   options.defaultModel = defaultModel;
   if (bashPath !== undefined) options.bashPath = bashPath;
   if (toolPaths !== undefined) options.toolPaths = toolPaths;
+  if (hindsight !== undefined) options.hindsight = hindsight;
 
   const server = await openControlServer(options);
 

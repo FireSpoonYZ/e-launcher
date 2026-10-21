@@ -147,6 +147,40 @@ export function createControlClient({ url, token, fetch: fetchImpl = globalThis.
     contextStatus(botId, options) {
       return request('GET', ['v1', 'bots', botId, 'context'], callOptions(options));
     },
+    memoryStatus(botId, input = {}, options) {
+      if (!input || typeof input !== 'object' || Array.isArray(input) ||
+          Object.keys(input).some(key => !['target', 'state', 'limit', 'cursor'].includes(key)) ||
+          (input.limit !== undefined && typeof input.limit !== 'number')) {
+        return Promise.reject(new ControlApiError('invalid memory status input', { code: 'INVALID_ARGUMENT' }));
+      }
+      const query = new URLSearchParams();
+      if (input && input.target !== undefined) query.set('target', JSON.stringify(input.target));
+      if (input && input.state !== undefined) query.set('state', String(input.state));
+      if (input && input.limit !== undefined) query.set('limit', String(input.limit));
+      if (input && input.cursor !== undefined) query.set('cursor', JSON.stringify(input.cursor));
+      return request('GET', ['v1', 'bots', botId, 'memory'], { signal: options && options.signal, query });
+    },
+    recallMemory(botId, input, options) {
+      return request('POST', ['v1', 'bots', botId, 'memory', 'recall'], { ...callOptions(options), body: input });
+    },
+    reflectMemory(botId, input, options) {
+      return request('POST', ['v1', 'bots', botId, 'memory', 'reflect'], { ...callOptions(options), body: input });
+    },
+    retainMemory(botId, input, options) {
+      return request('POST', ['v1', 'bots', botId, 'memory', 'retain'], { ...callOptions(options), body: input });
+    },
+    getMemory(botId, input, options) {
+      return request('POST', ['v1', 'bots', botId, 'memory', 'get'], { ...callOptions(options), body: input });
+    },
+    getMemorySource(botId, input, options) {
+      return request('POST', ['v1', 'bots', botId, 'memory', 'source'], { ...callOptions(options), body: input });
+    },
+    correctMemory(botId, input, options) {
+      return request('POST', ['v1', 'bots', botId, 'memory', 'correct'], { ...callOptions(options), body: input });
+    },
+    retryMemory(botId, input, options) {
+      return request('POST', ['v1', 'bots', botId, 'memory', 'retry'], { ...callOptions(options), body: input });
+    },
     // 固定 ~ 前缀避免 '.'/'..' scope 被 URL 折叠；request 仍逐段 URI 编码。
     getWorkContext(botId, scopeId, options) {
       return request('GET', ['v1', 'bots', botId, 'work-contexts', '~' + scopeId], callOptions(options));

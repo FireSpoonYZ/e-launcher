@@ -3,6 +3,7 @@
 import http from 'node:http';
 import { openHost } from './host.js';
 import { openRuntime } from './runtime.js';
+import { parseHindsightOptions } from './hindsight-client.js';
 import {
   ControlHttpError,
   createControlAuthorizer,
@@ -15,6 +16,8 @@ import { serveBotLive } from './control-live.js';
 const BIND_HOST = '127.0.0.1';
 const DEFAULT_PORT = 8787;
 const PROTOCOL_VERSION = 1;
+const JOB_STATE_RE = /^(pending|accepted|completed|failed)$/;
+const MAX_STATUS_LIMIT = 200;
 
 const routes = [
   { method: 'GET', key: '/v1/host', pattern: /^\/v1\/host\/?$/, params: [], hasBody: false, handler: getHostInfo },
@@ -27,6 +30,14 @@ const routes = [
   { method: 'GET', key: '/v1/bots/:botId/submissions/:requestId', pattern: /^\/v1\/bots\/([^/]+)\/submissions\/([^/]+)\/?$/, params: ['botId', 'requestId'], hasBody: false, handler: getSubmission },
   { method: 'GET', key: '/v1/bots/:botId/history', pattern: /^\/v1\/bots\/([^/]+)\/history\/?$/, params: ['botId'], hasBody: false, handler: history },
   { method: 'POST', key: '/v1/bots/:botId/abort', pattern: /^\/v1\/bots\/([^/]+)\/abort\/?$/, params: ['botId'], hasBody: true, handler: abort },
+  { method: 'GET', key: '/v1/bots/:botId/memory', pattern: /^\/v1\/bots\/([^/]+)\/memory\/?$/, params: ['botId'], hasBody: false, handler: memoryStatus },
+  { method: 'POST', key: '/v1/bots/:botId/memory/recall', pattern: /^\/v1\/bots\/([^/]+)\/memory\/recall\/?$/, params: ['botId'], hasBody: true, handler: memoryRecall },
+  { method: 'POST', key: '/v1/bots/:botId/memory/reflect', pattern: /^\/v1\/bots\/([^/]+)\/memory\/reflect\/?$/, params: ['botId'], hasBody: true, handler: memoryReflect },
+  { method: 'POST', key: '/v1/bots/:botId/memory/retain', pattern: /^\/v1\/bots\/([^/]+)\/memory\/retain\/?$/, params: ['botId'], hasBody: true, handler: memoryRetain },
+  { method: 'POST', key: '/v1/bots/:botId/memory/get', pattern: /^\/v1\/bots\/([^/]+)\/memory\/get\/?$/, params: ['botId'], hasBody: true, handler: memoryGet },
+  { method: 'POST', key: '/v1/bots/:botId/memory/source', pattern: /^\/v1\/bots\/([^/]+)\/memory\/source\/?$/, params: ['botId'], hasBody: true, handler: memorySource },
+  { method: 'POST', key: '/v1/bots/:botId/memory/correct', pattern: /^\/v1\/bots\/([^/]+)\/memory\/correct\/?$/, params: ['botId'], hasBody: true, handler: memoryCorrect },
+  { method: 'POST', key: '/v1/bots/:botId/memory/retry', pattern: /^\/v1\/bots\/([^/]+)\/memory\/retry\/?$/, params: ['botId'], hasBody: true, handler: memoryRetry },
   { method: 'GET', key: '/v1/bots/:botId/context', pattern: /^\/v1\/bots\/([^/]+)\/context\/?$/, params: ['botId'], hasBody: false, handler: contextStatus },
   { method: 'GET', key: '/v1/bots/:botId/work-contexts/:scopeKey', pattern: /^\/v1\/bots\/([^/]+)\/work-contexts\/([^/]+)\/?$/, params: ['botId', 'scopeKey'], hasBody: false, handler: getWorkContext },
   { method: 'POST', key: '/v1/bots/:botId/work-contexts/:scopeKey/sync', pattern: /^\/v1\/bots\/([^/]+)\/work-contexts\/([^/]+)\/sync\/?$/, params: ['botId', 'scopeKey'], hasBody: true, handler: syncWorkContext },
@@ -52,6 +63,10 @@ export async function openControlServer(options) {
   assertPort(port);
   // token 格式由 createControlAuthorizer 校验；在打开任何数据前调用并保留结果。
   const authorize = createControlAuthorizer(token);
+
+  // 先校验 Hindsight 配置（含 apiKeyEnv 解析），再打开本服务自己的 Host；
+  // 仍把原始字段传给 openRuntime，绝不把归一化后的 apiKey 对象送回公共解析器。
+  parseHindsightOptions(runtimeOptions.hindsight);
 
   const host = openHost({ dataRoot: runtimeOptions.dataRoot });
   let runtime;
@@ -225,6 +240,46 @@ async function abort(host, runtime, params, body, req, res) {
   writeControlJson(res, 200, { botId: params.botId });
 }
 
+async function memoryStatus(host, runtime, params, body, req, res) {
+  const input = parseMemoryStatusQuery(new URL(req.url, 'http://' + BIND_HOST).searchParams);
+  writeControlJson(res, 200, await runtime.memoryStatus(params.botId, input));
+}
+
+async function memoryRecall(host, runtime, params, body, req, res) {
+  assertNoQuery(req);
+  writeControlJson(res, 200, await runtime.recallMemory(params.botId, body));
+}
+
+async function memoryReflect(host, runtime, params, body, req, res) {
+  assertNoQuery(req);
+  writeControlJson(res, 200, await runtime.reflectMemory(params.botId, body));
+}
+
+async function memoryRetain(host, runtime, params, body, req, res) {
+  assertNoQuery(req);
+  writeControlJson(res, 202, await runtime.retainMemory(params.botId, body));
+}
+
+async function memoryGet(host, runtime, params, body, req, res) {
+  assertNoQuery(req);
+  writeControlJson(res, 200, await runtime.getMemory(params.botId, body));
+}
+
+async function memorySource(host, runtime, params, body, req, res) {
+  assertNoQuery(req);
+  writeControlJson(res, 200, await runtime.getMemorySource(params.botId, body));
+}
+
+async function memoryCorrect(host, runtime, params, body, req, res) {
+  assertNoQuery(req);
+  writeControlJson(res, 202, await runtime.correctMemory(params.botId, body));
+}
+
+async function memoryRetry(host, runtime, params, body, req, res) {
+  assertNoQuery(req);
+  writeControlJson(res, 202, await runtime.retryMemory(params.botId, body));
+}
+
 async function contextStatus(host, runtime, params, body, req, res) {
   writeControlJson(res, 200, await runtime.contextStatus(params.botId));
 }
@@ -352,6 +407,52 @@ function parseScopeQuery(searchParams, allowed) {
     }
   }
   return options;
+}
+
+// GET memory 状态严格查询解析：只允许 target/state/limit/cursor，每键至多一次，
+// 拒绝未知/重复/畸形值；无任何参数时返回 {}（默认 primary、全部状态、limit20）。
+function parseMemoryStatusQuery(searchParams) {
+  const seen = new Set();
+  const input = {};
+  for (const [key, value] of searchParams) {
+    if (key !== 'target' && key !== 'state' && key !== 'limit' && key !== 'cursor') {
+      throw new ControlHttpError(400, 'INVALID_ARGUMENT', 'unknown query parameter: ' + key);
+    }
+    if (seen.has(key)) {
+      throw new ControlHttpError(400, 'INVALID_ARGUMENT', 'query parameter may appear at most once: ' + key);
+    }
+    seen.add(key);
+    if (key === 'state') {
+      if (!JOB_STATE_RE.test(value)) {
+        throw new ControlHttpError(400, 'INVALID_ARGUMENT', 'state must be pending, accepted, completed, or failed');
+      }
+      input.state = value;
+    } else if (key === 'limit') {
+      if (!/^[1-9]\d*$/.test(value) || Number(value) > MAX_STATUS_LIMIT) {
+        throw new ControlHttpError(400, 'INVALID_ARGUMENT', `limit must be a strict positive integer between 1 and ${MAX_STATUS_LIMIT}`);
+      }
+      input.limit = Number(value);
+    } else {
+      let parsed;
+      try {
+        parsed = JSON.parse(value);
+      } catch {
+        throw new ControlHttpError(400, 'INVALID_ARGUMENT', key + ' must be a JSON object');
+      }
+      if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        throw new ControlHttpError(400, 'INVALID_ARGUMENT', key + ' must be a JSON object');
+      }
+      input[key] = parsed;
+    }
+  }
+  return input;
+}
+
+// memory POST 路由不允许任何查询参数；从严拒绝未知/重复查询字段。
+function assertNoQuery(req) {
+  if (new URL(req.url, 'http://' + BIND_HOST).searchParams.size > 0) {
+    throw new ControlHttpError(400, 'INVALID_ARGUMENT', 'query parameters are not allowed for this route');
+  }
 }
 
 function decodeSegment(segment) {

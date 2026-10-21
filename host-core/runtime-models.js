@@ -2,6 +2,7 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { createModels, createProvider } from '@earendil-works/pi-ai/models';
 import { openAICompletionsApi } from '@earendil-works/pi-ai/api/openai-completions.lazy';
+import { parseHindsightOptions } from './hindsight-client.js';
 
 const DEFAULT_CONTEXT_WINDOW = 32768;
 const DEFAULT_MAX_TOKENS = 1024;
@@ -84,8 +85,9 @@ export function parseModelRef(value) {
 /**
  * Read a user-provided runtime config JSON file and register its providers in a
  * fresh pi-ai Models collection. Only the given file is read; nothing is
- * scanned or written. Returns { models, defaultModel }, where defaultModel is
- * the config value as written (null when omitted).
+ * scanned or written. Returns { models, defaultModel, bashPath, toolPaths, hindsight },
+ * where defaultModel is the config value as written (null when omitted) and hindsight
+ * is the raw config field (undefined when absent), validated before any data is opened.
  */
 export async function loadRuntimeConfig(file) {
   let text;
@@ -122,8 +124,10 @@ export async function loadRuntimeConfig(file) {
     defaultModel = config.defaultModel;
   }
 
+  // hindsight 配置在 CLI 打开任何数据前先校验；原始值回传，归一化在 openRuntime 内完成。
+  parseHindsightOptions(config.hindsight);
   const execution = parseExecutionOptions(config);
-  return { models, defaultModel, bashPath: execution.bashPath, toolPaths: execution.toolPaths };
+  return { models, defaultModel, bashPath: execution.bashPath, toolPaths: execution.toolPaths, hindsight: config.hindsight };
 }
 
 function validateProviders(providers) {

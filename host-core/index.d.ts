@@ -151,6 +151,167 @@ export interface WorkActivity {
   error: { code: string; message: string } | null;
 }
 
+/**
+ * Module 13: Hindsight long-term memory (Pi Durable adapter). Fact storage,
+ * extraction, recall and curation live on the configured Hindsight service;
+ * the local adapter only tracks inputs, outbox, recall cache, provenance and
+ * correction audit. Automatic extraction follows completed inference only;
+ * explicit tool/control notes are durable tool history and never auto-source.
+ */
+
+/** Selected memory bank target; scope requires read authorization via work context. */
+export type MemoryTarget =
+  | { kind: 'primary' }
+  | { kind: 'scope'; scopeId: string }
+  | { kind: 'shared' };
+
+/** Host config; apiKeyEnv names an environment variable, never an inline value. */
+export interface HindsightOptions {
+  baseUrl: string;
+  apiKeyEnv?: string;
+  /** Opt-in shared bank; accepts explicit notes only, never automatic transcripts. */
+  sharedMemory?: boolean;
+}
+
+export type MemoryJobState = 'pending' | 'accepted' | 'completed' | 'failed';
+
+/** Job receipt; never exposes token or raw backend error bodies. */
+export interface MemoryReceipt {
+  operationId: string;
+  documentId: string;
+  botId: string;
+  target: MemoryTarget;
+  bankId: string;
+  state: MemoryJobState;
+  createdAt: string;
+  updatedAt: string;
+  lastErrorCode: string | null;
+}
+
+export interface MemoryRetainReceipt {
+  botId: string;
+  target: MemoryTarget;
+  bankId: string;
+  jobs: MemoryReceipt[];
+}
+
+export type MemoryCorrectionState = 'pending' | 'applied' | 'rejected' | 'unconfirmed';
+export type MemoryCorrectionOutcome = 'not-sent' | 'responded' | 'unconfirmed';
+
+export interface MemoryCorrectionReceipt {
+  requestId: string;
+  botId: string;
+  target: MemoryTarget;
+  bankId: string;
+  memoryId: string;
+  state: MemoryCorrectionState;
+  outcome: MemoryCorrectionOutcome;
+  createdAt: string;
+  updatedAt: string;
+  errorCode: string | null;
+}
+
+export type MemoryRecallOutcome = 'injected' | 'empty' | 'budget' | 'unavailable';
+
+export interface MemoryLastRecall {
+  at: string;
+  outcome: MemoryRecallOutcome;
+}
+
+/** Paged job-list continuation; bound to the derived bank/filter, never selects a target. */
+export interface MemoryCursor {
+  bankId: string;
+  state: MemoryJobState | null;
+  afterOperationId: string;
+}
+
+export interface MemoryStatusInput {
+  target?: MemoryTarget;
+  state?: MemoryJobState;
+  /** 1..200, default 20. */
+  limit?: number;
+  cursor?: MemoryCursor | null;
+}
+
+/**
+ * Memory status. Counts always cover the whole context; only jobs obey the
+ * state filter. jobs/nextCursor are null when disabled (unknown); a configured
+ * empty store returns [] with nextCursor null.
+ */
+export interface MemoryStatus {
+  botId: string;
+  target: MemoryTarget;
+  enabled: boolean;
+  sharedMemory: boolean;
+  bankId: string | null;
+  pending: number | null;
+  accepted: number | null;
+  completed: number | null;
+  failed: number | null;
+  lastErrorCode: string | null;
+  lastRecall: MemoryLastRecall | null;
+  jobs: MemoryReceipt[] | null;
+  nextCursor: MemoryCursor | null;
+}
+
+export interface MemoryQueryInput {
+  target?: MemoryTarget;
+  query: string;
+  maxTokens?: number;
+}
+
+export interface MemoryRetainInput {
+  requestId: string;
+  target?: MemoryTarget;
+  text: string;
+}
+
+export interface MemoryLookupInput {
+  target?: MemoryTarget;
+  memoryId: string;
+}
+
+export interface MemorySourceInput {
+  target?: MemoryTarget;
+  documentId: string;
+}
+
+export interface MemoryCorrectionInput {
+  requestId: string;
+  target?: MemoryTarget;
+  memoryId: string;
+  text?: string;
+  state?: 'valid' | 'invalidated';
+  reason?: string;
+}
+
+export interface MemoryRetryInput {
+  target?: MemoryTarget;
+  operationId: string;
+}
+
+/** Backend recall/reflect/get result; opaque unknown shape, no invented DTO. */
+export interface MemoryBankResult {
+  botId: string;
+  target: MemoryTarget;
+  bankId: string;
+  result: Record<string, unknown>;
+}
+
+export type MemoryRecallResult = MemoryBankResult;
+export type MemoryReflectResult = MemoryBankResult;
+export type MemoryGetResult = MemoryBankResult;
+
+/** Source fetch result; externally created documents may have no local provenance/receipt. */
+export interface MemorySourceResult {
+  botId: string;
+  target: MemoryTarget;
+  bankId: string;
+  document: Record<string, unknown>;
+  source: Record<string, unknown> | null;
+  receipt: MemoryReceipt | null;
+}
+
 export interface OpenRuntimeOptions {
   dataRoot: string;
   models?: Models;
@@ -159,6 +320,8 @@ export interface OpenRuntimeOptions {
   bashPath?: string;
   /** Optional explicit search binaries for grep (rg) and find (fd); existence is checked at use. */
   toolPaths?: { rg?: string; fd?: string };
+  /** Optional Hindsight memory config; absent leaves memory disabled. */
+  hindsight?: HindsightOptions;
 }
 
 export interface Runtime {
@@ -188,6 +351,15 @@ export interface Runtime {
   /** Room-public user message; returns the stored ledger receipt, not a delivery/inference completion. */
   publishUserMessage(scopeId: string, input: UserMessageInput): Promise<StoredMessage>;
   listScopeReplicas(scopeId: string, options?: ReplicaListOptions): Promise<ReplicaListPage>;
+  /** Module 13: eight local-only Hindsight memory methods; hidden from the remote whitelist. */
+  memoryStatus(botId: string, input?: MemoryStatusInput): Promise<MemoryStatus>;
+  recallMemory(botId: string, input: MemoryQueryInput): Promise<MemoryRecallResult>;
+  reflectMemory(botId: string, input: MemoryQueryInput): Promise<MemoryReflectResult>;
+  retainMemory(botId: string, input: MemoryRetainInput): Promise<MemoryRetainReceipt>;
+  getMemory(botId: string, input: MemoryLookupInput): Promise<MemoryGetResult>;
+  getMemorySource(botId: string, input: MemorySourceInput): Promise<MemorySourceResult>;
+  correctMemory(botId: string, input: MemoryCorrectionInput): Promise<MemoryCorrectionReceipt>;
+  retryMemory(botId: string, input: MemoryRetryInput): Promise<MemoryReceipt>;
   watch(botId: string, options?: { signal?: AbortSignal }): Promise<BotWatch>;
   /** Idempotently resume native tasks AND activate automatic room/DM processing; may submit new work. */
   resume(): void;

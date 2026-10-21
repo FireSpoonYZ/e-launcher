@@ -1,6 +1,6 @@
 # 下一代多端 Bot 架构设计
 
-> 状态：目标架构设计，整体尚未实现。[Bot/Host 核心](../host-core/README.md) 已独立实现模块 1 本机登记、模块 2 Durable 长期主私聊、模块 3 内嵌 Billion Context、模块 4 本机工具及模块 5 本机控制面（长期本地 Host 控制 API：基础 HTTP、回环端口、Bearer 令牌认证、拒绝全部 Origin；配套 Node/浏览器兼容客户端）及模块 6 主私聊实时预览（认证本地 SSE：有界快照+整体替换更新、每订阅 sequence 非持久游标，原始历史分页保留；无群消息/中心/Tauri，无轮询或新调度器）；模块 7 已实现本机持久消息账本（作用域/成员修订、不可变信封、outbox、落地去重 ACK、本地收件/历史/缺口、特权离线 CLI；仅 messages.sqlite 本机存储，无网络认证/隧道/中心/推理）；模块 8 已实现认证设备中继与 Host 消息投递（中心只存设备注册，复用模块 7 outbox，本机进程网络端到端已通；跨设备/真机网络验收与完整中心产品尚未完成）；模块 9 已实现认证远程 Host JSON 控制（固定 10 个 JSON 方法、独立多客户端角色、Node 客户端与一次性 CLI；父助手已完成本机独立进程 171/171 个端到端检查点验收，具体范围见下文）；模块 10 已完成群与 Bot DM 的独立被动工作上下文（显式导入、独立 Durable/BC、本机 API/CLI；父助手完成 149/149 个检查点，范围与限制见下文）。模块 11 已完成自然群聊决策与通信工具（父助手完成 161/161 个端到端检查点及 18 份数据库完整性/外键检查；本机 WSS 与脚本化模型服务，范围与限制见下文）。模块 12（成员范围管理与历史补齐）已完成父助手限定范围验收（122/122 检查点，见下节）。总计划 20 个模块、已完成 12 个。整体通信（框架隧道/中心产品）、跨端与外壳（Tauri/TUI）尚未完成。本文约定产品方向、首版设计默认与工程验证边界，不授权删除现有能力。当前安装、构建及运行行为仍以 [README](../README.md) 为准。
+> 状态：目标架构设计，整体尚未实现。[Bot/Host 核心](../host-core/README.md) 已独立实现模块 1 本机登记、模块 2 Durable 长期主私聊、模块 3 内嵌 Billion Context、模块 4 本机工具及模块 5 本机控制面（长期本地 Host 控制 API：基础 HTTP、回环端口、Bearer 令牌认证、拒绝全部 Origin；配套 Node/浏览器兼容客户端）及模块 6 主私聊实时预览（认证本地 SSE：有界快照+整体替换更新、每订阅 sequence 非持久游标，原始历史分页保留；无群消息/中心/Tauri，无轮询或新调度器）；模块 7 已实现本机持久消息账本（作用域/成员修订、不可变信封、outbox、落地去重 ACK、本地收件/历史/缺口、特权离线 CLI；仅 messages.sqlite 本机存储，无网络认证/隧道/中心/推理）；模块 8 已实现认证设备中继与 Host 消息投递（中心只存设备注册，复用模块 7 outbox，本机进程网络端到端已通；跨设备/真机网络验收与完整中心产品尚未完成）；模块 9 已实现认证远程 Host JSON 控制（固定 10 个 JSON 方法、独立多客户端角色、Node 客户端与一次性 CLI；父助手已完成本机独立进程 171/171 个端到端检查点验收，具体范围见下文）；模块 10 已完成群与 Bot DM 的独立被动工作上下文（显式导入、独立 Durable/BC、本机 API/CLI；父助手完成 149/149 个检查点，范围与限制见下文）。模块 11 已完成自然群聊决策与通信工具（父助手完成 161/161 个端到端检查点及 18 份数据库完整性/外键检查；本机 WSS 与脚本化模型服务，范围与限制见下文）。模块 12（成员范围管理与历史补齐）已完成父助手限定范围验收（122/122 检查点，见下节）。模块 13（Hindsight → Pi Durable 长期事实记忆）已完成 Host 侧适配交付（进度 13/20；最终清理/验收与合入归父助手，真实 Hindsight 服务联调未做）。总计划 20 个模块、已完成 13 个、14–20 共 7 个待交付。整体通信（框架隧道/中心产品）、跨端与外壳（Tauri/TUI）尚未完成。本文约定产品方向、首版设计默认与工程验证边界，不授权删除现有能力。当前安装、构建及运行行为仍以 [README](../README.md) 为准。
 
 当前交付计划与完成/剩余模块见 [重构路线图](refactor-roadmap.md)。
 
@@ -110,7 +110,7 @@ Durable 保存代理执行与恢复所需状态；内部 Task 不暴露成独立
 
 Pi Durable 当前为实验性 API；实现时固定 Durable、pi-ai、chord 与 acp-kernel 的依赖版本，状态格式升级应有显式迁移，不能静默重置压缩引用或丢弃旧状态。
 
-记忆自动提取后可查看出处、纠正错误，不逐条要求批准。角色、cwd、能力和允许共享的稳定知识保持连续；私聊事实默认保留原范围，不能把“可供自己推理”混同“可以公开原文”。纠正应更新派生记忆并保留追溯关系，不改写历史。
+记忆自动提取后可查看出处、纠正错误，不逐条要求批准。角色、cwd、能力和允许共享的稳定知识保持连续；私聊事实默认保留原范围，不能把“可供自己推理”混同“可以公开原文”。纠正应更新派生记忆并保留追溯关系，不改写历史。模块 13 将经显式配置的 Hindsight 服务实现该长期记忆（见第 6 节模块 13）：提取只在该服务端，本机只保留适配侧跟踪/出处/纠正审计。
 
 ## 5. 长期对话与自然群聊
 
@@ -143,7 +143,7 @@ Bot DM 使用通知、请求、相关回复的语义，可查历史并允许沉�
 
 未实测跨物理设备/WAN、Linux/Android/arm64、Tauri/TUI、浏览器 native-fetch 适配集成及真实外部付费模型；直接 JS AbortSignal、直接 `Runtime.close` 并发调用/关闭竞态也未实跑；本轮已测 HTTP 断连和进程优雅关闭。全局 128 pending/256 连接负载、中继慢接收者压力及模块 9 既有限制保留。
 
-以上是模块 10 的历史验收记录，不作为模块 11 自然群聊决策/发言/通信工具的验收证据；模块 11 的独立验收见下节。模块 12 成员同步/历史补齐和模块 13 长期事实记忆仍未交付。模块 9 中继远程协议保持固定 10 个方法，远程 work 版本化接线属于模块 14；不增加 Session 产品或 UI。
+以上是模块 10 的历史验收记录，不作为模块 11 自然群聊决策/发言/通信工具的验收证据；模块 11 的独立验收见下节。模块 12 成员同步/历史补齐已完成父助手限定范围验收；模块 13 长期事实记忆已完成 Host 侧适配交付。模块 9 中继远程协议保持固定 10 个方法，远程 work 版本化接线属于模块 14；不增加 Session 产品或 UI。
 
 ### 模块 11：自然群聊决策与通信工具（已完成父助手验收）
 
@@ -195,7 +195,7 @@ Bot DM 使用通知、请求、相关回复的语义，可查历史并允许沉�
 
 **仅本机控制扩展。** Runtime/ControlClient 增加 `getWorkActivity`、`stopWork`、`resumeWork`；本机 HTTP 为 GET `/v1/bots/:botId/work-contexts/:scopeKey/activity`、POST `…/stop`、POST `…/resume`（两个 POST 要求解析后为空对象；零字节 body 沿用 `readControlBody` 约定视作 `{}`，客户端仍发送 JSON `{}`），均返回 WorkActivity。沿用 Bearer/Origin 规则及 scopeKey=`'~'+encodeURIComponent(scopeId)`，解码一次且只剥一个 `~`。客户端 options 仅 signal，取消 HTTP 不撤销已受理操作。CLI 为 `work-activity`/`work-stop`/`work-resume --bot-id --scope-id`（另加原 url/token-env 连接选项），拒绝无关参数。M10 四个本机 work 操作保留；远端仍是 getHostInfo/listBots/createBot/getBot/findByRequest/submit/getSubmission/history/abort/contextStatus 十方法，不增加远端 work 或群/DM live。
 
-完整参数、DTO、使用示例及 `module11-verification.json` 证据位置见 [Host 核心模块 11 说明](../host-core/README.md#模块-11自然群聊决策与-bot-通信工具已完成父助手验收)。模块 **12** 已完成父助手限定范围验收（122/122 检查点，见下节 [模块 12](../host-core/README.md#模块-12成员范围管理与历史补齐已完成父助手验收)）；模块 **13–20** 仍待交付：长期事实记忆、远程 work/实时接线、跨平台/迁移/外壳与真机集成；不新增后台任务产品。
+完整参数、DTO、使用示例及 `module11-verification.json` 证据位置见 [Host 核心模块 11 说明](../host-core/README.md#模块-11自然群聊决策与-bot-通信工具已完成父助手验收)。模块 **12** 已完成父助手限定范围验收（122/122 检查点，见下节 [模块 12](../host-core/README.md#模块-12成员范围管理与历史补齐已完成父助手验收)）；模块 **13** 已完成 Host 侧适配交付，模块 **14–20 共 7 个** 仍待交付：远程 work/实时接线、跨平台/迁移/外壳与真机集成；不新增后台任务产品。
 
 **模块 11 验收范围。** 父助手在 **Windows / Git Bash、Node 26.8.2 / 22.19.0**，使用 pi-durable **1.3.0**、acp-kernel **0.0.101**，完成 **161/161 个检查点，失败 0**。实际 localhost WSS 连接 Host A/B，模型 HTTP/SSE 进程使用脚本化 Mockoon 响应；这是实际运行协议与恢复机制的验收，不是付费模型或智能决策质量验证。
 
@@ -287,6 +287,19 @@ Bot DM 使用通知、请求、相关回复的语义，可查历史并允许沉�
 - **自源恢复**：来自 peer 的本机源历史重建发布指纹（仅补空）并恢复丢失的远端 outbox（保留已 ack），后续本地发布沿用最高序号+1。
 - **scopeProtocol:1 升级与信任**：先升 relay；已协商源向在线未协商旧目标发 scope 帧回 UNSUPPORTED，未协商/旧源发 scope 帧被 REVOKED 关闭；ready 缺能力→UNSUPPORTED_SCOPE_PROTOCOL，真旧 relay 可能以 BAD_FRAME 拒绝扩展 hello；新连接要求协商；认证通道+TLS 信任服务 Host，无原始作者端到端签名/加密声明。
 - **六个本机入口**：GET/POST `/v1/scopes`、GET `/v1/scopes/:scopeKey`、POST `…/members`、POST `…/messages`、GET `…/replicas`（`scopeKey='~'+encodeURIComponent(scopeId)`），配合 ControlClient/CLI 六个方法与 `--input` 文件入口；默认 50/上限 200 分页、控制≈1MiB/同步≈2MiB 预算；用户消息回执与元数据收据都不是投递/推理完成。六个方法仅本机，远端仍固定 10 方法。
+
+### 模块 13：可追溯长期记忆（Hindsight → Pi Durable，Host 侧适配交付）
+
+模块 13 把长期记忆落地为**派生事实**：自动提取的稳定偏好与事实存放在由宿主显式配置的 Hindsight 服务中，可追溯来源、适用范围与纠正，按范围控制共享。已完成 Host 侧适配交付，进度 **13/20**（14–20 共 7 个待交付）。验证环境为真实 Durable/BC/HTTP/CLI/SQLite + 隔离 Mockoon 协议夹具；真实 Hindsight 服务联调未做。
+
+- **版本与外接**：复用 Pi Hindsight **0.13.0** 策略与 REST 客户端 schema **0.9.2**，适配 pi-durable **1.3.0** 生命周期，不直接加载 Pi 扩展；客户端版本不是已验证的服务端版本。
+- **显式服务配置与数据归属**：每 Host 显式配置 `options.hindsight {baseUrl, apiKeyEnv?, sharedMemory?}`（apiKeyEnv 仅为环境变量名）；事实提取与检索由该服务执行；本机 `hindsight.sqlite` 仅作适配侧输入跟踪/outbox/召回缓存/来源出处/纠正审计，不是第二个事实引擎；原始 Native Entry 与消息账本历史保持完整。relay 永不接收/存储记忆或凭证；不继承 Pi 个人/项目/全局 banks、HOME 配置或会话文件身份；URL 绑定固定 endpointHash，防止旧 outbox 静默改投另一端点。
+- **私有与共享**：默认私有记忆库按 `(deviceId, botId, target)` 建立，target 为 primary/scope/shared；`sharedMemory` 默认关闭，启用后仅同一 Bot 经本机 API/CLI 或模型工具提交的显式笔记可进 shared，自动转录永不共享；共享需显式选择，当前作用域身份由控制器注入，former-member 读语义沿用既有工作绑定的授权。
+- **自动召回与显式工具区别**：自动召回是临时性的，在 BC prepare 后、预算检查前注入且仅限预算内，不写回原生条目或 BC 源；显式记忆工具调用/结果走普通 Durable 工具历史，但排除在自动来源抽取之外。
+- **队列与纠正不确定性**：异步受理（accepted）≠ 抽取完成（completed）；稳定 operationId 恢复同一次发布，失败抽取不自动重试，需显式 retry；PATCH 纠正/失效/恢复只改派生记忆并保留审计，unconfirmed 结局不自动回放，仅明确 HTTP 4xx 拒绝判 rejected/responded；仅世界/体验事实可编辑，观测派生。
+- **接口**：八个本机 Runtime 方法/CLI（memory-status/recall/reflect/retain/get/source/correct/retry）与八个模型工具（hindsight_status/recall/reflect/retain/get/source/correct/retry）；`memoryStatus(botId, input?)` 的 input 为 `{target?,state?,limit?,cursor?}`，返回分页 job 回执（jobs/nextCursor），游标绑定派生 bank/过滤、不能选另一记忆库，计数全上下文、列表可按 state 过滤。memoryStatus **不创建记忆库、不发起后端请求，但可读取已有库**。
+- **关闭顺序**：先启动 Durable close，再取消网络请求并等待记忆调用结束，避免正常关闭持久化任务中止，保留可恢复任务。
+- **验收状态（夹具环境）**：Windows、Node 26.8.2/22.19.0，实际运行 Pi Durable 1.3.0 + acp-kernel 0.0.101、本地 HTTP/CLI/SQLite；模型与 Hindsight wire 响应来自隔离 Mockoon 夹具。验证八个本机 API/CLI 与八个模型工具、禁用不建库/配置拒绝、私有与 shared bank 边界、provider 前捕获与仅完成态收集、分页/并发收集、代理对安全重建与 Unicode 预览、BC 压缩与预算内召回、稳定 operationId 与显式重试、纠正审计与 unconfirmed/4xx 映射、schema/设备/端点变更拒绝、关闭保留可恢复任务、2MiB 后端响应拒绝与公开声明严格检查。真实 Hindsight 服务部署/API 互通与语义抽取/召回/reflect 质量**未经联调**。完整开发说明与限制见 [Host 核心模块 13 说明](../host-core/README.md#hindsight-memory)。
 
 ## 7. 外壳与 Android 生命周期
 

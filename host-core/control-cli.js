@@ -4,7 +4,7 @@ import { once } from 'node:events';
 import { createControlClient } from './control-client.js';
 import { invalid, readInputObject } from './cli-input.js';
 
-const USAGE = `usage: node host-core/control-cli.js <host|create|list|get|find-request|send|status|history|abort|context|live|work-get|work-sync|work-history|work-context|work-activity|work-stop|work-resume|scope-list|scope-get|scope-create|scope-update|scope-send|scope-replicas> [options]
+const USAGE = `usage: node host-core/control-cli.js <host|create|list|get|find-request|send|status|history|abort|context|live|work-get|work-sync|work-history|work-context|work-activity|work-stop|work-resume|scope-list|scope-get|scope-create|scope-update|scope-send|scope-replicas|memory-status|memory-recall|memory-reflect|memory-retain|memory-get|memory-source|memory-correct|memory-retry> [options]
 
 commands:
   host             print host info
@@ -31,6 +31,14 @@ commands:
   scope-update     update scope members; requires --scope-id --input
   scope-send       publish a user message; requires --scope-id --input
   scope-replicas   list replica observations; requires --scope-id [--limit] [--cursor]
+  memory-status     show memory status (no backend request or DB creation); requires --bot-id [--input {target?,state?,limit?,cursor?}]
+  memory-recall     recall from the selected memory bank; requires --bot-id --input
+  memory-reflect    reflect on the selected memory bank; requires --bot-id --input
+  memory-retain     retain a note into the selected memory bank (admission only); requires --bot-id --input
+  memory-get        get one memory by id; requires --bot-id --input
+  memory-source     get a memory source/receipt; requires --bot-id --input
+  memory-correct    correct/invalidate a memory fact (admission only); requires --bot-id --input
+  memory-retry      retry an outbox operation (admission only); requires --bot-id --input
 
 options:
   --url <url>         host control server URL (required, except --help)
@@ -42,7 +50,7 @@ options:
   --cwd <dir>
   --model-ref <value>
   --text <text>
-  --input <file>       input JSON file: max 1MiB, UTF-8, a single plain object (never stdin)
+  --input <file>       input JSON file: max 1MiB, UTF-8, a single plain object (never stdin) (scope-create/scope-update/scope-send and memory-* commands)
   --limit <int>       strict decimal positive integer (history, work-sync, work-history, scope-list, scope-replicas)
   --cursor <json>     JSON object cursor (history, work-history, scope-list, scope-replicas)
   -h, --help          show this help
@@ -76,6 +84,14 @@ const REQUIRED = {
   abort: ['bot-id'],
   context: ['bot-id'],
   live: ['bot-id'],
+  'memory-status': ['bot-id'],
+  'memory-recall': ['bot-id', 'input'],
+  'memory-reflect': ['bot-id', 'input'],
+  'memory-retain': ['bot-id', 'input'],
+  'memory-get': ['bot-id', 'input'],
+  'memory-source': ['bot-id', 'input'],
+  'memory-correct': ['bot-id', 'input'],
+  'memory-retry': ['bot-id', 'input'],
   'work-get': ['bot-id', 'scope-id'],
   'work-sync': ['bot-id', 'scope-id'],
   'work-history': ['bot-id', 'scope-id'],
@@ -162,11 +178,20 @@ async function main() {
   }
   const workCommand = command.startsWith('work-');
   const scopeCommand = command.startsWith('scope-');
+  const memoryCommand = command.startsWith('memory-');
   if (command === 'host' || command === 'list' || workCommand || scopeCommand) {
     const allowed = [...REQUIRED[command]];
     if (command === 'work-sync' || command === 'work-history') allowed.push('limit');
     if (command === 'work-history') allowed.push('cursor');
     if (command === 'scope-list' || command === 'scope-replicas') allowed.push('limit', 'cursor');
+    for (const key of RESOURCE_OPTIONS) {
+      if (values[key] !== undefined && !allowed.includes(key)) {
+        throw invalid(`${command} does not take --${key}`);
+      }
+    }
+  } else if (memoryCommand) {
+    const allowed = [...REQUIRED[command]];
+    if (command === 'memory-status') allowed.push('input');
     for (const key of RESOURCE_OPTIONS) {
       if (values[key] !== undefined && !allowed.includes(key)) {
         throw invalid(`${command} does not take --${key}`);
@@ -265,6 +290,30 @@ async function main() {
       break;
     case 'scope-replicas':
       result = await client.listScopeReplicas(values['scope-id'], pageOptions);
+      break;
+    case 'memory-status':
+      result = await client.memoryStatus(values['bot-id'], input ?? {});
+      break;
+    case 'memory-recall':
+      result = await client.recallMemory(values['bot-id'], input);
+      break;
+    case 'memory-reflect':
+      result = await client.reflectMemory(values['bot-id'], input);
+      break;
+    case 'memory-retain':
+      result = await client.retainMemory(values['bot-id'], input);
+      break;
+    case 'memory-get':
+      result = await client.getMemory(values['bot-id'], input);
+      break;
+    case 'memory-source':
+      result = await client.getMemorySource(values['bot-id'], input);
+      break;
+    case 'memory-correct':
+      result = await client.correctMemory(values['bot-id'], input);
+      break;
+    case 'memory-retry':
+      result = await client.retryMemory(values['bot-id'], input);
       break;
     case 'live':
       await streamLive(client, values['bot-id']);

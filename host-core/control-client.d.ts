@@ -23,7 +23,22 @@ import type {
   ReplicaListOptions,
   ReplicaListPage,
   UserMessageInput,
-  StoredMessage
+  StoredMessage,
+  MemoryStatusInput,
+  MemoryStatus,
+  MemoryQueryInput,
+  MemoryRecallResult,
+  MemoryReflectResult,
+  MemoryRetainInput,
+  MemoryRetainReceipt,
+  MemoryLookupInput,
+  MemoryGetResult,
+  MemorySourceInput,
+  MemorySourceResult,
+  MemoryCorrectionInput,
+  MemoryCorrectionReceipt,
+  MemoryRetryInput,
+  MemoryReceipt
 } from './index.js';
 
 export class ControlApiError extends Error {
@@ -97,6 +112,15 @@ export interface ControlClient {
   /** Room-public user message ledger receipt; not delivery/inference completion. */
   publishUserMessage(scopeId: string, input: UserMessageInput, options?: ControlClientCallOptions): Promise<StoredMessage>;
   listScopeReplicas(scopeId: string, options?: ReplicaListClientOptions): Promise<ReplicaListPage>;
+  /* Module 13: eight local-only Hindsight memory methods. */
+  memoryStatus(botId: string, input?: MemoryStatusInput, options?: ControlClientCallOptions): Promise<MemoryStatus>;
+  recallMemory(botId: string, input: MemoryQueryInput, options?: ControlClientCallOptions): Promise<MemoryRecallResult>;
+  reflectMemory(botId: string, input: MemoryQueryInput, options?: ControlClientCallOptions): Promise<MemoryReflectResult>;
+  retainMemory(botId: string, input: MemoryRetainInput, options?: ControlClientCallOptions): Promise<MemoryRetainReceipt>;
+  getMemory(botId: string, input: MemoryLookupInput, options?: ControlClientCallOptions): Promise<MemoryGetResult>;
+  getMemorySource(botId: string, input: MemorySourceInput, options?: ControlClientCallOptions): Promise<MemorySourceResult>;
+  correctMemory(botId: string, input: MemoryCorrectionInput, options?: ControlClientCallOptions): Promise<MemoryCorrectionReceipt>;
+  retryMemory(botId: string, input: MemoryRetryInput, options?: ControlClientCallOptions): Promise<MemoryReceipt>;
   /** Consume the authenticated live SSE stream for a bot; ends on an end frame, break/return, or signal abort. */
   live(botId: string, options?: LiveClientOptions): AsyncIterable<BotLiveFrame>;
 }
