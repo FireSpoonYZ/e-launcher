@@ -87,7 +87,9 @@ exit $LASTEXITCODE
 - **不要提交 `local.properties`**。需要代理时写在用户级 `~/.gradle/gradle.properties`。
 - **不要提交或重新生成 `debug.keystore`**；缺失时从其他开发机复制。
 
-## Scout 子代理约定
+## 子代理约定
+
+- worker 统一使用 `openai/gpt-6-astra:max`，默认配置在 `.pi/agents/worker.md`；只做静态开发，不执行测试、构建、类型检查、语法检查或其他运行验证，最终验收由父助手负责。
 
 - scout 只负责现有代码探索，使用 `inception/mercury-3`，默认配置在 `.pi/agents/scout.md`。开发方案由父助手确定，代码实现交给 worker；父助手负责集成和运行验收。
 - 每次启动 scout 必须读取 `.pi/agents/scout-output.schema.json`，将解析后的对象传入调用的 `outputSchema`（单次调用放在 `options` 中，workflow 子项直接指定）。只写提示词不算格式约束。
