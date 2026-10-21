@@ -1,9 +1,7 @@
 import { parseArgs } from 'node:util';
-import { statSync, openSync, fstatSync, readSync, closeSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { openMessageLog } from './messages.js';
-
-const MAX_INPUT_BYTES = 1024 * 1024;
+import { invalid, readInputObject } from './cli-input.js';
 
 const USAGE = `usage: node host-core/message-cli.js <scope|get-scope|scopes|publish|get|receive|ack|history|inbox|outbox|delivery|stream> [options]
 
@@ -79,10 +77,6 @@ const ALLOWED_EXTRA = {
   outbox: ['scope-id', 'target-device-id', 'limit', 'cursor'],
 };
 
-function invalid(message) {
-  return Object.assign(new Error(message), { code: 'INVALID_ARGUMENT' });
-}
-
 function parseLimit(value) {
   if (!/^[1-9][0-9]*$/.test(value) || !Number.isSafeInteger(Number(value)) || Number(value) > 200) {
     throw invalid('--limit must be a strict decimal positive integer between 1 and 200');
@@ -108,58 +102,6 @@ function parseCursor(value) {
     throw invalid('--cursor must be a JSON object');
   }
   return parsed;
-}
-
-// 先 statSync 拒绝非普通文件（含 device/FIFO，避免阻塞打开），open 后 fstat 取真实大小，
-// 大小超限直接拒绝，缓冲/读取最多 1MiB+1，绝不无界 readFile。
-function readInputObject(file) {
-  let fd;
-  try {
-    const st = statSync(file);
-    if (!st.isFile()) {
-      throw invalid('--input must be a regular file');
-    }
-    fd = openSync(file, 'r');
-    const real = fstatSync(fd);
-    if (!real.isFile()) {
-      throw invalid('--input must be a regular file');
-    }
-    if (real.size > MAX_INPUT_BYTES) {
-      throw invalid('--input file exceeds 1MiB');
-    }
-    const buf = Buffer.allocUnsafe(real.size + 1);
-    const bytesRead = readSync(fd, buf, 0, buf.length, 0);
-    if (bytesRead !== real.size) {
-      throw invalid('--input file changed while reading');
-    }
-    let text;
-    try {
-      text = new TextDecoder('utf-8', { fatal: true }).decode(buf.subarray(0, bytesRead));
-    } catch {
-      throw invalid('--input file is not valid UTF-8');
-    }
-    let parsed;
-    try {
-      parsed = JSON.parse(text);
-    } catch {
-      throw invalid('--input file must contain a single JSON object');
-    }
-    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-      throw invalid('--input file must contain a single JSON object');
-    }
-    return parsed;
-  } catch (err) {
-    if (err?.code === 'INVALID_ARGUMENT') throw err;
-    throw invalid(`cannot read --input file: ${err.message}`);
-  } finally {
-    if (fd !== undefined) {
-      try {
-        closeSync(fd);
-      } catch {
-        // 关闭失败不掩盖原错误。
-      }
-    }
-  }
 }
 
 function pageOptions(values) {

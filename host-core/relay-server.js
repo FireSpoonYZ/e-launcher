@@ -4,6 +4,8 @@
 // carry a role (host default, client explicit); hosts are the sole entry in
 // deviceMap and route legacy delivery frames, while clients of the same
 // registered device place bounded control calls that are correlated by routeId.
+// Module 12 routes managed-scope sync frames between hosts that negotiated
+// scopeProtocol:1; no scope/history state or pending mailbox is kept here.
 // The relay never persists messages and keeps no business state beyond peers.
 
 import { createServer } from 'node:http';
@@ -35,6 +37,16 @@ const DEFAULT_PORT = 8790;
 const DEFAULT_LISTEN_HOST = '127.0.0.1';
 const MAX_CONNECTIONS = 256;
 const WS_OPEN = 1; // WebSocket.OPEN
+
+// Only authenticated host connections that negotiated scopeProtocol:1 may send
+// these fixed business frames; anything else closes REVOKED without routing.
+const SCOPE_BUSINESS_FRAME_TYPES = new Set([
+  'scope-offer',
+  'scope-ack',
+  'scope-reject',
+  'replica-request',
+  'replica-result',
+]);
 
 function invalid(message) {
   return messageError('INVALID_ARGUMENT', message);
@@ -190,6 +202,34 @@ export async function openRelayServer(options = {}) {
     }, noop);
   }
 
+  // ScopeAck derived from a canonical ScopeRecord (same digest as MessageLog).
+  function scopeAckFromRecord(record) {
+    return {
+      scopeId: record.scope.scopeId,
+      revision: record.scope.revision,
+      digest: digest(record)
+    };
+  }
+
+  function sendScopeUnavailable(conn, targetDeviceId, ack, code) {
+    writeFrame(conn.ws, {
+      type: 'scope-unavailable',
+      targetDeviceId,
+      ack,
+      code
+    }, noop);
+  }
+
+  function sendReplicaUnavailable(conn, targetDeviceId, requestId, operation, code) {
+    writeFrame(conn.ws, {
+      type: 'replica-unavailable',
+      targetDeviceId,
+      requestId,
+      operation,
+      code
+    }, noop);
+  }
+
   function routeDeliver(conn, frame) {
     const target = frame.targetDeviceId;
     const peer = deviceMap.get(target);
@@ -243,6 +283,133 @@ export async function openRelayServer(options = {}) {
       digest: frame.digest,
       code: frame.code
     }, (err) => {
+      if (err) {
+        try { peer.ws.terminate(); } catch { /* socket gone */ }
+      }
+    });
+  }
+
+  // ---- Module 12 scope sync routing ----
+
+  function routeScopeOffer(conn, frame) {
+    // Source-authority binding: only the authenticated authority host may offer.
+    if (frame.targetDeviceId === conn.deviceId || frame.record.authorityDeviceId !== conn.deviceId) {
+      return closeWith(conn, RELAY_CLOSE.REVOKED);
+    }
+    const peer = deviceMap.get(frame.targetDeviceId);
+    const ack = scopeAckFromRecord(frame.record);
+    if (!peer || !peerUsable(peer)) {
+      return sendScopeUnavailable(conn, frame.targetDeviceId, ack, 'OFFLINE');
+    }
+    if (peer.scopeProtocol !== 1) {
+      return sendScopeUnavailable(conn, frame.targetDeviceId, ack, 'UNSUPPORTED');
+    }
+    const outbound = { type: 'scope-offer', fromDeviceId: conn.deviceId, record: frame.record };
+    let text;
+    try {
+      text = encodeRelayFrame(outbound);
+    } catch {
+      return sendScopeUnavailable(conn, frame.targetDeviceId, ack, 'BACKPRESSURE');
+    }
+    if (peer.ws.bufferedAmount + Buffer.byteLength(text) > RELAY_HIGH_WATER_BYTES) {
+      return sendScopeUnavailable(conn, frame.targetDeviceId, ack, 'BACKPRESSURE');
+    }
+    try {
+      peer.ws.send(text, (err) => {
+        if (err) {
+          try { peer.ws.terminate(); } catch { /* socket gone */ }
+        }
+      });
+    } catch {
+      sendScopeUnavailable(conn, frame.targetDeviceId, ack, 'BACKPRESSURE');
+    }
+  }
+
+  function routeScopeAck(conn, frame) {
+    if (frame.targetDeviceId === conn.deviceId) {
+      return closeWith(conn, RELAY_CLOSE.REVOKED);
+    }
+    const peer = deviceMap.get(frame.targetDeviceId);
+    // Ephemeral ack: dropped when the target is offline/revoked or lacks scope
+    // capability; the requester retries by timeout.
+    if (!peer || !peerUsable(peer) || peer.scopeProtocol !== 1) return;
+    writeFrame(peer.ws, {
+      type: 'scope-ack',
+      fromDeviceId: conn.deviceId,
+      ack: frame.ack
+    }, (err) => {
+      if (err) {
+        try { peer.ws.terminate(); } catch { /* socket gone */ }
+      }
+    });
+  }
+
+  function routeScopeReject(conn, frame) {
+    if (frame.targetDeviceId === conn.deviceId) {
+      return closeWith(conn, RELAY_CLOSE.REVOKED);
+    }
+    const peer = deviceMap.get(frame.targetDeviceId);
+    if (!peer || !peerUsable(peer) || peer.scopeProtocol !== 1) return; // ephemeral: drop
+    writeFrame(peer.ws, {
+      type: 'scope-reject',
+      fromDeviceId: conn.deviceId,
+      ack: frame.ack,
+      code: frame.code
+    }, (err) => {
+      if (err) {
+        try { peer.ws.terminate(); } catch { /* socket gone */ }
+      }
+    });
+  }
+
+  function routeReplicaRequest(conn, frame) {
+    if (frame.targetDeviceId === conn.deviceId) {
+      return closeWith(conn, RELAY_CLOSE.REVOKED);
+    }
+    const peer = deviceMap.get(frame.targetDeviceId);
+    if (!peer || !peerUsable(peer)) {
+      return sendReplicaUnavailable(conn, frame.targetDeviceId, frame.requestId, frame.operation, 'OFFLINE');
+    }
+    if (peer.scopeProtocol !== 1) {
+      return sendReplicaUnavailable(conn, frame.targetDeviceId, frame.requestId, frame.operation, 'UNSUPPORTED');
+    }
+    const outbound = {
+      type: 'replica-request',
+      fromDeviceId: conn.deviceId,
+      requestId: frame.requestId,
+      operation: frame.operation,
+      query: frame.query
+    };
+    let text;
+    try {
+      text = encodeRelayFrame(outbound);
+    } catch {
+      return sendReplicaUnavailable(conn, frame.targetDeviceId, frame.requestId, frame.operation, 'BACKPRESSURE');
+    }
+    if (peer.ws.bufferedAmount + Buffer.byteLength(text) > RELAY_HIGH_WATER_BYTES) {
+      return sendReplicaUnavailable(conn, frame.targetDeviceId, frame.requestId, frame.operation, 'BACKPRESSURE');
+    }
+    try {
+      peer.ws.send(text, (err) => {
+        if (err) {
+          try { peer.ws.terminate(); } catch { /* socket gone */ }
+        }
+      });
+    } catch {
+      sendReplicaUnavailable(conn, frame.targetDeviceId, frame.requestId, frame.operation, 'BACKPRESSURE');
+    }
+  }
+
+  function routeReplicaResult(conn, frame) {
+    if (frame.targetDeviceId === conn.deviceId) {
+      return closeWith(conn, RELAY_CLOSE.REVOKED);
+    }
+    const peer = deviceMap.get(frame.targetDeviceId);
+    if (!peer || !peerUsable(peer) || peer.scopeProtocol !== 1) return; // ephemeral: drop
+    const outbound = frame.ok
+      ? { type: 'replica-result', fromDeviceId: conn.deviceId, requestId: frame.requestId, operation: frame.operation, ok: true, page: frame.page }
+      : { type: 'replica-result', fromDeviceId: conn.deviceId, requestId: frame.requestId, operation: frame.operation, ok: false, code: frame.code };
+    writeFrame(peer.ws, outbound, (err) => {
       if (err) {
         try { peer.ws.terminate(); } catch { /* socket gone */ }
       }
@@ -393,6 +560,7 @@ export async function openRelayServer(options = {}) {
       conn.alive = true;
       conn.role = frame.role === 'client' ? 'client' : 'host';
       conn.controlProtocol = frame.controlProtocol === 1 ? 1 : 0;
+      conn.scopeProtocol = frame.scopeProtocol === 1 ? 1 : 0;
       clearTimeout(conn.helloTimer);
 
       // One host conn per device (legacy REPLACED semantics); clients of the
@@ -411,6 +579,7 @@ export async function openRelayServer(options = {}) {
         deviceId: conn.deviceId
       };
       if (conn.role === 'client') ready.role = 'client';
+      if (conn.scopeProtocol === 1) ready.scopeProtocol = 1;
       if (!writeFrame(conn.ws, ready, noop)) {
         closeWith(conn, 1009);
       }
@@ -444,6 +613,10 @@ export async function openRelayServer(options = {}) {
       if (frame.type !== 'control-call' && frame.type !== 'control-cancel') {
         return closeWith(conn, RELAY_CLOSE.REVOKED);
       }
+    } else if (SCOPE_BUSINESS_FRAME_TYPES.has(frame.type)) {
+      if (conn.scopeProtocol !== 1) {
+        return closeWith(conn, RELAY_CLOSE.REVOKED);
+      }
     } else if (frame.type === 'control-call' || frame.type === 'control-cancel') {
       return closeWith(conn, RELAY_CLOSE.REVOKED);
     }
@@ -473,6 +646,16 @@ export async function openRelayServer(options = {}) {
         }
         return routeReject(conn, frame);
       }
+      case 'scope-offer':
+        return routeScopeOffer(conn, frame);
+      case 'scope-ack':
+        return routeScopeAck(conn, frame);
+      case 'scope-reject':
+        return routeScopeReject(conn, frame);
+      case 'replica-request':
+        return routeReplicaRequest(conn, frame);
+      case 'replica-result':
+        return routeReplicaResult(conn, frame);
       case 'control-call':
         return routeControlCall(conn, frame);
       case 'control-cancel':
@@ -495,6 +678,7 @@ export async function openRelayServer(options = {}) {
       version: 0,
       role: 'host',
       controlProtocol: 0,
+      scopeProtocol: 0,
       helloTimer: null,
       alive: true,
       dead: false,

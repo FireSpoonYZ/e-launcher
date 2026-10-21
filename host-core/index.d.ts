@@ -179,6 +179,15 @@ export interface Runtime {
   stopWork(botId: string, scopeId: string): Promise<WorkActivity>;
   /** Current member only; clear stop/error without consuming input. Does not activate a passive Runtime's scheduler. */
   resumeWork(botId: string, scopeId: string): Promise<WorkActivity>;
+  /** Module 12: six local-only scope methods; the remote 10 control methods stay unchanged. */
+  createScope(input: ScopeCreateInput): Promise<ScopeInfo>;
+  updateScope(scopeId: string, input: ScopeUpdateInput): Promise<ScopeInfo>;
+  /** Latest state; rejects SCOPE_NOT_FOUND when the scope is missing, never resolves null. */
+  getScopeState(scopeId: string): Promise<ScopeInfo>;
+  listScopeStates(options?: ScopeListOptions): Promise<ScopeListPage>;
+  /** Room-public user message; returns the stored ledger receipt, not a delivery/inference completion. */
+  publishUserMessage(scopeId: string, input: UserMessageInput): Promise<StoredMessage>;
+  listScopeReplicas(scopeId: string, options?: ReplicaListOptions): Promise<ReplicaListPage>;
   watch(botId: string, options?: { signal?: AbortSignal }): Promise<BotWatch>;
   /** Idempotently resume native tasks AND activate automatic room/DM processing; may submit new work. */
   resume(): void;
@@ -469,6 +478,210 @@ export interface MessageDeliveryStatus {
   }[];
 }
 
+/**
+ * Module 12 types: managed scope metadata (one authority Host creates/updates
+ * the membership revision), metadata deliveries, and authenticated replica
+ * repair. History is served only to known scope peers at a frozen revision;
+ * peer stream observations never imply global completeness or online liveness.
+ */
+
+/** Managed scope create input; the store generates the scopeId inside its transaction. */
+export interface ScopeCreateInput {
+  requestId: string;
+  kind: 'room' | 'dm';
+  members: MessageMember[];
+}
+
+/** Managed scope update input; scopeId is a separate argument. */
+export interface ScopeUpdateInput {
+  requestId: string;
+  expectedRevision: number;
+  members: MessageMember[];
+}
+
+/** Canonical fixed-order record; authorityDeviceId is null only for legacy unmanaged scopes. */
+export interface ScopeRecord {
+  scope: MessageScope;
+  authorityDeviceId: string | null;
+}
+
+/**
+ * Managed scope state. delivery is present only when this Host is the authority
+ * for the current/requested revision AND a local create/update operation exists
+ * for that revision; a peer-recovered authority revision has no original
+ * operation/delivery rows, so delivery is null even though isAuthority remains
+ * true (no receipts are inferred or rebuilt). fullyAcknowledged is metadata
+ * receipt only, not model/message completion.
+ */
+export interface ScopeInfo {
+  scope: MessageScope;
+  authorityDeviceId: string | null;
+  isAuthority: boolean;
+  delivery: {
+    fullyAcknowledged: boolean;
+    targets: {
+      deviceId: string;
+      state: 'pending' | 'acked';
+      acknowledgedAt: string | null;
+      lastErrorCode: string | null;
+    }[];
+  } | null;
+}
+
+export interface ScopeListCursor {
+  deviceId: string;
+  afterScopeId: string;
+}
+
+export interface ScopeListOptions {
+  limit?: number;
+  cursor?: ScopeListCursor | null;
+}
+
+export interface ScopeListPage {
+  deviceId: string;
+  items: ScopeInfo[];
+  nextCursor: ScopeListCursor | null;
+}
+
+/** Scope revision acknowledgement; lowercase SHA-256 hex digest, peer identity supplied separately. */
+export interface ScopeAck {
+  scopeId: string;
+  revision: number;
+  digest: string;
+}
+
+export interface ScopeOfferCursor {
+  scopeId: string;
+  revision: number;
+  targetDeviceId: string;
+}
+
+export interface ScopeOfferOptions {
+  limit?: number;
+  cursor?: ScopeOfferCursor | null;
+}
+
+export interface ScopeOfferPage {
+  items: { targetDeviceId: string; record: ScopeRecord; digest: string }[];
+  nextCursor: ScopeOfferCursor | null;
+}
+
+export interface InventoryCursor {
+  deviceId: string;
+  requesterDeviceId: string;
+  scopeId: string;
+  afterSourceDeviceId: string;
+  afterStreamId: string;
+}
+
+export interface InventoryQuery {
+  scopeId: string;
+  limit?: number;
+  cursor?: InventoryCursor | null;
+}
+
+/** Peer-observed stream holdings; contiguous <= count <= highest, never a global completeness guarantee. */
+export interface ReplicaStream {
+  scopeId: string;
+  revision: number;
+  sourceDeviceId: string;
+  streamId: string;
+  contiguous: number;
+  highest: number;
+  count: number;
+}
+
+export interface InventoryPage {
+  scopeId: string;
+  items: ReplicaStream[];
+  nextCursor: InventoryCursor | null;
+}
+
+/** Replica history query; pagination is by source sequence, not localId. */
+export interface ReplicaHistoryQuery {
+  scopeId: string;
+  revision: number;
+  sourceDeviceId: string;
+  afterSequence?: number;
+  throughSequence: number;
+  limit?: number;
+}
+
+/**
+ * Authenticated known-peer history page for one frozen revision. Envelopes are
+ * canonical and strict-ascending by source sequence; nextAfterSequence is null
+ * on empty or exhausted pages and otherwise equals the last returned envelope.
+ */
+export interface ReplicaHistoryPage {
+  record: ScopeRecord;
+  sourceDeviceId: string;
+  afterSequence: number;
+  throughSequence: number;
+  items: MessageEnvelope[];
+  nextAfterSequence: number | null;
+}
+
+/** Missing-range query; no limit field. */
+export interface MissingRangeQuery {
+  scopeId: string;
+  revision: number;
+  sourceDeviceId: string;
+  afterSequence: number;
+  throughSequence: number;
+}
+
+export interface MissingRange {
+  from: number;
+  to: number;
+}
+
+export interface ReplicaListCursor {
+  deviceId: string;
+  scopeId: string;
+  afterPeerDeviceId: string;
+  afterSourceDeviceId: string;
+  afterStreamId: string;
+}
+
+export interface ReplicaListOptions {
+  limit?: number;
+  cursor?: ReplicaListCursor | null;
+}
+
+/**
+ * Observed peer replica rows; no row means unknown, never inferred complete/offline.
+ */
+export interface ReplicaListPage {
+  deviceId: string;
+  scopeId: string;
+  items: {
+    peerDeviceId: string;
+    stream: ReplicaStream;
+    observedAt: string;
+    lastScannedAt: string | null;
+    lastErrorCode: string | null;
+  }[];
+  nextCursor: ReplicaListCursor | null;
+}
+
+/** Atomic replica history import result; nextAfterSequence echoes the imported page. */
+export interface ImportReplicaHistoryResult {
+  scopeId: string;
+  revision: number;
+  sourceDeviceId: string;
+  imported: number;
+  duplicates: number;
+  nextAfterSequence: number | null;
+}
+
+/** Room-public user message input; author/category/source are injected by the normalizer. */
+export interface UserMessageInput {
+  messageId: string;
+  text: string;
+  replyTo?: string | null;
+}
+
 export interface MessageLog {
   readonly deviceId: string;
   readonly dataRoot: string;
@@ -494,6 +707,28 @@ export interface MessageLog {
   outbox(options?: MessageOutboxOptions): MessageOutboxPage;
   deliveryStatus(messageId: string): MessageDeliveryStatus;
   streamStatus(scopeId: string, revision: number, sourceDeviceId: string): MessageStreamStatus | null;
+  /* Module 12: managed scope and replica facade methods. */
+  createScope(input: ScopeCreateInput): ScopeInfo;
+  updateScope(scopeId: string, input: ScopeUpdateInput): ScopeInfo;
+  /** Latest/requested state; rejects SCOPE_NOT_FOUND when missing, never returns null. */
+  getScopeState(scopeId: string, revision?: number): ScopeInfo;
+  listScopeStates(options?: ScopeListOptions): ScopeListPage;
+  getScopeRecord(scopeId: string, revision?: number): ScopeRecord | null;
+  /** Commits the offer and returns the ScopeAck to send back to the peer. */
+  acceptScopeOffer(peer: MessagePeer, record: ScopeRecord): ScopeAck;
+  acknowledgeScope(peer: MessagePeer, ack: ScopeAck): void;
+  recordScopeError(peer: MessagePeer, ack: ScopeAck, code: string): void;
+  scopeOffers(options?: ScopeOfferOptions): ScopeOfferPage;
+  replicaInventory(peer: MessagePeer, query: InventoryQuery): InventoryPage;
+  /** Authenticated known-peer, frozen-revision history page. */
+  replicaHistory(peer: MessagePeer, query: ReplicaHistoryQuery): ReplicaHistoryPage;
+  nextMissingRange(query: MissingRangeQuery): MissingRange | null;
+  listScopeReplicas(scopeId: string, options?: ReplicaListOptions): ReplicaListPage;
+  listReplicaPeers(scopeId: string): string[];
+  recordReplicaInventory(peer: MessagePeer, query: InventoryQuery, page: InventoryPage): void;
+  importReplicaHistory(peer: MessagePeer, query: ReplicaHistoryQuery, page: ReplicaHistoryPage): ImportReplicaHistoryResult;
+  /** code null or a stable uppercase/underscore code; records a requested-interval scan only. */
+  recordReplicaScan(peer: MessagePeer, query: ReplicaHistoryQuery, code?: string | null): void;
   close(): void;
 }
 
@@ -566,12 +801,29 @@ export interface DeliveryPumpStatus {
 
 export type DeviceLinkPhase = 'connecting' | 'online' | 'backoff' | 'blocked' | 'closed';
 
+export interface ScopeDeliveryStatus {
+  online: boolean;
+  inFlight: number;
+  /** Transient diagnostics; scopeId/targetDeviceId are null on general storage failure; no timestamp field. */
+  lastProblem: { scopeId: string | null; targetDeviceId: string | null; code: string } | null;
+}
+
+export interface ReplicaSyncStatus {
+  online: boolean;
+  inFlight: number;
+  activePairs: number;
+  /** Transient diagnostics; scopeId/peerDeviceId are null on general storage failure; no timestamp field. */
+  lastProblem: { scopeId: string | null; peerDeviceId: string | null; code: string } | null;
+}
+
 export interface DeviceLinkStatus {
   deviceId: string;
   phase: DeviceLinkPhase;
   attempt: number;
   lastError: string | null;
   delivery: DeliveryPumpStatus;
+  scopeDelivery: ScopeDeliveryStatus;
+  replicaSync: ReplicaSyncStatus;
 }
 
 export interface OpenDeviceLinkOptions {

@@ -2,8 +2,9 @@ import { parseArgs } from 'node:util';
 import { pathToFileURL } from 'node:url';
 import { once } from 'node:events';
 import { createControlClient } from './control-client.js';
+import { invalid, readInputObject } from './cli-input.js';
 
-const USAGE = `usage: node host-core/control-cli.js <host|create|list|get|find-request|send|status|history|abort|context|live|work-get|work-sync|work-history|work-context|work-activity|work-stop|work-resume> [options]
+const USAGE = `usage: node host-core/control-cli.js <host|create|list|get|find-request|send|status|history|abort|context|live|work-get|work-sync|work-history|work-context|work-activity|work-stop|work-resume|scope-list|scope-get|scope-create|scope-update|scope-send|scope-replicas> [options]
 
 commands:
   host             print host info
@@ -24,19 +25,26 @@ commands:
   work-activity    print work activity; requires --bot-id --scope-id
   work-stop        persistently stop work in one scope; requires --bot-id --scope-id
   work-resume      resume stopped or failed work in one scope; requires --bot-id --scope-id
+  scope-list       list managed scopes; [--limit] [--cursor]
+  scope-get        print one scope; requires --scope-id
+  scope-create     create a managed scope; requires --input
+  scope-update     update scope members; requires --scope-id --input
+  scope-send       publish a user message; requires --scope-id --input
+  scope-replicas   list replica observations; requires --scope-id [--limit] [--cursor]
 
 options:
   --url <url>         host control server URL (required, except --help)
   --token-env <name>  environment variable holding the bearer token (required, except --help)
   --bot-id <id>
-  --scope-id <id>     work context scope (work-* commands only)
+  --scope-id <id>     scope (work-*/scope-* commands only)
   --request-id <id>
   --role <text>
   --cwd <dir>
   --model-ref <value>
   --text <text>
-  --limit <int>       strict decimal positive integer (history, work-sync, work-history)
-  --cursor <json>     JSON object cursor (history, work-history)
+  --input <file>       input JSON file: max 1MiB, UTF-8, a single plain object (never stdin)
+  --limit <int>       strict decimal positive integer (history, work-sync, work-history, scope-list, scope-replicas)
+  --cursor <json>     JSON object cursor (history, work-history, scope-list, scope-replicas)
   -h, --help          show this help
 `;
 
@@ -50,6 +58,7 @@ const OPTIONS = {
   cwd: { type: 'string' },
   'model-ref': { type: 'string' },
   text: { type: 'string' },
+  input: { type: 'string' },
   limit: { type: 'string' },
   cursor: { type: 'string' },
   help: { type: 'boolean', short: 'h' },
@@ -74,16 +83,18 @@ const REQUIRED = {
   'work-activity': ['bot-id', 'scope-id'],
   'work-stop': ['bot-id', 'scope-id'],
   'work-resume': ['bot-id', 'scope-id'],
+  'scope-list': [],
+  'scope-get': ['scope-id'],
+  'scope-create': ['input'],
+  'scope-update': ['scope-id', 'input'],
+  'scope-send': ['scope-id', 'input'],
+  'scope-replicas': ['scope-id'],
 };
 
 // host/list 不接受资源参数；work-* 只接受各自的必需项及分页项。
-const RESOURCE_OPTIONS = ['bot-id', 'scope-id', 'request-id', 'role', 'cwd', 'model-ref', 'text', 'limit', 'cursor'];
+const RESOURCE_OPTIONS = ['bot-id', 'scope-id', 'request-id', 'role', 'cwd', 'model-ref', 'text', 'input', 'limit', 'cursor'];
 
 const ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
-
-function invalid(message) {
-  return Object.assign(new Error(message), { code: 'INVALID_ARGUMENT' });
-}
 
 function parseLimit(value) {
   if (!/^[1-9][0-9]*$/.test(value) || !Number.isSafeInteger(Number(value))) {
@@ -150,23 +161,32 @@ async function main() {
     }
   }
   const workCommand = command.startsWith('work-');
-  if (command === 'host' || command === 'list' || workCommand) {
+  const scopeCommand = command.startsWith('scope-');
+  if (command === 'host' || command === 'list' || workCommand || scopeCommand) {
     const allowed = [...REQUIRED[command]];
     if (command === 'work-sync' || command === 'work-history') allowed.push('limit');
     if (command === 'work-history') allowed.push('cursor');
+    if (command === 'scope-list' || command === 'scope-replicas') allowed.push('limit', 'cursor');
     for (const key of RESOURCE_OPTIONS) {
       if (values[key] !== undefined && !allowed.includes(key)) {
         throw invalid(`${command} does not take --${key}`);
       }
     }
-  } else if (values['scope-id'] !== undefined) {
-    throw invalid(`${command} does not take --scope-id`);
+  } else {
+    if (values['scope-id'] !== undefined) {
+      throw invalid(`${command} does not take --scope-id`);
+    }
+    if (values.input !== undefined) {
+      throw invalid(`${command} does not take --input`);
+    }
   }
   const pageOptions = {};
-  if (command === 'history' || command === 'work-history' || command === 'work-sync') {
+  if (command === 'history' || command === 'work-history' || command === 'work-sync' || command === 'scope-list' || command === 'scope-replicas') {
     if (values.limit !== undefined) pageOptions.limit = parseLimit(values.limit);
     if (values.cursor !== undefined) pageOptions.cursor = parseCursor(values.cursor);
   }
+
+  const input = values.input !== undefined ? readInputObject(values.input) : undefined;
 
   const client = createControlClient({ url: values.url, token: tokenFromEnv(values['token-env']) });
 
@@ -227,6 +247,24 @@ async function main() {
       break;
     case 'work-resume':
       result = await client.resumeWork(values['bot-id'], values['scope-id']);
+      break;
+    case 'scope-list':
+      result = await client.listScopeStates(pageOptions);
+      break;
+    case 'scope-get':
+      result = await client.getScopeState(values['scope-id']);
+      break;
+    case 'scope-create':
+      result = await client.createScope(input);
+      break;
+    case 'scope-update':
+      result = await client.updateScope(values['scope-id'], input);
+      break;
+    case 'scope-send':
+      result = await client.publishUserMessage(values['scope-id'], input);
+      break;
+    case 'scope-replicas':
+      result = await client.listScopeReplicas(values['scope-id'], pageOptions);
       break;
     case 'live':
       await streamLive(client, values['bot-id']);

@@ -10,6 +10,8 @@ import { DatabaseSync } from 'node:sqlite';
 import WebSocket from 'ws';
 import { openMessageLog } from './messages.js';
 import { createMessageDelivery } from './message-delivery.js';
+import { createScopeDelivery } from './scope-delivery.js';
+import { createReplicaSync } from './replica-sync.js';
 import { createLocalControlAdapter } from './local-control-adapter.js';
 import { createHostControlReceiver } from './host-control.js';
 import {
@@ -148,6 +150,8 @@ export async function openDeviceLink(options) {
       attempt,
       lastError,
       delivery: delivery.getStatus(),
+      scopeDelivery: scopeDelivery.getStatus(),
+      replicaSync: replicaSync.getStatus(),
     };
   }
 
@@ -185,6 +189,8 @@ export async function openDeviceLink(options) {
     lastError = code;
     cancelReconnect();
     delivery.setOnline(false);
+    scopeDelivery.setOnline(false);
+    replicaSync.setOnline(false);
     receiver.reset();
     setPhase('blocked');
   }
@@ -244,6 +250,8 @@ export async function openDeviceLink(options) {
     const ws = currentWs;
     if (ws && ws.readyState === WebSocket.OPEN) {
       const frame = { type: 'hello', protocolVersion: 1, deviceId: log.deviceId, token };
+      // Module 12：scope 协议独立于 M9 control，恒发送 scopeProtocol:1（host-only）。
+      frame.scopeProtocol = 1;
       if (control) {
         frame.role = 'host';
         frame.controlProtocol = 1;
@@ -253,6 +261,21 @@ export async function openDeviceLink(options) {
   }
 
   const delivery = createMessageDelivery({
+    messageLog: log,
+    send: deliverySend,
+    onChange: () => {
+      if (!closed) emitStatus();
+    },
+  });
+  // Module 12：两个新泵共用同一 log、guarded send 与安全 status 监听器。
+  const scopeDelivery = createScopeDelivery({
+    messageLog: log,
+    send: deliverySend,
+    onChange: () => {
+      if (!closed) emitStatus();
+    },
+  });
+  const replicaSync = createReplicaSync({
     messageLog: log,
     send: deliverySend,
     onChange: () => {
@@ -274,6 +297,8 @@ export async function openDeviceLink(options) {
     ready = false;
     // 新连接前作废旧代控制调用，旧代回调不会发到新 socket。
     receiver.reset();
+    scopeDelivery.setOnline(false);
+    replicaSync.setOnline(false);
     setPhase('connecting');
     let ws;
     try {
@@ -322,6 +347,12 @@ export async function openDeviceLink(options) {
           ws.terminate();
           return;
         }
+        if (frame.scopeProtocol !== 1) {
+          // Module 12：必须回显 scopeProtocol:1；否则视为中继未升级，永久阻塞。
+          block('UNSUPPORTED_SCOPE_PROTOCOL');
+          ws.terminate();
+          return;
+        }
         ready = true;
         if (readyTimer) {
           clearTimeout(readyTimer);
@@ -330,8 +361,12 @@ export async function openDeviceLink(options) {
         backoffBase = BACKOFF_MIN_MS;
         lastError = null;
         delivery.setOnline(true);
+        scopeDelivery.setOnline(true);
+        replicaSync.setOnline(true);
         setPhase('online');
         delivery.wake();
+        scopeDelivery.wake();
+        replicaSync.wake();
         return;
       }
       if (frame.type === 'hello' || !ready) {
@@ -345,6 +380,20 @@ export async function openDeviceLink(options) {
           receiver.handle(frame);
         } catch { /* 控制接收器内部异常不影响传输；其自身状态负责诊断 */ }
         return;
+      }
+      // Module 12：新 scope/副本帧先路由到对应泵，再走既有投递处理。
+      let handled = false;
+      try {
+        handled = scopeDelivery.handle(frame);
+      } catch { /* scope 泵内部异常不影响传输；其自身状态负责诊断 */ }
+      if (!handled) {
+        try {
+          handled = replicaSync.handle(frame);
+        } catch { /* 副本泵内部异常不影响传输；其自身状态负责诊断 */ }
+      }
+      if (handled && frame.type === 'scope-offer') {
+        // 新元数据落地后唤醒副本泵，发现新的本地 scope。
+        replicaSync.wake();
       }
       try {
         delivery.handle(frame);
@@ -363,6 +412,8 @@ export async function openDeviceLink(options) {
       clearSocketTimers();
       if (phase === 'blocked') return;
       delivery.setOnline(false);
+      scopeDelivery.setOnline(false);
+      replicaSync.setOnline(false);
       receiver.reset();
       const blockedCode = BLOCKED_CLOSE_CODES.has(code)
         ? code === RELAY_CLOSE.UNAUTHORIZED ? 'UNAUTHORIZED'
@@ -387,6 +438,8 @@ export async function openDeviceLink(options) {
     setPhase('closed');
     const errors = [];
     try { delivery.close(); } catch (err) { errors.push(err); }
+    try { scopeDelivery.close(); } catch (err) { errors.push(err); }
+    try { replicaSync.close(); } catch (err) { errors.push(err); }
     try { receiver.close(); } catch (err) { errors.push(err); }
     const ws = currentWs;
     currentWs = null;
@@ -403,7 +456,11 @@ export async function openDeviceLink(options) {
   return {
     deviceId: log.deviceId,
     getStatus,
-    wake: () => delivery.wake(),
+    wake: () => {
+      delivery.wake();
+      scopeDelivery.wake();
+      replicaSync.wake();
+    },
     close,
   };
 }

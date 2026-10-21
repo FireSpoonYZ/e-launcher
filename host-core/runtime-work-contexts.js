@@ -60,6 +60,10 @@ export function createWorkContextRuntime({ host, harness, manager, context }) {
     return run(() => authorize(botId, scopeId));
   }
 
+  function runMessageOperation(operation) {
+    return run(() => operation(getMessageLog()));
+  }
+
   function getWorkContext(botId, scopeId) {
     return run(async () => {
       const { binding } = await authorize(botId, scopeId);
@@ -169,5 +173,5 @@ export function createWorkContextRuntime({ host, harness, manager, context }) {
     return closePromise;
   }
 
-  return { getWorkContext, syncWorkContext, workHistory, workContextStatus, getMessageLog, resolveWorkContext, quiesce, close };
+  return { getWorkContext, syncWorkContext, workHistory, workContextStatus, getMessageLog, resolveWorkContext, runMessageOperation, quiesce, close };
 }

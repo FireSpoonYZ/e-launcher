@@ -35,6 +35,12 @@ const routes = [
   { method: 'GET', key: '/v1/bots/:botId/work-contexts/:scopeKey/activity', pattern: /^\/v1\/bots\/([^/]+)\/work-contexts\/([^/]+)\/activity\/?$/, params: ['botId', 'scopeKey'], hasBody: false, handler: getWorkActivity },
   { method: 'POST', key: '/v1/bots/:botId/work-contexts/:scopeKey/stop', pattern: /^\/v1\/bots\/([^/]+)\/work-contexts\/([^/]+)\/stop\/?$/, params: ['botId', 'scopeKey'], hasBody: true, handler: stopWork },
   { method: 'POST', key: '/v1/bots/:botId/work-contexts/:scopeKey/resume', pattern: /^\/v1\/bots\/([^/]+)\/work-contexts\/([^/]+)\/resume\/?$/, params: ['botId', 'scopeKey'], hasBody: true, handler: resumeWork },
+  { method: 'GET', key: '/v1/scopes', pattern: /^\/v1\/scopes\/?$/, params: [], hasBody: false, handler: listScopes },
+  { method: 'POST', key: '/v1/scopes', pattern: /^\/v1\/scopes\/?$/, params: [], hasBody: true, handler: createScope },
+  { method: 'GET', key: '/v1/scopes/:scopeKey', pattern: /^\/v1\/scopes\/([^/]+)\/?$/, params: ['scopeKey'], hasBody: false, handler: getScopeState },
+  { method: 'POST', key: '/v1/scopes/:scopeKey/members', pattern: /^\/v1\/scopes\/([^/]+)\/members\/?$/, params: ['scopeKey'], hasBody: true, handler: updateScopeMembers },
+  { method: 'POST', key: '/v1/scopes/:scopeKey/messages', pattern: /^\/v1\/scopes\/([^/]+)\/messages\/?$/, params: ['scopeKey'], hasBody: true, handler: publishUserMessage },
+  { method: 'GET', key: '/v1/scopes/:scopeKey/replicas', pattern: /^\/v1\/scopes\/([^/]+)\/replicas\/?$/, params: ['scopeKey'], hasBody: false, handler: listScopeReplicas },
 ];
 
 /**
@@ -257,6 +263,34 @@ async function resumeWork(host, runtime, params, body, req, res) {
   writeControlJson(res, 200, await runtime.resumeWork(params.botId, workScopeId(params.scopeKey)));
 }
 
+async function listScopes(host, runtime, params, body, req, res) {
+  const options = parseScopeQuery(new URL(req.url, 'http://' + BIND_HOST).searchParams, ['limit', 'cursor']);
+  writeControlJson(res, 200, await runtime.listScopeStates(options));
+}
+
+async function createScope(host, runtime, params, body, req, res) {
+  writeControlJson(res, 201, await runtime.createScope(body));
+}
+
+async function getScopeState(host, runtime, params, body, req, res) {
+  // get-scope 不允许任何查询参数；从严拒绝未知/重复查询字段。
+  parseScopeQuery(new URL(req.url, 'http://' + BIND_HOST).searchParams, []);
+  writeControlJson(res, 200, await runtime.getScopeState(workScopeId(params.scopeKey)));
+}
+
+async function updateScopeMembers(host, runtime, params, body, req, res) {
+  writeControlJson(res, 200, await runtime.updateScope(workScopeId(params.scopeKey), body));
+}
+
+async function publishUserMessage(host, runtime, params, body, req, res) {
+  writeControlJson(res, 202, await runtime.publishUserMessage(workScopeId(params.scopeKey), body));
+}
+
+async function listScopeReplicas(host, runtime, params, body, req, res) {
+  const options = parseScopeQuery(new URL(req.url, 'http://' + BIND_HOST).searchParams, ['limit', 'cursor']);
+  writeControlJson(res, 200, await runtime.listScopeReplicas(workScopeId(params.scopeKey), options));
+}
+
 function workScopeId(scopeKey) {
   // dispatch 已解码一次；固定前缀保护 '.'/'..' scope，避免 URL 路径折叠。
   if (!scopeKey.startsWith('~')) {
@@ -287,6 +321,37 @@ function parseHistoryQuery(searchParams) {
     }
   }
   return { limit, cursor };
+}
+
+// 新 scope 路由严格查询解析：只允许指定键、每个键至多一次，拒绝未知/重复字段。
+function parseScopeQuery(searchParams, allowed) {
+  const seen = new Set();
+  const options = {};
+  for (const [key, value] of searchParams) {
+    if (!allowed.includes(key)) {
+      throw new ControlHttpError(400, 'INVALID_ARGUMENT', 'unknown query parameter: ' + key);
+    }
+    if (seen.has(key)) {
+      throw new ControlHttpError(400, 'INVALID_ARGUMENT', 'query parameter may appear at most once: ' + key);
+    }
+    seen.add(key);
+    if (key === 'limit') {
+      if (!/^[1-9]\d*$/.test(value)) {
+        throw new ControlHttpError(400, 'INVALID_ARGUMENT', 'limit must be a positive decimal integer');
+      }
+      options.limit = Number(value);
+    } else {
+      try {
+        options.cursor = JSON.parse(value);
+      } catch {
+        throw new ControlHttpError(400, 'INVALID_ARGUMENT', 'cursor must be a JSON object');
+      }
+      if (options.cursor === null || typeof options.cursor !== 'object' || Array.isArray(options.cursor)) {
+        throw new ControlHttpError(400, 'INVALID_ARGUMENT', 'cursor must be a JSON object');
+      }
+    }
+  }
+  return options;
 }
 
 function decodeSegment(segment) {

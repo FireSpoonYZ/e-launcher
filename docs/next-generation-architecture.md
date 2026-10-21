@@ -1,6 +1,6 @@
 # 下一代多端 Bot 架构设计
 
-> 状态：目标架构设计，整体尚未实现。[Bot/Host 核心](../host-core/README.md) 已独立实现模块 1 本机登记、模块 2 Durable 长期主私聊、模块 3 内嵌 Billion Context、模块 4 本机工具及模块 5 本机控制面（长期本地 Host 控制 API：基础 HTTP、回环端口、Bearer 令牌认证、拒绝全部 Origin；配套 Node/浏览器兼容客户端）及模块 6 主私聊实时预览（认证本地 SSE：有界快照+整体替换更新、每订阅 sequence 非持久游标，原始历史分页保留；无群消息/中心/Tauri，无轮询或新调度器）；模块 7 已实现本机持久消息账本（作用域/成员修订、不可变信封、outbox、落地去重 ACK、本地收件/历史/缺口、特权离线 CLI；仅 messages.sqlite 本机存储，无网络认证/隧道/中心/推理）；模块 8 已实现认证设备中继与 Host 消息投递（中心只存设备注册，复用模块 7 outbox，本机进程网络端到端已通；跨设备/真机网络验收与完整中心产品尚未完成）；模块 9 已实现认证远程 Host JSON 控制（固定 10 个 JSON 方法、独立多客户端角色、Node 客户端与一次性 CLI；父助手已完成本机独立进程 171/171 个端到端检查点验收，具体范围见下文）；模块 10 已完成群与 Bot DM 的独立被动工作上下文（显式导入、独立 Durable/BC、本机 API/CLI；父助手完成 149/149 个检查点，范围与限制见下文）。模块 11 已完成自然群聊决策与通信工具（父助手完成 161/161 个端到端检查点及 18 份数据库完整性/外键检查；本机 WSS 与脚本化模型服务，范围与限制见下文）。总计划 20 个模块、已完成 11 个。整体通信（框架隧道/中心产品）、跨端与外壳（Tauri/TUI）尚未完成。本文约定产品方向、首版设计默认与工程验证边界，不授权删除现有能力。当前安装、构建及运行行为仍以 [README](../README.md) 为准。
+> 状态：目标架构设计，整体尚未实现。[Bot/Host 核心](../host-core/README.md) 已独立实现模块 1 本机登记、模块 2 Durable 长期主私聊、模块 3 内嵌 Billion Context、模块 4 本机工具及模块 5 本机控制面（长期本地 Host 控制 API：基础 HTTP、回环端口、Bearer 令牌认证、拒绝全部 Origin；配套 Node/浏览器兼容客户端）及模块 6 主私聊实时预览（认证本地 SSE：有界快照+整体替换更新、每订阅 sequence 非持久游标，原始历史分页保留；无群消息/中心/Tauri，无轮询或新调度器）；模块 7 已实现本机持久消息账本（作用域/成员修订、不可变信封、outbox、落地去重 ACK、本地收件/历史/缺口、特权离线 CLI；仅 messages.sqlite 本机存储，无网络认证/隧道/中心/推理）；模块 8 已实现认证设备中继与 Host 消息投递（中心只存设备注册，复用模块 7 outbox，本机进程网络端到端已通；跨设备/真机网络验收与完整中心产品尚未完成）；模块 9 已实现认证远程 Host JSON 控制（固定 10 个 JSON 方法、独立多客户端角色、Node 客户端与一次性 CLI；父助手已完成本机独立进程 171/171 个端到端检查点验收，具体范围见下文）；模块 10 已完成群与 Bot DM 的独立被动工作上下文（显式导入、独立 Durable/BC、本机 API/CLI；父助手完成 149/149 个检查点，范围与限制见下文）。模块 11 已完成自然群聊决策与通信工具（父助手完成 161/161 个端到端检查点及 18 份数据库完整性/外键检查；本机 WSS 与脚本化模型服务，范围与限制见下文）。模块 12（成员范围管理与历史补齐）已完成父助手限定范围验收（122/122 检查点，见下节）。总计划 20 个模块、已完成 12 个。整体通信（框架隧道/中心产品）、跨端与外壳（Tauri/TUI）尚未完成。本文约定产品方向、首版设计默认与工程验证边界，不授权删除现有能力。当前安装、构建及运行行为仍以 [README](../README.md) 为准。
 
 当前交付计划与完成/剩余模块见 [重构路线图](refactor-roadmap.md)。
 
@@ -195,7 +195,7 @@ Bot DM 使用通知、请求、相关回复的语义，可查历史并允许沉�
 
 **仅本机控制扩展。** Runtime/ControlClient 增加 `getWorkActivity`、`stopWork`、`resumeWork`；本机 HTTP 为 GET `/v1/bots/:botId/work-contexts/:scopeKey/activity`、POST `…/stop`、POST `…/resume`（两个 POST 要求解析后为空对象；零字节 body 沿用 `readControlBody` 约定视作 `{}`，客户端仍发送 JSON `{}`），均返回 WorkActivity。沿用 Bearer/Origin 规则及 scopeKey=`'~'+encodeURIComponent(scopeId)`，解码一次且只剥一个 `~`。客户端 options 仅 signal，取消 HTTP 不撤销已受理操作。CLI 为 `work-activity`/`work-stop`/`work-resume --bot-id --scope-id`（另加原 url/token-env 连接选项），拒绝无关参数。M10 四个本机 work 操作保留；远端仍是 getHostInfo/listBots/createBot/getBot/findByRequest/submit/getSubmission/history/abort/contextStatus 十方法，不增加远端 work 或群/DM live。
 
-完整参数、DTO、使用示例及 `module11-verification.json` 证据位置见 [Host 核心模块 11 说明](../host-core/README.md#模块-11自然群聊决策与-bot-通信工具已完成父助手验收)。模块 **12–20** 仍待交付，包括成员协商/历史补齐、长期事实记忆、远程 work/实时接线、跨平台/迁移/外壳与真机集成；不新增后台任务产品。
+完整参数、DTO、使用示例及 `module11-verification.json` 证据位置见 [Host 核心模块 11 说明](../host-core/README.md#模块-11自然群聊决策与-bot-通信工具已完成父助手验收)。模块 **12** 已完成父助手限定范围验收（122/122 检查点，见下节 [模块 12](../host-core/README.md#模块-12成员范围管理与历史补齐已完成父助手验收)）；模块 **13–20** 仍待交付：长期事实记忆、远程 work/实时接线、跨平台/迁移/外壳与真机集成；不新增后台任务产品。
 
 **模块 11 验收范围。** 父助手在 **Windows / Git Bash、Node 26.8.2 / 22.19.0**，使用 pi-durable **1.3.0**、acp-kernel **0.0.101**，完成 **161/161 个检查点，失败 0**。实际 localhost WSS 连接 Host A/B，模型 HTTP/SSE 进程使用脚本化 Mockoon 响应；这是实际运行协议与恢复机制的验收，不是付费模型或智能决策质量验证。
 
@@ -277,6 +277,17 @@ Bot DM 使用通知、请求、相关回复的语义，可查历史并允许沉�
 
 未实测：跨物理设备/外网、Linux/Android/arm64、Tauri/TUI、真实外部付费模型；全局 128 pending、256 连接负载及中继慢接收者反压。直接 JS AbortSignal、客户端本地 25s 超时兜底和恶意服务端同一 chunk 合并帧拒绝等分支仅由父助手源码核对，不能记作实跑通过。验收数据、脚本、夹具与 `module9-verification.json` 均在仓库外，完整范围见 [host-core/README.md](../host-core/README.md)。
 
+### 模块 12：成员范围管理与历史补齐（已完成父助手验收）
+
+模块 12 把上文“记录归属、可靠投递与历史”扩展为受控的成员元数据与副本补齐：托管 scope 只有**创建 Host** 一个元数据写入者，它不是群日志宿主；成员 Host 保留各自独立消息副本，可在权威离线时互修历史。父助手已在 Windows 本机 Host A–E、Node 26.8.2/22.19.0、真实 TLS/WSS 与 HTTP/CLI 下完成 **122/122 个检查点**及公开声明检查（模型回归使用 Mockoon 脚本化 HTTP/SSE 夹具，非付费/智能模型验收），进度推进至 **12/20**。剩余平台与覆盖限制见 [Host 核心模块 12 说明](../host-core/README.md#模块-12成员范围管理与历史补齐已完成父助手验收)。
+
+- **权威与 CAS**：`createScope`/`updateScope` 幂等去重；更新必须由 authority 以 `expectedRevision` CAS 递增，kind/DM 不可变；旧修订定义/消息/targets 永不改写；元数据 ACK 为收据而非消息/推理完成；正常本地修订保留真实 pending/acked，仅全部 ACK 或合法本地空目标集报告 `fullyAcknowledged:true`。peer 恢复修订若缺本地操作/收据记录，`delivery=null`（isAuthority 仍 true），不推断目标/ACK。
+- **已知 peer 授权**：注册外部者不能凭猜 scopeId 获取；初始元数据必须直接来自 authority offer，已知 peer 只能在已记录 authority 下提供历史修订；per-revision 要求服务 peer、请求方与 source 都是成员，冻结 Bot 目标保留——新加入 Bot 不获得未面向它的旧历史。
+- **有界补史**：副本同步泵最多 4 个活跃 `(scopeId,peerDeviceId)` 修复任务、每 peer 至多 1 个在途请求、5s 超时、限 256 条冷却，分页遍历本地 scope/peer，页边界轮转；稀疏缺口用 SQL 定位且同 pass 不重求同一缺口；`recordReplicaScan` 只记录请求区间扫描时间，空观察不代表全局完整/在线。
+- **自源恢复**：来自 peer 的本机源历史重建发布指纹（仅补空）并恢复丢失的远端 outbox（保留已 ack），后续本地发布沿用最高序号+1。
+- **scopeProtocol:1 升级与信任**：先升 relay；已协商源向在线未协商旧目标发 scope 帧回 UNSUPPORTED，未协商/旧源发 scope 帧被 REVOKED 关闭；ready 缺能力→UNSUPPORTED_SCOPE_PROTOCOL，真旧 relay 可能以 BAD_FRAME 拒绝扩展 hello；新连接要求协商；认证通道+TLS 信任服务 Host，无原始作者端到端签名/加密声明。
+- **六个本机入口**：GET/POST `/v1/scopes`、GET `/v1/scopes/:scopeKey`、POST `…/members`、POST `…/messages`、GET `…/replicas`（`scopeKey='~'+encodeURIComponent(scopeId)`），配合 ControlClient/CLI 六个方法与 `--input` 文件入口；默认 50/上限 200 分页、控制≈1MiB/同步≈2MiB 预算；用户消息回执与元数据收据都不是投递/推理完成。六个方法仅本机，远端仍固定 10 方法。
+
 ## 7. 外壳与 Android 生命周期
 
 Tauri 提供 Android/Windows/Linux 界面与平台集成，Windows/Linux TUI 使用相同业务协议。桌面 Host 不依附一个窗口或 TUI 连接，关闭客户端不停止 Agent。Android 可先保留原生/Capacitor 宿主承接统一核心，再迁 Tauri 外壳；迁移期不是第二套永久架构。
@@ -309,7 +320,7 @@ Android 仍是真正本机 Host：Durable、BC、原始历史和模型请求在�
 1. **跨端创建与续用**：手机创建 Linux Bot，Windows TUI 继续主私聊；离线创建只待发，重连丢回执不重复创建。关界面不终止 Agent，工具位置与 cwd 始终正确，中心查不到私有模型凭证。
 2. **BC 与副作用恢复**：多次压缩后重启 Host，展开旧 refs 找回原文和纠正来源；模拟工具结果不明，不重复外部动作，旧 SDK 历史可读但不冒充检查点恢复。
 3. **自然群聊与 DM**：多个 Bot 全员收件、自主补充或沉默；忙时人类纠正先于旧稿处理；DM 不泄露群中，回复不造成确认循环，处理水位与停止状态在重启后恢复，owner 显式 resume 后再处理未消费输入，新人类输入不自行解除停止；主动停止得到范围明确的回执。
-4. **断线与历史副本**：固定 ID 重投、接收去重、缺序补史；全部离线客户端待发，在线副本只能证明已知范围；新成员可选导入不唤醒旧消息，不误报全员同步。
+4. **断线与历史副本**：固定 ID 重投、接收去重、缺序补史；全部离线客户端待发，在线副本只能证明已知范围；新成员可选导入不唤醒旧消息，不误报全员同步。模块 12 已完成父助手限定范围验收（托管元数据权威、副本授权补史与自源恢复，见模块 12 一节）。
 5. **Android 覆盖迁移**：原签名覆盖更新后聊天、附件、草稿、旧定时记录仍在；FGS/嵌入 JS/SQLite/桥与 Tauri 生命周期实机验证；回收、force-stop、断网显示真实离线并恢复补投，Widget 冷读不唤醒，Shower conversation 归属及非零屏边界不变。
 
 ## 10. 行业来源与借鉴边界

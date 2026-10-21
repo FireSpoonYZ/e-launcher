@@ -6,11 +6,14 @@ import {
   messageError,
   streamIdForScope,
   normalizeEnvelope,
+  normalizePublish,
   digest,
   assertScopeMessage,
 } from './message-protocol.js';
+import { SCOPE_SCHEMA_SQL, createScopeStore } from './scope-store.js';
+import { createReplicaQueries } from './replica-queries.js';
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 const DB_FILE = 'messages.sqlite';
 
 // 模块 7 消息账本 schema：7 张表 + queries 需要的索引，参数化 SQL 各处使用。
@@ -90,16 +93,23 @@ function initSchema(db, deviceId) {
       if (existingTables.length > 0) {
         throw messageError('UNSUPPORTED_SCHEMA', 'database file already contains unrecognized tables');
       }
+      // 全新库：旧 M7 表 + M12 托管/副本表在同一事务内创建，随后写身份并置 v2。
       db.exec(SCHEMA_SQL);
+      db.exec(SCOPE_SCHEMA_SQL);
       db.prepare('INSERT INTO message_meta (id, device_id) VALUES (1, ?)').run(deviceId);
       db.exec('PRAGMA user_version = ' + SCHEMA_VERSION);
     } else {
+      // v1/v2 先校验身份行与宿主 deviceId，再做 v1->v2 增量迁移。
       const row = db.prepare('SELECT device_id FROM message_meta WHERE id = 1').get();
       if (!row) {
         throw messageError('UNSUPPORTED_SCHEMA', 'message database is missing identity row');
       }
       if (row.device_id !== deviceId) {
         throw messageError('REQUEST_CONFLICT', 'message database owner deviceId does not match host deviceId');
+      }
+      if (version === 1) {
+        db.exec(SCOPE_SCHEMA_SQL);
+        db.exec('PRAGMA user_version = ' + SCHEMA_VERSION);
       }
     }
     db.exec('COMMIT');
@@ -179,6 +189,39 @@ export function openMessageStore(dataRoot, deviceId) {
     const stmtInsertLocalTarget = db.prepare(
       'INSERT INTO message_local_targets (message_id, bot_id) VALUES (?, ?)'
     );
+    const stmtGetAuthPublic = db.prepare('SELECT authority_device_id FROM message_scope_authorities WHERE scope_id = ?');
+    const stmtSetFingerprint = db.prepare('UPDATE message_events SET publish_fingerprint = ? WHERE message_id = ?');
+    const stmtInsertOutboxIgnore = db.prepare(
+      "INSERT OR IGNORE INTO message_outbox (message_id, target_device_id, state, acked_at) VALUES (?, ?, 'pending', NULL)"
+    );
+    const stmtInsertHistorySource = db.prepare(
+      'INSERT OR IGNORE INTO message_history_sources (message_id, peer_device_id, received_at) VALUES (?, ?, ?)'
+    );
+    const stmtUpsertReplicaStream = db.prepare(
+      `INSERT INTO message_replica_streams (peer_device_id, source_device_id, stream_id, scope_id, revision, snapshot_json, observed_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(peer_device_id, source_device_id, stream_id)
+       DO UPDATE SET scope_id = excluded.scope_id, revision = excluded.revision,
+                    snapshot_json = excluded.snapshot_json, observed_at = excluded.observed_at`
+    );
+    const stmtUpdateObservedScan = db.prepare(
+      `UPDATE message_replica_streams
+          SET last_scanned_at = ?, last_error_code = ?
+        WHERE peer_device_id = ? AND source_device_id = ? AND stream_id = ?
+          AND scope_id = ? AND revision = ?`
+    );
+    const stmtReplicaPeers = db.prepare(
+      `SELECT DISTINCT x.device_id AS device_id
+         FROM (
+           SELECT json_extract(m.value, '$.deviceId') AS device_id
+             FROM message_scope_revisions r, json_each(r.members_json) m
+            WHERE r.scope_id = ?
+           UNION
+           SELECT authority_device_id AS device_id FROM message_scope_authorities WHERE scope_id = ?
+         ) x
+        WHERE x.device_id IS NOT NULL AND x.device_id <> ?
+        ORDER BY x.device_id ASC`
+    );
 
     const stmtGetStream = db.prepare('SELECT * FROM message_streams WHERE source_device_id = ? AND stream_id = ?');
     const stmtInsertStream = db.prepare(
@@ -236,7 +279,81 @@ export function openMessageStore(dataRoot, deviceId) {
       }
     };
 
-    const installScope = (input) => inTransaction(db, () => {
+    // 自源恢复：用 INSERT OR IGNORE 补远程目标 outbox 行，保留已 ack/已存在行。
+    const restoreOutboxTargets = (envelope) => {
+      for (const member of envelope.targets) {
+        if (member.deviceId !== deviceId) {
+          stmtInsertOutboxIgnore.run(envelope.messageId, member.deviceId);
+        }
+      }
+    };
+
+    // 私有同步 ingest：已验证封套的去重/引用/来源序列冲突检查、写入、本地目标与流推进。
+    // 不开启事务（调用方持锁），不与 peer 身份绑定；普通 receive 与副本导入共用。
+    // publishFingerprint 非 null 时作为事件发布指纹存储（仅自源恢复路径使用）。
+    const ingestEnvelopeWithinTransaction = (envelope, { publishFingerprint = null, restoreOutbox = false } = {}) => {
+      const envelopeDigest = digest(envelope);
+      const existing = stmtGetEventByMsg.get(envelope.messageId);
+      if (existing) {
+        if (existing.digest !== envelopeDigest) {
+          throw messageError('REQUEST_CONFLICT', 'messageId already used with a different envelope');
+        }
+        if (restoreOutbox) {
+          // 匹配的完整封套只补空指纹，绝不覆盖已有指纹。
+          if (existing.publish_fingerprint === null && publishFingerprint !== null) {
+            stmtSetFingerprint.run(publishFingerprint, envelope.messageId);
+          }
+          restoreOutboxTargets(envelope);
+        }
+        return {
+          message: queries.getMessage(existing.message_id),
+          ack: makeAck(existing, envelope.sourceDeviceId),
+          duplicate: true,
+        };
+      }
+      const seqUsed = stmtGetEventBySrcStreamSeq.get(envelope.sourceDeviceId, envelope.streamId, envelope.sequence);
+      if (seqUsed) {
+        throw messageError('REQUEST_CONFLICT', 'source sequence already used by a different message');
+      }
+      for (const ref of [envelope.rootId, envelope.replyTo]) {
+        if (!ref || ref === envelope.messageId) continue;
+        const known = stmtGetEventByMsg.get(ref);
+        if (known && known.scope_id !== envelope.scopeId) {
+          throw messageError('REQUEST_CONFLICT', 'reference points outside the message scope');
+        }
+      }
+      const storedAt = new Date().toISOString();
+      stmtInsertEvent.run(
+        envelope.messageId,
+        envelope.sourceDeviceId,
+        envelope.streamId,
+        envelope.sequence,
+        envelope.scopeId,
+        envelope.revision,
+        JSON.stringify(envelope),
+        envelopeDigest,
+        publishFingerprint,
+        storedAt
+      );
+      for (const member of envelope.targets) {
+        if (member.deviceId === deviceId) {
+          stmtInsertLocalTarget.run(envelope.messageId, member.botId);
+        }
+      }
+      if (restoreOutbox) {
+        restoreOutboxTargets(envelope);
+      }
+      applyStreamReceive(envelope.sourceDeviceId, envelope.scopeId, envelope.revision, envelope.streamId, envelope.sequence);
+      const row = stmtGetEventByMsg.get(envelope.messageId);
+      return {
+        message: queries.getMessage(row.message_id),
+        ack: makeAck(row, envelope.sourceDeviceId),
+        duplicate: false,
+      };
+    };
+
+    // 无 BEGIN 的 M7 scope 安装体（scopeStore 回调与公开 installScope 共用）。
+    const installScopeRevision = (input) => {
       const fingerprint = digest(input);
       const existing = stmtGetScopeRev.get(input.scopeId, input.revision);
       if (existing) {
@@ -269,7 +386,34 @@ export function openMessageStore(dataRoot, deviceId) {
       }
       stmtInsertRevision.run(input.scopeId, input.revision, JSON.stringify(input.members), fingerprint);
       return { scopeId: input.scopeId, kind: input.kind, revision: input.revision, members: input.members };
+    };
+
+    // 公开遗留安装仍走自己的事务；托管 scope 仅接受完全一致的已装版本幂等重试。
+    const installScope = (input) => inTransaction(db, () => {
+      const authorityRow = stmtGetAuthPublic.get(input.scopeId);
+      if (authorityRow) {
+        const existing = stmtGetScopeRev.get(input.scopeId, input.revision);
+        if (!existing || existing.fingerprint !== digest(input)) {
+          throw messageError('SCOPE_AUTHORITY_REQUIRED', 'managed scope requires the create/update APIs');
+        }
+        const kindRow = stmtGetScopeKind.get(input.scopeId);
+        return {
+          scopeId: input.scopeId,
+          kind: kindRow.kind,
+          revision: input.revision,
+          members: JSON.parse(existing.members_json),
+        };
+      }
+      return installScopeRevision(input);
     });
+
+    const scopeStore = createScopeStore(db, {
+      deviceId,
+      transaction: (fn) => inTransaction(db, fn),
+      queries,
+      installScopeRevision,
+    });
+    const replicaQueries = createReplicaQueries(db, { deviceId, queries, scopeStore });
 
     const publish = (input, guard = null) => inTransaction(db, () => {
       const fingerprint = digest(input);
@@ -393,58 +537,7 @@ export function openMessageStore(dataRoot, deviceId) {
       };
       // 作者/类别/scope 目标（含 streamId）检查由协议 assertScopeMessage 完成；本机 Bot 存在性由 facade 检查。
       assertScopeMessage(scopeObj, envelope, deviceId);
-      const envelopeDigest = digest(envelope);
-
-      const existing = stmtGetEventByMsg.get(envelope.messageId);
-      if (existing) {
-        if (existing.digest === envelopeDigest) {
-          return {
-            message: queries.getMessage(existing.message_id),
-            ack: makeAck(existing, envelope.sourceDeviceId),
-            duplicate: true,
-          };
-        }
-        throw messageError('REQUEST_CONFLICT', 'messageId already used with a different envelope');
-      }
-      const seqUsed = stmtGetEventBySrcStreamSeq.get(envelope.sourceDeviceId, envelope.streamId, envelope.sequence);
-      if (seqUsed) {
-        throw messageError('REQUEST_CONFLICT', 'source sequence already used by a different message');
-      }
-
-      for (const ref of [envelope.rootId, envelope.replyTo]) {
-        if (!ref || ref === envelope.messageId) continue;
-        const known = stmtGetEventByMsg.get(ref);
-        if (known && known.scope_id !== envelope.scopeId) {
-          throw messageError('REQUEST_CONFLICT', 'reference points outside the message scope');
-        }
-      }
-
-      const storedAt = new Date().toISOString();
-      stmtInsertEvent.run(
-        envelope.messageId,
-        envelope.sourceDeviceId,
-        envelope.streamId,
-        envelope.sequence,
-        envelope.scopeId,
-        envelope.revision,
-        JSON.stringify(envelope),
-        envelopeDigest,
-        null,
-        storedAt
-      );
-      for (const member of envelope.targets) {
-        if (member.deviceId === deviceId) {
-          stmtInsertLocalTarget.run(envelope.messageId, member.botId);
-        }
-      }
-      applyStreamReceive(envelope.sourceDeviceId, envelope.scopeId, envelope.revision, envelope.streamId, envelope.sequence);
-
-      const row = stmtGetEventByMsg.get(envelope.messageId);
-      return {
-        message: queries.getMessage(row.message_id),
-        ack: makeAck(row, envelope.sourceDeviceId),
-        duplicate: false,
-      };
+      return ingestEnvelopeWithinTransaction(envelope, { publishFingerprint: null });
     });
 
     const acknowledge = (peer, ack) => {
@@ -476,6 +569,169 @@ export function openMessageStore(dataRoot, deviceId) {
       return queries.deliveryStatus(ack.messageId);
     };
 
+    // 内部 peer 发现：只读已装修订成员与存储 authority，排除本机，不做网络/目录查找。
+    const listReplicaPeers = (scopeId) => {
+      if (!queries.getScope(scopeId)) {
+        throw messageError('SCOPE_NOT_FOUND', 'scope not found');
+      }
+      return stmtReplicaPeers.all(scopeId, scopeId, deviceId).map((row) => row.device_id);
+    };
+
+    // 观测写入：整页校验全部完成后原子 upsert 快照；不证明本地完整覆盖或在线活性。
+    const recordReplicaInventory = (peer, query, page) => {
+      if (page.scopeId !== query.scopeId) {
+        throw messageError('INVALID_ARGUMENT', 'page scopeId must match query scopeId');
+      }
+      if (page.items.length > query.limit) {
+        throw messageError('INVALID_ARGUMENT', 'page items exceed query limit');
+      }
+      if (page.nextCursor !== null) {
+        if (
+          page.nextCursor.deviceId !== peer.deviceId ||
+          page.nextCursor.requesterDeviceId !== deviceId ||
+          page.nextCursor.scopeId !== query.scopeId
+        ) {
+          throw messageError('INVALID_ARGUMENT', 'response cursor is not bound to this peer/requester/scope');
+        }
+        const last = page.items[page.items.length - 1];
+        if (
+          page.nextCursor.afterSourceDeviceId !== last.sourceDeviceId ||
+          page.nextCursor.afterStreamId !== last.streamId
+        ) {
+          throw messageError('INVALID_ARGUMENT', 'response cursor must reference the last returned stream');
+        }
+      }
+      // 输入游标必须绑定 serving peer、本机 requester 与 query scope，空页同样要求。
+      if (query.cursor !== null) {
+        if (
+          query.cursor.deviceId !== peer.deviceId ||
+          query.cursor.requesterDeviceId !== deviceId ||
+          query.cursor.scopeId !== query.scopeId
+        ) {
+          throw messageError('INVALID_ARGUMENT', 'input cursor must bind serving peer, this host as requester and the query scope');
+        }
+      }
+      // 每个返回 key 都必须严格大于上一 tuple（SQLite BINARY UTF-8 序），拒绝重复/乱序；
+      // 首页无输入游标时也强制页内严格递增。
+      let prevSource = query.cursor ? query.cursor.afterSourceDeviceId : null;
+      let prevStream = query.cursor ? query.cursor.afterStreamId : null;
+      for (const item of page.items) {
+        if (prevSource !== null) {
+          const cmpSource = Buffer.compare(Buffer.from(item.sourceDeviceId, 'utf8'), Buffer.from(prevSource, 'utf8'));
+          const cmpStream = Buffer.compare(Buffer.from(item.streamId, 'utf8'), Buffer.from(prevStream, 'utf8'));
+          if (cmpSource < 0 || (cmpSource === 0 && cmpStream <= 0)) {
+            throw messageError('INVALID_ARGUMENT', 'stream keys must strictly increase in SQLite BINARY UTF-8 order');
+          }
+        }
+        prevSource = item.sourceDeviceId;
+        prevStream = item.streamId;
+      }
+      return inTransaction(db, () => {
+        scopeStore.assertReplicaPeer(peer, query.scopeId);
+        // 已装修订成员检查属 DB 依赖，必须在 peer 授权之后的同一写事务内执行，
+        // 避免并发安装者在检查与提交之间把未知修订变为已知。
+        for (const item of page.items) {
+          const localScope = queries.getScope(query.scopeId, item.revision);
+          if (localScope) {
+            const memberIds = new Set(localScope.members.map((member) => member.deviceId));
+            if (!memberIds.has(peer.deviceId) || !memberIds.has(deviceId) || !memberIds.has(item.sourceDeviceId)) {
+              throw messageError('SCOPE_FORBIDDEN', 'installed revision must include serving peer, local device and source device');
+            }
+          }
+        }
+        const observedAt = new Date().toISOString();
+        for (const item of page.items) {
+          stmtUpsertReplicaStream.run(
+            peer.deviceId,
+            item.sourceDeviceId,
+            item.streamId,
+            query.scopeId,
+            item.revision,
+            JSON.stringify(item),
+            observedAt
+          );
+        }
+      });
+    };
+
+    // 授权副本历史导入：整页元数据/消息/目标/流/来源记录原子回滚。
+    const importReplicaHistory = (peer, query, page) => {
+      if (
+        page.record.scope.scopeId !== query.scopeId ||
+        page.record.scope.revision !== query.revision ||
+        page.sourceDeviceId !== query.sourceDeviceId ||
+        page.afterSequence !== query.afterSequence ||
+        page.throughSequence !== query.throughSequence
+      ) {
+        throw messageError('INVALID_ARGUMENT', 'history page echo must match the originating query');
+      }
+      if (page.items.length > query.limit) {
+        throw messageError('INVALID_ARGUMENT', 'history page items exceed query limit');
+      }
+      // 即使空页，源设备也必须是该修订成员（不制造未观测的非成员源）。
+      if (!page.record.scope.members.some((member) => member.deviceId === query.sourceDeviceId)) {
+        throw messageError('SCOPE_FORBIDDEN', 'source device must be a member of the record revision');
+      }
+      return inTransaction(db, () => {
+        scopeStore.ensureReplicaRecord(peer, page.record);
+        let imported = 0;
+        let duplicates = 0;
+        const receivedAt = new Date().toISOString();
+        for (const envelope of page.items) {
+          // 业务校验（冻结目标/作者/类别/本地参与）对每个封套执行，含重复；
+          // 仅授权副本导入路径允许 source!=serving peer，assertScopeMessage 不比较 peer。
+          assertScopeMessage(page.record.scope, envelope, deviceId);
+          const selfOrigin = envelope.sourceDeviceId === deviceId;
+          // 自源恢复：按原发布输入重建指纹；第三方历史保持 null 指纹与无 outbox。
+          const fingerprint = selfOrigin
+            ? digest(
+                normalizePublish({
+                  messageId: envelope.messageId,
+                  scopeId: envelope.scopeId,
+                  author: envelope.author,
+                  category: envelope.category,
+                  text: envelope.text,
+                  replyTo: envelope.replyTo,
+                })
+              )
+            : null;
+          const result = ingestEnvelopeWithinTransaction(envelope, {
+            publishFingerprint: fingerprint,
+            restoreOutbox: selfOrigin,
+          });
+          if (result.duplicate) duplicates += 1;
+          else imported += 1;
+          stmtInsertHistorySource.run(envelope.messageId, peer.deviceId, receivedAt);
+        }
+        return {
+          scopeId: query.scopeId,
+          revision: query.revision,
+          sourceDeviceId: query.sourceDeviceId,
+          imported,
+          duplicates,
+          nextAfterSequence: page.nextAfterSequence,
+        };
+      });
+    };
+
+    // 记录请求区间扫描结果：只更新已存在观测，绝不虚构观测。
+    const recordReplicaScan = (peer, query, code = null) => {
+      if (code !== null && (typeof code !== 'string' || !/^[A-Z0-9_]{1,64}$/.test(code))) {
+        throw messageError('INVALID_ARGUMENT', 'error code must be null or a stable uppercase/underscore code up to 64 chars');
+      }
+      scopeStore.assertReplicaPeer(peer, query.scopeId);
+      const streamId = streamIdForScope(query.scopeId, query.revision);
+      stmtUpdateObservedScan.run(
+        new Date().toISOString(),
+        code,
+        peer.deviceId,
+        query.sourceDeviceId,
+        streamId,
+        query.scopeId,
+        query.revision
+      );
+    };
+
     return {
       deviceId,
       ...queries,
@@ -483,6 +739,23 @@ export function openMessageStore(dataRoot, deviceId) {
       publish,
       receive,
       acknowledge,
+      createScope: scopeStore.createScope,
+      updateScope: scopeStore.updateScope,
+      getScopeState: scopeStore.getScopeState,
+      listScopeStates: scopeStore.listScopeStates,
+      getScopeRecord: scopeStore.getScopeRecord,
+      acceptScopeOffer: scopeStore.acceptScopeOffer,
+      acknowledgeScope: scopeStore.acknowledgeScope,
+      recordScopeError: scopeStore.recordScopeError,
+      scopeOffers: scopeStore.scopeOffers,
+      replicaInventory: replicaQueries.inventory,
+      replicaHistory: replicaQueries.historyPage,
+      nextMissingRange: replicaQueries.nextMissingRange,
+      listScopeReplicas: replicaQueries.listScopeReplicas,
+      listReplicaPeers,
+      recordReplicaInventory,
+      importReplicaHistory,
+      recordReplicaScan,
       close,
     };
   } catch (err) {

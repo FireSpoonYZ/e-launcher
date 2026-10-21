@@ -14,7 +14,16 @@ import type {
   WorkContextStatus,
   WorkActivity,
   ControlHostInfo,
-  BotLiveFrame
+  BotLiveFrame,
+  ScopeCreateInput,
+  ScopeUpdateInput,
+  ScopeInfo,
+  ScopeListOptions,
+  ScopeListPage,
+  ReplicaListOptions,
+  ReplicaListPage,
+  UserMessageInput,
+  StoredMessage
 } from './index.js';
 
 export class ControlApiError extends Error {
@@ -50,6 +59,14 @@ export interface LiveClientOptions {
   signal?: AbortSignal;
 }
 
+export interface ScopeListClientOptions extends ScopeListOptions {
+  signal?: AbortSignal;
+}
+
+export interface ReplicaListClientOptions extends ReplicaListOptions {
+  signal?: AbortSignal;
+}
+
 export interface ControlClient {
   getHostInfo(options?: ControlClientCallOptions): Promise<ControlHostInfo>;
   listBots(options?: ControlClientCallOptions): Promise<BotRecord[]>;
@@ -71,6 +88,15 @@ export interface ControlClient {
   stopWork(botId: string, scopeId: string, options?: ControlClientCallOptions): Promise<WorkActivity>;
   /** Local-only explicit resume for a current member; posts {}, not a global Runtime.resume(). */
   resumeWork(botId: string, scopeId: string, options?: ControlClientCallOptions): Promise<WorkActivity>;
+  /* Module 12: six local-only scope methods; the fixed 10 remote control methods stay unchanged. */
+  listScopeStates(options?: ScopeListClientOptions): Promise<ScopeListPage>;
+  createScope(input: ScopeCreateInput, options?: ControlClientCallOptions): Promise<ScopeInfo>;
+  /** Latest state; a missing scope rejects with ControlApiError (404 SCOPE_NOT_FOUND), never null success. */
+  getScopeState(scopeId: string, options?: ControlClientCallOptions): Promise<ScopeInfo>;
+  updateScope(scopeId: string, input: ScopeUpdateInput, options?: ControlClientCallOptions): Promise<ScopeInfo>;
+  /** Room-public user message ledger receipt; not delivery/inference completion. */
+  publishUserMessage(scopeId: string, input: UserMessageInput, options?: ControlClientCallOptions): Promise<StoredMessage>;
+  listScopeReplicas(scopeId: string, options?: ReplicaListClientOptions): Promise<ReplicaListPage>;
   /** Consume the authenticated live SSE stream for a bot; ends on an end frame, break/return, or signal abort. */
   live(botId: string, options?: LiveClientOptions): AsyncIterable<BotLiveFrame>;
 }

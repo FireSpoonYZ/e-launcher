@@ -2,8 +2,11 @@
 // frames and relay URLs; no ws, no Runtime, no generic schema framework.
 // Module 9 adds optional hello/ready role fields and fixed-direction control-*
 // frames, delegated to remote-control-protocol.js helpers.
+// Module 12 adds the host-only optional scopeProtocol:1 hello/ready capability
+// and delegates managed-scope sync frames to scope-wire.js helpers.
 import { messageError, assertId, normalizeEnvelope, normalizeAck } from './message-protocol.js';
 import { readControlClientFrame, readControlHostFrame, readControlServerFrame } from './remote-control-protocol.js';
+import { readScopeClientFrame, readScopeServerFrame } from './scope-wire.js';
 
 const INVALID_ARGUMENT = 'INVALID_ARGUMENT';
 
@@ -142,7 +145,7 @@ function parseFrame(data) {
 }
 
 function readHello(frame) {
-  rejectUnknownFields(frame, new Set(['type', 'protocolVersion', 'deviceId', 'token', 'role', 'controlProtocol']), 'hello frame');
+  rejectUnknownFields(frame, new Set(['type', 'protocolVersion', 'deviceId', 'token', 'role', 'controlProtocol', 'scopeProtocol']), 'hello frame');
   if (frame.protocolVersion !== 1) throw invalid('hello.protocolVersion must be 1');
   assertId(frame.deviceId, 'deviceId');
   assertDeviceToken(frame.token);
@@ -162,11 +165,20 @@ function readHello(frame) {
     }
     normalized.controlProtocol = 1;
   }
+  if (frame.scopeProtocol !== undefined) {
+    if (frame.scopeProtocol !== 1) {
+      throw invalid('hello.scopeProtocol must be 1');
+    }
+    if (normalized.role === 'client') {
+      throw invalid('hello.scopeProtocol is allowed only for the host role');
+    }
+    normalized.scopeProtocol = 1;
+  }
   return normalized;
 }
 
 function readReady(frame) {
-  rejectUnknownFields(frame, new Set(['type', 'protocolVersion', 'deviceId', 'role']), 'ready frame');
+  rejectUnknownFields(frame, new Set(['type', 'protocolVersion', 'deviceId', 'role', 'scopeProtocol']), 'ready frame');
   if (frame.protocolVersion !== 1) throw invalid('ready.protocolVersion must be 1');
   assertId(frame.deviceId, 'deviceId');
   let role = 'host';
@@ -176,7 +188,17 @@ function readReady(frame) {
     }
     role = frame.role;
   }
-  return { type: 'ready', protocolVersion: 1, deviceId: frame.deviceId, role };
+  const normalized = { type: 'ready', protocolVersion: 1, deviceId: frame.deviceId, role };
+  if (frame.scopeProtocol !== undefined) {
+    if (frame.scopeProtocol !== 1) {
+      throw invalid('ready.scopeProtocol must be 1');
+    }
+    if (role === 'client') {
+      throw invalid('ready.scopeProtocol is allowed only for the host role');
+    }
+    normalized.scopeProtocol = 1;
+  }
+  return normalized;
 }
 
 // Cross-checks needing the authenticated device (source === authenticated,
@@ -288,6 +310,8 @@ function readUnavailable(frame) {
 export function readClientFrame(data, isBinary = false) {
   if (isBinary) throw invalid('relay frames must be text frames');
   const frame = parseFrame(data);
+  const scopeFrame = readScopeClientFrame(frame);
+  if (scopeFrame !== null) return scopeFrame;
   switch (frame.type) {
     case 'hello':
       return readHello(frame);
@@ -315,6 +339,8 @@ export function readClientFrame(data, isBinary = false) {
 export function readServerFrame(data, isBinary = false) {
   if (isBinary) throw invalid('relay frames must be text frames');
   const frame = parseFrame(data);
+  const scopeFrame = readScopeServerFrame(frame);
+  if (scopeFrame !== null) return scopeFrame;
   switch (frame.type) {
     case 'ready':
       return readReady(frame);

@@ -21,6 +21,7 @@ import { BC_KERNEL_VERSION } from './context-state.js';
 import { createRuntimeLive } from './runtime-live.js';
 import { createWorkContextRuntime } from './runtime-work-contexts.js';
 import { createWorkDecisionRuntime } from './runtime-work-decisions.js';
+import { normalizeUserMessage } from './scope-protocol.js';
 import { createCommunicationTools } from './communication-tools.js';
 
 const CTX = BACKGROUND_CONTEXT;
@@ -168,7 +169,9 @@ export async function openRuntime(options) {
 
 function createRuntime({ host, harness, models, defaultModel, releaseOwner, manager, cleanupEnvs, live, workContexts, decisions }) {
   let closePromise = null;
+  let closing = false;
   const close = () => {
+    closing = true;
     closePromise ??= (async () => {
       // 依次执行并收集每步错误：任何一步失败仍继续清理，最后显式抛出。
       const errors = [];
@@ -185,6 +188,12 @@ function createRuntime({ host, harness, models, defaultModel, releaseOwner, mana
       if (errors.length > 1) throw new AggregateError(errors, 'runtime close failed');
     })();
     return closePromise;
+  };
+
+  // 账本元数据/读取与用户发布仅经共享 MessageLog，不触碰模型、原生任务或 harness。
+  const runMessageOperation = (operation) => {
+    if (closing) return Promise.reject(new Error('work context runtime is closed'));
+    return workContexts.runMessageOperation(operation);
   };
 
   return {
@@ -311,6 +320,13 @@ function createRuntime({ host, harness, models, defaultModel, releaseOwner, mana
     getWorkActivity: decisions.getWorkActivity,
     stopWork: decisions.stopWork,
     resumeWork: decisions.resumeWork,
+
+    createScope: (input) => runMessageOperation((log) => log.createScope(input)),
+    updateScope: (scopeId, input) => runMessageOperation((log) => log.updateScope(scopeId, input)),
+    getScopeState: (scopeId) => runMessageOperation((log) => log.getScopeState(scopeId)),
+    listScopeStates: (options) => runMessageOperation((log) => log.listScopeStates(options)),
+    publishUserMessage: (scopeId, input) => runMessageOperation((log) => log.publish(normalizeUserMessage(scopeId, input))),
+    listScopeReplicas: (scopeId, options) => runMessageOperation((log) => log.listScopeReplicas(scopeId, options)),
 
     resume() {
       harness.resume();

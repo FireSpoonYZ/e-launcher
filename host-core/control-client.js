@@ -172,6 +172,30 @@ export function createControlClient({ url, token, fetch: fetchImpl = globalThis.
     resumeWork(botId, scopeId, options) {
       return request('POST', ['v1', 'bots', botId, 'work-contexts', '~' + scopeId, 'resume'], { ...callOptions(options), body: {} });
     },
+    listScopeStates(options) {
+      const query = new URLSearchParams();
+      if (options && options.limit != null) query.set('limit', String(options.limit));
+      if (options && options.cursor != null) query.set('cursor', JSON.stringify(options.cursor));
+      return request('GET', ['v1', 'scopes'], { signal: options && options.signal, query });
+    },
+    createScope(input, options) {
+      return request('POST', ['v1', 'scopes'], { ...callOptions(options), body: input });
+    },
+    getScopeState(scopeId, options) {
+      return request('GET', ['v1', 'scopes', '~' + scopeId], callOptions(options));
+    },
+    updateScope(scopeId, input, options) {
+      return request('POST', ['v1', 'scopes', '~' + scopeId, 'members'], { ...callOptions(options), body: input });
+    },
+    publishUserMessage(scopeId, input, options) {
+      return request('POST', ['v1', 'scopes', '~' + scopeId, 'messages'], { ...callOptions(options), body: input });
+    },
+    listScopeReplicas(scopeId, options) {
+      const query = new URLSearchParams();
+      if (options && options.limit != null) query.set('limit', String(options.limit));
+      if (options && options.cursor != null) query.set('cursor', JSON.stringify(options.cursor));
+      return request('GET', ['v1', 'scopes', '~' + scopeId, 'replicas'], { signal: options && options.signal, query });
+    },
     async *live(botId, options = {}) {
       const signal = options.signal;
       const target = new URL(['v1', 'bots', botId, 'live'].map(encodeURIComponent).join('/'), base);
