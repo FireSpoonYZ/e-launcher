@@ -77,6 +77,49 @@ export interface ContextStatus {
   } | null;
 }
 
+/** Module 10: passive, isolated room/DM contexts; importing never starts inference. */
+export interface WorkContextRecord {
+  deviceId: string;
+  botId: string;
+  scopeId: string;
+  kind: 'room' | 'dm';
+  /** Public UUID, distinct from the Bot's primary conversation and SDK numeric ID. */
+  conversationId: string;
+  createdAt: string;
+  lastImportedLocalId: number;
+  importedCount: number;
+}
+
+export interface WorkSyncOptions {
+  /** One page per explicit sync; default 50, maximum 200, positive safe integer. */
+  limit?: number;
+}
+
+export interface WorkSyncResult {
+  context: WorkContextRecord;
+  imported: number;
+  hasMore: boolean;
+}
+
+/** Exact wrapper bound to one public work-context UUID; never a raw/primary cursor. */
+export interface WorkHistoryCursor {
+  conversationId: string;
+  position: Record<string, unknown>;
+}
+
+export interface WorkHistoryPage {
+  botId: string;
+  scopeId: string;
+  conversationId: string | null;
+  items: readonly EntryRecord[];
+  nextCursor: WorkHistoryCursor | null;
+}
+
+export interface WorkContextStatus extends Omit<ContextStatus, 'conversationId'> {
+  scopeId: string;
+  conversationId: string | null;
+}
+
 export interface OpenRuntimeOptions {
   dataRoot: string;
   models?: Models;
@@ -94,6 +137,10 @@ export interface Runtime {
   history(botId: string, options?: HistoryOptions): Promise<HistoryPage>;
   abort(botId: string): Promise<void>;
   contextStatus(botId: string): Promise<ContextStatus>;
+  getWorkContext(botId: string, scopeId: string): Promise<WorkContextRecord | null>;
+  syncWorkContext(botId: string, scopeId: string, options?: WorkSyncOptions): Promise<WorkSyncResult>;
+  workHistory(botId: string, scopeId: string, options?: { limit?: number; cursor?: WorkHistoryCursor | null }): Promise<WorkHistoryPage>;
+  workContextStatus(botId: string, scopeId: string): Promise<WorkContextStatus>;
   watch(botId: string, options?: { signal?: AbortSignal }): Promise<BotWatch>;
   resume(): void;
   close(): Promise<void>;
@@ -308,6 +355,11 @@ export interface MessagePageOptions {
   cursor?: MessageCursor | null;
 }
 
+export interface MessageInboxOptions extends MessagePageOptions {
+  /** Filter frozen Bot targets by scope before paging; omission preserves the legacy inbox. */
+  scopeId?: string;
+}
+
 export interface MessageOutboxOptions extends MessagePageOptions {
   scopeId?: string;
   targetDeviceId?: string;
@@ -369,7 +421,7 @@ export interface MessageLog {
   ): { message: StoredMessage; ack: MessageAck; duplicate: boolean };
   acknowledge(peer: MessagePeer, ack: MessageAck): MessageDeliveryStatus;
   history(scopeId: string, options?: MessagePageOptions): MessageHistoryPage;
-  inbox(botId: string, options?: MessagePageOptions): MessageInboxPage;
+  inbox(botId: string, options?: MessageInboxOptions): MessageInboxPage;
   outbox(options?: MessageOutboxOptions): MessageOutboxPage;
   deliveryStatus(messageId: string): MessageDeliveryStatus;
   streamStatus(scopeId: string, revision: number, sourceDeviceId: string): MessageStreamStatus | null;
@@ -476,7 +528,8 @@ export function openDeviceLink(options: OpenDeviceLinkOptions): Promise<DeviceLi
  * Module 9 types: authenticated remote Host JSON control over the module 8
  * relay. The Node client opens an explicit 'client' role connection; the
  * target Host remains the sole authority for Bot cwd/create, inference,
- * tools and history. Static delivery pending parent E2E.
+ * tools and history. Module 10 work-context operations remain local-only;
+ * they do not extend these fixed 10 remote methods.
  */
 
 export type RemoteControlOutcome = 'not-sent' | 'unconfirmed' | 'responded';

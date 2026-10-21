@@ -6,6 +6,12 @@ import type {
   HistoryOptions,
   HistoryPage,
   ContextStatus,
+  WorkContextRecord,
+  WorkSyncOptions,
+  WorkSyncResult,
+  WorkHistoryCursor,
+  WorkHistoryPage,
+  WorkContextStatus,
   ControlHostInfo,
   BotLiveFrame
 } from './index.js';
@@ -26,11 +32,17 @@ export interface ControlClientOptions {
 }
 
 export interface ControlClientCallOptions {
+  /** Cancels only HTTP; does not abort inference or roll back accepted imports. */
   signal?: AbortSignal;
 }
 
 export interface HistoryClientOptions extends HistoryOptions {
   signal?: AbortSignal;
+}
+
+export interface WorkHistoryClientOptions extends ControlClientCallOptions {
+  limit?: number;
+  cursor?: WorkHistoryCursor | null;
 }
 
 export interface LiveClientOptions {
@@ -48,6 +60,10 @@ export interface ControlClient {
   history(botId: string, options?: HistoryClientOptions): Promise<HistoryPage>;
   abort(botId: string, options?: ControlClientCallOptions): Promise<{ botId: string }>;
   contextStatus(botId: string, options?: ControlClientCallOptions): Promise<ContextStatus>;
+  getWorkContext(botId: string, scopeId: string, options?: ControlClientCallOptions): Promise<WorkContextRecord>;
+  syncWorkContext(botId: string, scopeId: string, input?: WorkSyncOptions, options?: ControlClientCallOptions): Promise<WorkSyncResult>;
+  workHistory(botId: string, scopeId: string, options?: WorkHistoryClientOptions): Promise<WorkHistoryPage>;
+  workContextStatus(botId: string, scopeId: string, options?: ControlClientCallOptions): Promise<WorkContextStatus>;
   /** Consume the authenticated live SSE stream for a bot; ends on an end frame, break/return, or signal abort. */
   live(botId: string, options?: LiveClientOptions): AsyncIterable<BotLiveFrame>;
 }

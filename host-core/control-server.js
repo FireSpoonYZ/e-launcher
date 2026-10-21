@@ -28,6 +28,10 @@ const routes = [
   { method: 'GET', key: '/v1/bots/:botId/history', pattern: /^\/v1\/bots\/([^/]+)\/history\/?$/, params: ['botId'], hasBody: false, handler: history },
   { method: 'POST', key: '/v1/bots/:botId/abort', pattern: /^\/v1\/bots\/([^/]+)\/abort\/?$/, params: ['botId'], hasBody: true, handler: abort },
   { method: 'GET', key: '/v1/bots/:botId/context', pattern: /^\/v1\/bots\/([^/]+)\/context\/?$/, params: ['botId'], hasBody: false, handler: contextStatus },
+  { method: 'GET', key: '/v1/bots/:botId/work-contexts/:scopeKey', pattern: /^\/v1\/bots\/([^/]+)\/work-contexts\/([^/]+)\/?$/, params: ['botId', 'scopeKey'], hasBody: false, handler: getWorkContext },
+  { method: 'POST', key: '/v1/bots/:botId/work-contexts/:scopeKey/sync', pattern: /^\/v1\/bots\/([^/]+)\/work-contexts\/([^/]+)\/sync\/?$/, params: ['botId', 'scopeKey'], hasBody: true, handler: syncWorkContext },
+  { method: 'GET', key: '/v1/bots/:botId/work-contexts/:scopeKey/history', pattern: /^\/v1\/bots\/([^/]+)\/work-contexts\/([^/]+)\/history\/?$/, params: ['botId', 'scopeKey'], hasBody: false, handler: workHistory },
+  { method: 'GET', key: '/v1/bots/:botId/work-contexts/:scopeKey/context', pattern: /^\/v1\/bots\/([^/]+)\/work-contexts\/([^/]+)\/context\/?$/, params: ['botId', 'scopeKey'], hasBody: false, handler: workContextStatus },
 ];
 
 /**
@@ -214,6 +218,34 @@ async function abort(host, runtime, params, body, req, res) {
 
 async function contextStatus(host, runtime, params, body, req, res) {
   writeControlJson(res, 200, await runtime.contextStatus(params.botId));
+}
+
+async function getWorkContext(host, runtime, params, body, req, res) {
+  const record = await runtime.getWorkContext(params.botId, workScopeId(params.scopeKey));
+  if (!record) throw new ControlHttpError(404, 'WORK_CONTEXT_NOT_FOUND', 'work context not found');
+  writeControlJson(res, 200, record);
+}
+
+async function syncWorkContext(host, runtime, params, body, req, res) {
+  writeControlJson(res, 200, await runtime.syncWorkContext(params.botId, workScopeId(params.scopeKey), body));
+}
+
+async function workHistory(host, runtime, params, body, req, res) {
+  const scopeId = workScopeId(params.scopeKey);
+  const options = parseHistoryQuery(new URL(req.url, 'http://' + BIND_HOST).searchParams);
+  writeControlJson(res, 200, await runtime.workHistory(params.botId, scopeId, options));
+}
+
+async function workContextStatus(host, runtime, params, body, req, res) {
+  writeControlJson(res, 200, await runtime.workContextStatus(params.botId, workScopeId(params.scopeKey)));
+}
+
+function workScopeId(scopeKey) {
+  // dispatch 已解码一次；固定前缀保护 '.'/'..' scope，避免 URL 路径折叠。
+  if (!scopeKey.startsWith('~')) {
+    throw new ControlHttpError(400, 'INVALID_ARGUMENT', 'work context scope path segment must start with ~');
+  }
+  return scopeKey.slice(1);
 }
 
 function parseHistoryQuery(searchParams) {

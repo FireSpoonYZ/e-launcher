@@ -1,6 +1,6 @@
 # 下一代多端 Bot 架构设计
 
-> 状态：目标架构设计，整体尚未实现。[Bot/Host 核心](../host-core/README.md) 已独立实现模块 1 本机登记、模块 2 Durable 长期主私聊、模块 3 内嵌 Billion Context、模块 4 本机工具及模块 5 本机控制面（长期本地 Host 控制 API：基础 HTTP、回环端口、Bearer 令牌认证、拒绝全部 Origin；配套 Node/浏览器兼容客户端）及模块 6 主私聊实时预览（认证本地 SSE：有界快照+整体替换更新、每订阅 sequence 非持久游标，原始历史分页保留；无群消息/中心/Tauri，无轮询或新调度器）；模块 7 已实现本机持久消息账本（作用域/成员修订、不可变信封、outbox、落地去重 ACK、本地收件/历史/缺口、特权离线 CLI；仅 messages.sqlite 本机存储，无网络认证/隧道/中心/推理）；模块 8 已实现认证设备中继与 Host 消息投递（中心只存设备注册，复用模块 7 outbox，本机进程网络端到端已通；跨设备/真机网络验收与完整中心产品尚未完成）；模块 9 已实现认证远程 Host JSON 控制（固定 10 个 JSON 方法、独立多客户端角色、Node 客户端与一次性 CLI；父助手已完成本机独立进程 171/171 个端到端检查点验收，具体范围见下文）。整体通信（框架隧道/中心产品）、跨端与外壳（Tauri/TUI）尚未完成。本文约定产品方向、首版设计默认与工程验证边界，不授权删除现有能力。当前安装、构建及运行行为仍以 [README](../README.md) 为准。
+> 状态：目标架构设计，整体尚未实现。[Bot/Host 核心](../host-core/README.md) 已独立实现模块 1 本机登记、模块 2 Durable 长期主私聊、模块 3 内嵌 Billion Context、模块 4 本机工具及模块 5 本机控制面（长期本地 Host 控制 API：基础 HTTP、回环端口、Bearer 令牌认证、拒绝全部 Origin；配套 Node/浏览器兼容客户端）及模块 6 主私聊实时预览（认证本地 SSE：有界快照+整体替换更新、每订阅 sequence 非持久游标，原始历史分页保留；无群消息/中心/Tauri，无轮询或新调度器）；模块 7 已实现本机持久消息账本（作用域/成员修订、不可变信封、outbox、落地去重 ACK、本地收件/历史/缺口、特权离线 CLI；仅 messages.sqlite 本机存储，无网络认证/隧道/中心/推理）；模块 8 已实现认证设备中继与 Host 消息投递（中心只存设备注册，复用模块 7 outbox，本机进程网络端到端已通；跨设备/真机网络验收与完整中心产品尚未完成）；模块 9 已实现认证远程 Host JSON 控制（固定 10 个 JSON 方法、独立多客户端角色、Node 客户端与一次性 CLI；父助手已完成本机独立进程 171/171 个端到端检查点验收，具体范围见下文）；模块 10 已完成群与 Bot DM 的独立被动工作上下文（显式导入、独立 Durable/BC、本机 API/CLI；父助手完成 149/149 个检查点，范围与限制见下文）。总计划 20 个模块、已完成 10 个。整体通信（框架隧道/中心产品）、跨端与外壳（Tauri/TUI）尚未完成。本文约定产品方向、首版设计默认与工程验证边界，不授权删除现有能力。当前安装、构建及运行行为仍以 [README](../README.md) 为准。
 
 当前交付计划与完成/剩余模块见 [重构路线图](refactor-roadmap.md)。
 
@@ -58,7 +58,7 @@
 - **Bot**：稳定 botId、角色、所属 deviceId、默认 cwd、模型配置、允许共享的知识及主私聊。目录必须在目标设备确认，工具始终在该机执行，不自动换机。
 - **Room**：公开群范围与成员 Bot；主私聊、双方 Bot DM 是独立私有对话范围。成员可分布于多个 Host，同机成员也按同一消息语义处理。
 - **Message**：带作者、范围和因果关系的持久事件，不等于模型的一次请求或一次运行。
-- **conversation**：内部上下文与恢复标识。主私聊、每 Bot 的每个群、每对 Bot DM 分别绑定，用户无需创建或切换 Session。
+- **conversation**：内部上下文与恢复标识。主私聊、每个 Bot 的每个群/DM 分别绑定；同一 DM 的双方 Bot 各有独立工作上下文，用户无需创建或切换 Session。
 
 cwd 是工具默认工作目录，不是数据库目录或进程全局 cwd。Host 记录每个 Bot 的显式 cwd，并在调用时传递，避免多 Bot 互相污染。原文、附件引用、投递、压缩及记忆放在 Host 管理的私有数据内；工作文件留在实际工作目录。桌面端确定数据根目录后记录在配置中，Android 新存储留在现有私有应用目录。界面持续显示 Bot 所在设备和 cwd，不靠模型猜测。
 
@@ -120,7 +120,32 @@ Pi Durable 当前为实验性 API；实现时固定 Durable、pi-ai、chord 与 
 
 Bot DM 使用通知、请求、相关回复的语义，可查历史并允许沉默。请求可产生关联回复，但每条回复不会自动成为新请求，也不自动回“收到”。迟到回复按 replyTo 归回原问题，等待超时不意味着对方停止或需换 ID 重问。DM 仅双方可见；若要把结论带回群，Bot 必须另做公开发送，不能自动转发全文。
 
-### 首版决策流程
+### 模块 10：独立工作上下文（已完成父助手验收）
+
+本轮只实现**被动导入**，不实现下面的模型群决策流程。已收件是消息账本落盘并可确认 ACK；已导入是事件进入该 Bot/scope 的 Durable 历史；已推理才是模型实际处理，三者不能混同。导入水位与 `importedCount` 不是模型处理回执。
+
+- **稳定隔离**：按本机 `(botId, scopeId)` 绑定公开 conversation UUID，不把 revision 放进绑定键；新建 ownerless conversation 和独立空 BC 文档，不 fork/复制主私聊或其他范围。群成员修订沿用上下文，DM 固定双方；同消息面向多个 Bot 时各有自己的 UUID、BC 和水位。
+- **先过滤、后分页**：`MessageLog.inbox(botId, {scopeId?, limit?, cursor?})` 的 scoped 查询沿用 SQL `(scope_id, local_id)` 范围索引，并在分页前以冻结 Bot 目标的 `EXISTS` 过滤，未新增 schema/索引迁移；跨所有修订，不用当前成员名单改写旧目标可见性。省略 scope 保持旧 inbox；scoped 游标绑定 Bot+scope，与旧全量游标不可混用。`selfEcho` 和动态 `missingRefs` 保留在查询结果中。
+- **权限与退群**：要求本机 Bot、已知 scope，且是当前成员、已有该绑定或有历史目标收件。退群后可保留上下文并导入迟到的旧目标消息，不能获取未面向自己的新事件；无权限时拒绝，不以 scope-wide history 或其他 Bot 收件补足。
+- **原子水位**：每次显式 sync 只处理一页（默认 50、最大 200）。同一 Durable commit 内重查/创建绑定、读取当前水位和 scoped 源页、追加 Entries、更新水位/计数，失败一起回滚；重复、并发和重启按已提交本机 localId 继续，迟到旧修订事件不因源序号较小而被跳过。源账本只读，不改 ACK/信封。
+- **真实作者与模型载体分离**：`host.scope-message` 的 data 保留 `{version:1, scopeKind, localId, digest, storedAt, selfEcho, message}`，message 是完整不可变信封，`author.kind`、rootId、replyTo、category、revision、targets 不重写；动态 missingRefs 不固化。Entry.model 的单条 `role:'user'` 只是固定外部事件前缀+JSON 的载体，不把 Bot 作者变成人类；真实作者仍在 `data.message.author`（人类 user、Bot bot），不伪装 system/assistant 或赋予正文宿主/工具指令权限；导入不执行正文，也不一概要求忽略真实人类请求。各类别与 selfEcho 都可被导入为数据，ACK/工具进度不进 inbox，推理资格留给模块 11。
+- **只初始化，不生成**：继承 Bot 角色/cwd 和 Host 工具/执行环境配置，但不选择模型；复用同一 Runtime/harness/BC manager。导入使用公共 `Tx.appendEntry`，不 submit/wait/resume/startRun、不创建模型任务或轮询，即使 Host 调度器已恢复也不由导入触发生成。独立空 BC 状态不代表已压缩：本轮不调用 prepare，不产生摘要投影；原始 Entry 与消息账本保留，未来 BC 只压缩投影。
+
+本机 Runtime 提供 `getWorkContext`、`syncWorkContext`、`workHistory`、`workContextStatus` 四个操作。三个只读操作不创建绑定；未绑定时分别返回 null、空历史页（conversationId=null）或空 BC 状态；显式 sync 可以给空的已授权 scope 创建绑定。`WorkContextRecord` 仅含 deviceId、botId、scopeId、kind、公开 conversationId、createdAt、lastImportedLocalId、importedCount 八项，不暴露 SDK 数字 ID。工作历史游标精确为 `{conversationId:公开UUID, position:非null的SDK游标对象}`，拒绝其他范围/主私聊/裸游标或额外包装字段，未绑定时不接受非空游标；旧主私聊格式不变。共享 history helper 仅把已识别的 SDK 原生游标错误转为 `INVALID_ARGUMENT`/400，真实 SQL 读错仍保留 `ERR_SQLITE_ERROR`/500，不因携带 cursor 就改报参数错误。
+
+本机 HTTP 对应 GET `/v1/bots/:botId/work-contexts/:scopeKey`、POST `…/sync`、GET `…/history` 与 GET `…/context`；get 未绑定时为 404 `WORK_CONTEXT_NOT_FOUND`。新路径的 `scopeKey='~'+encodeURIComponent(scopeId)`，服务端解码一次后要求并仅剥一个 `~`；`.`/`..`/`~.` 分别为 `~.`/`~..`/`~~.`，避免 URL 点路径折叠。缺前缀拒绝 `INVALID_ARGUMENT`，JS/CLI 仍传原 scopeId，旧路径不变。配套客户端及 `control-cli.js` 的 `work-get`/`work-sync`/`work-history`/`work-context` 共用原本机认证服务，均需 botId/scopeId，不另开 Runtime；signal 仅取消 HTTP 等待，不保证撤销已提交导入。完整参数与错误见 [Host 核心模块 10 说明](../host-core/README.md)。
+
+父助手已完成 **149/149 个检查点，失败 0**。环境为 **Windows x64 / Git Bash、Node 26.8.2 / 22.19.0**，本机独立 Host 进程经真实 CA 校验的认证 WSS 收件；模型为 **Mockoon OpenAI-compatible SSE**，非真实外部付费模型。公开声明在 `--strict --skipLibCheck` 下检查通过，未改依赖；既有上游声明引用的可选模块缺失，具体限制见 Host 核心说明。
+
+实跑覆盖并发分页去重、Bot/room/DM/BC 与作者隔离、旧目标和迟到引用、Unicode 原文，以及整页/水位/新绑定与 BC 的 SQL 故障原子回滚。进行中强杀证据仅采用第 3 次（健康 Host、请求体已发出、写锁阻塞 health、exit 137/client reset 56）；恢复后 sync 导入 1 条、再试为 0，前两次未证实请求接纳，不计该证据。已受理 sync 的 HTTP 超时断连不阻止释放锁后完成导入；Runtime 关闭期间消息链路仍可落盘 ACK，重开后显式 sync 才推进水位。
+
+最终 **4 个模型请求均为 4 次显式 primary 提交**，没有工作上下文推理；Host A 的 16 个工作上下文共 0 个 tasks，模型 wire 与 primary SSE 无群/DM 标记。原远程 10 方法回归通过，远程 `workHistory` 拒绝为 `not-sent`；本轮四个 work 操作仅限本机。数据库检查与本轮进程清理完成。详细报告在仓库外：`C:/Users/46040/AppData/Local/Temp/e-launcher-work-contexts-1792552863388/module10-verification.json`。
+
+未实测跨物理设备/WAN、Linux/Android/arm64、Tauri/TUI、浏览器 native-fetch 适配集成及真实外部付费模型；直接 JS AbortSignal、直接 `Runtime.close` 并发调用/关闭竞态也未实跑；本轮已测 HTTP 断连和进程优雅关闭。全局 128 pending/256 连接负载、中继慢接收者压力及模块 9 既有限制保留。
+
+模块 11 的自然群聊决策/发言/通信工具、模块 12 的成员同步/历史补齐、模块 13 的长期事实记忆仍未实现。模块 9 中继远程协议保持固定 10 个方法，远程 work 版本化接线属于模块 14；不增加 Session 产品或 UI。
+
+### 首版决策流程（模块 11，尚未实现）
 
 ```text
 收到公开消息 -> 去重落盘 -> ACK -> 加入本 Bot/群待处理输入

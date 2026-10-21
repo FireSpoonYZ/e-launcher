@@ -16,7 +16,7 @@ commands:
   receive           receive an envelope; requires --peer-device-id --input
   ack              acknowledge delivery; requires --peer-device-id --input
   history           list history of a scope; requires --scope-id [--limit] [--cursor]
-  inbox             list a bot's inbox; requires --bot-id [--limit] [--cursor]
+  inbox             list a bot's inbox; requires --bot-id [--scope-id] [--limit] [--cursor]
   outbox            list pending outbox; [--scope-id] [--target-device-id] [--limit] [--cursor]
   delivery          print delivery status; requires --message-id
   stream            print stream status; requires --scope-id --revision --source-device-id
@@ -75,7 +75,7 @@ const REQUIRED = {
 const ALLOWED_EXTRA = {
   'get-scope': ['revision'],
   history: ['limit', 'cursor'],
-  inbox: ['limit', 'cursor'],
+  inbox: ['scope-id', 'limit', 'cursor'],
   outbox: ['scope-id', 'target-device-id', 'limit', 'cursor'],
 };
 
@@ -259,7 +259,7 @@ function main() {
         result = log.history(values['scope-id'], page);
         break;
       case 'inbox':
-        result = log.inbox(values['bot-id'], page);
+        result = log.inbox(values['bot-id'], { ...page, scopeId: values['scope-id'] });
         break;
       case 'outbox':
         result = log.outbox(outboxOptions);

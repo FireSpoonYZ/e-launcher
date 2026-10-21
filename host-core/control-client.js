@@ -147,6 +147,22 @@ export function createControlClient({ url, token, fetch: fetchImpl = globalThis.
     contextStatus(botId, options) {
       return request('GET', ['v1', 'bots', botId, 'context'], callOptions(options));
     },
+    // 固定 ~ 前缀避免 '.'/'..' scope 被 URL 折叠；request 仍逐段 URI 编码。
+    getWorkContext(botId, scopeId, options) {
+      return request('GET', ['v1', 'bots', botId, 'work-contexts', '~' + scopeId], callOptions(options));
+    },
+    syncWorkContext(botId, scopeId, input = {}, options) {
+      return request('POST', ['v1', 'bots', botId, 'work-contexts', '~' + scopeId, 'sync'], { ...callOptions(options), body: input });
+    },
+    workHistory(botId, scopeId, options) {
+      const query = new URLSearchParams();
+      if (options && options.limit != null) query.set('limit', String(options.limit));
+      if (options && options.cursor != null) query.set('cursor', JSON.stringify(options.cursor));
+      return request('GET', ['v1', 'bots', botId, 'work-contexts', '~' + scopeId, 'history'], { signal: options && options.signal, query });
+    },
+    workContextStatus(botId, scopeId, options) {
+      return request('GET', ['v1', 'bots', botId, 'work-contexts', '~' + scopeId, 'context'], callOptions(options));
+    },
     async *live(botId, options = {}) {
       const signal = options.signal;
       const target = new URL(['v1', 'bots', botId, 'live'].map(encodeURIComponent).join('/'), base);

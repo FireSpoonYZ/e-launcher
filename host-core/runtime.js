@@ -19,6 +19,7 @@ import { createContextManager } from './context-manager.js';
 import { createContextTools } from './context-tools.js';
 import { BC_KERNEL_VERSION } from './context-state.js';
 import { createRuntimeLive } from './runtime-live.js';
+import { createWorkContextRuntime } from './runtime-work-contexts.js';
 
 const CTX = BACKGROUND_CONTEXT;
 
@@ -122,16 +123,19 @@ export async function openRuntime(options) {
     throw err;
   }
   const live = createRuntimeLive({ host, getHarness: () => harness });
-  return createRuntime({ host, harness, models, defaultModel, releaseOwner, manager, cleanupEnvs, live });
+  const workContexts = createWorkContextRuntime({ host, harness, manager, context: CTX });
+  return createRuntime({ host, harness, models, defaultModel, releaseOwner, manager, cleanupEnvs, live, workContexts });
 }
 
-function createRuntime({ host, harness, models, defaultModel, releaseOwner, manager, cleanupEnvs, live }) {
+function createRuntime({ host, harness, models, defaultModel, releaseOwner, manager, cleanupEnvs, live, workContexts }) {
   let closePromise = null;
   const close = () => {
     closePromise ??= (async () => {
       // 依次执行并收集每步错误：任何一步失败仍继续清理，最后显式抛出。
       const errors = [];
-      // 先停止全部 live 订阅，再关闭 harness：保持既有错误收集与资源释放语义。
+      // 拒绝新工作上下文调用并等待已接受操作，避免 harness 提前关闭导致导入中断。
+      try { await workContexts.close(); } catch (err) { errors.push(err); }
+      // 停止全部 live 订阅，再关闭 harness：保持既有错误收集与资源释放语义。
       try { await live.close(); } catch (err) { errors.push(err); }
       try { await harness.close(CTX); } catch (err) { errors.push(err); }
       try { await cleanupEnvs(); } catch (err) { errors.push(err); }
@@ -259,6 +263,11 @@ function createRuntime({ host, harness, models, defaultModel, releaseOwner, mana
         : { kernelVersion: BC_KERNEL_VERSION, status: null, blocks: [], messageRefs: { byRaw: {}, byRef: {} }, prepared: null };
       return { botId, conversationId: bot.primaryConversationId, ...status };
     },
+
+    getWorkContext: workContexts.getWorkContext,
+    syncWorkContext: workContexts.syncWorkContext,
+    workHistory: workContexts.workHistory,
+    workContextStatus: workContexts.workContextStatus,
 
     resume() {
       harness.resume();

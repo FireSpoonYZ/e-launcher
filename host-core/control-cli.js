@@ -3,7 +3,7 @@ import { pathToFileURL } from 'node:url';
 import { once } from 'node:events';
 import { createControlClient } from './control-client.js';
 
-const USAGE = `usage: node host-core/control-cli.js <host|create|list|get|find-request|send|status|history|abort|context|live> [options]
+const USAGE = `usage: node host-core/control-cli.js <host|create|list|get|find-request|send|status|history|abort|context|live|work-get|work-sync|work-history|work-context> [options]
 
 commands:
   host             print host info
@@ -17,18 +17,23 @@ commands:
   abort            abort a bot's current work; requires --bot-id
   context          print context status; requires --bot-id
   live             stream live bot frames, one JSON line per frame; requires --bot-id
+  work-get         print one work context; requires --bot-id --scope-id
+  work-sync        import one inbox page without inference; requires --bot-id --scope-id [--limit]
+  work-history     list work context history; requires --bot-id --scope-id [--limit] [--cursor]
+  work-context     print work context status; requires --bot-id --scope-id
 
 options:
   --url <url>         host control server URL (required, except --help)
   --token-env <name>  environment variable holding the bearer token (required, except --help)
   --bot-id <id>
+  --scope-id <id>     work context scope (work-* commands only)
   --request-id <id>
   --role <text>
   --cwd <dir>
   --model-ref <value>
   --text <text>
-  --limit <int>       strict decimal positive integer (history)
-  --cursor <json>     JSON object cursor (history)
+  --limit <int>       strict decimal positive integer (history, work-sync, work-history)
+  --cursor <json>     JSON object cursor (history, work-history)
   -h, --help          show this help
 `;
 
@@ -36,6 +41,7 @@ const OPTIONS = {
   url: { type: 'string' },
   'token-env': { type: 'string' },
   'bot-id': { type: 'string' },
+  'scope-id': { type: 'string' },
   'request-id': { type: 'string' },
   role: { type: 'string' },
   cwd: { type: 'string' },
@@ -58,10 +64,14 @@ const REQUIRED = {
   abort: ['bot-id'],
   context: ['bot-id'],
   live: ['bot-id'],
+  'work-get': ['bot-id', 'scope-id'],
+  'work-sync': ['bot-id', 'scope-id'],
+  'work-history': ['bot-id', 'scope-id'],
+  'work-context': ['bot-id', 'scope-id'],
 };
 
-// host/list 不接受任何资源参数。
-const RESOURCE_OPTIONS = ['bot-id', 'request-id', 'role', 'cwd', 'model-ref', 'text', 'limit', 'cursor'];
+// host/list 不接受资源参数；work-* 只接受各自的必需项及分页项。
+const RESOURCE_OPTIONS = ['bot-id', 'scope-id', 'request-id', 'role', 'cwd', 'model-ref', 'text', 'limit', 'cursor'];
 
 const ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
@@ -133,17 +143,23 @@ async function main() {
       throw invalid(`missing required option --${key}`);
     }
   }
-  if (command === 'host' || command === 'list') {
+  const workCommand = command.startsWith('work-');
+  if (command === 'host' || command === 'list' || workCommand) {
+    const allowed = [...REQUIRED[command]];
+    if (command === 'work-sync' || command === 'work-history') allowed.push('limit');
+    if (command === 'work-history') allowed.push('cursor');
     for (const key of RESOURCE_OPTIONS) {
-      if (values[key] !== undefined) {
+      if (values[key] !== undefined && !allowed.includes(key)) {
         throw invalid(`${command} does not take --${key}`);
       }
     }
+  } else if (values['scope-id'] !== undefined) {
+    throw invalid(`${command} does not take --scope-id`);
   }
-  const historyOptions = {};
-  if (command === 'history') {
-    if (values.limit !== undefined) historyOptions.limit = parseLimit(values.limit);
-    if (values.cursor !== undefined) historyOptions.cursor = parseCursor(values.cursor);
+  const pageOptions = {};
+  if (command === 'history' || command === 'work-history' || command === 'work-sync') {
+    if (values.limit !== undefined) pageOptions.limit = parseLimit(values.limit);
+    if (values.cursor !== undefined) pageOptions.cursor = parseCursor(values.cursor);
   }
 
   const client = createControlClient({ url: values.url, token: tokenFromEnv(values['token-env']) });
@@ -177,13 +193,25 @@ async function main() {
       result = await client.getSubmission(values['bot-id'], values['request-id']);
       break;
     case 'history':
-      result = await client.history(values['bot-id'], historyOptions);
+      result = await client.history(values['bot-id'], pageOptions);
       break;
     case 'abort':
       result = await client.abort(values['bot-id']);
       break;
     case 'context':
       result = await client.contextStatus(values['bot-id']);
+      break;
+    case 'work-get':
+      result = await client.getWorkContext(values['bot-id'], values['scope-id']);
+      break;
+    case 'work-sync':
+      result = await client.syncWorkContext(values['bot-id'], values['scope-id'], pageOptions);
+      break;
+    case 'work-history':
+      result = await client.workHistory(values['bot-id'], values['scope-id'], pageOptions);
+      break;
+    case 'work-context':
+      result = await client.workContextStatus(values['bot-id'], values['scope-id']);
       break;
     case 'live':
       await streamLive(client, values['bot-id']);

@@ -1,5 +1,6 @@
 // 模块 2：Pi Durable 本机主私聊的只读 helper。
 // 不启动调度、不写记录、不合成回答；由后续运行时集成 worker 调用。
+import { StorageRequestError } from '@earendil-works/pi-durable';
 
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 200;
@@ -31,8 +32,19 @@ export function normalizeHistoryOptions(options = {}) {
  */
 export async function readPrimaryHistory(conversation, options = {}, context) {
   const { limit, cursor } = normalizeHistoryOptions(options);
-  const page = await conversation.entries({ order: 'ascending' }, limit, cursor, context);
-  return { items: page.items, nextCursor: page.next ?? null };
+  try {
+    const page = await conversation.entries({ order: 'ascending' }, limit, cursor, context);
+    return { items: page.items, nextCursor: page.next ?? null };
+  } catch (err) {
+    // SDK 1.3.0 没有细分游标错误码，不能把其余 StorageRequestError 当成参数错误。
+    if (err instanceof StorageRequestError && (
+      err.message === 'Invalid storage cursor' ||
+      err.message === 'The cursor continues a descending scan; the query asks for ascending'
+    )) {
+      throw invalidArgument(err.message);
+    }
+    throw err;
+  }
 }
 
 /** 把 Durable 提交记录格式化为 PrimarySubmission；conversationId 用公开 UUID。 */

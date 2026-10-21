@@ -7,7 +7,12 @@ import {
 } from './message-protocol.js';
 
 const MAX_GAP_INTERVALS = 100;
+const INBOX_OPTION_KEYS = new Set(['scopeId', 'limit', 'cursor']);
 const OUTBOX_OPTION_KEYS = new Set(['scopeId', 'targetDeviceId', 'limit', 'cursor']);
+
+export function inboxQueryKey(botId, scopeId) {
+  return scopeId === undefined ? botId : 'scope:' + digest([botId, scopeId]);
+}
 
 // 只读查询层：仅 prepared SELECT，事务/写入/连接生命周期归 message-store.js。
 export function createMessageQueries(db, { deviceId }) {
@@ -70,6 +75,16 @@ export function createMessageQueries(db, { deviceId }) {
     `SELECT e.* FROM message_events e
        JOIN message_local_targets t ON t.message_id = e.message_id
        WHERE t.bot_id = ? AND e.local_id > ?
+       ORDER BY e.local_id ASC
+       LIMIT ?`
+  );
+  const stmtInboxScoped = db.prepare(
+    `SELECT e.* FROM message_events e
+       WHERE e.scope_id = ? AND e.local_id > ?
+         AND EXISTS (
+           SELECT 1 FROM message_local_targets t
+           WHERE t.message_id = e.message_id AND t.bot_id = ?
+         )
        ORDER BY e.local_id ASC
        LIMIT ?`
   );
@@ -246,11 +261,31 @@ export function createMessageQueries(db, { deviceId }) {
   }
 
   function inbox(botId, options) {
-    const { limit, cursor } = normalizePageOptions(options ?? {});
-    bindCursor(cursor, 'inbox', botId, false);
-    const rows = cursor
-      ? stmtInboxAfter.all(botId, cursor.afterLocalId, limit + 1)
-      : stmtInbox.all(botId, limit + 1);
+    const opts = options ?? {};
+    if (typeof opts !== 'object' || Array.isArray(opts)) {
+      throw messageError('INVALID_ARGUMENT', 'page options must be an object');
+    }
+    for (const optionKey of Object.keys(opts)) {
+      if (!INBOX_OPTION_KEYS.has(optionKey)) {
+        throw messageError('INVALID_ARGUMENT', 'page options has unknown field: ' + optionKey);
+      }
+    }
+    const scopeId = opts.scopeId;
+    if (scopeId !== undefined) {
+      assertId(scopeId, 'scopeId');
+      if (!stmtScopeExists.get(scopeId)) {
+        throw messageError('SCOPE_NOT_FOUND', 'scope not found');
+      }
+    }
+    const { limit, cursor } = normalizePageOptions({ limit: opts.limit, cursor: opts.cursor });
+    const key = inboxQueryKey(botId, scopeId);
+    bindCursor(cursor, 'inbox', key, false);
+    const rows =
+      scopeId !== undefined
+        ? stmtInboxScoped.all(scopeId, cursor?.afterLocalId ?? 0, botId, limit + 1)
+        : cursor
+          ? stmtInboxAfter.all(botId, cursor.afterLocalId, limit + 1)
+          : stmtInbox.all(botId, limit + 1);
     const pageRows = rows.length > limit ? rows.slice(0, limit) : rows;
     const items = pageRows.map((row) => {
       const stored = toStoredMessage(row);
@@ -264,7 +299,7 @@ export function createMessageQueries(db, { deviceId }) {
         ? {
             deviceId,
             kind: 'inbox',
-            key: botId,
+            key,
             afterLocalId: pageRows[pageRows.length - 1].local_id,
           }
         : null;
