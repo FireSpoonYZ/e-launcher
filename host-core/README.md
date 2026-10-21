@@ -1,13 +1,13 @@
 # @e-launcher/host-core
 
-本机 Bot/Host 核心。模块 1 提供 Bot 定义与主私聊身份登记；模块 2 接入 Pi Durable 长期主私聊、历史与执行恢复；模块 3 内嵌 Billion Context；模块 4 接入本机工具（read/write/edit/bash 与 grep/find/ls）；模块 5 接入本机长驻控制 API 与客户端；模块 6 接入 Bot 主私聊直播预览（认证本地 SSE、运行时 watch、客户端与 CLI）。运行时由单 Host 所有者持有，跨进程身份稳定。包正式名为 `@e-launcher/host-core`；当前仓库尚无 workspace/包安装连接，示例直接从仓库根导入本地文件（见下文）。
+本机 Bot/Host 核心。模块 1 提供 Bot 定义与主私聊身份登记；模块 2 接入 Pi Durable 长期主私聊、历史与执行恢复；模块 3 内嵌 Billion Context；模块 4 接入本机工具（read/write/edit/bash 与 grep/find/ls）；模块 5 接入本机长驻控制 API 与客户端；模块 6 接入 Bot 主私聊直播预览（认证本地 SSE、运行时 watch、客户端与 CLI）；模块 7 接入本机持久消息账本（messages.sqlite：作用域/成员修订、不可变信封、outbox、落地去重 ACK、本地收件/历史/缺口、特权离线 CLI）。运行时由单 Host 所有者持有，跨进程身份稳定。包正式名为 `@e-launcher/host-core`；当前仓库尚无 workspace/包安装连接，示例直接从仓库根导入本地文件（见下文）。
 
 整体方向见 [../docs/next-generation-architecture.md](../docs/next-generation-architecture.md)（状态：未来设计）。
 
 ## 实现与边界
 
 - 需要 Node >= 22.19.0（package.json 中 `engines.node` 声明的最低版本）。存储用 Node 内置 SQLite（`node:sqlite`），数据库文件即 `dataRoot/host.sqlite`；新的 dataRoot 会自动建立（含必要的目录与库文件）。
-- `openHost` 负责登记；`openRuntime` 负责 Pi Durable 主私聊、内嵌 BC 及本机工具。群聊与隧道仍未接入；模块 5 提供基础 HTTP 本机控制面，模块 6 在其上加认证本地 SSE 直播预览。
+- `openHost` 负责登记；`openRuntime` 负责 Pi Durable 主私聊、内嵌 BC 及本机工具。群聊与隧道仍未接入；模块 5 提供基础 HTTP 本机控制面，模块 6 在其上加认证本地 SSE 直播预览；模块 7 只在本机实现持久消息账本，不做网络认证/隧道/中心/推理/唤醒。
 - 写入由 SQLite 事务保护，重复请求重试安全。
 - `host.sqlite` 仍只保存登记数据，Durable 使用独立的 `durable.sqlite`；`runtime-owner.sqlite` 的 SQLite 事务锁保证单进程所有权。
 - SQLite 宿主适配尚未在 Android 验证；旧运行链路未被替换。
@@ -95,8 +95,13 @@ node host-core/cli.js create   --data-root '/path/to/data-root'   --request-id r
 - `store.js`：openStore(dataRoot)，返回 {deviceId, createBot, getBot, findByRequest, listBots, close}。
 - `host.js`：openHost({dataRoot})，返回 {deviceId, dataRoot, createBot, getBot, findByRequest, listBots, close}。
 - `cli.js`：CLI 入口。
-- `index.js`：导出 `openHost`、`openRuntime`、`openControlServer` 与控制 IO 辅助（`ControlHttpError`、`createControlAuthorizer`、`readControlBody`、`writeControlJson`、`writeControlError`）。
-- `index.d.ts`：登记接口，以及 `Runtime`、`PrimarySubmission`、`HistoryPage`、`OpenRuntimeOptions`（含可选 `bashPath`/`toolPaths`）、模块 6 直播预览类型（`LiveMessage`/`LiveHistoryItem`/`LiveTool`/`LiveGeneration`/`BotLiveState`/`BotLiveChanges`/`BotLiveSnapshot`/`BotLiveUpdate`/`BotLiveDataFrame`/`BotLiveEnd`/`BotLiveFrame`/`BotWatchEnd`/`BotWatch`）等类型。
+- `index.js`：导出 `openHost`、`openRuntime`、`openControlServer`、`openMessageLog` 与控制 IO 辅助（`ControlHttpError`、`createControlAuthorizer`、`readControlBody`、`writeControlJson`、`writeControlError`）。
+- `index.d.ts`：登记接口，以及 `Runtime`、`PrimarySubmission`、`HistoryPage`、`OpenRuntimeOptions`（含可选 `bashPath`/`toolPaths`）、模块 6 直播预览类型（`LiveMessage`/`LiveHistoryItem`/`LiveTool`/`LiveGeneration`/`BotLiveState`/`BotLiveChanges`/`BotLiveSnapshot`/`BotLiveUpdate`/`BotLiveDataFrame`/`BotLiveEnd`/`BotLiveFrame`/`BotWatchEnd`/`BotWatch`）、模块 7 消息账本类型（`MessageMember`/`MessageAuthor`/`MessageScope`/`PublishMessageInput`/`MessageEnvelope`/`MessagePeer`/`MessageAck`/`StoredMessage`/`MessageCursor`/`MessagePageOptions`/`MessageOutboxOptions`/`MessageStreamStatus`/`MessageHistoryPage`/`MessageInboxPage`/`MessageOutboxPage`/`MessageDeliveryStatus`/`MessageLog`/`openMessageLog`）等类型。
+- `messages.js`：模块 7 门面 `openMessageLog({dataRoot})`，组合 openHost 与 openMessageStore；协议边界只验证一次。
+- `message-protocol.js`：模块 7 协议校验与规范化（`messageError`/`assertId`/`assertRevision`/`normalizeScope`/`normalizePublish`/`normalizeEnvelope`/`normalizePeer`/`normalizeAck`/`normalizePageOptions`/`streamIdForScope`/`digest`/`assertScopeMessage`）。
+- `message-store.js`：`openMessageStore(dataRoot, deviceId)`，建库 `messages.sqlite`（user_version=1）与事务读写。
+- `message-queries.js`：`createMessageQueries(db, {deviceId})` 只读查询（getScope/listScopes/getMessage/history/inbox/outbox/deliveryStatus/streamStatus）。
+- `message-cli.js`：模块 7 特权离线 CLI（scope/get-scope/scopes/publish/get/receive/ack/history/inbox/outbox/delivery/stream）。
 - `host-environment.js`：HostExecutionEnv（NodeExecutionEnv 子类）；仅命令字符串经 Git Bash/bash 执行，argv 数组与文件操作直接透传。
 - `grep-tool.js` / `find-tool.js` / `ls-tool.js`：grep（rg）、find（fd）、ls 工具。
 - `search-bin.js`：rg/fd 固定版本、asset 规格与解析顺序；`prepare-tools.js`：显式下载并安装 rg/fd 的 CLI。
@@ -429,3 +434,97 @@ node host-core/control-cli.js live --url http://127.0.0.1:8787 \
 关闭时存在 SSE 订阅及快速断连请求，Node 22 服务约 1.1 秒退出 0，随后重新打开同一数据目录成功，设备及主私聊身份保留。数据、协议夹具与 module6-verification.json 保存在仓库外，没有新增测试文件，也没有调用外部模型或读取真实凭证。
 
 Linux、Android、arm64、Tauri/TUI 和真实终端信号尚未验收。Runtime.watch 的直接慢监听器、故障及取消竞争仅作源码核对，实际端到端验收经过 HTTP/CLI 订阅路径；本模块未实现可靠群消息、跨设备隧道或中心。
+
+## 模块 7：本机持久消息账本（messages.sqlite 与特权离线 CLI）
+
+模块 7 在 Host 本机实现持久消息账本：作用域/成员修订、不可变信封、outbox、接收落地去重与 ACK、本地收件/历史/缺口，以及特权离线 CLI。**只**存储与在本机记账；**没有**网络认证/隧道/HTTP 入口/中心/LLM 调用/推理/唤醒/UI。不要据此宣称跨设备消息已收发，或任何网络能力已就绪。
+
+- 新数据库为 `dataRoot/messages.sqlite`（user_version=1，FK ON，busy_timeout 5000，BEGIN IMMEDIATE 事务）；`host.sqlite` v1 与 `durable.sqlite` 保持不变，旧 Android 数据与 Durable 不动。
+- `openMessageLog({dataRoot})` 同步返回 `MessageLog`（`{deviceId, dataRoot, installScope, getScope, listScopes, publish, getMessage, receive, acknowledge, history, inbox, outbox, deliveryStatus, streamStatus, close}`），并同时打开既有 openHost registry 连接；不触发 runtime/harness/model 调用。close 幂等；打开失败关闭已打开部分。
+
+```js
+import { openMessageLog } from './host-core/index.js';
+
+const log = openMessageLog({ dataRoot: '/path/to/data-root' });
+try {
+  const scope = log.installScope({
+    scopeId: 'room-1', kind: 'room', revision: 1,
+    members: [
+      { deviceId: log.deviceId, botId: process.env.LOCAL_BOT_ID },
+      { deviceId: process.env.REMOTE_DEVICE_ID, botId: process.env.REMOTE_BOT_ID },
+    ],
+  });
+  const stored = log.publish({
+    messageId: 'm-1', scopeId: 'room-1', author: { kind: 'user' },
+    category: 'public', text: '你好',
+  });
+  log.history('room-1', { limit: 50 });
+} finally {
+  log.close();
+}
+```
+
+示例的 `LOCAL_BOT_ID` 必须是本机已登记 Bot；另外两个环境变量提供已确认的远端设备与 Bot 标识，登记此定义不会查询远端是否在线。
+
+### 作用域与成员
+
+- `MessageScope` 成员只能是 Bot（`{deviceId, botId}`）；`dm` 恰 2 个不同 Bot（可同机），`room` 2..64；成员按 deviceId 再 botId 确定性排序（JS code-unit，非 localeCompare）。
+- 修订不可变，kind 不变。DM 的两个参与者固定，换一对 Bot 必须创建不同 scopeId。群首次安装需至少一个本机成员，后续修订可移除本机成员并保留旧历史。相同修订重试返回同一 Scope；同 scope/rev 不同定义报 `REQUEST_CONFLICT`。
+- 隐式人类 owner 只能经至少有一个成员 Bot 的 Host 发布到 room；人类作者显式为 `{kind:'user'}`，仅 room 的 public 消息；bot 间 DM 不允许 user actor。未来模型工具必须注入自己的 bot actor，本机控制 UI 注入 user，不信任意模型自报作者。
+
+### 信封、流与目标快照
+
+- 每个源流按 (scopeId, revision, sourceDeviceId) 区分，`streamId='scope:'+sha256(JSON.stringify([scopeId, revision]))`；成员修订变化即开启新流，新成员不会因从未面向它的事件产生假缺口。
+- `envelope.targets` 是**整份规范成员列表**（冻结的 targetSnapshot），随消息一并固定，不由调用方选择；规范属性按 normalizeEnvelope 固定顺序构造。
+- digest 为规范化信封 JSON 的 SHA256 小写 hex；完整规范化 publish 请求摘要单独保存用于幂等重试（排除生成字段）。
+- 标识最多 256 UTF-8 字节、正文最多 262144 字节；保留原始空白及 Unicode 拼写，拒绝空白正文和孤立 UTF-16 代理字符，防止 SQLite 编码转换造成身份碰撞。时间戳须是有效的毫秒 UTC ISO 字符串。
+
+### publish / receive / ack
+
+- `publish`：已有 messageId 且相同发布指纹时在任何最新作用域检查前返回原消息（重试安全）；指纹不匹配或与已接收 ID 冲突报 `REQUEST_CONFLICT`。replyTo 须引用同作用域已存消息（可为旧修订）；rootId 从 parent.rootId 派生，无 parent 时为 messageId；user 作者即使给 replyTo 也始终以 messageId 为 rootId。room 仅 public；dm 仅 notice/request/reply，reply 必带 replyTo。本地 DM 无远程 outbox。
+- `receive`：要求 `peer.deviceId===envelope.sourceDeviceId`、修订已安装、targets 恰为规范存储成员、Bot 作者属于该修订的源 Host 成员（user 源需源 Host 有成员 Bot 且类别 public）、本机目标成员均存在。未知修订拒绝且不发 ACK；不猜名单/中心目录。同 ID 同 digest 返回原始条目与稳定 ACK，绝不重复本地目标；同 ID 异 digest 或 source+stream+seq 被他 ID 复用报 `REQUEST_CONFLICT`。
+- `acknowledge`：仅当 peer.deviceId===ack.recipientDeviceId、ack.sourceDeviceId===本机、本机原消息+目标 outbox 存在且 digest 匹配。pending→acked 置 acked_at；重复 ACK 无状态变化/新事件。**ACK 是投递层确认，不是聊天消息**，不进收件/历史。
+- 落盘与推理分离：inbox/已落盘 = 纯回执，不等于已推理；没有自动响应或请求合成。
+
+### history / inbox / outbox / delivery / stream
+
+- `history` 按本机 `local_id` 升序（Host 接收顺序，非全局时间线）分页；`MessageCursor {deviceId, kind:'history', key:scopeId, afterLocalId}`，仅限本机/同 scope；每页 `streams` 只含本页条目代表的流状态。`missingRefs` 在读取时计算，晚期补到引用可在不改原信封下消缺。
+- `inbox(botId)` 含本机源副本（`selfEcho` 标记），纯回执、非推理。
+- `outbox` 只返回 PENDING，`{targetDeviceId, message}` 重试用同一稳定信封；按 local_id 再 target_device_id 排序。
+- `deliveryStatus` 只针对本机源消息；收到的消息报 `SCOPE_FORBIDDEN`，未知报 `MESSAGE_NOT_FOUND`；聚合唯一 Host 目标（非 Bot），状态 stored/pending/acked + acknowledgedAt。
+- `streamStatus` 的 gaps 只到已观测最高序号，不虚构尾部/补洞；最多 100 个最早缺口区间并置 gapsTruncated；SQL LAG/相邻行索引区间实现，绝不循环 1..highest。
+- 分页 limit 默认 50、上限 200；cursor 跨设备/kind/key、字段类型错或未知字段拒绝。
+
+### 错误码
+
+`INVALID_ARGUMENT`、`REQUEST_CONFLICT`、`UNSUPPORTED_SCHEMA`、`BOT_NOT_FOUND`、`SCOPE_NOT_FOUND`（含缺修订）、`MESSAGE_NOT_FOUND`、`DELIVERY_NOT_FOUND`、`SCOPE_FORBIDDEN`、`PEER_MISMATCH`。错误不带堆栈/token。
+
+### CLI（特权离线）
+
+```bash
+node host-core/message-cli.js scope --data-root "$DATA_ROOT" --input scope.json
+node host-core/message-cli.js scopes --data-root "$DATA_ROOT"
+node host-core/message-cli.js get-scope --data-root "$DATA_ROOT" --scope-id room-1 --revision 1
+node host-core/message-cli.js publish --data-root "$DATA_ROOT" --input publish.json
+node host-core/message-cli.js get --data-root "$DATA_ROOT" --message-id m-1
+node host-core/message-cli.js receive --data-root "$DATA_ROOT" --peer-device-id dev-a --input envelope.json
+node host-core/message-cli.js ack --data-root "$DATA_ROOT" --peer-device-id dev-a --input ack.json
+node host-core/message-cli.js history --data-root "$DATA_ROOT" --scope-id room-1 --limit 50
+node host-core/message-cli.js inbox --data-root "$DATA_ROOT" --bot-id "$LOCAL_BOT_ID" --limit 50
+node host-core/message-cli.js outbox --data-root "$DATA_ROOT" --scope-id room-1 --limit 50
+node host-core/message-cli.js delivery --data-root "$DATA_ROOT" --message-id m-1
+node host-core/message-cli.js stream --data-root "$DATA_ROOT" --scope-id room-1 --revision 1 --source-device-id dev-a
+```
+
+- 全部命令要求 `--data-root`（除 help）；scope/publish/receive/ack 输入 JSON 文件 ≤1MiB，绝不 stdin；游标是 JSON 对象；未知/缺失/无关选项拒绝。
+- receive/ack 是**特权离线适配器**接口：peer 由可信进程内调用方断言，**不是**密码学认证实现，也不是模型选项；无 `--force` 信任绕过，无自动投递/重试/轮询/LLM。
+- stdout 一条 JSON；应用错误以 `{"error":{"code":...,"message":...}}` 输出到 stderr，exitCode=1，finally 关闭消息库与 registry，清理失败保留工作错误。
+
+### 边界与验收
+
+- 模块 7 不改当前 token 路由；模块 5/6 的主私聊认证本地 SSE 仍是主私聊通道。
+- 父助手在 Windows x64 / Git Bash、Node 26.8.2 与最低版本 Node 22.19.0 下完成 **278 个端到端检查点**及公开类型声明检查，全部通过。使用四份独立 Host 数据目录，经特权离线 CLI 传递信封；没有把此过程当作网络认证或真实跨设备传输验收。
+- 验证涵盖人类/Bot 作者分离、群与 DM、同机投递、乱序接收、引用补齐、成员变更、旧目标保留、新成员流、去重 ACK、离线待投递和绑定 Host/范围的分页游标。8 个进程并发创建/提交/接收/确认同一项时只保存一次；12 个不同消息并发提交后，序号连续。
+- SQLite 触发器故障注入验证消息/outbox、本地收件和 ACK 的事务回滚；失败受理无半条消息、无 ACK，重试不跳过序号。102 个稀疏序号的缺口截到 100 区间并标记截断；最高安全整数 9007199254740991 的接收与查询在本次机器上分别约 117ms / 135ms，没有按整数范围循环。
+- 256 字节标识与 262144 字节正文边界、UTF-8/日期、错作者/目标/摘要/来源、SQL 特殊字符、坏文件与参数均经过实跑。未知/更高版本/损坏/错设备消息库被拒绝，文件哈希保持原样；新账本打开前后既有 Host/Durable/owner 数据库哈希相同。Node 22 写入、Node 26 重放与旧主私聊查询通过，当前 HTTP 控制面没有新增 peer ingress。
+- 数据、故障夹具与 `module7-verification.json` 报告在仓库外，没有新增测试文件。Linux、Android、arm64 尚未验收；没有执行 SQLite 提交期间强杀，回滚以实际 SQL 故障注入验证；仅适用于直接 JavaScript 调用的额外选项类型分支做了源码核对，端到端验收使用 CLI。

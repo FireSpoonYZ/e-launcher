@@ -221,3 +221,159 @@ export interface ControlServer {
 }
 
 export function openControlServer(options: OpenControlServerOptions): Promise<ControlServer>;
+
+/**
+ * Module 7 types: host-owned persistent message ledger (messages.sqlite) on
+ * this Host. Local-only storage plus a privileged offline CLI; no network
+ * authentication, tunnel, center, LLM call, inference, or wakeup.
+ */
+
+/** A Bot member of a scope; members are always Bots, never the human owner. */
+export interface MessageMember {
+  deviceId: string;
+  botId: string;
+}
+
+/** Message author: a Bot, or the single human owner (room public messages only). */
+export type MessageAuthor =
+  | { kind: 'bot'; botId: string }
+  | { kind: 'user' };
+
+export interface MessageScope {
+  scopeId: string;
+  kind: 'dm' | 'room';
+  revision: number;
+  members: MessageMember[];
+}
+
+export interface PublishMessageInput {
+  messageId: string;
+  scopeId: string;
+  author: MessageAuthor;
+  category: 'public' | 'notice' | 'request' | 'reply';
+  text: string;
+  replyTo?: string | null;
+}
+
+export interface MessageEnvelope {
+  protocolVersion: 1;
+  messageId: string;
+  sourceDeviceId: string;
+  streamId: string;
+  sequence: number;
+  scopeId: string;
+  revision: number;
+  author: MessageAuthor;
+  category: 'public' | 'notice' | 'request' | 'reply';
+  rootId: string;
+  replyTo: string | null;
+  text: string;
+  /** Whole canonical scope-revision member list, frozen with the message; not caller-chosen. */
+  targets: MessageMember[];
+  createdAt: string;
+}
+
+export interface MessagePeer {
+  deviceId: string;
+}
+
+export interface MessageAck {
+  protocolVersion: 1;
+  messageId: string;
+  sourceDeviceId: string;
+  recipientDeviceId: string;
+  digest: string;
+  storedAt: string;
+}
+
+export interface StoredMessage {
+  localId: number;
+  message: MessageEnvelope;
+  digest: string;
+  storedAt: string;
+  /** Unique rootId/replyTo IDs (excluding own root) not yet stored in the same scope, computed at read time. */
+  missingRefs: string[];
+}
+
+export interface MessageCursor {
+  deviceId: string;
+  kind: 'history' | 'inbox' | 'outbox';
+  key: string;
+  afterLocalId: number;
+  afterTargetDeviceId?: string;
+}
+
+export interface MessagePageOptions {
+  limit?: number;
+  cursor?: MessageCursor | null;
+}
+
+export interface MessageOutboxOptions extends MessagePageOptions {
+  scopeId?: string;
+  targetDeviceId?: string;
+}
+
+export interface MessageStreamStatus {
+  scopeId: string;
+  revision: number;
+  sourceDeviceId: string;
+  streamId: string;
+  contiguous: number;
+  highest: number;
+  gaps: { from: number; to: number }[];
+  gapsTruncated: boolean;
+}
+
+export interface MessageHistoryPage {
+  deviceId: string;
+  scopeId: string;
+  items: StoredMessage[];
+  nextCursor: MessageCursor | null;
+  /** Only streams represented by items on this page. */
+  streams: MessageStreamStatus[];
+}
+
+export interface MessageInboxPage {
+  deviceId: string;
+  botId: string;
+  items: (StoredMessage & { selfEcho: boolean })[];
+  nextCursor: MessageCursor | null;
+}
+
+export interface MessageOutboxPage {
+  deviceId: string;
+  items: { targetDeviceId: string; message: MessageEnvelope }[];
+  nextCursor: MessageCursor | null;
+}
+
+export interface MessageDeliveryStatus {
+  messageId: string;
+  targets: {
+    deviceId: string;
+    state: 'stored' | 'pending' | 'acked';
+    acknowledgedAt: string | null;
+  }[];
+}
+
+export interface MessageLog {
+  readonly deviceId: string;
+  readonly dataRoot: string;
+  installScope(input: MessageScope): MessageScope;
+  getScope(scopeId: string, revision?: number): MessageScope | null;
+  listScopes(): MessageScope[];
+  publish(input: PublishMessageInput): StoredMessage;
+  getMessage(messageId: string): StoredMessage | null;
+  receive(
+    peer: MessagePeer,
+    envelope: MessageEnvelope,
+  ): { message: StoredMessage; ack: MessageAck; duplicate: boolean };
+  acknowledge(peer: MessagePeer, ack: MessageAck): MessageDeliveryStatus;
+  history(scopeId: string, options?: MessagePageOptions): MessageHistoryPage;
+  inbox(botId: string, options?: MessagePageOptions): MessageInboxPage;
+  outbox(options?: MessageOutboxOptions): MessageOutboxPage;
+  deliveryStatus(messageId: string): MessageDeliveryStatus;
+  streamStatus(scopeId: string, revision: number, sourceDeviceId: string): MessageStreamStatus | null;
+  close(): void;
+}
+
+export function openMessageLog(options: { dataRoot: string }): MessageLog;
