@@ -3,7 +3,7 @@ name: worker
 description: 按父助手契约做最小静态实现；不运行测试、构建或验证
 aliases: developer, coder, implementer, develop
 tools: read, grep, find, ls, edit, write, contact_supervisor
-model: openai/gpt-6-astra
+model: inception/mercury-3
 thinking: max
 systemPromptMode: replace
 inheritProjectContext: true
