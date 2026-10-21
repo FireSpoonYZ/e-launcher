@@ -1,0 +1,381 @@
+// host-core/device-link.js
+//
+// 模块 8 Host 侧链路：持有本地 MessageLog 与专属 owner 锁，通过已认证中继的
+// WebSocket 传输消息。交付泵（pump/重试/入站处理）完全由兄弟模块
+// message-delivery.js 承担；本文件只负责 socket 生命周期、认证顺序、分帧
+// 限制、断线退避与阻塞判定，绝不读写 runtime 或模型状态。
+import { mkdirSync } from 'node:fs';
+import { join, isAbsolute } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
+import WebSocket from 'ws';
+import { openMessageLog } from './messages.js';
+import { createMessageDelivery } from './message-delivery.js';
+import {
+  assertDeviceToken,
+  parseRelayUrl,
+  readServerFrame,
+  encodeRelayFrame,
+  MAX_RELAY_FRAME_BYTES,
+  RELAY_HIGH_WATER_BYTES,
+  RELAY_HELLO_TIMEOUT_MS,
+  RELAY_HEARTBEAT_MS,
+  RELAY_CLOSE,
+} from './relay-protocol.js';
+import { messageError } from './message-protocol.js';
+
+const OWNER_DB = 'device-link-owner.sqlite';
+// SQLITE_BUSY (5) / SQLITE_LOCKED (6)：另一个进程已持有本 dataRoot 的链路 owner。
+const BUSY_ERRCODES = new Set([5, 6]);
+const BACKOFF_MIN_MS = 1000;
+const BACKOFF_MAX_MS = 30000;
+const WATCHDOG_MS = RELAY_HEARTBEAT_MS * 3;
+// 服务端协议关闭码 + ws 策略/超负载码：收到后永久阻塞，不再自动重连。
+const BLOCKED_CLOSE_CODES = new Set([
+  RELAY_CLOSE.BAD_FRAME,
+  RELAY_CLOSE.UNAUTHORIZED,
+  RELAY_CLOSE.REVOKED,
+  RELAY_CLOSE.REPLACED,
+  1008,
+  1009,
+]);
+
+function linkBusy(message) {
+  const err = new Error(message);
+  err.code = 'LINK_BUSY';
+  return err;
+}
+
+function mapOwnerError(err) {
+  if (BUSY_ERRCODES.has(err?.errcode) || err?.code === 'SQLITE_BUSY' || err?.code === 'SQLITE_LOCKED') {
+    return linkBusy('device link owner database is locked by another process');
+  }
+  return err;
+}
+
+/**
+ * 与 runtime-owner.js 同款真实 SQLite 独占模式，但使用独立文件，绝不借用
+ * runtime 的锁：Host runtime 可照常并行运行。busy_timeout=0 使竞争快速失败，
+ * 返回 LINK_BUSY；崩溃时 OS 文件锁自动释放，无需 stale/PID 清理。
+ */
+function acquireDeviceLinkOwner(dataRoot) {
+  let db;
+  try {
+    db = new DatabaseSync(join(dataRoot, OWNER_DB));
+    db.exec('PRAGMA busy_timeout = 0');
+    db.exec('BEGIN IMMEDIATE');
+  } catch (err) {
+    try { db?.close(); } catch { /* close 失败不掩盖原错误 */ }
+    throw mapOwnerError(err);
+  }
+  let closed = false;
+  const close = () => {
+    if (closed) return;
+    closed = true;
+    db.close();
+  };
+  return () => {
+    if (closed) return;
+    try {
+      db.exec('ROLLBACK');
+    } finally {
+      close();
+    }
+  };
+}
+
+function validateCa(ca) {
+  if (
+    typeof ca !== 'string' ||
+    !ca.isWellFormed() ||
+    ca.trim() === '' ||
+    !ca.includes('-----BEGIN CERTIFICATE-----') ||
+    !ca.includes('-----END CERTIFICATE-----')
+  ) {
+    throw messageError('INVALID_ARGUMENT', 'ca must be a non-empty PEM certificate string');
+  }
+}
+
+export async function openDeviceLink(options) {
+  if (!options || typeof options !== 'object') {
+    throw messageError('INVALID_ARGUMENT', 'options must be an object');
+  }
+  const dataRoot = options.dataRoot;
+  if (typeof dataRoot !== 'string' || dataRoot.trim() === '' || !isAbsolute(dataRoot)) {
+    throw messageError('INVALID_ARGUMENT', 'dataRoot must be a non-empty absolute path');
+  }
+  // URL/token/ca 全部在写任何数据前校验；失败时不产生任何文件和连接。
+  const url = parseRelayUrl(options.url);
+  const token = options.token;
+  assertDeviceToken(token);
+  const ca = options.ca === undefined || options.ca === null ? undefined : options.ca;
+  if (ca !== undefined) validateCa(ca);
+  const onStatus = options.onStatus;
+  if (onStatus !== undefined && typeof onStatus !== 'function') {
+    throw messageError('INVALID_ARGUMENT', 'onStatus must be a function');
+  }
+
+  mkdirSync(dataRoot, { recursive: true });
+  const releaseOwner = acquireDeviceLinkOwner(dataRoot);
+  let log;
+  try {
+    log = openMessageLog({ dataRoot });
+  } catch (err) {
+    try { releaseOwner(); } catch { /* 打开失败清理不掩盖原错误 */ }
+    throw err;
+  }
+
+  let phase = 'connecting';
+  let attempt = 0;
+  let lastError = null;
+  let closed = false;
+  let currentGen = 0;
+  let currentWs = null;
+  let ready = false;
+  let backoffBase = BACKOFF_MIN_MS;
+  let readyTimer = null;
+  let watchdogTimer = null;
+  let reconnectTimer = null;
+
+  function getStatus() {
+    return {
+      deviceId: log.deviceId,
+      phase,
+      attempt,
+      lastError,
+      delivery: delivery.getStatus(),
+    };
+  }
+
+  function emitStatus() {
+    if (!onStatus) return;
+    // 监听器只同步接收元数据快照；异常被隔离，不影响链路。
+    try { onStatus(getStatus()); } catch { /* 忽略监听器异常 */ }
+  }
+
+  function setPhase(next) {
+    phase = next;
+    emitStatus();
+  }
+
+  function cancelReconnect() {
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
+  }
+
+  function clearSocketTimers() {
+    if (readyTimer) {
+      clearTimeout(readyTimer);
+      readyTimer = null;
+    }
+    if (watchdogTimer) {
+      clearTimeout(watchdogTimer);
+      watchdogTimer = null;
+    }
+  }
+
+  function block(code) {
+    if (closed || phase === 'blocked') return;
+    lastError = code;
+    cancelReconnect();
+    delivery.setOnline(false);
+    setPhase('blocked');
+  }
+
+  function scheduleReconnect() {
+    if (closed || phase === 'blocked') return;
+    if (reconnectTimer) return;
+    const delay = Math.floor(backoffBase * (1 + Math.random() * 0.2));
+    backoffBase = Math.min(BACKOFF_MAX_MS, backoffBase * 2);
+    setPhase('backoff');
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = null;
+      if (!closed && phase !== 'blocked') startConnect();
+    }, delay);
+  }
+
+  function armWatchdog(gen, ws) {
+    if (watchdogTimer) clearTimeout(watchdogTimer);
+    watchdogTimer = setTimeout(() => {
+      watchdogTimer = null;
+      if (gen === currentGen && !closed) {
+        // 中继静默（无 ping/message/ready）：按断开处理，走退避重连。
+        ws.terminate();
+      }
+    }, WATCHDOG_MS);
+  }
+
+  // 序列化 + 尺寸检查；socket 必须 OPEN，且（除 hello 外）必须已 ready。
+  // 不做任意 URL/port 发送，只走当前认证连接。返回是否被接受。
+  function sendFrame(frame) {
+    const ws = currentWs;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+    let text;
+    try {
+      text = encodeRelayFrame(frame);
+    } catch {
+      return false;
+    }
+    const bytes = Buffer.byteLength(text, 'utf8');
+    if (bytes > MAX_RELAY_FRAME_BYTES) return false;
+    if (ws.bufferedAmount + bytes > RELAY_HIGH_WATER_BYTES) return false;
+    ws.send(text, (err) => {
+      // 发送回调出错说明 socket 正在损坏：终止以触发统一断开处理，不泄漏原始错误。
+      if (err && ws === currentWs && !closed) {
+        ws.terminate();
+      }
+    });
+    return true;
+  }
+
+  function deliverySend(frame) {
+    if (!ready) return false;
+    return sendFrame(frame);
+  }
+
+  function sendHello() {
+    const ws = currentWs;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      sendFrame({ type: 'hello', protocolVersion: 1, deviceId: log.deviceId, token });
+    }
+  }
+
+  const delivery = createMessageDelivery({
+    messageLog: log,
+    send: deliverySend,
+    onChange: () => {
+      if (!closed) emitStatus();
+    },
+  });
+
+  function startConnect() {
+    if (closed || phase === 'blocked') return;
+    const gen = ++currentGen;
+    attempt += 1;
+    ready = false;
+    setPhase('connecting');
+    let ws;
+    try {
+      ws = new WebSocket(url.href, {
+        ...(ca !== undefined ? { ca } : {}),
+        maxPayload: MAX_RELAY_FRAME_BYTES,
+        perMessageDeflate: false,
+        followRedirects: false,
+        handshakeTimeout: RELAY_HELLO_TIMEOUT_MS,
+      });
+    } catch {
+      lastError = 'CONNECT_FAILED';
+      scheduleReconnect();
+      return;
+    }
+    currentWs = ws;
+
+    const alive = () => gen === currentGen && !closed && ws === currentWs;
+
+    ws.on('open', () => {
+      if (!alive()) return;
+      // 接受 WS 后 5s 内必须收到 ready；否则按异常断开处理。
+      readyTimer = setTimeout(() => {
+        readyTimer = null;
+        if (alive() && !ready) ws.terminate();
+      }, RELAY_HELLO_TIMEOUT_MS);
+      armWatchdog(gen, ws);
+      sendHello();
+    });
+
+    ws.on('message', (data, isBinary) => {
+      if (!alive()) return;
+      armWatchdog(gen, ws);
+      let frame;
+      try {
+        frame = readServerFrame(data, isBinary);
+      } catch {
+        block('BAD_FRAME');
+        ws.terminate();
+        return;
+      }
+      if (frame.type === 'ready') {
+        if (ready || frame.deviceId !== log.deviceId) {
+          // ready 重复或身份不匹配：协议违规。
+          block('BAD_FRAME');
+          ws.terminate();
+          return;
+        }
+        ready = true;
+        if (readyTimer) {
+          clearTimeout(readyTimer);
+          readyTimer = null;
+        }
+        backoffBase = BACKOFF_MIN_MS;
+        lastError = null;
+        delivery.setOnline(true);
+        setPhase('online');
+        delivery.wake();
+        return;
+      }
+      if (frame.type === 'hello' || !ready) {
+        // 未认证前的业务帧或意外的重复 hello/ready：协议违规，永久阻塞。
+        block('BAD_FRAME');
+        ws.terminate();
+        return;
+      }
+      try {
+        delivery.handle(frame);
+      } catch { /* 交付层内部异常不影响传输；其自身状态负责诊断 */ }
+      emitStatus();
+    });
+
+    ws.on('ping', () => { if (alive()) armWatchdog(gen, ws); });
+    ws.on('pong', () => { if (alive()) armWatchdog(gen, ws); });
+    // 吞掉原始错误，仅由 close 汇总为固定 code，绝不向外部暴露网络错误文本。
+    ws.on('error', () => {});
+
+    ws.on('close', (code) => {
+      if (!alive()) return;
+      currentWs = null;
+      clearSocketTimers();
+      if (phase === 'blocked') return;
+      delivery.setOnline(false);
+      const blockedCode = BLOCKED_CLOSE_CODES.has(code)
+        ? code === RELAY_CLOSE.UNAUTHORIZED ? 'UNAUTHORIZED'
+          : code === RELAY_CLOSE.REVOKED ? 'REVOKED'
+          : code === RELAY_CLOSE.REPLACED ? 'REPLACED'
+          : 'BAD_FRAME'
+        : null;
+      if (blockedCode) {
+        block(blockedCode);
+        return;
+      }
+      lastError = ready ? 'DISCONNECTED' : 'CONNECT_FAILED';
+      scheduleReconnect();
+    });
+  }
+
+  async function close() {
+    if (closed) return;
+    closed = true;
+    cancelReconnect();
+    clearSocketTimers();
+    setPhase('closed');
+    const errors = [];
+    try { delivery.close(); } catch (err) { errors.push(err); }
+    const ws = currentWs;
+    currentWs = null;
+    if (ws) {
+      try { ws.terminate(); } catch (err) { errors.push(err); }
+    }
+    try { log.close(); } catch (err) { errors.push(err); }
+    try { releaseOwner(); } catch (err) { errors.push(err); }
+    if (errors.length === 1) throw errors[0];
+    if (errors.length > 1) throw new AggregateError(errors, 'device link close failed');
+  }
+
+  startConnect();
+  return {
+    deviceId: log.deviceId,
+    getStatus,
+    wake: () => delivery.wake(),
+    close,
+  };
+}

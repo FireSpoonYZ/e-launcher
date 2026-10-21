@@ -138,3 +138,12 @@ accompanies the downloaded artifact. Binaries are fetched from the projects' off
 assets at pinned tags (`15.1.0`, `v10.3.0`), checked against PE/ELF headers, and installed with
 atomic rename; installation results report sha256 fingerprints. Only Windows x64 has been exercised
 so far.
+## ws (WebSocket)
+
+The host-core depends on **ws 8.22.0**, the WebSocket client/server implementation for Node.js, under the MIT License:
+
+- Copyright (c) 2011 Einar Otto Stangvik <einaros@gmail.com>
+- Copyright (c) 2013 Arnout Kazemier and contributors
+- Copyright (c) 2016 Luigi Pinca and contributors
+
+The full verbatim license is retained at [`licenses/ws-MIT.txt`](licenses/ws-MIT.txt). Source: https://github.com/websockets/ws

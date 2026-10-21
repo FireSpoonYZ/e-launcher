@@ -1,6 +1,6 @@
 # @e-launcher/host-core
 
-本机 Bot/Host 核心。模块 1 提供 Bot 定义与主私聊身份登记；模块 2 接入 Pi Durable 长期主私聊、历史与执行恢复；模块 3 内嵌 Billion Context；模块 4 接入本机工具（read/write/edit/bash 与 grep/find/ls）；模块 5 接入本机长驻控制 API 与客户端；模块 6 接入 Bot 主私聊直播预览（认证本地 SSE、运行时 watch、客户端与 CLI）；模块 7 接入本机持久消息账本（messages.sqlite：作用域/成员修订、不可变信封、outbox、落地去重 ACK、本地收件/历史/缺口、特权离线 CLI）。运行时由单 Host 所有者持有，跨进程身份稳定。包正式名为 `@e-launcher/host-core`；当前仓库尚无 workspace/包安装连接，示例直接从仓库根导入本地文件（见下文）。
+本机 Bot/Host 核心。模块 1 提供 Bot 定义与主私聊身份登记；模块 2 接入 Pi Durable 长期主私聊、历史与执行恢复；模块 3 内嵌 Billion Context；模块 4 接入本机工具（read/write/edit/bash 与 grep/find/ls）；模块 5 接入本机长驻控制 API 与客户端；模块 6 接入 Bot 主私聊直播预览（认证本地 SSE、运行时 watch、客户端与 CLI）；模块 7 接入本机持久消息账本（messages.sqlite：作用域/成员修订、不可变信封、outbox、落地去重 ACK、本地收件/历史/缺口、特权离线 CLI）；模块 8 接入认证设备中继与 Host 消息投递（中心只存设备注册；复用模块 7 outbox，本机进程网络端到端）。运行时由单 Host 所有者持有，跨进程身份稳定。包正式名为 `@e-launcher/host-core`；当前仓库尚无 workspace/包安装连接，示例直接从仓库根导入本地文件（见下文）。
 
 整体方向见 [../docs/next-generation-architecture.md](../docs/next-generation-architecture.md)（状态：未来设计）。
 
@@ -95,8 +95,8 @@ node host-core/cli.js create   --data-root '/path/to/data-root'   --request-id r
 - `store.js`：openStore(dataRoot)，返回 {deviceId, createBot, getBot, findByRequest, listBots, close}。
 - `host.js`：openHost({dataRoot})，返回 {deviceId, dataRoot, createBot, getBot, findByRequest, listBots, close}。
 - `cli.js`：CLI 入口。
-- `index.js`：导出 `openHost`、`openRuntime`、`openControlServer`、`openMessageLog` 与控制 IO 辅助（`ControlHttpError`、`createControlAuthorizer`、`readControlBody`、`writeControlJson`、`writeControlError`）。
-- `index.d.ts`：登记接口，以及 `Runtime`、`PrimarySubmission`、`HistoryPage`、`OpenRuntimeOptions`（含可选 `bashPath`/`toolPaths`）、模块 6 直播预览类型（`LiveMessage`/`LiveHistoryItem`/`LiveTool`/`LiveGeneration`/`BotLiveState`/`BotLiveChanges`/`BotLiveSnapshot`/`BotLiveUpdate`/`BotLiveDataFrame`/`BotLiveEnd`/`BotLiveFrame`/`BotWatchEnd`/`BotWatch`）、模块 7 消息账本类型（`MessageMember`/`MessageAuthor`/`MessageScope`/`PublishMessageInput`/`MessageEnvelope`/`MessagePeer`/`MessageAck`/`StoredMessage`/`MessageCursor`/`MessagePageOptions`/`MessageOutboxOptions`/`MessageStreamStatus`/`MessageHistoryPage`/`MessageInboxPage`/`MessageOutboxPage`/`MessageDeliveryStatus`/`MessageLog`/`openMessageLog`）等类型。
+- `index.js`：导出 `openHost`、`openRuntime`、`openControlServer`、`openMessageLog`、`openRelayRegistry`、`openRelayServer`、`openDeviceLink` 与控制 IO 辅助（`ControlHttpError`、`createControlAuthorizer`、`readControlBody`、`writeControlJson`、`writeControlError`）。
+- `index.d.ts`：登记接口，以及 `Runtime`、`PrimarySubmission`、`HistoryPage`、`OpenRuntimeOptions`（含可选 `bashPath`/`toolPaths`）、模块 6 直播预览类型（`LiveMessage`/`LiveHistoryItem`/`LiveTool`/`LiveGeneration`/`BotLiveState`/`BotLiveChanges`/`BotLiveSnapshot`/`BotLiveUpdate`/`BotLiveDataFrame`/`BotLiveEnd`/`BotLiveFrame`/`BotWatchEnd`/`BotWatch`）、模块 7 消息账本类型（`MessageMember`/`MessageAuthor`/`MessageScope`/`PublishMessageInput`/`MessageEnvelope`/`MessagePeer`/`MessageAck`/`StoredMessage`/`MessageCursor`/`MessagePageOptions`/`MessageOutboxOptions`/`MessageStreamStatus`/`MessageHistoryPage`/`MessageInboxPage`/`MessageOutboxPage`/`MessageDeliveryStatus`/`MessageLog`/`openMessageLog`）、模块 8 中继类型（`RelayDevice`/`RelayRegistry`/`RelayServerStatus`/`RelayServer`/`DeliveryPumpStatus`/`DeviceLinkStatus`/`DeviceLink`/`openRelayRegistry`/`openRelayServer`/`openDeviceLink`）等类型。
 - `messages.js`：模块 7 门面 `openMessageLog({dataRoot})`，组合 openHost 与 openMessageStore；协议边界只验证一次。
 - `message-protocol.js`：模块 7 协议校验与规范化（`messageError`/`assertId`/`assertRevision`/`normalizeScope`/`normalizePublish`/`normalizeEnvelope`/`normalizePeer`/`normalizeAck`/`normalizePageOptions`/`streamIdForScope`/`digest`/`assertScopeMessage`）。
 - `message-store.js`：`openMessageStore(dataRoot, deviceId)`，建库 `messages.sqlite`（user_version=1）与事务读写。
@@ -110,6 +110,11 @@ node host-core/cli.js create   --data-root '/path/to/data-root'   --request-id r
 - `runtime-live-projection.js` / `runtime-live.js`：模块 6 直播预览投影与 `Runtime.watch`。
 - `control-live.js`：模块 6 SSE 路由 `GET /v1/bots/:botId/live`。
 - `control-live-client.js`：模块 6 SSE 流式解析与 `readControlLive`。
+- `relay-protocol.js`：模块 8 协议常量、凭证/URL/帧校验与编码（`MAX_RELAY_FRAME_BYTES`/`RELAY_HELLO_TIMEOUT_MS`/`RELAY_CLOSE`/`assertDeviceToken`/`parseRelayUrl`/`readClientFrame`/`readServerFrame`/`encodeRelayFrame`/`DELIVERY_REJECT_CODES`）。
+- `relay-registry.js` / `relay-registry-cli.js`：中心设备注册库（`relay.sqlite`，唯一写入口）与唯一写 CLI。
+- `relay-server.js` / `relay-server-cli.js`：认证中继服务（WebSocketServer noServer + TLS/loopback 规则）与其 CLI。
+- `message-delivery.js`：内部投递泵（不导出），在线扫描 outbox、退避与诊断。
+- `device-link.js` / `device-link-cli.js`：Host 链路（ws 客户端、Hello/ready、所有权锁、重连/blocked）与其 CLI。
 
 ## 本次模块验收
 
@@ -528,3 +533,95 @@ node host-core/message-cli.js stream --data-root "$DATA_ROOT" --scope-id room-1 
 - SQLite 触发器故障注入验证消息/outbox、本地收件和 ACK 的事务回滚；失败受理无半条消息、无 ACK，重试不跳过序号。102 个稀疏序号的缺口截到 100 区间并标记截断；最高安全整数 9007199254740991 的接收与查询在本次机器上分别约 117ms / 135ms，没有按整数范围循环。
 - 256 字节标识与 262144 字节正文边界、UTF-8/日期、错作者/目标/摘要/来源、SQL 特殊字符、坏文件与参数均经过实跑。未知/更高版本/损坏/错设备消息库被拒绝，文件哈希保持原样；新账本打开前后既有 Host/Durable/owner 数据库哈希相同。Node 22 写入、Node 26 重放与旧主私聊查询通过，当前 HTTP 控制面没有新增 peer ingress。
 - 数据、故障夹具与 `module7-verification.json` 报告在仓库外，没有新增测试文件。Linux、Android、arm64 尚未验收；没有执行 SQLite 提交期间强杀，回滚以实际 SQL 故障注入验证；仅适用于直接 JavaScript 调用的额外选项类型分支做了源码核对，端到端验收使用 CLI。
+
+## 模块 8：认证设备中继与 Host 消息投递（relay + device-link）
+
+模块 8 实现轻中心的第一阶段：**认证设备中继**（relay 服务，只保存设备注册）与 **Host 消息投递**（device-link 客户端，复用模块 7 持久 outbox）。真实的本机进程网络端到端投递已实现；跨设备部署与网络形态尚需真机/外网验收。仍**没有** LLM、群决策、UI、远程控制 RPC；中心没有全局 Bot 目录、聊天库、模型凭证，也不提供通用 URL/端口/VPN 转发。
+
+### 安全与信任边界
+
+- **注册是特权显式动作**：本地所有者把目标 Host 已有 `deviceId` 与独立 opaque 设备 token 写入中心 registry（唯一写入口是 `relay-registry-cli.js`）。没有未认证注册端点，不自动生成新设备 ID，也没有自助配对 UI。设备 token 只从环境变量读取，不是控制 token，不会被记录或持久化明文。
+- **中心只存注册**：`relay.sqlite` 只有 device_id、token_hash（SHA256）、credential_version、created_at、updated_at、revoked_at；没有 Bot/历史/作用域表，也没有稳定中心 Host 身份。
+- **TLS 注入权威**：接收端通过“连接到已认证所有者 relay 的 TLS 通道”获得 fromDeviceId；没有端到端加密签名/PKI 声明。Host 只信任 relay 注入的 fromDeviceId（不是消息 JSON 或本地控制 bearer）。
+- **Hello 先于一切**：首个 JSON 文本帧必须在 5000ms 内为 `{type:'hello',protocolVersion:1,deviceId,token}`；ready 只在认证后发送。WS upgrade 携带 Origin 拒绝 403；路径不是 `/v1/link` 或含 query 拒绝 404；无 URL token/userinfo/fragment，不跟随重定向。
+- **loopback 与 TLS**：监听只允许字面 `127.0.0.1`/`::1` 免 TLS；其他监听地址必须提供 TLS cert/key。客户端仅字面回环 URL 可用 ws，非回环必须 wss；自签证书可经 `ca` PEM 传入，但绝不关闭校验（无 rejectUnauthorized:false / insecure 开关）。
+- **替换与吊销**：最新成功认证的连接替换旧连接（旧连接收到 4409 REPLACED 即进入 blocked，不再自动重连对抗）。registry 变更递增 credentialVersion；服务端在**每个已认证接收帧**与 **1000ms 定时器**上重查版本/启用状态，失效立即关闭 4403——覆盖另一进程用 CLI 修改 registry 的情况。
+
+### 交付与缓存语义
+
+- **ready ≠ 落盘 ACK**：relay 的 ready 只表示认证/传输就绪；消息确认始终是接收 Host 落盘后的 per-Host ACK。离线/未知 peer 目标的 source pending 保留，不改动、不删除，也不伪造 ACK。
+- **扫描是投递，不是模型调度**：`createMessageDelivery` 在线时按 1000ms 定时器 + wake 合并扫描模块 7 outbox（每 tick 一页 200 条，cursor 推进防止永久饥饿），每目标至多 1 条、全局至多 16 条在途；匹配失败按 1000→30000ms 指数退避重试。它从不启动模型、创建输入、调用 log.installScope/SQL，也不改信封（ID/正文/修订/targets）。
+- **缓冲有限**：单帧上限 2MiB，高水位 4MiB；目标 `bufferedAmount + frameBytes > 4MiB` 时中心发 `unavailable`（BACKPRESSURE）且不入队。
+- **诊断有限**：`lastProblem` 只是最新一条诊断（code/target/messageId/at），不代表全部目标状态；实际事实源仍是 `MessageLog.deliveryStatus`/outbox。
+
+### 可执行流程（现有 deviceId → 所有者注册 → TLS 中继 → Host 链路）
+
+```bash
+CENTRE_ROOT='/path/to/relay-data'      # 中心数据目录（relay.sqlite 所在）
+HOST_ROOT='/path/to/host-data'         # Host 数据目录（host.sqlite / messages.sqlite 所在）
+
+# 1) 取 Host 现有 deviceId（模块 1 init 输出 {deviceId, dataRoot}）
+node host-core/cli.js init --data-root "$HOST_ROOT"
+
+# 2) 所有者预登记：独立设备 token 只经环境变量传入（有效格式 ^[A-Za-z0-9_-]{32,512}$）
+export DEVICE_ID='<第 1 步输出的 deviceId>'
+export RELAY_DEVICE_TOKEN="$(openssl rand -hex 32)"
+node host-core/relay-registry-cli.js register --data-root "$CENTRE_ROOT" \
+  --device-id "$DEVICE_ID" --token-env RELAY_DEVICE_TOKEN
+# stdout: {"deviceId":...,"credentialVersion":1,"createdAt":...,"updatedAt":...,"revokedAt":null}
+
+# 3) 启动 TLS 中继（非回环监听必须 TLS；本地调试可省略 --listen-host 使用默认 127.0.0.1）
+node host-core/relay-server-cli.js --data-root "$CENTRE_ROOT" \
+  --listen-host 0.0.0.0 --port 8790 \
+  --tls-cert /path/to/server.crt --tls-key /path/to/server.key
+# stdout 一行: {"event":"listening","url":"wss://…/v1/link"}
+
+# 4) 启动 Host 链路（token 仍只从环境读；自签 CA 加 --ca，禁止关闭校验）
+node host-core/device-link-cli.js --data-root "$HOST_ROOT" \
+  --url 'wss://…/v1/link' --token-env RELAY_DEVICE_TOKEN \
+  --ca /path/to/ca.pem
+# stdout 仅在状态变化时输出一行 {"event":"link_status",...DeviceLinkStatus}
+```
+
+注意：`--url` 必须精确到 `/v1/link` 且无 query/fragment；CLI 的 token 永不作为命令行值/stdout/JSON 输出。若 relay 服务仅监听 127.0.0.1（免 TLS），第 4 步改为 `--url ws://127.0.0.1:8790/v1/link` 且不传 `--ca`。
+
+### JS API（`./host-core/index.js` 新增导出）
+
+```js
+import { readFileSync } from 'node:fs';
+import { openRelayRegistry, openRelayServer, openDeviceLink } from './host-core/index.js';
+
+const { CENTRE_ROOT, HOST_ROOT, DEVICE_ID, RELAY_DEVICE_TOKEN, TLS_CERT, TLS_KEY } = process.env;
+const cert = readFileSync(TLS_CERT, 'utf8');
+const key = readFileSync(TLS_KEY, 'utf8');
+const registry = openRelayRegistry({ dataRoot: CENTRE_ROOT });
+try {
+  registry.register({ deviceId: DEVICE_ID, token: RELAY_DEVICE_TOKEN });
+} finally {
+  registry.close();
+}
+
+const relay = await openRelayServer({ dataRoot: CENTRE_ROOT, port: 8790,
+  listenHost: '127.0.0.1', tls: { cert, key } });
+const link = await openDeviceLink({ dataRoot: HOST_ROOT,
+  url: relay.url, token: RELAY_DEVICE_TOKEN, ca: cert,
+  onStatus: (s) => console.log(s.phase, s.attempt, s.lastError, s.delivery) });
+// openDeviceLink 只完成本机资源准备；认证成功后才报告 online。
+link.wake();
+process.once('SIGINT', async () => {
+  await link.close();
+  await relay.close();
+});
+```
+
+### 模块 8 验收状态
+
+父助手在 Windows x64 / Git Bash、Node 26.8.2 与最低版本 Node 22.19.0 下完成 **146 个端到端检查点**及公开类型声明检查，全部通过。使用独立 Host/中继进程的真实 WebSocket 和 CA 校验 TLS 连接，包含 IPv4、IPv6 回环及系统分配端口；Node 22 新发消息、路由、接收和确认均已实跑。
+
+验收覆盖群/DM 信封、人类作者保留、离线补投、未知修订拒绝后补装、错误凭证、伪造来源/ACK、认证前业务帧、重复 hello、Origin/路径/query 限制、UTF-8/二进制/帧大小错误。真实发送约 780KiB 的合法转义 JSON 消息并核对接收摘要；读取端未确认时，源 outbox 保持 pending。中继数据库只含 relay_devices，日志及数据库检查未发现测试正文、Bot ID、明文设备令牌或原始 SQL 错误。
+
+凭证轮换/撤销会关闭旧连接，旧进程以 blocked/exit 2 停止，不反复重连；相同设备的新认证连接接管路由，旧连接关闭不会删掉新路由。ACK 写入故障保留在途及 pending，强杀来源进程后恢复补投，接收方仍只有原条目和原 storedAt。强杀中继期间新消息留在 Host，重启中继后完成投递。
+
+大消息向 20 个离线目标发送时观察到发送缓冲拒绝，最高在途数为 6，20 项仍持久 pending。stdin EOF 不停止连接；慢 HTTP 头、未认证 WebSocket 和活连接并存时，中继约 1.1 秒关闭并退出 0。消息链路和原 Runtime 使用不同独占锁，可同时运行，分别关闭。ws MIT 许可证与已安装上游文本一致。
+
+数据、网络夹具与 module8-verification.json 报告保存在仓库外，没有新增测试文件。跨物理设备/外网、Linux、Android、arm64 仍待验证；中继慢接收者的 BACKPRESSURE 分支尚无有效实跑证据，256 连接上限未做负载验收。直接 JS 的 getStatus/回调故障分支做了源码核对，端到端验收主要通过生产 CLI。现有信任模型是受信中继与 TLS 通道，没有端到端消息加密或签名。

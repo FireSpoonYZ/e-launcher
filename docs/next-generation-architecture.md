@@ -1,6 +1,6 @@
 # 下一代多端 Bot 架构设计
 
-> 状态：目标架构设计，整体尚未实现。[Bot/Host 核心](../host-core/README.md) 已独立实现模块 1 本机登记、模块 2 Durable 长期主私聊、模块 3 内嵌 Billion Context、模块 4 本机工具及模块 5 本机控制面（长期本地 Host 控制 API：基础 HTTP、回环端口、Bearer 令牌认证、拒绝全部 Origin；配套 Node/浏览器兼容客户端）及模块 6 主私聊实时预览（认证本地 SSE：有界快照+整体替换更新、每订阅 sequence 非持久游标，原始历史分页保留；无群消息/中心/Tauri，无轮询或新调度器）；模块 7 已实现本机持久消息账本（作用域/成员修订、不可变信封、outbox、落地去重 ACK、本地收件/历史/缺口、特权离线 CLI；仅 messages.sqlite 本机存储，无网络认证/隧道/中心/推理）。整体通信（框架隧道/中心）、跨端与外壳（Tauri/TUI）尚未完成。本文约定产品方向、首版设计默认与工程验证边界，不授权删除现有能力。当前安装、构建及运行行为仍以 [README](../README.md) 为准。
+> 状态：目标架构设计，整体尚未实现。[Bot/Host 核心](../host-core/README.md) 已独立实现模块 1 本机登记、模块 2 Durable 长期主私聊、模块 3 内嵌 Billion Context、模块 4 本机工具及模块 5 本机控制面（长期本地 Host 控制 API：基础 HTTP、回环端口、Bearer 令牌认证、拒绝全部 Origin；配套 Node/浏览器兼容客户端）及模块 6 主私聊实时预览（认证本地 SSE：有界快照+整体替换更新、每订阅 sequence 非持久游标，原始历史分页保留；无群消息/中心/Tauri，无轮询或新调度器）；模块 7 已实现本机持久消息账本（作用域/成员修订、不可变信封、outbox、落地去重 ACK、本地收件/历史/缺口、特权离线 CLI；仅 messages.sqlite 本机存储，无网络认证/隧道/中心/推理）；模块 8 已实现认证设备中继与 Host 消息投递（中心只存设备注册，复用模块 7 outbox，本机进程网络端到端已通；跨设备/真机网络验收与完整中心产品尚未完成）。整体通信（框架隧道/中心产品）、跨端与外壳（Tauri/TUI）尚未完成。本文约定产品方向、首版设计默认与工程验证边界，不授权删除现有能力。当前安装、构建及运行行为仍以 [README](../README.md) 为准。
 
 ## 1. 已确认目标与首版边界
 
@@ -184,6 +184,18 @@ Bot DM 使用通知、请求、相关回复的语义，可查历史并允许沉�
 - **落盘≠推理**：inbox 落盘只是回执，不等于已推理；无自动响应或请求合成。人类作者保留：user 仅 room public，经含成员 Bot 的 Host 发布；bot 间 DM 不允许 user；未来模型工具必须注入自己的 bot actor，不信模型自报作者。现有 Host 控制 SSE 仍是主私聊通道，模块 7 不改当前 token 路由。
 
 模块 7 已在 Windows x64 / Git Bash、Node 26.8.2 与 Node 22.19.0 完成 278 个端到端检查点及公开类型检查。使用四份本机 Host 数据目录验证持久消息、并发去重、ACK、乱序缺口、成员修订、事务回滚与旧数据保护；信封经特权离线 CLI 传递，尚未接入网络认证和跨设备传输。完整范围与未验收项见 [host-core/README.md](../host-core/README.md)。
+
+### 模块 8：认证设备中继与 Host 消息投递已实现（中心只存注册）
+
+模块 8 落地轻中心第一阶段：`relay-server` 只保存设备注册（`relay.sqlite`：device_id/token_hash/credential_version/created_at/updated_at/revoked_at）并中继认证 WebSocket 帧；`device-link` 是 Host 侧客户端，复用模块 7 持久 outbox 完成真实本机进程网络端到端投递。**没有**全局 Bot 目录、聊天库、模型凭证、通用 URL/端口/VPN 转发；没有 LLM/群决策/UI/远程控制 RPC；也不宣称端到端密码学（TLS 通道认证是唯一信任来源，无 E2E 加密签名/PKI 声明）。
+
+关键约束：
+
+- 设备凭证由本地所有者 CLI 预登记（token 仅环境变量，入库 SHA256 哈希，不留明文），无自助配对 UI 或未认证注册端点。撤销/轮换递增 credentialVersion，服务端逐帧 + 1000ms 定时器校验，另一进程的 CLI 修改会在后续逐帧或每秒检查时生效（4403）。
+- ws 仅字面回环（127.0.0.1/::1）免 TLS；外部监听必须 TLS。自签 ca 可传但不能关闭校验。Hello 先于一切，Origin 拒绝 403，路径/query 不符 404；新认证连接替换旧连接（4409 → blocked，不重连对抗）。
+- 扫描是投递非模型调度：有界在途（16 全局/1 每目标）、1000ms 周期 + wake 扫描、每 tick 一页 200 条、指数退避 1000→30000ms；ready 非落盘 ACK，source pending 保留，latest diagnostic 非全目标状态。
+- 中心无聊天库/模型/Bot 目录/全局状态；消息落地仍走模块 7 去重 ACK。
+- 模块 8 已在 Windows x64 / Git Bash、Node 26.8.2 与 Node 22.19.0 完成 146 个端到端检查点及类型检查；真实 TLS/IPv6、本机多进程投递、离线补投、撤销/轮换、连接替换、ACK 存储故障及强杀恢复通过。中继数据库只保存设备登记。跨物理设备/外网等尚未验收，完整范围与剩余验证见 [host-core/README.md](../host-core/README.md)。
 
 
 ## 7. 外壳与 Android 生命周期

@@ -377,3 +377,95 @@ export interface MessageLog {
 }
 
 export function openMessageLog(options: { dataRoot: string }): MessageLog;
+
+/**
+ * Module 8 types: authenticated device relay + Host message delivery. The
+ * centre stores device registration only (relay.sqlite); delivery reuses the
+ * module 7 durable outbox. MessageDeliveryStatus above remains the module 7
+ * ledger DTO; DeliveryPumpStatus is separate volatile diagnostics.
+ */
+
+export interface RelayDevice {
+  deviceId: string;
+  credentialVersion: number;
+  createdAt: string;
+  updatedAt: string;
+  revokedAt: string | null;
+}
+
+export interface RelayRegistryInput {
+  deviceId: string;
+  token: string;
+}
+
+export interface RelayRegistry {
+  readonly dataRoot: string;
+  register(input: RelayRegistryInput): RelayDevice;
+  rotate(input: RelayRegistryInput): RelayDevice;
+  revoke(deviceId: string): RelayDevice;
+  get(deviceId: string): RelayDevice | null;
+  list(): RelayDevice[];
+  authenticate(deviceId: string, token: string): RelayDevice | null;
+  close(): void;
+}
+
+export function openRelayRegistry(options: { dataRoot: string }): RelayRegistry;
+
+export interface RelayServerStatus {
+  onlineDeviceIds: string[];
+  pendingConnections: number;
+}
+
+export interface OpenRelayServerOptions {
+  dataRoot: string;
+  port?: number;
+  listenHost?: string;
+  tls?: { cert: string; key: string };
+}
+
+export interface RelayServer {
+  readonly url: string;
+  getStatus(): RelayServerStatus;
+  close(): Promise<void>;
+}
+
+export function openRelayServer(options: OpenRelayServerOptions): Promise<RelayServer>;
+
+export interface DeliveryPumpProblem {
+  code: string;
+  targetDeviceId: string | null;
+  messageId: string | null;
+  at: string;
+}
+
+export interface DeliveryPumpStatus {
+  inFlight: number;
+  lastProblem: DeliveryPumpProblem | null;
+}
+
+export type DeviceLinkPhase = 'connecting' | 'online' | 'backoff' | 'blocked' | 'closed';
+
+export interface DeviceLinkStatus {
+  deviceId: string;
+  phase: DeviceLinkPhase;
+  attempt: number;
+  lastError: string | null;
+  delivery: DeliveryPumpStatus;
+}
+
+export interface OpenDeviceLinkOptions {
+  dataRoot: string;
+  url: string;
+  token: string;
+  ca?: string;
+  onStatus?: (status: DeviceLinkStatus) => void;
+}
+
+export interface DeviceLink {
+  readonly deviceId: string;
+  getStatus(): DeviceLinkStatus;
+  wake(): void;
+  close(): Promise<void>;
+}
+
+export function openDeviceLink(options: OpenDeviceLinkOptions): Promise<DeviceLink>;

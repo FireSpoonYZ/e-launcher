@@ -1,0 +1,319 @@
+// Relay wire protocol boundary helper (module 8). Parses/validates relay
+// frames and relay URLs; no ws, no Runtime, no generic schema framework.
+import { messageError, assertId, normalizeEnvelope, normalizeAck } from './message-protocol.js';
+
+const INVALID_ARGUMENT = 'INVALID_ARGUMENT';
+
+export const MAX_RELAY_FRAME_BYTES = 2097152; // 2 MiB, actual UTF-8 bytes
+export const RELAY_HIGH_WATER_BYTES = 4194304; // 4 MiB bufferedAmount + frame budget
+export const RELAY_HELLO_TIMEOUT_MS = 5000;
+export const RELAY_HEARTBEAT_MS = 15000;
+
+export const RELAY_CLOSE = Object.freeze({
+  BAD_FRAME: 4400,
+  UNAUTHORIZED: 4401,
+  REVOKED: 4403,
+  HELLO_TIMEOUT: 4408,
+  REPLACED: 4409,
+});
+
+// Allowed relay reject codes; reject frames carry NO free-form message.
+// Read-only in practice: never mutate; internal receiver imports this set.
+export const DELIVERY_REJECT_CODES = new Set([
+  'INVALID_ARGUMENT',
+  'REQUEST_CONFLICT',
+  'UNSUPPORTED_SCHEMA',
+  'BOT_NOT_FOUND',
+  'SCOPE_NOT_FOUND',
+  'MESSAGE_NOT_FOUND',
+  'DELIVERY_NOT_FOUND',
+  'SCOPE_FORBIDDEN',
+  'PEER_MISMATCH',
+  'STORE_FAILED',
+]);
+
+const DEVICE_TOKEN_RE = /^[A-Za-z0-9_-]{32,512}$/;
+const SHA256_HEX_RE = /^[0-9a-f]{64}$/;
+const FRAME_MAX_TEXT = 'relay frame exceeds 2 MiB';
+
+function invalid(message) {
+  return messageError(INVALID_ARGUMENT, message);
+}
+
+function isPlainObject(value) {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function rejectUnknownFields(value, allowed, label) {
+  for (const key of Object.keys(value)) {
+    if (!allowed.has(key)) {
+      throw invalid(`${label} has unknown field: ${key}`);
+    }
+  }
+}
+
+export function assertDeviceToken(token) {
+  if (typeof token !== 'string' || !DEVICE_TOKEN_RE.test(token)) {
+    throw invalid('token must be 32-512 characters of A-Za-z0-9_-');
+  }
+}
+
+function assertSha256Hex(value) {
+  if (typeof value !== 'string' || !SHA256_HEX_RE.test(value)) {
+    throw invalid('digest must be a lowercase 64-character hex SHA-256');
+  }
+}
+
+/**
+ * Parse and validate a relay URL. ws is loopback-only (literal 127.0.0.1 or
+ * ::1); wss accepts any non-empty host. Path must be exactly /v1/link with no
+ * query, fragment, or user info. Redirects are rejected by the client, not here.
+ */
+export function parseRelayUrl(raw) {
+  let url;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw invalid('relay URL must be a valid ws:// or wss:// URL');
+  }
+  if (url.protocol !== 'ws:' && url.protocol !== 'wss:') {
+    throw invalid('relay URL must use ws:// or wss://');
+  }
+  if (url.username !== '' || url.password !== '') {
+    throw invalid('relay URL must not contain user info');
+  }
+  if (url.search !== '') {
+    throw invalid('relay URL must not contain a query string');
+  }
+  if (url.hash !== '') {
+    throw invalid('relay URL must not contain a fragment');
+  }
+  if (url.hostname === '') {
+    throw invalid('relay URL must include a host');
+  }
+  if (url.pathname !== '/v1/link') {
+    throw invalid('relay URL path must be exactly /v1/link');
+  }
+  if (url.protocol === 'ws:' && url.hostname !== '127.0.0.1' && url.hostname !== '[::1]') {
+    throw invalid('ws relay URLs are allowed only for literal loopback 127.0.0.1 or ::1');
+  }
+  return url;
+}
+
+function decodeText(data) {
+  if (typeof data === 'string') {
+    if (!data.isWellFormed()) {
+      throw invalid('relay frame must be valid UTF-8 text');
+    }
+    return data;
+  }
+  if (data instanceof Uint8Array) {
+    try {
+      return new TextDecoder('utf-8', { fatal: true }).decode(data);
+    } catch {
+      throw invalid('relay frame must be valid UTF-8 text');
+    }
+  }
+  throw invalid('relay frame must be a string or bytes');
+}
+
+function frameBytes(data) {
+  return typeof data === 'string' ? Buffer.byteLength(data, 'utf8') : data.byteLength;
+}
+
+function parseFrame(data) {
+  if (frameBytes(data) > MAX_RELAY_FRAME_BYTES) {
+    throw invalid(FRAME_MAX_TEXT);
+  }
+  let value;
+  try {
+    value = JSON.parse(decodeText(data));
+  } catch (err) {
+    if (err && err.code === INVALID_ARGUMENT) throw err;
+    throw invalid('relay frame must be valid JSON text');
+  }
+  if (!isPlainObject(value)) {
+    throw invalid('relay frame must be a JSON object');
+  }
+  return value;
+}
+
+function readHello(frame) {
+  rejectUnknownFields(frame, new Set(['type', 'protocolVersion', 'deviceId', 'token']), 'hello frame');
+  if (frame.protocolVersion !== 1) throw invalid('hello.protocolVersion must be 1');
+  assertId(frame.deviceId, 'deviceId');
+  assertDeviceToken(frame.token);
+  return { type: 'hello', protocolVersion: 1, deviceId: frame.deviceId, token: frame.token };
+}
+
+function readReady(frame) {
+  rejectUnknownFields(frame, new Set(['type', 'protocolVersion', 'deviceId']), 'ready frame');
+  if (frame.protocolVersion !== 1) throw invalid('ready.protocolVersion must be 1');
+  assertId(frame.deviceId, 'deviceId');
+  return { type: 'ready', protocolVersion: 1, deviceId: frame.deviceId };
+}
+
+// Cross-checks needing the authenticated device (source === authenticated,
+// target !== self) live in the relay server, not in this pure parser.
+function readClientDeliver(frame) {
+  rejectUnknownFields(frame, new Set(['type', 'targetDeviceId', 'message']), 'deliver frame');
+  assertId(frame.targetDeviceId, 'targetDeviceId');
+  const message = normalizeEnvelope(frame.message);
+  if (frame.targetDeviceId === message.sourceDeviceId) {
+    throw invalid('deliver target must differ from envelope source device');
+  }
+  if (!message.targets.some((m) => m.deviceId === frame.targetDeviceId)) {
+    throw invalid('deliver target must be listed in envelope targets');
+  }
+  return { type: 'deliver', targetDeviceId: frame.targetDeviceId, message };
+}
+
+function readClientAck(frame) {
+  rejectUnknownFields(frame, new Set(['type', 'targetDeviceId', 'ack']), 'ack frame');
+  assertId(frame.targetDeviceId, 'targetDeviceId');
+  const ack = normalizeAck(frame.ack);
+  if (frame.targetDeviceId !== ack.sourceDeviceId) {
+    throw invalid('ack targetDeviceId must match ack source device');
+  }
+  if (frame.targetDeviceId === ack.recipientDeviceId) {
+    throw invalid('ack targetDeviceId must differ from ack recipient device');
+  }
+  return { type: 'ack', targetDeviceId: frame.targetDeviceId, ack };
+}
+
+function readClientReject(frame) {
+  rejectUnknownFields(frame, new Set(['type', 'targetDeviceId', 'messageId', 'digest', 'code']), 'reject frame');
+  assertId(frame.targetDeviceId, 'targetDeviceId');
+  assertId(frame.messageId, 'messageId');
+  assertSha256Hex(frame.digest);
+  if (typeof frame.code !== 'string' || !DELIVERY_REJECT_CODES.has(frame.code)) {
+    throw invalid('reject code must be an allowed delivery rejection code');
+  }
+  return {
+    type: 'reject',
+    targetDeviceId: frame.targetDeviceId,
+    messageId: frame.messageId,
+    digest: frame.digest,
+    code: frame.code,
+  };
+}
+
+// Server frames carry fromDeviceId injected relay-side; it must match the
+// envelope/ack identity it wraps.
+function readServerDeliver(frame) {
+  rejectUnknownFields(frame, new Set(['type', 'fromDeviceId', 'message']), 'deliver frame');
+  assertId(frame.fromDeviceId, 'fromDeviceId');
+  const message = normalizeEnvelope(frame.message);
+  if (frame.fromDeviceId !== message.sourceDeviceId) {
+    throw invalid('deliver fromDeviceId must match envelope source device');
+  }
+  return { type: 'deliver', fromDeviceId: frame.fromDeviceId, message };
+}
+
+function readServerAck(frame) {
+  rejectUnknownFields(frame, new Set(['type', 'fromDeviceId', 'ack']), 'ack frame');
+  assertId(frame.fromDeviceId, 'fromDeviceId');
+  const ack = normalizeAck(frame.ack);
+  if (frame.fromDeviceId !== ack.recipientDeviceId) {
+    throw invalid('ack fromDeviceId must match ack recipient device');
+  }
+  return { type: 'ack', fromDeviceId: frame.fromDeviceId, ack };
+}
+
+function readServerReject(frame) {
+  rejectUnknownFields(frame, new Set(['type', 'fromDeviceId', 'messageId', 'digest', 'code']), 'reject frame');
+  assertId(frame.fromDeviceId, 'fromDeviceId');
+  assertId(frame.messageId, 'messageId');
+  assertSha256Hex(frame.digest);
+  if (typeof frame.code !== 'string' || !DELIVERY_REJECT_CODES.has(frame.code)) {
+    throw invalid('reject code must be an allowed delivery rejection code');
+  }
+  return {
+    type: 'reject',
+    fromDeviceId: frame.fromDeviceId,
+    messageId: frame.messageId,
+    digest: frame.digest,
+    code: frame.code,
+  };
+}
+
+function readUnavailable(frame) {
+  rejectUnknownFields(frame, new Set(['type', 'targetDeviceId', 'messageId', 'digest', 'code']), 'unavailable frame');
+  assertId(frame.targetDeviceId, 'targetDeviceId');
+  assertId(frame.messageId, 'messageId');
+  assertSha256Hex(frame.digest);
+  if (frame.code !== 'OFFLINE' && frame.code !== 'BACKPRESSURE') {
+    throw invalid('unavailable code must be OFFLINE or BACKPRESSURE');
+  }
+  return {
+    type: 'unavailable',
+    targetDeviceId: frame.targetDeviceId,
+    messageId: frame.messageId,
+    digest: frame.digest,
+    code: frame.code,
+  };
+}
+
+/**
+ * Parse a frame sent by a relay client (hello/deliver/ack/reject).
+ * Throws messageError with code INVALID_ARGUMENT on any protocol violation.
+ */
+export function readClientFrame(data, isBinary = false) {
+  if (isBinary) throw invalid('relay frames must be text frames');
+  const frame = parseFrame(data);
+  switch (frame.type) {
+    case 'hello':
+      return readHello(frame);
+    case 'deliver':
+      return readClientDeliver(frame);
+    case 'ack':
+      return readClientAck(frame);
+    case 'reject':
+      return readClientReject(frame);
+    default:
+      throw invalid('unknown relay frame type');
+  }
+}
+
+/**
+ * Parse a frame sent by a relay server (ready/deliver/ack/reject/unavailable).
+ * "Ready first" ordering is enforced by the link lifecycle, not here.
+ */
+export function readServerFrame(data, isBinary = false) {
+  if (isBinary) throw invalid('relay frames must be text frames');
+  const frame = parseFrame(data);
+  switch (frame.type) {
+    case 'ready':
+      return readReady(frame);
+    case 'deliver':
+      return readServerDeliver(frame);
+    case 'ack':
+      return readServerAck(frame);
+    case 'reject':
+      return readServerReject(frame);
+    case 'unavailable':
+      return readUnavailable(frame);
+    default:
+      throw invalid('unknown relay frame type');
+  }
+}
+
+/**
+ * Encode a known outbound frame (already validated by its caller) to JSON text
+ * with the 2 MiB byte cap. No full schema revalidation here.
+ */
+export function encodeRelayFrame(frame) {
+  if (!isPlainObject(frame)) {
+    throw invalid('relay frame must be an object');
+  }
+  let text;
+  try {
+    text = JSON.stringify(frame);
+  } catch {
+    throw invalid('relay frame must be JSON-serializable');
+  }
+  if (text === undefined || Buffer.byteLength(text, 'utf8') > MAX_RELAY_FRAME_BYTES) {
+    throw invalid(FRAME_MAX_TEXT);
+  }
+  return text;
+}
