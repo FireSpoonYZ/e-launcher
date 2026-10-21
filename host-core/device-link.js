@@ -10,6 +10,8 @@ import { DatabaseSync } from 'node:sqlite';
 import WebSocket from 'ws';
 import { openMessageLog } from './messages.js';
 import { createMessageDelivery } from './message-delivery.js';
+import { createLocalControlAdapter } from './local-control-adapter.js';
+import { createHostControlReceiver } from './host-control.js';
 import {
   assertDeviceToken,
   parseRelayUrl,
@@ -113,6 +115,9 @@ export async function openDeviceLink(options) {
   if (onStatus !== undefined && typeof onStatus !== 'function') {
     throw messageError('INVALID_ARGUMENT', 'onStatus must be a function');
   }
+  // control 配置未提供则保持模块 8 legacy 行为；提供时由适配器构造同步完成完整
+  // 校验（url/token），坏参数在任何文件/socket 创建前失败，绝不产生数据写入。
+  const control = options.control !== undefined ? createLocalControlAdapter(options.control) : null;
 
   mkdirSync(dataRoot, { recursive: true });
   const releaseOwner = acquireDeviceLinkOwner(dataRoot);
@@ -180,6 +185,7 @@ export async function openDeviceLink(options) {
     lastError = code;
     cancelReconnect();
     delivery.setOnline(false);
+    receiver.reset();
     setPhase('blocked');
   }
 
@@ -237,7 +243,12 @@ export async function openDeviceLink(options) {
   function sendHello() {
     const ws = currentWs;
     if (ws && ws.readyState === WebSocket.OPEN) {
-      sendFrame({ type: 'hello', protocolVersion: 1, deviceId: log.deviceId, token });
+      const frame = { type: 'hello', protocolVersion: 1, deviceId: log.deviceId, token };
+      if (control) {
+        frame.role = 'host';
+        frame.controlProtocol = 1;
+      }
+      sendFrame(frame);
     }
   }
 
@@ -248,12 +259,21 @@ export async function openDeviceLink(options) {
       if (!closed) emitStatus();
     },
   });
+  // log.deviceId 已知后再建接收器；execute 为适配器（未配置时为 null），send 只走
+  // 已认证 ready 后的当前 socket。控制请求与消息投递泵完全分离。
+  const receiver = createHostControlReceiver({
+    deviceId: log.deviceId,
+    execute: control,
+    send: (frame) => (ready ? sendFrame(frame) : false),
+  });
 
   function startConnect() {
     if (closed || phase === 'blocked') return;
     const gen = ++currentGen;
     attempt += 1;
     ready = false;
+    // 新连接前作废旧代控制调用，旧代回调不会发到新 socket。
+    receiver.reset();
     setPhase('connecting');
     let ws;
     try {
@@ -296,8 +316,8 @@ export async function openDeviceLink(options) {
         return;
       }
       if (frame.type === 'ready') {
-        if (ready || frame.deviceId !== log.deviceId) {
-          // ready 重复或身份不匹配：协议违规。
+        if (ready || frame.deviceId !== log.deviceId || frame.role === 'client') {
+          // ready 重复、身份不匹配或客户端角色：协议违规。
           block('BAD_FRAME');
           ws.terminate();
           return;
@@ -320,6 +340,12 @@ export async function openDeviceLink(options) {
         ws.terminate();
         return;
       }
+      if (frame.type === 'control-request' || frame.type === 'control-cancel') {
+        try {
+          receiver.handle(frame);
+        } catch { /* 控制接收器内部异常不影响传输；其自身状态负责诊断 */ }
+        return;
+      }
       try {
         delivery.handle(frame);
       } catch { /* 交付层内部异常不影响传输；其自身状态负责诊断 */ }
@@ -337,6 +363,7 @@ export async function openDeviceLink(options) {
       clearSocketTimers();
       if (phase === 'blocked') return;
       delivery.setOnline(false);
+      receiver.reset();
       const blockedCode = BLOCKED_CLOSE_CODES.has(code)
         ? code === RELAY_CLOSE.UNAUTHORIZED ? 'UNAUTHORIZED'
           : code === RELAY_CLOSE.REVOKED ? 'REVOKED'
@@ -360,6 +387,7 @@ export async function openDeviceLink(options) {
     setPhase('closed');
     const errors = [];
     try { delivery.close(); } catch (err) { errors.push(err); }
+    try { receiver.close(); } catch (err) { errors.push(err); }
     const ws = currentWs;
     currentWs = null;
     if (ws) {

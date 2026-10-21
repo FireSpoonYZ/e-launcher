@@ -458,6 +458,8 @@ export interface OpenDeviceLinkOptions {
   url: string;
   token: string;
   ca?: string;
+  /** Optional local loopback Control API pair; when set, hello carries role:'host',controlProtocol:1. */
+  control?: { url: string; token: string };
   onStatus?: (status: DeviceLinkStatus) => void;
 }
 
@@ -469,3 +471,54 @@ export interface DeviceLink {
 }
 
 export function openDeviceLink(options: OpenDeviceLinkOptions): Promise<DeviceLink>;
+
+/**
+ * Module 9 types: authenticated remote Host JSON control over the module 8
+ * relay. The Node client opens an explicit 'client' role connection; the
+ * target Host remains the sole authority for Bot cwd/create, inference,
+ * tools and history. Static delivery pending parent E2E.
+ */
+
+export type RemoteControlOutcome = 'not-sent' | 'unconfirmed' | 'responded';
+
+/** Fixed 10 JSON methods; params/results reuse the existing DTOs above. */
+export interface RemoteControlMethodMap {
+  getHostInfo: { params: Record<string, never>; result: ControlHostInfo };
+  listBots: { params: Record<string, never>; result: BotRecord[] };
+  createBot: { params: CreateBotInput; result: BotRecord };
+  getBot: { params: { botId: string }; result: BotRecord };
+  findByRequest: { params: { requestId: string }; result: BotRecord };
+  submit: { params: { botId: string; requestId: string; text: string }; result: PrimarySubmission };
+  getSubmission: { params: { botId: string; requestId: string }; result: PrimarySubmission };
+  history: { params: { botId: string; limit?: number; cursor?: Record<string, unknown> | null }; result: HistoryPage };
+  abort: { params: { botId: string }; result: { botId: string } };
+  contextStatus: { params: { botId: string }; result: ContextStatus };
+}
+
+export interface OpenRemoteControlOptions {
+  deviceId: string;
+  url: string;
+  token: string;
+  ca?: string;
+  /** Startup AbortSignal; applies only until open() resolves. */
+  signal?: AbortSignal;
+}
+
+export interface RemoteControl {
+  readonly deviceId: string;
+  call<K extends keyof RemoteControlMethodMap>(
+    targetDeviceId: string,
+    method: K,
+    params: RemoteControlMethodMap[K]['params'],
+    options?: { signal?: AbortSignal },
+  ): Promise<RemoteControlMethodMap[K]['result']>;
+  close(): void;
+}
+
+export function openRemoteControl(options: OpenRemoteControlOptions): Promise<RemoteControl>;
+
+export class RemoteControlError extends Error {
+  constructor(code: string, outcome: RemoteControlOutcome);
+  readonly code: string;
+  readonly outcome: RemoteControlOutcome;
+}

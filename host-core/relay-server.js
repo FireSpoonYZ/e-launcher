@@ -1,8 +1,10 @@
 // host-core/relay-server.js
-// Module 8 authenticated device relay: one HTTP(S) listener with a single
-// /v1/link WebSocket upgrade path. Authenticated sockets are bound to a
-// deviceId; frames are routed one-to-one between bound devices. The relay
-// never persists messages and keeps no business state beyond online peers.
+// Module 8 authenticated device relay + Module 9 control routing: one HTTP(S)
+// listener with a single /v1/link WebSocket upgrade path. Authenticated sockets
+// carry a role (host default, client explicit); hosts are the sole entry in
+// deviceMap and route legacy delivery frames, while clients of the same
+// registered device place bounded control calls that are correlated by routeId.
+// The relay never persists messages and keeps no business state beyond peers.
 
 import { createServer } from 'node:http';
 import { createServer as createHttpsServer } from 'node:https';
@@ -22,6 +24,12 @@ import {
   encodeRelayFrame
 } from './relay-protocol.js';
 import { digest, messageError } from './message-protocol.js';
+import {
+  openControlRoutes,
+  CONTROL_MAX_CLIENT_CALLS,
+  CONTROL_MAX_HOST_CALLS,
+  CONTROL_MAX_PENDING
+} from './relay-control.js';
 
 const DEFAULT_PORT = 8790;
 const DEFAULT_LISTEN_HOST = '127.0.0.1';
@@ -131,9 +139,10 @@ export async function openRelayServer(options = {}) {
     throw err;
   }
 
-  const deviceMap = new Map(); // deviceId -> conn (authenticated)
+  const deviceMap = new Map(); // deviceId -> host conn (authenticated)
   const allConns = new Set();  // every accepted WS, authenticated or not
   const upgradeSockets = new Set();
+  const controlRoutes = openControlRoutes(); // bounded control-call correlation
   let closed = false;
 
   function connCleanup(conn) {
@@ -141,6 +150,10 @@ export async function openRelayServer(options = {}) {
     if (conn.deviceId !== null && deviceMap.get(conn.deviceId) === conn) {
       deviceMap.delete(conn.deviceId);
     }
+    // A leaving client abandons its pending calls (best-effort host cancel);
+    // a leaving host fails its pending calls as unconfirmed.
+    cancelClientControlRoutes(conn);
+    failHostControlRoutes(conn);
   }
 
   function closeWith(conn, code) {
@@ -236,6 +249,124 @@ export async function openRelayServer(options = {}) {
     });
   }
 
+  // ---- Module 9 control routing ----
+
+  function sendControlFailure(conn, callId, targetDeviceId, code, outcome) {
+    if (!writeFrame(conn.ws, {
+      type: 'control-result',
+      callId,
+      targetDeviceId,
+      ok: false,
+      code,
+      outcome
+    }, noop)) {
+      try { conn.ws.terminate(); } catch { /* socket gone */ }
+    }
+  }
+
+  function routeControlCall(conn, frame) {
+    if (controlRoutes.findByClientCall(conn, frame.callId)) {
+      return closeWith(conn, RELAY_CLOSE.BAD_FRAME);
+    }
+    if (
+      controlRoutes.size() >= CONTROL_MAX_PENDING ||
+      controlRoutes.countClient(conn) >= CONTROL_MAX_CLIENT_CALLS
+    ) {
+      return sendControlFailure(conn, frame.callId, frame.targetDeviceId, 'RPC_BUSY', 'not-sent');
+    }
+    const peer = deviceMap.get(frame.targetDeviceId);
+    if (!peer || !peerUsable(peer)) {
+      return sendControlFailure(conn, frame.callId, frame.targetDeviceId, 'OFFLINE', 'not-sent');
+    }
+    if (peer.controlProtocol !== 1) {
+      return sendControlFailure(conn, frame.callId, frame.targetDeviceId, 'CONTROL_UNAVAILABLE', 'not-sent');
+    }
+    if (controlRoutes.countHost(peer) >= CONTROL_MAX_HOST_CALLS) {
+      return sendControlFailure(conn, frame.callId, frame.targetDeviceId, 'RPC_BUSY', 'not-sent');
+    }
+    const record = controlRoutes.add(conn, frame.callId, peer, frame.targetDeviceId);
+    if (!writeFrame(peer.ws, {
+      type: 'control-request',
+      routeId: record.routeId,
+      fromDeviceId: conn.deviceId,
+      method: frame.method,
+      params: frame.params
+    }, (err) => {
+      if (err) {
+        // Accepted send failed asynchronously: the host may have seen it, so
+        // the pending call resolves via close/timeout as unconfirmed.
+        try { peer.ws.terminate(); } catch { /* socket gone */ }
+      }
+    })) {
+      controlRoutes.remove(record.routeId);
+      const code = peer.dead || peer.ws.readyState !== WS_OPEN ? 'OFFLINE' : 'BACKPRESSURE';
+      sendControlFailure(conn, frame.callId, frame.targetDeviceId, code, 'not-sent');
+    }
+  }
+
+  function routeControlCancel(conn, frame) {
+    const record = controlRoutes.findByClientCall(conn, frame.callId);
+    if (!record) return; // duplicate/late cancel is harmless
+    controlRoutes.remove(record.routeId);
+    if (peerUsable(record.host)) {
+      writeFrame(record.host.ws, {
+        type: 'control-cancel',
+        routeId: record.routeId
+      }, noop);
+    }
+  }
+
+  function routeControlResult(conn, frame) {
+    const record = controlRoutes.findByRoute(frame.routeId);
+    // Only the exact host conn a call was forwarded to may answer it; stale,
+    // late, duplicate or wrong-host replies are ignored.
+    if (!record || record.host !== conn) return;
+    if (!peerUsable(conn)) {
+      controlRoutes.remove(record.routeId);
+      sendControlResult(record, false, 'DISCONNECTED', 'unconfirmed');
+      return;
+    }
+    controlRoutes.remove(record.routeId);
+    if (frame.ok) {
+      sendControlResult(record, true, frame.result);
+    } else {
+      sendControlResult(record, false, frame.code, frame.outcome);
+    }
+  }
+
+  function sendControlResult(record, ok, value, outcome) {
+    if (!peerUsable(record.client)) return false;
+    const frame = ok
+      ? { type: 'control-result', callId: record.callId, targetDeviceId: record.targetDeviceId, ok: true, result: value }
+      : { type: 'control-result', callId: record.callId, targetDeviceId: record.targetDeviceId, ok: false, code: value, outcome };
+    if (!writeFrame(record.client.ws, frame, noop)) {
+      // Backpressured client cannot learn the real outcome: terminate rather
+      // than invent success.
+      try { record.client.ws.terminate(); } catch { /* socket gone */ }
+      return false;
+    }
+    return true;
+  }
+
+  function cancelClientControlRoutes(conn) {
+    for (const record of controlRoutes.listForClient(conn)) {
+      controlRoutes.remove(record.routeId);
+      if (peerUsable(record.host)) {
+        writeFrame(record.host.ws, {
+          type: 'control-cancel',
+          routeId: record.routeId
+        }, noop);
+      }
+    }
+  }
+
+  function failHostControlRoutes(conn) {
+    for (const record of controlRoutes.listForHost(conn)) {
+      controlRoutes.remove(record.routeId);
+      sendControlResult(record, false, 'DISCONNECTED', 'unconfirmed');
+    }
+  }
+
   function onFrame(conn, data, isBinary) {
     let frame;
     try {
@@ -260,21 +391,27 @@ export async function openRelayServer(options = {}) {
       conn.deviceId = device.deviceId;
       conn.version = device.credentialVersion;
       conn.alive = true;
+      conn.role = frame.role === 'client' ? 'client' : 'host';
+      conn.controlProtocol = frame.controlProtocol === 1 ? 1 : 0;
       clearTimeout(conn.helloTimer);
 
-      const previous = deviceMap.get(conn.deviceId);
-      deviceMap.set(conn.deviceId, conn);
-      if (previous) {
-        // Replacement: old socket stops routing; its close handler must not
-        // delete the new map entry (identity guard in connCleanup).
-        previous.replaced = true;
-        closeWith(previous, RELAY_CLOSE.REPLACED);
+      // One host conn per device (legacy REPLACED semantics); clients of the
+      // same registered device are independent peers and never replace it.
+      if (conn.role === 'host') {
+        const previous = deviceMap.get(conn.deviceId);
+        deviceMap.set(conn.deviceId, conn);
+        if (previous) {
+          previous.replaced = true;
+          closeWith(previous, RELAY_CLOSE.REPLACED);
+        }
       }
-      if (!writeFrame(conn.ws, {
+      const ready = {
         type: 'ready',
         protocolVersion: 1,
         deviceId: conn.deviceId
-      }, noop)) {
+      };
+      if (conn.role === 'client') ready.role = 'client';
+      if (!writeFrame(conn.ws, ready, noop)) {
         closeWith(conn, 1009);
       }
       return;
@@ -297,6 +434,17 @@ export async function openRelayServer(options = {}) {
       current === null || current.revokedAt !== null ||
       current.credentialVersion !== conn.version
     ) {
+      return closeWith(conn, RELAY_CLOSE.REVOKED);
+    }
+
+    // Roles separate traffic, not credential privilege: clients only
+    // place/cancel control calls; hosts only send legacy frames and control
+    // results. Role violations close 4403 (REVOKED) without routing.
+    if (conn.role === 'client') {
+      if (frame.type !== 'control-call' && frame.type !== 'control-cancel') {
+        return closeWith(conn, RELAY_CLOSE.REVOKED);
+      }
+    } else if (frame.type === 'control-call' || frame.type === 'control-cancel') {
       return closeWith(conn, RELAY_CLOSE.REVOKED);
     }
 
@@ -325,6 +473,12 @@ export async function openRelayServer(options = {}) {
         }
         return routeReject(conn, frame);
       }
+      case 'control-call':
+        return routeControlCall(conn, frame);
+      case 'control-cancel':
+        return routeControlCancel(conn, frame);
+      case 'control-result':
+        return routeControlResult(conn, frame);
       default:
         return closeWith(conn, RELAY_CLOSE.BAD_FRAME);
     }
@@ -339,6 +493,8 @@ export async function openRelayServer(options = {}) {
       ws,
       deviceId: null,
       version: 0,
+      role: 'host',
+      controlProtocol: 0,
       helloTimer: null,
       alive: true,
       dead: false,
@@ -395,9 +551,11 @@ export async function openRelayServer(options = {}) {
 
   server.on('error', noop); // listener errors after bind never crash the process
 
+  // Credential and heartbeat scans cover every authenticated host AND client
+  // connection, not only deviceMap hosts.
   const registryCheckTimer = setInterval(() => {
-    for (const conn of deviceMap.values()) {
-      if (conn.dead || conn.replaced) continue;
+    for (const conn of allConns) {
+      if (conn.dead || conn.replaced || conn.deviceId === null) continue;
       let device;
       try {
         device = registry.get(conn.deviceId);
@@ -414,8 +572,8 @@ export async function openRelayServer(options = {}) {
   }, 1000);
 
   const heartbeatTimer = setInterval(() => {
-    for (const conn of deviceMap.values()) {
-      if (conn.dead || conn.replaced) continue;
+    for (const conn of allConns) {
+      if (conn.dead || conn.replaced || conn.deviceId === null) continue;
       if (!conn.alive) {
         // previous ping was unanswered: peer is dead
         try {
@@ -434,6 +592,22 @@ export async function openRelayServer(options = {}) {
     }
   }, RELAY_HEARTBEAT_MS);
 
+  // Control-call TTL scan (<=1s granularity): expire -> TIMEOUT/unconfirmed,
+  // then best-effort host cancellation.
+  const controlTimer = setInterval(() => {
+    const now = Date.now();
+    for (const record of controlRoutes.expired(now)) {
+      controlRoutes.remove(record.routeId);
+      sendControlResult(record, false, 'TIMEOUT', 'unconfirmed');
+      if (peerUsable(record.host)) {
+        writeFrame(record.host.ws, {
+          type: 'control-cancel',
+          routeId: record.routeId
+        }, noop);
+      }
+    }
+  }, 1000);
+
   let closing = null;
   function close() {
     if (closing === null) {
@@ -445,12 +619,14 @@ export async function openRelayServer(options = {}) {
         };
         clearInterval(registryCheckTimer);
         clearInterval(heartbeatTimer);
+        clearInterval(controlTimer);
         for (const conn of allConns) {
           clearTimeout(conn.helloTimer);
           conn.dead = true;
           capture(() => conn.ws.terminate());
         }
         deviceMap.clear();
+        controlRoutes.clear();
         for (const socket of upgradeSockets) {
           capture(() => socket.destroy());
         }
@@ -502,6 +678,8 @@ export async function openRelayServer(options = {}) {
     closed = true;
     clearInterval(registryCheckTimer);
     clearInterval(heartbeatTimer);
+    clearInterval(controlTimer);
+    controlRoutes.clear();
     for (const conn of allConns) {
       clearTimeout(conn.helloTimer);
       try { conn.ws.terminate(); } catch { /* ignore */ }

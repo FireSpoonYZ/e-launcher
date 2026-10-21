@@ -6,13 +6,15 @@ import { openDeviceLink } from './device-link.js';
 
 const MAX_CA_BYTES = 1024 * 1024;
 
-const USAGE = `usage: node host-core/device-link-cli.js --data-root <dir> --url <ws(s)://...> --token-env <name> [--ca <file>]
+const USAGE = `usage: node host-core/device-link-cli.js --data-root <dir> --url <ws(s)://...> --token-env <name> [--ca <file>] [--control-url <url> --control-token-env <name>]
 
 options:
   --data-root <dir>   verified absolute data directory (required)
   --url <url>         relay WebSocket URL (required; path must be /v1/link)
   --token-env <name>  environment variable holding the device token (required, must be set)
   --ca <file>         custom CA bundle PEM file, regular UTF-8, max 1MiB (optional)
+  --control-url <url> local Host control base URL, paired with --control-token-env (optional)
+  --control-token-env <name>  environment variable holding the control bearer token (optional, pair)
   -h, --help          show this help
 `;
 
@@ -21,6 +23,8 @@ const OPTIONS = {
   url: { type: 'string' },
   'token-env': { type: 'string' },
   ca: { type: 'string' },
+  'control-url': { type: 'string' },
+  'control-token-env': { type: 'string' },
   help: { type: 'boolean', short: 'h' },
 };
 
@@ -110,6 +114,23 @@ async function main() {
   // 参数/CA 文件校验全部发生在 openDeviceLink 之前：坏参数不会先写数据。
   const options = { dataRoot: values['data-root'], url: values.url, token };
   if (values.ca !== undefined) options.ca = readCaFile(values.ca);
+  // 可选控制通道凭据与链路凭据分开：--control-token-env 独立命名，两者必须成对出现；
+  // 深层 URL/token 校验由 openDeviceLink 构造控制适配器时完成（发生在写任何数据之前）。
+  const controlUrl = values['control-url'];
+  const controlTokenEnv = values['control-token-env'];
+  if ((controlUrl === undefined) !== (controlTokenEnv === undefined)) {
+    throw invalid('--control-url and --control-token-env must be used together');
+  }
+  if (controlUrl !== undefined) {
+    if (!ENV_NAME_RE.test(controlTokenEnv)) {
+      throw invalid('--control-token-env must be a valid environment variable name');
+    }
+    const controlToken = process.env[controlTokenEnv];
+    if (typeof controlToken !== 'string' || controlToken === '') {
+      throw invalid(`environment variable ${controlTokenEnv} is not set`);
+    }
+    options.control = { url: controlUrl, token: controlToken };
+  }
 
   let link = null;
   let pendingBlocked = false;

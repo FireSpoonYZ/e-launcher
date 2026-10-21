@@ -1,8 +1,8 @@
 # @e-launcher/host-core
 
-本机 Bot/Host 核心。模块 1 提供 Bot 定义与主私聊身份登记；模块 2 接入 Pi Durable 长期主私聊、历史与执行恢复；模块 3 内嵌 Billion Context；模块 4 接入本机工具（read/write/edit/bash 与 grep/find/ls）；模块 5 接入本机长驻控制 API 与客户端；模块 6 接入 Bot 主私聊直播预览（认证本地 SSE、运行时 watch、客户端与 CLI）；模块 7 接入本机持久消息账本（messages.sqlite：作用域/成员修订、不可变信封、outbox、落地去重 ACK、本地收件/历史/缺口、特权离线 CLI）；模块 8 接入认证设备中继与 Host 消息投递（中心只存设备注册；复用模块 7 outbox，本机进程网络端到端）。运行时由单 Host 所有者持有，跨进程身份稳定。包正式名为 `@e-launcher/host-core`；当前仓库尚无 workspace/包安装连接，示例直接从仓库根导入本地文件（见下文）。
+本机 Bot/Host 核心。模块 1 提供 Bot 定义与主私聊身份登记；模块 2 接入 Pi Durable 长期主私聊、历史与执行恢复；模块 3 内嵌 Billion Context；模块 4 接入本机工具（read/write/edit/bash 与 grep/find/ls）；模块 5 接入本机长驻控制 API 与客户端；模块 6 接入 Bot 主私聊直播预览（认证本地 SSE、运行时 watch、客户端与 CLI）；模块 7 接入本机持久消息账本（messages.sqlite：作用域/成员修订、不可变信封、outbox、落地去重 ACK、本地收件/历史/缺口、特权离线 CLI）；模块 8 接入认证设备中继与 Host 消息投递（中心只存设备注册；复用模块 7 outbox，本机进程网络端到端）；模块 9 在认证中继上增加固定 10 个 JSON 方法的远程 Host 控制（独立多客户端角色、Node 客户端与一次性 CLI；父助手已完成本机独立进程 171/171 个端到端检查点验收，范围见下文）。运行时由单 Host 所有者持有，跨进程身份稳定。包正式名为 `@e-launcher/host-core`；当前仓库尚无 workspace/包安装连接，示例直接从仓库根导入本地文件（见下文）。
 
-整体方向见 [../docs/next-generation-architecture.md](../docs/next-generation-architecture.md)（状态：未来设计）。
+整体方向见 [下一代多端 Bot 架构设计](../docs/next-generation-architecture.md)（目标架构，部分已实现），交付计划与完成/剩余模块见 [重构路线图](../docs/refactor-roadmap.md)。
 
 ## 实现与边界
 
@@ -95,8 +95,8 @@ node host-core/cli.js create   --data-root '/path/to/data-root'   --request-id r
 - `store.js`：openStore(dataRoot)，返回 {deviceId, createBot, getBot, findByRequest, listBots, close}。
 - `host.js`：openHost({dataRoot})，返回 {deviceId, dataRoot, createBot, getBot, findByRequest, listBots, close}。
 - `cli.js`：CLI 入口。
-- `index.js`：导出 `openHost`、`openRuntime`、`openControlServer`、`openMessageLog`、`openRelayRegistry`、`openRelayServer`、`openDeviceLink` 与控制 IO 辅助（`ControlHttpError`、`createControlAuthorizer`、`readControlBody`、`writeControlJson`、`writeControlError`）。
-- `index.d.ts`：登记接口，以及 `Runtime`、`PrimarySubmission`、`HistoryPage`、`OpenRuntimeOptions`（含可选 `bashPath`/`toolPaths`）、模块 6 直播预览类型（`LiveMessage`/`LiveHistoryItem`/`LiveTool`/`LiveGeneration`/`BotLiveState`/`BotLiveChanges`/`BotLiveSnapshot`/`BotLiveUpdate`/`BotLiveDataFrame`/`BotLiveEnd`/`BotLiveFrame`/`BotWatchEnd`/`BotWatch`）、模块 7 消息账本类型（`MessageMember`/`MessageAuthor`/`MessageScope`/`PublishMessageInput`/`MessageEnvelope`/`MessagePeer`/`MessageAck`/`StoredMessage`/`MessageCursor`/`MessagePageOptions`/`MessageOutboxOptions`/`MessageStreamStatus`/`MessageHistoryPage`/`MessageInboxPage`/`MessageOutboxPage`/`MessageDeliveryStatus`/`MessageLog`/`openMessageLog`）、模块 8 中继类型（`RelayDevice`/`RelayRegistry`/`RelayServerStatus`/`RelayServer`/`DeliveryPumpStatus`/`DeviceLinkStatus`/`DeviceLink`/`openRelayRegistry`/`openRelayServer`/`openDeviceLink`）等类型。
+- `index.js`：导出 `openHost`、`openRuntime`、`openControlServer`、`openMessageLog`、`openRelayRegistry`、`openRelayServer`、`openDeviceLink`、`openRemoteControl`、`RemoteControlError` 与控制 IO 辅助（`ControlHttpError`、`createControlAuthorizer`、`readControlBody`、`writeControlJson`、`writeControlError`）。
+- `index.d.ts`：登记接口，以及 `Runtime`、`PrimarySubmission`、`HistoryPage`、`OpenRuntimeOptions`（含可选 `bashPath`/`toolPaths`）、模块 6 直播预览类型（`LiveMessage`/`LiveHistoryItem`/`LiveTool`/`LiveGeneration`/`BotLiveState`/`BotLiveChanges`/`BotLiveSnapshot`/`BotLiveUpdate`/`BotLiveDataFrame`/`BotLiveEnd`/`BotLiveFrame`/`BotWatchEnd`/`BotWatch`）、模块 7 消息账本类型（`MessageMember`/`MessageAuthor`/`MessageScope`/`PublishMessageInput`/`MessageEnvelope`/`MessagePeer`/`MessageAck`/`StoredMessage`/`MessageCursor`/`MessagePageOptions`/`MessageOutboxOptions`/`MessageStreamStatus`/`MessageHistoryPage`/`MessageInboxPage`/`MessageOutboxPage`/`MessageDeliveryStatus`/`MessageLog`/`openMessageLog`）、模块 8 中继类型（`RelayDevice`/`RelayRegistry`/`RelayServerStatus`/`RelayServer`/`DeliveryPumpStatus`/`DeviceLinkStatus`/`DeviceLink`/`openRelayRegistry`/`openRelayServer`/`openDeviceLink`，`OpenDeviceLinkOptions.control` 可选）、模块 9 远程控制类型（`RemoteControlOutcome`/`RemoteControlMethodMap`/`OpenRemoteControlOptions`/`RemoteControl`/`RemoteControlError`/`openRemoteControl`）等类型。
 - `messages.js`：模块 7 门面 `openMessageLog({dataRoot})`，组合 openHost 与 openMessageStore；协议边界只验证一次。
 - `message-protocol.js`：模块 7 协议校验与规范化（`messageError`/`assertId`/`assertRevision`/`normalizeScope`/`normalizePublish`/`normalizeEnvelope`/`normalizePeer`/`normalizeAck`/`normalizePageOptions`/`streamIdForScope`/`digest`/`assertScopeMessage`）。
 - `message-store.js`：`openMessageStore(dataRoot, deviceId)`，建库 `messages.sqlite`（user_version=1）与事务读写。
@@ -114,7 +114,13 @@ node host-core/cli.js create   --data-root '/path/to/data-root'   --request-id r
 - `relay-registry.js` / `relay-registry-cli.js`：中心设备注册库（`relay.sqlite`，唯一写入口）与唯一写 CLI。
 - `relay-server.js` / `relay-server-cli.js`：认证中继服务（WebSocketServer noServer + TLS/loopback 规则）与其 CLI。
 - `message-delivery.js`：内部投递泵（不导出），在线扫描 outbox、退避与诊断。
-- `device-link.js` / `device-link-cli.js`：Host 链路（ws 客户端、Hello/ready、所有权锁、重连/blocked）与其 CLI。
+- `device-link.js` / `device-link-cli.js`：Host 链路（ws 客户端、Hello/ready、所有权锁、重连/blocked）与其 CLI；模块 9 起 `device-link-cli` 增加可选配对 `--control-url` 与 `--control-token-env`，配置控制适配器后 hello 带 `role:'host',controlProtocol:1`。
+- `remote-control-protocol.js`：模块 9 协议常量与方向性帧校验（`CONTROL_METHODS`/`CONTROL_ERROR_CODES`/`MAX_CONTROL_JSON_BYTES`/`CONTROL_TIMEOUT_MS`/`CONTROL_CLIENT_TIMEOUT_MS`/`CONTROL_MAX_CLIENT_CALLS`/`CONTROL_MAX_HOST_CALLS`/`CONTROL_MAX_PENDING`/`normalizeControlCall`/`readControlClientFrame`/`readControlServerFrame`）。
+- `relay-server.js`：模块 8/9 认证中继服务（WebSocketServer noServer + TLS/loopback 规则、control-* 有界路由与清理）。
+- `local-control-adapter.js`：`createLocalControlAdapter({url,token})`，目标本机回环 Control API 适配（仅字面 `http://127.0.0.1` 或 `http://[::1]`，路径 `/`）。
+- `host-control.js`：`createHostControlReceiver({deviceId,execute,send})`，Host 侧控制接收器（最多 8 个活动调用、无队列）。
+- `remote-control-client.js`：模块 9 Node 控制客户端（`openRemoteControl`/`RemoteControlError`）。
+- `remote-control-cli.js`：模块 9 一次性控制 CLI（10 个固定方法）。
 
 ## 本次模块验收
 
@@ -625,3 +631,64 @@ process.once('SIGINT', async () => {
 大消息向 20 个离线目标发送时观察到发送缓冲拒绝，最高在途数为 6，20 项仍持久 pending。stdin EOF 不停止连接；慢 HTTP 头、未认证 WebSocket 和活连接并存时，中继约 1.1 秒关闭并退出 0。消息链路和原 Runtime 使用不同独占锁，可同时运行，分别关闭。ws MIT 许可证与已安装上游文本一致。
 
 数据、网络夹具与 module8-verification.json 报告保存在仓库外，没有新增测试文件。跨物理设备/外网、Linux、Android、arm64 仍待验证；中继慢接收者的 BACKPRESSURE 分支尚无有效实跑证据，256 连接上限未做负载验收。直接 JS 的 getStatus/回调故障分支做了源码核对，端到端验收主要通过生产 CLI。现有信任模型是受信中继与 TLS 通道，没有端到端消息加密或签名。
+
+## 模块 9：认证远程 Host JSON 控制（已完成父助手验收）
+
+模块 9 在模块 8 的认证中继之上增加固定 10 个 JSON 方法的远程 Host 控制：`getHostInfo`/`listBots`/`createBot`/`getBot`/`findByRequest`/`submit`/`getSubmission`/`history`/`abort`/`contextStatus`。控制与消息是分离的不同角色流量：Host 连接沿用 `device-link`（若有 `--control-url` + `--control-token-env` 配对配置则发送 `role:'host',controlProtocol:1` hello），客户端用 `remote-control-client` 显式发送 `role:'client'` hello。**本模块已完成父助手的本机独立进程端到端验收**，具体环境、覆盖及未实测范围见下文，不代表跨物理设备或全端产品已完成。
+
+### CLI
+
+```bash
+node host-core/remote-control-cli.js listBots \
+  --device-id <SOURCE_DEVICE_ID> --target-device-id <TARGET_DEVICE_ID> \
+  --url 'wss://…/v1/link' --token-env REMOTE_CONTROL_TOKEN \
+  [--input control-input.json] [--ca /path/to/ca.pem]
+```
+
+- METHOD 必须精确等于上述 10 个方法名之一，无别名；`--input` 可选，缺省 `{}`，为 ≤1MiB 的普通 UTF-8 JSON 对象。
+- 成功：stdout 输出一行原始 JSON 结果，exit 0。失败：stderr 输出 `{"error":{"code":...,"message":...,"outcome":...}}`；unconfirmed 结果 exit 2，其他错误 exit 1，`--help` exit 0。信号只关闭客户端，绝不发送 abort 方法；错误输出不含令牌/调用负载。
+
+### JS API（`./host-core/index.js` 新增导出）
+
+```js
+import { openRemoteControl } from './host-core/index.js';
+
+const ctl = await openRemoteControl({
+  deviceId: DEVICE_ID,            // 本机已注册设备身份
+  url: relay.url,                  // ws(s)://…/v1/link
+  token: REMOTE_CONTROL_TOKEN,     // relay 凭证（环境变量）
+  // ca: cert,                    // 自签 CA，禁止关闭校验
+});
+try {
+  const info = await ctl.call(TARGET_DEVICE_ID, 'getHostInfo', {});
+  const bots = await ctl.call(TARGET_DEVICE_ID, 'listBots', {});
+  // createBot/submit 等 10 个方法同构；每调用独立 callId
+} finally {
+  ctl.close();
+}
+```
+
+### 语义边界
+
+- **同一设备多客户端共存**：多个 `role:'client'` 连接可同时存在；DeviceLink 仍是唯一主机连接。凭证撤销、轮换检查和心跳覆盖全部认证 host/client 连接；新的 Host 连接只替换同设备的旧 Host 连接，客户端可继续共存。新建客户端不打开 host.sqlite/messages.sqlite/device-link-owner 或 Runtime，原 Host 仍是 cwd 创建、推理、工具与历史的唯一权威。
+- **令牌区分**：relay 凭证（`--token-env`）用于登录中继；`--control-url`/`--control-token-env` 是本机回环 Control API 的本地令牌（仅字面 `http://127.0.0.1` 或 `http://[::1]`，路径必须 `/`，不带 query/fragment）。
+- **信任模型**：传输仍依赖受信中继 + TLS 通道，不是端到端加密/签名；CA 可用但不能关闭校验。
+- **结果语义**：`not-sent` 未交给目标本地 Control API；`unconfirmed` 操作可能已被接受（超时/断线/取消后），不可认定无副作用；`responded` 目标本地 API 已返回（未必代表失败零副作用）。应用层请求幂等依赖显式 requestId 重试核对，不自动重试。
+- **上限**：请求参数与结果 JSON 各 ≤1MiB（UTF-8），整 relay 帧 ≤2MiB；客户端 8 个在途调用、25s 超时，Host 8 个活动调用、20s TTL，全局 128 条 pending。
+- **边界**：仅 Node 客户端；SSE 直播、设备目录/枚举 UI、任意 URL/路径/头/端口 RPC、离线信箱或自动变更重试不在本模块。
+
+### 模块 9 验收
+
+父助手在 Windows x64 / Git Bash、Node 26.8.2 与最低版本 Node 22.19.0 下，使用本机独立客户端、中继与 Host 进程及真实 CA 校验的 WSS，完成 **171/171 个端到端检查点**（失败 0），公开类型声明检查通过。IPv6 仅实测回环 ws 认证与目标离线回执，没有据此宣称 IPv6 在线 Host 控制已验收。这里的端到端指业务链路，仍依赖可信中继与 TLS，**不是端到端消息密码学**，没有 E2E 消息加密或签名。
+
+模型服务使用 **Mockoon OpenAI-compatible SSE**，不是外部真实付费模型；目标 Host 实际运行 Durable/BC 及原生 write/bash/grep，确认工具在目标 cwd 执行并写入真实文件。固定 10 个 JSON 方法、同设备多客户端、幂等与并发创建、目标 cwd 校验、逐 call 本机 Host 身份核对、被动历史/上下文查询、离线拒绝且不重放均通过。提交不等待模型，客户端退出后推理继续；忙时输入排队，显式 abort 停止当前及排队输入并阻止后续工具写入。
+
+验收还覆盖调用/连接范围隔离、错误 Host 与重复/迟到回复忽略、更换 Host 后的 unconfirmed、每客户端和每 Host 各 8 个并发上限、20s 中继超时及取消通知、1MiB JSON 边界与超大结果拒绝。RPC 取消不会调用 Agent abort，推理仍可完成；只有显式 abort 才停止 Agent。错误角色/参数/凭证、撤销/轮换、Node 22 中继重启与 Host 重连、Runtime 重开及既有提交稳定、旧消息 outbox/ACK 兼容均已实跑。
+
+29 个日志/数据库文件未含验收用私有标记，中心只持久保存设备注册，三份 Host 数据库完整性通过。所有验收进程已退出：6 个最终核心进程 exit 0，测试模型服务以 SIGTERM/143 结束；只清理本轮验收所属进程。验收数据、脚本、协议夹具及 `module9-verification.json` 报告均保存在仓库外，没有新增仓库内测试文件，也不在文档中保存临时凭据。
+
+未实测范围仍保留：
+
+- 跨物理设备/外网、Linux、Android、arm64、Tauri/TUI，以及真实外部付费模型。
+- 全局 128 pending、256 连接上限的负载，以及中继慢接收者反压。
+- 直接 JS AbortSignal、客户端本地 25s 超时兜底、恶意服务端同一 chunk 合并帧拒绝等分支仅由父助手源码核对；实际运行覆盖的是生产 CLI/中继取消和 20s 截止路径。

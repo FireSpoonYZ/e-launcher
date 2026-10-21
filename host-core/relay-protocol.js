@@ -1,6 +1,9 @@
-// Relay wire protocol boundary helper (module 8). Parses/validates relay
+// Relay wire protocol boundary helper (modules 8-9). Parses/validates relay
 // frames and relay URLs; no ws, no Runtime, no generic schema framework.
+// Module 9 adds optional hello/ready role fields and fixed-direction control-*
+// frames, delegated to remote-control-protocol.js helpers.
 import { messageError, assertId, normalizeEnvelope, normalizeAck } from './message-protocol.js';
+import { readControlClientFrame, readControlHostFrame, readControlServerFrame } from './remote-control-protocol.js';
 
 const INVALID_ARGUMENT = 'INVALID_ARGUMENT';
 
@@ -139,18 +142,41 @@ function parseFrame(data) {
 }
 
 function readHello(frame) {
-  rejectUnknownFields(frame, new Set(['type', 'protocolVersion', 'deviceId', 'token']), 'hello frame');
+  rejectUnknownFields(frame, new Set(['type', 'protocolVersion', 'deviceId', 'token', 'role', 'controlProtocol']), 'hello frame');
   if (frame.protocolVersion !== 1) throw invalid('hello.protocolVersion must be 1');
   assertId(frame.deviceId, 'deviceId');
   assertDeviceToken(frame.token);
-  return { type: 'hello', protocolVersion: 1, deviceId: frame.deviceId, token: frame.token };
+  const normalized = { type: 'hello', protocolVersion: 1, deviceId: frame.deviceId, token: frame.token };
+  if (frame.role !== undefined) {
+    if (frame.role !== 'host' && frame.role !== 'client') {
+      throw invalid('hello.role must be host or client');
+    }
+    normalized.role = frame.role;
+  }
+  if (frame.controlProtocol !== undefined) {
+    if (frame.controlProtocol !== 1) {
+      throw invalid('hello.controlProtocol must be 1');
+    }
+    if (normalized.role === 'client') {
+      throw invalid('hello.controlProtocol is allowed only for the host role');
+    }
+    normalized.controlProtocol = 1;
+  }
+  return normalized;
 }
 
 function readReady(frame) {
-  rejectUnknownFields(frame, new Set(['type', 'protocolVersion', 'deviceId']), 'ready frame');
+  rejectUnknownFields(frame, new Set(['type', 'protocolVersion', 'deviceId', 'role']), 'ready frame');
   if (frame.protocolVersion !== 1) throw invalid('ready.protocolVersion must be 1');
   assertId(frame.deviceId, 'deviceId');
-  return { type: 'ready', protocolVersion: 1, deviceId: frame.deviceId };
+  let role = 'host';
+  if (frame.role !== undefined) {
+    if (frame.role !== 'host' && frame.role !== 'client') {
+      throw invalid('ready.role must be host or client');
+    }
+    role = frame.role;
+  }
+  return { type: 'ready', protocolVersion: 1, deviceId: frame.deviceId, role };
 }
 
 // Cross-checks needing the authenticated device (source === authenticated,
@@ -255,8 +281,9 @@ function readUnavailable(frame) {
 }
 
 /**
- * Parse a frame sent by a relay client (hello/deliver/ack/reject).
+ * Parse a frame sent by a relay client (hello/deliver/ack/reject/control-*).
  * Throws messageError with code INVALID_ARGUMENT on any protocol violation.
+ * Role legality of control frames is enforced by the relay server, not here.
  */
 export function readClientFrame(data, isBinary = false) {
   if (isBinary) throw invalid('relay frames must be text frames');
@@ -270,13 +297,19 @@ export function readClientFrame(data, isBinary = false) {
       return readClientAck(frame);
     case 'reject':
       return readClientReject(frame);
+    case 'control-call':
+    case 'control-cancel':
+      return readControlClientFrame(frame);
+    case 'control-result':
+      return readControlHostFrame(frame);
     default:
       throw invalid('unknown relay frame type');
   }
 }
 
 /**
- * Parse a frame sent by a relay server (ready/deliver/ack/reject/unavailable).
+ * Parse a frame sent by a relay server
+ * (ready/deliver/ack/reject/unavailable/control-*).
  * "Ready first" ordering is enforced by the link lifecycle, not here.
  */
 export function readServerFrame(data, isBinary = false) {
@@ -293,6 +326,10 @@ export function readServerFrame(data, isBinary = false) {
       return readServerReject(frame);
     case 'unavailable':
       return readUnavailable(frame);
+    case 'control-request':
+    case 'control-cancel':
+    case 'control-result':
+      return readControlServerFrame(frame);
     default:
       throw invalid('unknown relay frame type');
   }

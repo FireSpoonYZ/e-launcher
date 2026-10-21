@@ -5,3 +5,4 @@ export { openMessageLog } from './messages.js';
 export { openRelayRegistry } from './relay-registry.js';
 export { openRelayServer } from './relay-server.js';
 export { openDeviceLink } from './device-link.js';
+export { openRemoteControl, RemoteControlError } from './remote-control-client.js';
