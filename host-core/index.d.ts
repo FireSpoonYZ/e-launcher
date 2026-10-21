@@ -120,6 +120,37 @@ export interface WorkContextStatus extends Omit<ContextStatus, 'conversationId'>
   conversationId: string | null;
 }
 
+/** Module 11: passive activity DTO for one local Bot/scope; no native task IDs. */
+export interface WorkActivity {
+  botId: string;
+  scopeId: string;
+  /** Public work-context UUID; null when authorized but not yet bound. */
+  conversationId: string | null;
+  isMember: boolean;
+  /** Priority: unbound, stopped, error, inactive (nonmember), thinking, idle. */
+  status: 'unbound' | 'idle' | 'thinking' | 'stopped' | 'inactive' | 'error';
+  /** Owner stop persists across restart; only explicit resumeWork clears it. */
+  stopped: boolean;
+  lastImportedLocalId: number;
+  /** Policy-consumed source watermark, including ignored echoes/notices/replies; not an ACK. */
+  handledLocalId: number;
+  pending: {
+    requestId: string;
+    submissionId: number | null;
+    startedAt: string;
+    /** Source watermark in the actual frozen model request, not the latest imported watermark. */
+    preparedThroughLocalId: number | null;
+  } | null;
+  /** Model-decision outcome, not delivery confirmation or proof of no earlier side effects. */
+  lastDecision: {
+    requestId: string;
+    outcome: 'silent' | 'published' | 'replan' | 'aborted' | 'failed';
+    throughLocalId: number | null;
+    completedAt: string;
+  } | null;
+  error: { code: string; message: string } | null;
+}
+
 export interface OpenRuntimeOptions {
   dataRoot: string;
   models?: Models;
@@ -135,17 +166,26 @@ export interface Runtime {
   wait(botId: string, requestId: string): Promise<PrimarySubmission>;
   getSubmission(botId: string, requestId: string): Promise<PrimarySubmission | null>;
   history(botId: string, options?: HistoryOptions): Promise<HistoryPage>;
+  /** Abort only the primary conversation; does not stop room/DM work contexts. */
   abort(botId: string): Promise<void>;
   contextStatus(botId: string): Promise<ContextStatus>;
   getWorkContext(botId: string, scopeId: string): Promise<WorkContextRecord | null>;
   syncWorkContext(botId: string, scopeId: string, options?: WorkSyncOptions): Promise<WorkSyncResult>;
   workHistory(botId: string, scopeId: string, options?: { limit?: number; cursor?: WorkHistoryCursor | null }): Promise<WorkHistoryPage>;
   workContextStatus(botId: string, scopeId: string): Promise<WorkContextStatus>;
+  /** Passive, authorized query; creates neither a binding nor model work. */
+  getWorkActivity(botId: string, scopeId: string): Promise<WorkActivity>;
+  /** Persist stop, abort only this work conversation and await quiescence; committed effects remain. */
+  stopWork(botId: string, scopeId: string): Promise<WorkActivity>;
+  /** Current member only; clear stop/error without consuming input. Does not activate a passive Runtime's scheduler. */
+  resumeWork(botId: string, scopeId: string): Promise<WorkActivity>;
   watch(botId: string, options?: { signal?: AbortSignal }): Promise<BotWatch>;
+  /** Idempotently resume native tasks AND activate automatic room/DM processing; may submit new work. */
   resume(): void;
   close(): Promise<void>;
 }
 
+/** Opens passively; automatic room/DM processing starts only through Runtime.resume(). */
 export function openRuntime(options: OpenRuntimeOptions): Promise<Runtime>;
 
 /**
@@ -302,6 +342,14 @@ export interface PublishMessageInput {
   replyTo?: string | null;
 }
 
+/** Optional local publication fence; not part of the message envelope or fingerprint. */
+export interface MessagePublishGuard {
+  /** Origin work scope whose input was observed; may differ from the publication target. */
+  scopeId: string;
+  /** Non-negative safe integer source localId watermark, not a token count or native EntryId. */
+  afterLocalId: number;
+}
+
 export interface MessageEnvelope {
   protocolVersion: 1;
   messageId: string;
@@ -385,10 +433,24 @@ export interface MessageHistoryPage {
   streams: MessageStreamStatus[];
 }
 
+export interface MessageInboxItem extends StoredMessage {
+  selfEcho: boolean;
+}
+
 export interface MessageInboxPage {
   deviceId: string;
   botId: string;
-  items: (StoredMessage & { selfEcho: boolean })[];
+  items: MessageInboxItem[];
+  nextCursor: MessageCursor | null;
+}
+
+/** Direct counterpart replies to this local Bot's DM request; full immutable messages, not previews. */
+export interface MessageRepliesPage {
+  botId: string;
+  requestMessageId: string;
+  scopeId: string;
+  items: MessageInboxItem[];
+  /** kind:'inbox', key bound to this Bot/request and device; not a normal inbox cursor. */
   nextCursor: MessageCursor | null;
 }
 
@@ -413,7 +475,12 @@ export interface MessageLog {
   installScope(input: MessageScope): MessageScope;
   getScope(scopeId: string, revision?: number): MessageScope | null;
   listScopes(): MessageScope[];
-  publish(input: PublishMessageInput): StoredMessage;
+  /**
+   * Bot-only guard: atomically check origin membership; newer targeted non-self events cause STALE_INPUT.
+   * Same-ID/fingerprint retries return the stored receipt before DB guard checks.
+   * Omit guard for legacy behavior; null is invalid.
+   */
+  publish(input: PublishMessageInput, guard?: MessagePublishGuard): StoredMessage;
   getMessage(messageId: string): StoredMessage | null;
   receive(
     peer: MessagePeer,
@@ -422,6 +489,8 @@ export interface MessageLog {
   acknowledge(peer: MessagePeer, ack: MessageAck): MessageDeliveryStatus;
   history(scopeId: string, options?: MessagePageOptions): MessageHistoryPage;
   inbox(botId: string, options?: MessageInboxOptions): MessageInboxPage;
+  /** Passive, authorized direct replyTo query; default limit 50, maximum 200. */
+  replies(botId: string, requestMessageId: string, options?: MessagePageOptions): MessageRepliesPage;
   outbox(options?: MessageOutboxOptions): MessageOutboxPage;
   deliveryStatus(messageId: string): MessageDeliveryStatus;
   streamStatus(scopeId: string, revision: number, sourceDeviceId: string): MessageStreamStatus | null;
@@ -528,8 +597,8 @@ export function openDeviceLink(options: OpenDeviceLinkOptions): Promise<DeviceLi
  * Module 9 types: authenticated remote Host JSON control over the module 8
  * relay. The Node client opens an explicit 'client' role connection; the
  * target Host remains the sole authority for Bot cwd/create, inference,
- * tools and history. Module 10 work-context operations remain local-only;
- * they do not extend these fixed 10 remote methods.
+ * tools and history. Module 10/11 work-context and activity/stop/resume
+ * operations remain local-only; they do not extend these fixed 10 remote methods.
  */
 
 export type RemoteControlOutcome = 'not-sent' | 'unconfirmed' | 'responded';

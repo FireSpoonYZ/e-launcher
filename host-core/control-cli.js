@@ -3,7 +3,7 @@ import { pathToFileURL } from 'node:url';
 import { once } from 'node:events';
 import { createControlClient } from './control-client.js';
 
-const USAGE = `usage: node host-core/control-cli.js <host|create|list|get|find-request|send|status|history|abort|context|live|work-get|work-sync|work-history|work-context> [options]
+const USAGE = `usage: node host-core/control-cli.js <host|create|list|get|find-request|send|status|history|abort|context|live|work-get|work-sync|work-history|work-context|work-activity|work-stop|work-resume> [options]
 
 commands:
   host             print host info
@@ -21,6 +21,9 @@ commands:
   work-sync        import one inbox page without inference; requires --bot-id --scope-id [--limit]
   work-history     list work context history; requires --bot-id --scope-id [--limit] [--cursor]
   work-context     print work context status; requires --bot-id --scope-id
+  work-activity    print work activity; requires --bot-id --scope-id
+  work-stop        persistently stop work in one scope; requires --bot-id --scope-id
+  work-resume      resume stopped or failed work in one scope; requires --bot-id --scope-id
 
 options:
   --url <url>         host control server URL (required, except --help)
@@ -68,6 +71,9 @@ const REQUIRED = {
   'work-sync': ['bot-id', 'scope-id'],
   'work-history': ['bot-id', 'scope-id'],
   'work-context': ['bot-id', 'scope-id'],
+  'work-activity': ['bot-id', 'scope-id'],
+  'work-stop': ['bot-id', 'scope-id'],
+  'work-resume': ['bot-id', 'scope-id'],
 };
 
 // host/list 不接受资源参数；work-* 只接受各自的必需项及分页项。
@@ -212,6 +218,15 @@ async function main() {
       break;
     case 'work-context':
       result = await client.workContextStatus(values['bot-id'], values['scope-id']);
+      break;
+    case 'work-activity':
+      result = await client.getWorkActivity(values['bot-id'], values['scope-id']);
+      break;
+    case 'work-stop':
+      result = await client.stopWork(values['bot-id'], values['scope-id']);
+      break;
+    case 'work-resume':
+      result = await client.resumeWork(values['bot-id'], values['scope-id']);
       break;
     case 'live':
       await streamLive(client, values['bot-id']);

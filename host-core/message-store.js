@@ -155,6 +155,21 @@ export function openMessageStore(dataRoot, deviceId) {
     const stmtGetEventBySrcStreamSeq = db.prepare(
       'SELECT * FROM message_events WHERE source_device_id = ? AND stream_id = ? AND source_seq = ?'
     );
+    const stmtHasNewInput = db.prepare(
+      `SELECT 1 FROM message_events e
+         WHERE e.scope_id = ? AND e.local_id > ?
+           AND EXISTS (
+             SELECT 1 FROM message_local_targets t
+             WHERE t.message_id = e.message_id AND t.bot_id = ?
+           )
+           AND NOT (
+             e.source_device_id = ?
+             AND json_extract(e.envelope_json, '$.author.kind') = 'bot'
+             AND json_extract(e.envelope_json, '$.author.botId') = ?
+           )
+         ORDER BY e.local_id ASC
+         LIMIT 1`
+    );
     const stmtInsertEvent = db.prepare(
       'INSERT INTO message_events (message_id, source_device_id, stream_id, source_seq, scope_id, revision, envelope_json, digest, publish_fingerprint, stored_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
     );
@@ -256,9 +271,9 @@ export function openMessageStore(dataRoot, deviceId) {
       return { scopeId: input.scopeId, kind: input.kind, revision: input.revision, members: input.members };
     });
 
-    const publish = (input) => inTransaction(db, () => {
+    const publish = (input, guard = null) => inTransaction(db, () => {
       const fingerprint = digest(input);
-      // 去重先于 latestScope 检查：同请求重试返回原封套（保留老目标/序号）。
+      // 去重先于目标/来源 scope 与新输入检查：同请求重试返回原封套（保留老目标/序号）。
       const existing = stmtGetEventByMsg.get(input.messageId);
       if (existing) {
         if (existing.publish_fingerprint !== null && existing.publish_fingerprint === fingerprint) {
@@ -313,6 +328,21 @@ export function openMessageStore(dataRoot, deviceId) {
         members,
       };
       assertScopeMessage(scopeObj, envelope, deviceId);
+      if (guard !== null) {
+        // guard 绑定模型读取的来源 scope，不一定是本次发送目标。
+        const originScope = stmtGetLatestScope.get(guard.scopeId);
+        if (!originScope) {
+          throw messageError('SCOPE_NOT_FOUND', 'origin scope not installed');
+        }
+        const originMembers = JSON.parse(originScope.members_json);
+        const botId = input.author.botId;
+        if (!originMembers.some((member) => member.deviceId === deviceId && member.botId === botId)) {
+          throw messageError('SCOPE_FORBIDDEN', 'publisher bot must be a current member of the origin scope');
+        }
+        if (stmtHasNewInput.get(guard.scopeId, guard.afterLocalId, botId, deviceId, botId)) {
+          throw messageError('STALE_INPUT', 'new input arrived before publication');
+        }
+      }
       const envelopeDigest = digest(envelope);
       const storedAt = new Date().toISOString();
       stmtInsertEvent.run(

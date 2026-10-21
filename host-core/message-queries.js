@@ -88,6 +88,20 @@ export function createMessageQueries(db, { deviceId }) {
        ORDER BY e.local_id ASC
        LIMIT ?`
   );
+  const stmtReplies = db.prepare(
+    `SELECT e.* FROM message_events e
+       WHERE e.scope_id = ? AND e.local_id > ?
+         AND EXISTS (
+           SELECT 1 FROM message_local_targets t
+           WHERE t.message_id = e.message_id AND t.bot_id = ?
+         )
+         AND json_extract(e.envelope_json, '$.category') = 'reply'
+         AND json_extract(e.envelope_json, '$.replyTo') = ?
+         AND json_extract(e.envelope_json, '$.author.kind') = 'bot'
+         AND json_extract(e.envelope_json, '$.author.botId') <> ?
+       ORDER BY e.local_id ASC
+       LIMIT ?`
+  );
   const stmtOutbox = db.prepare(
     `SELECT e.*, o.target_device_id AS outbox_target_device_id
        FROM message_outbox o
@@ -306,6 +320,39 @@ export function createMessageQueries(db, { deviceId }) {
     return { deviceId, botId, items, nextCursor };
   }
 
+  function replies(botId, requestMessageId, options) {
+    const event = stmtGetEventByMessageId.get(requestMessageId);
+    if (!event) throw messageError('MESSAGE_NOT_FOUND', 'message not found');
+    const request = JSON.parse(event.envelope_json);
+    if (
+      request.sourceDeviceId !== deviceId ||
+      request.author.kind !== 'bot' ||
+      request.author.botId !== botId ||
+      request.category !== 'request' ||
+      getScope(event.scope_id, event.revision)?.kind !== 'dm'
+    ) {
+      throw messageError('SCOPE_FORBIDDEN', 'replies only available for the calling local bot\'s DM request');
+    }
+    const scopeId = event.scope_id;
+    const { limit, cursor } = normalizePageOptions(options);
+    const key = 'reply:' + digest([botId, requestMessageId]);
+    bindCursor(cursor, 'inbox', key, false);
+    // 恢复时 reply 可能先于 request 入库，初始游标不能用请求的 localId。
+    const rows = stmtReplies.all(scopeId, cursor?.afterLocalId ?? 0, botId, requestMessageId, botId, limit + 1);
+    const pageRows = rows.length > limit ? rows.slice(0, limit) : rows;
+    const items = pageRows.map((row) => ({ ...toStoredMessage(row), selfEcho: false }));
+    const nextCursor =
+      rows.length > limit
+        ? {
+            deviceId,
+            kind: 'inbox',
+            key,
+            afterLocalId: pageRows[pageRows.length - 1].local_id,
+          }
+        : null;
+    return { botId, requestMessageId, scopeId, items, nextCursor };
+  }
+
   function outbox(options) {
     const opts = options ?? {};
     if (typeof opts !== 'object' || Array.isArray(opts)) {
@@ -375,6 +422,7 @@ export function createMessageQueries(db, { deviceId }) {
     getMessage,
     history,
     inbox,
+    replies,
     outbox,
     deliveryStatus,
     streamStatus: streamStatusFor,

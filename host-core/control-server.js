@@ -32,6 +32,9 @@ const routes = [
   { method: 'POST', key: '/v1/bots/:botId/work-contexts/:scopeKey/sync', pattern: /^\/v1\/bots\/([^/]+)\/work-contexts\/([^/]+)\/sync\/?$/, params: ['botId', 'scopeKey'], hasBody: true, handler: syncWorkContext },
   { method: 'GET', key: '/v1/bots/:botId/work-contexts/:scopeKey/history', pattern: /^\/v1\/bots\/([^/]+)\/work-contexts\/([^/]+)\/history\/?$/, params: ['botId', 'scopeKey'], hasBody: false, handler: workHistory },
   { method: 'GET', key: '/v1/bots/:botId/work-contexts/:scopeKey/context', pattern: /^\/v1\/bots\/([^/]+)\/work-contexts\/([^/]+)\/context\/?$/, params: ['botId', 'scopeKey'], hasBody: false, handler: workContextStatus },
+  { method: 'GET', key: '/v1/bots/:botId/work-contexts/:scopeKey/activity', pattern: /^\/v1\/bots\/([^/]+)\/work-contexts\/([^/]+)\/activity\/?$/, params: ['botId', 'scopeKey'], hasBody: false, handler: getWorkActivity },
+  { method: 'POST', key: '/v1/bots/:botId/work-contexts/:scopeKey/stop', pattern: /^\/v1\/bots\/([^/]+)\/work-contexts\/([^/]+)\/stop\/?$/, params: ['botId', 'scopeKey'], hasBody: true, handler: stopWork },
+  { method: 'POST', key: '/v1/bots/:botId/work-contexts/:scopeKey/resume', pattern: /^\/v1\/bots\/([^/]+)\/work-contexts\/([^/]+)\/resume\/?$/, params: ['botId', 'scopeKey'], hasBody: true, handler: resumeWork },
 ];
 
 /**
@@ -238,6 +241,20 @@ async function workHistory(host, runtime, params, body, req, res) {
 
 async function workContextStatus(host, runtime, params, body, req, res) {
   writeControlJson(res, 200, await runtime.workContextStatus(params.botId, workScopeId(params.scopeKey)));
+}
+
+async function getWorkActivity(host, runtime, params, body, req, res) {
+  writeControlJson(res, 200, await runtime.getWorkActivity(params.botId, workScopeId(params.scopeKey)));
+}
+
+async function stopWork(host, runtime, params, body, req, res) {
+  if (Object.keys(body).length !== 0) throw invalidArgument('stopWork body must be an empty object');
+  writeControlJson(res, 200, await runtime.stopWork(params.botId, workScopeId(params.scopeKey)));
+}
+
+async function resumeWork(host, runtime, params, body, req, res) {
+  if (Object.keys(body).length !== 0) throw invalidArgument('resumeWork body must be an empty object');
+  writeControlJson(res, 200, await runtime.resumeWork(params.botId, workScopeId(params.scopeKey)));
 }
 
 function workScopeId(scopeKey) {

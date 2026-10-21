@@ -16,6 +16,8 @@ function isPlainObject(value) {
 export function createWorkContextRuntime({ host, harness, manager, context }) {
   let log = null;
   let closing = false;
+  let closed = false;
+  let quiescePromise = null;
   let closePromise = null;
   const inflight = new Set();
 
@@ -27,6 +29,12 @@ export function createWorkContextRuntime({ host, harness, manager, context }) {
     return task;
   }
 
+  function getMessageLog() {
+    if (closed) throw new Error('work context runtime is closed');
+    log ??= openMessageLog({ dataRoot: host.dataRoot });
+    return log;
+  }
+
   async function authorize(botId, scopeId) {
     assertId(botId, 'botId');
     assertId(scopeId, 'scopeId');
@@ -34,7 +42,7 @@ export function createWorkContextRuntime({ host, harness, manager, context }) {
     if (!bot || bot.deviceId !== host.deviceId) {
       throw messageError('BOT_NOT_FOUND', 'bot not found on this host: ' + botId);
     }
-    log ??= openMessageLog({ dataRoot: host.dataRoot });
+    const log = getMessageLog();
     const scope = log.getScope(scopeId);
     if (!scope) throw messageError('SCOPE_NOT_FOUND', 'scope not found: ' + scopeId);
     const binding = await getWorkBinding(harness, botId, scopeId, context);
@@ -46,6 +54,10 @@ export function createWorkContextRuntime({ host, harness, manager, context }) {
       throw messageError('SCOPE_FORBIDDEN', 'bot has no membership or targeted receipts in scope: ' + scopeId);
     }
     return { bot, scope, binding };
+  }
+
+  function resolveWorkContext(botId, scopeId) {
+    return run(() => authorize(botId, scopeId));
   }
 
   function getWorkContext(botId, scopeId) {
@@ -138,16 +150,24 @@ export function createWorkContextRuntime({ host, harness, manager, context }) {
     });
   }
 
+  function quiesce() {
+    if (!quiescePromise) {
+      closing = true;
+      quiescePromise = Promise.allSettled([...inflight]).then(() => {});
+    }
+    return quiescePromise;
+  }
+
   function close() {
     if (!closePromise) {
-      closing = true;
       closePromise = (async () => {
-        await Promise.allSettled([...inflight]);
+        await quiesce();
+        closed = true;
         log?.close();
       })();
     }
     return closePromise;
   }
 
-  return { getWorkContext, syncWorkContext, workHistory, workContextStatus, close };
+  return { getWorkContext, syncWorkContext, workHistory, workContextStatus, getMessageLog, resolveWorkContext, quiesce, close };
 }

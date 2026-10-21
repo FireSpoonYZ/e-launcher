@@ -12,6 +12,7 @@ import type {
   WorkHistoryCursor,
   WorkHistoryPage,
   WorkContextStatus,
+  WorkActivity,
   ControlHostInfo,
   BotLiveFrame
 } from './index.js';
@@ -32,7 +33,7 @@ export interface ControlClientOptions {
 }
 
 export interface ControlClientCallOptions {
-  /** Cancels only HTTP; does not abort inference or roll back accepted imports. */
+  /** Cancels only HTTP; does not abort inference or roll back accepted imports/stop/resume operations. */
   signal?: AbortSignal;
 }
 
@@ -64,6 +65,12 @@ export interface ControlClient {
   syncWorkContext(botId: string, scopeId: string, input?: WorkSyncOptions, options?: ControlClientCallOptions): Promise<WorkSyncResult>;
   workHistory(botId: string, scopeId: string, options?: WorkHistoryClientOptions): Promise<WorkHistoryPage>;
   workContextStatus(botId: string, scopeId: string, options?: ControlClientCallOptions): Promise<WorkContextStatus>;
+  /** Local-only passive query; an authorized unbound scope returns status:'unbound'. */
+  getWorkActivity(botId: string, scopeId: string, options?: ControlClientCallOptions): Promise<WorkActivity>;
+  /** Local-only persistent stop for this work context; does not affect primary/other scopes. */
+  stopWork(botId: string, scopeId: string, options?: ControlClientCallOptions): Promise<WorkActivity>;
+  /** Local-only explicit resume for a current member; posts {}, not a global Runtime.resume(). */
+  resumeWork(botId: string, scopeId: string, options?: ControlClientCallOptions): Promise<WorkActivity>;
   /** Consume the authenticated live SSE stream for a bot; ends on an end frame, break/return, or signal abort. */
   live(botId: string, options?: LiveClientOptions): AsyncIterable<BotLiveFrame>;
 }

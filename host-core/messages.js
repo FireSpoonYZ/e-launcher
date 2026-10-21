@@ -10,6 +10,7 @@ import {
   assertRevision,
   normalizeScope,
   normalizePublish,
+  normalizePublishGuard,
   normalizeEnvelope,
   normalizePeer,
   normalizeAck,
@@ -52,10 +53,14 @@ export function openMessageLog(options) {
 
   const listScopes = () => store.listScopes();
 
-  const publish = (input) => {
+  const publish = (input, guard) => {
     const pub = normalizePublish(input);
+    const normalizedGuard = normalizePublishGuard(guard);
+    if (normalizedGuard !== null && pub.author.kind !== 'bot') {
+      throw messageError('INVALID_ARGUMENT', 'guarded publish requires a bot author');
+    }
     if (pub.author.kind === 'bot') assertLocalBot(pub.author.botId);
-    return store.publish(pub);
+    return store.publish(pub, normalizedGuard);
   };
 
   const getMessage = (messageId) => {
@@ -87,6 +92,13 @@ export function openMessageLog(options) {
     assertId(botId, 'botId');
     assertLocalBot(botId);
     return store.inbox(botId, pageOptions);
+  };
+
+  const replies = (botId, requestMessageId, options) => {
+    assertId(botId, 'botId');
+    assertId(requestMessageId, 'requestMessageId');
+    assertLocalBot(botId);
+    return store.replies(botId, requestMessageId, options);
   };
 
   const outbox = (options) => store.outbox(options);
@@ -126,6 +138,7 @@ export function openMessageLog(options) {
     acknowledge,
     history,
     inbox,
+    replies,
     outbox,
     deliveryStatus,
     streamStatus,

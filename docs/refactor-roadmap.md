@@ -1,12 +1,12 @@
 # 多端 Bot 重构路线图
 
-当前交付计划共 **20 个模块**：**1–10 已完成，共 10 个；11–20 待交付，共 10 个**。这是模块计数，**不代表已完成 50% 工时**。此前按依赖滚动细分，完整总数未预先锁定；本表是依据已确认剩余范围整理的交付计划，不是最初就约定 20 个模块。
+当前交付计划共 **20 个模块**：**1–11 已完成，共 11 个；12–20 待交付，共 9 个**。模块 11 已通过父助手限定范围的端到端验收，完成数为 **11/20**。这是模块计数，**不代表已完成 55% 工时**。此前按依赖滚动细分，完整总数未预先锁定；本表是依据已确认剩余范围整理的交付计划，不是最初就约定 20 个模块。
 
 架构约束见 [下一代多端 Bot 架构设计](next-generation-architecture.md)，已交付能力与验收细节见 [Host 核心说明](../host-core/README.md)。保持 **B 架构、单人多设备、中心轻量**：Bot 在指定设备和 cwd 长期工作，中心只做设备注册、认证与业务中继，不保存聊天/模型凭证或运行模型决策。Android 是完整本机 Host，不是远程壳；原签名、旧数据、Widget、Shower 和既有定时能力必须兼容，不新增后台任务产品。
 
 ## 完成与剩余
 
-“完成”只指对应模块在已注明范围内交付并通过验收，不代表跨平台或完整产品已完成。模块 1–9 保留既有完成数字、结论与限制；模块 10 已通过父助手验收，具体范围见下文。
+“完成”只指对应模块在已注明范围内交付并通过验收，不代表跨平台或完整产品已完成。模块 1–10 保留既有完成数字、结论与限制；模块 11 的完成依据是父助手实际运行的 161/161 个检查点及公开声明检查，不是仅凭静态代码或文档，具体范围见下文。
 
 | 模块 | 目标 | 状态 | 简要验收完成条件（完成项为已达成范围） |
 | --- | --- | --- | --- |
@@ -20,7 +20,7 @@
 | 8 | 认证设备中继与可靠消息投递 | 已完成 · `64628a2` | 本机独立进程经认证中继投递；离线补投、撤销/轮换及恢复，中心仅存设备注册。 |
 | 9 | 认证远端 Host JSON 控制 | 已完成 · `0622b7d` | 固定 10 个 JSON 方法及调用/取消/错误边界；父助手 171/171 检查点及类型检查通过，范围见下文。 |
 | 10 | 群与 Bot DM 的独立工作上下文 | 已完成 | 独立 Durable/BC、分页前目标过滤、显式原子导入与水位去重、本机 API/CLI；149/149 检查点及类型检查通过，不自动调用模型，范围见下文。 |
-| 11 | 自然群聊决策与 Bot 通信工具 | 待交付 | 本机自主发言或沉默、忙时合并、发布前复核；真实 Bot 身份注入；DM 通知/请求/关联回复，不强制 @、不中央选人、不硬限思考次数。 |
+| 11 | 自然群聊决策与 Bot 通信工具 | 已完成 | 主动 resume、独立 scope 决策/持久停止、发布复核与原生 hook 取消、真实 Bot 作者、DM 等待/恢复和有界预览；父助手 161/161 检查点及类型检查通过，含 18 份数据库完整性/外键检查，范围见下文。 |
 | 12 | 成员范围管理与历史补齐 | 待交付 | 跨 Host 作用域/成员修订、用户消息入口、缺口补史及副本可见性；中心不保存群日志。 |
 | 13 | 可追溯长期记忆 | 待交付 | 自动提取稳定偏好与事实，保留来源、适用范围与纠正；按范围控制共享。 |
 | 14 | 统一 Host 服务与设备接入 | 待交付 | 常驻服务整合、设备登记/凭证配置、Host 本机模型设置、远端实时预览及客户端待发送/对账接线。 |
@@ -35,7 +35,7 @@
 
 父助手的 `module9-verification.json` 记录 **171/171 检查点通过、失败 0**，并完成公开类型声明检查及资源清理。环境为 Windows x64 / Git Bash、Node 26.8.2 / 22.19.0，本机独立进程与真实 CA 校验 WSS；IPv6 仅认证及离线回执。模型为 Mockoon OpenAI-compatible SSE，实际执行 Durable/BC 和目标 write/bash/grep，不是调用真实外部付费模型。可信中继与 TLS 不等于 E2E 消息加密/签名。验收数据、脚本与报告均留在仓库外。
 
-尚未实测跨物理设备/外网、Linux/Android/arm64、Tauri/TUI、真实外部付费模型，全局 128 pending/256 连接负载及中继慢接收者反压；直接 JS AbortSignal、客户端 25s 超时兜底及恶意服务端同 chunk 帧分支仅作源码核对。完整验证方法与边界见 [Host 核心说明](../host-core/README.md)。这些限制不因模块 9 或模块 10 标记完成而消失。
+尚未实测跨物理设备/外网、Linux/Android/arm64、Tauri/TUI、真实外部付费模型，全局 128 pending/256 连接负载及中继慢接收者反压；直接 JS AbortSignal、客户端 25s 超时兜底及恶意服务端同 chunk 帧分支仅作源码核对。完整验证方法与边界见 [Host 核心说明](../host-core/README.md)。这些限制不因模块 9、10 或 11 标记完成而消失。
 
 ## 模块 10 完成范围与验收限制
 
@@ -53,4 +53,44 @@
 
 未实测：跨物理设备/WAN、Linux/Android/arm64、Tauri/TUI、浏览器 native-fetch 适配集成、真实外部付费模型；直接 JS AbortSignal 与直接 `Runtime.close` 并发调用/关闭竞态（本轮已测 HTTP 断连和进程优雅关闭）。全局 128 pending/256 连接负载、中继慢接收者压力及模块 9 原有限制继续保留。
 
-模块 11 自然群聊决策/发言/通信工具、模块 12 成员同步/补史、模块 13 长期事实记忆仍待交付；远程 work 版本化接线留给模块 14。本轮未新增 Session/UI 产品。
+模块 11 自然群聊决策/发言/通信工具已另行通过父助手验收，不能用模块 10 的结果替代，见下节。模块 12 成员同步/补史、模块 13 长期事实记忆未交付；远程 work 版本化接线留给模块 14，不新增 Session/UI 产品。
+
+## 模块 11 完成范围与验收限制
+
+父助手完成 **161/161 个检查点，失败 0**，总完成数为 **11/20**。环境为 **Windows / Git Bash、Node 26.8.2 / 22.19.0**，使用 pi-durable **1.3.0**、acp-kernel **0.0.101**；本机独立进程通过真实 localhost WSS 通信，实际模型 HTTP/SSE 进程使用脚本化 **Mockoon** 响应。这是协议与执行/恢复机制的验收，不是跨物理设备或真实智能模型群聊质量验证。
+
+- **主动与被动**：`openRuntime`、M10 get/sync/history/context 和 `getWorkActivity` 不启动自动决策；`Runtime.resume()` 才激活驱动并恢复原生任务。常驻 ControlServer 监听成功后调用 resume，因此会处理合格收件、可能产生模型费用。只使用已安装 scope，不做成员发现/协商。
+- **自主决策**：本机每 Bot/scope 独立导入、忙时合并，追平后才起新决策；他人 room public 与 DM request 可触发，自身回声/DM notice/reply 不生成新请求，ACK/工具进度不进聊天。同一决策可多轮工具、多次发布，无中央选人、强制 @ 或思考次数上限。最终 assistant 文本私有，只有通信工具发布；没有 silent 工具或 `SILENT` 字串解析。
+- **发布与恢复**：以实际冻结模型请求的来源 localId 水位复核，不拿最新导入水位/tokenCount/native EntryId 代替。`publish(input,guard?)` 的 guard 为来源 `{scopeId,afterLocalId}`，可不同于发送目标；消息事务中核对成员及更晚的冻结目标非自身事件，陈旧输入报 `STALE_INPUT`、无消息/outbox 写入并 replan。合法同 ID/指纹重放先返回已存消息，guard 不进信封/指纹，不改消息 schema。
+- **原生 hook 取消修正**：pi-durable 1.3.0 HookRunner 会吞掉普通 beforeRequest 异常。组合 hook 的策略/BC prepare/预算步骤失败且本次 context 尚未取消时，使用同一 invocation context 执行 `harness.abortTask(api.taskId, context)` 后再抛错，只取消当前生成 task，不取消 conversation/队列；已因正常 close 取消时不追加持久 abort。父助手实跑旧稿 replan、零 provider 预算拒绝、工作 schema fatal、主私聊 BC prepare 失败零原文回退及安全等待的关闭/恢复路径。
+- **范围明确的停止**：`stopWork(botId,scopeId)` 先持久 stopped，再等待该工作 conversation 中止，不影响主私聊/其他 scope 或撤销已提交消息。`abort(botId)` 仍仅主私聊。重启、全局 resume、新人类输入、重入不解除 owner 停止；仅显式 `resumeWork` 清 stopped/error，且它不单独激活被动 Runtime。退群保留旧目标和未处理输入、停止新推理但不写 owner stopped。
+- **DM 与身份**：Host 从真实 conversation 注入 Bot 作者，模型不能自报身份/messageId/guard。`send_room`、`send_dm` 只发送到已安装范围，消息 ID 用持久 task memo 去重；`list_scopes`、`read_scope` 不越过当前成员列表/自身冻结收件。`MessageLog.replies`/`read_dm_replies` 只查自己本机 DM request 的对方直接 replyTo，不按 rootId 泛取或读其他 Bot。`wait_dm_reply` 等首回复最多 30 秒，memo 截止在重放时不延长，先查已有回复再判断过期；timeout 不取消对方，之后继续用原 requestMessageId 读/等。
+- **预览不是原文**：通信工具 JSON 最多 50KiB UTF-8，单消息 text 预览最多 4096 Unicode 安全的 UTF-16 单元并标 textTruncated；只按完整条目缩页，游标接在最后实际返回项之后。`list_scopes` 单项转义超限时的前缀分页与 `RESPONSE_TOO_LARGE` 边界见 [Host 核心说明](../host-core/README.md#有界工具预览不等于原文截断)。账本和工作历史原文完整保留；超大模型投影估计达到窗口时 `CONTEXT_LIMIT` 阻塞，不截原文或推进 handled，更小估计仍可能遭 provider 超窗。
+- **状态与故障**：`WorkActivity` 包含公开 conversationId/isMember/stopped、导入/处理水位、pending、lastDecision/error；status 优先级 unbound → stopped → error → inactive → thinking → idle，不暴露 nativeId/taskId/cutoff，不充当投递 ACK。模型错误按 scope 阻塞并等待显式恢复；意外存储/schema 错误保留 fatal、停止驱动并暴露，不静默重置。共享 MessageLog 在 harness 关闭后才关闭，DeviceLink 连接/锁独立。
+
+本机接口增量（与 M10 的 get/sync/history/context 四个操作并存）：
+
+| Runtime / ControlClient | 本机 HTTP（前缀 `/v1/bots/:botId/work-contexts/:scopeKey`） | control-cli |
+| --- | --- | --- |
+| `getWorkActivity(botId,scopeId)` | GET `…/activity` | `work-activity --bot-id --scope-id` |
+| `stopWork(botId,scopeId)` | POST `…/stop`，解析后为空对象 | `work-stop --bot-id --scope-id` |
+| `resumeWork(botId,scopeId)` | POST `…/resume`，解析后为空对象 | `work-resume --bot-id --scope-id` |
+
+两个 POST 的零字节 HTTP body 沿用 `readControlBody` 约定等同 `{}`，客户端仍发送 JSON `{}`。三者返回 WorkActivity；客户端额外 options 仅 `{signal?}`，取消 HTTP 不撤销已受理操作。沿用 Bearer/Origin 校验、scopeKey=`'~'+encodeURIComponent(scopeId)`（一次解码、剥一个 `~`），CLI 仍用 `--url --token-env`，拒绝无关参数。远端依旧仅 **getHostInfo/listBots/createBot/getBot/findByRequest/submit/getSubmission/history/abort/contextStatus 十方法**，不增加远端 work 或群/DM 直播；接线留给模块 14。完整声明、参数与示例见 [Host 核心说明](../host-core/README.md)。
+
+父助手实际运行覆盖无 @ 的独立决策、回声/DM notice/reply 仅导入、最终文本私有、真实作者与防伪、跨来源/目标 guard、旧请求停止后新决策确实发布、来源退群/重入、目标单独拒绝及持久 owner 停止。DM 直接 replyTo 查询排除同 root 下其他请求、自身 reply 与 notice；首回复、超时不重发、迟到回复以及跨 Bot 隐私通过。8 条预览分页各一次，50KiB/Unicode/原文保留及超大单 scope 的前缀与错误边界通过。
+
+- 等待 task **489** 优雅关闭后由 Node 22 恢复原 task 和绝对截止，停机过期不重置 30 秒；发布 task **729** 在消息已提交、原生结果插入遭 SQLite 触发器故障后被 SIGKILL，重开返回同回执，更新输入仍保留且只产生一条发布。
+- 原生重试 task **852** 在请求 cutoff **858**、BC 缓存 cutoff **856** 时完成；task **913** 的第 2 次尝试把来源水位 **66 → 67**，实际模型请求正文随之更新。预算阻断保留原文/未处理输入，工作 fatal 与主私聊 BC 失败的隔离、缺模型/配置更新后须显式恢复均通过。
+- Host A/B 经真实 WSS 完成脚本化模型 request/reply；B Runtime 关闭时链路仍持久收件/ACK，重开对 notice 只导入。M10 被动接口、primary history/live、空 Host 懒开、所有权、本机 HTTP/CLI 边界和远端十方法回归通过，远端 work 扩展仍拒绝。
+
+公开声明通过 **strict NodeNext + `--skipLibCheck`**；既有第三方声明依赖限制保留，不宣称全部上游声明通过检查。**18 份 SQLite 数据库**完整性/外键检查通过，最终无活动原生任务或故障触发器，中心仍仅设备注册表。**7 个最终服务均 exit 0**，全部验收夹具进程已清理、剩余 0。报告：`C:/Users/46040/AppData/Local/Temp/e-launcher-group-decisions-1792558247725/module11-verification.json`；详细行为见 [Host 核心说明](../host-core/README.md)。
+
+明确限制：
+
+- 未验证跨物理设备/WAN、Linux、Android、arm64、Tauri/TUI、外部付费或真实智能模型行为；Windows 本机脚本化协议验收不代表完整产品完成。
+- 未穷尽直接 JavaScript 参数/AbortSignal 并发矩阵和每个 close-beforeRequest 微观交错，只记录已运行的等待关闭/恢复与请求前取消场景。
+- reply 先于 request 的场景用受信收件 CLI 模拟，不作网络认证证据；发布恢复含刻意注入的原生结果存储失败再强杀，不是无故障提交间隙的精准崩溃，也不保证任意外部副作用 exactly-once。
+- 无新增仓库测试；全部夹具与证据留在仓库外。未新增依赖、消息 schema、Android 改动或新的后台任务产品；旧模块的连接负载/中继反压等未实测范围保留。
+
+模块 **12–20 共 9 个**仍待交付：成员协商/补史、长期事实、统一服务与远程/live 接线、Android 本机 Host/旧数据兼容、Tauri/TUI 与跨设备打包真机验收，不因模块 11 完成而提前计数。

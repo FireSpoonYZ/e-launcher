@@ -197,6 +197,17 @@ export function normalizePublish(input) {
   };
 }
 
+export function normalizePublishGuard(value) {
+  if (value === undefined) return null;
+  if (!isPlainObject(value)) throw invalid('publish guard must be an object');
+  rejectUnknownFields(value, new Set(['scopeId', 'afterLocalId']), 'publish guard');
+  assertId(value.scopeId, 'guard.scopeId');
+  if (!Number.isSafeInteger(value.afterLocalId) || value.afterLocalId < 0) {
+    throw invalid('guard.afterLocalId must be a non-negative safe integer');
+  }
+  return { scopeId: value.scopeId, afterLocalId: value.afterLocalId };
+}
+
 export function normalizeEnvelope(envelope) {
   if (!isPlainObject(envelope)) throw invalid('envelope must be an object');
   rejectUnknownFields(

@@ -1,6 +1,6 @@
 # 下一代多端 Bot 架构设计
 
-> 状态：目标架构设计，整体尚未实现。[Bot/Host 核心](../host-core/README.md) 已独立实现模块 1 本机登记、模块 2 Durable 长期主私聊、模块 3 内嵌 Billion Context、模块 4 本机工具及模块 5 本机控制面（长期本地 Host 控制 API：基础 HTTP、回环端口、Bearer 令牌认证、拒绝全部 Origin；配套 Node/浏览器兼容客户端）及模块 6 主私聊实时预览（认证本地 SSE：有界快照+整体替换更新、每订阅 sequence 非持久游标，原始历史分页保留；无群消息/中心/Tauri，无轮询或新调度器）；模块 7 已实现本机持久消息账本（作用域/成员修订、不可变信封、outbox、落地去重 ACK、本地收件/历史/缺口、特权离线 CLI；仅 messages.sqlite 本机存储，无网络认证/隧道/中心/推理）；模块 8 已实现认证设备中继与 Host 消息投递（中心只存设备注册，复用模块 7 outbox，本机进程网络端到端已通；跨设备/真机网络验收与完整中心产品尚未完成）；模块 9 已实现认证远程 Host JSON 控制（固定 10 个 JSON 方法、独立多客户端角色、Node 客户端与一次性 CLI；父助手已完成本机独立进程 171/171 个端到端检查点验收，具体范围见下文）；模块 10 已完成群与 Bot DM 的独立被动工作上下文（显式导入、独立 Durable/BC、本机 API/CLI；父助手完成 149/149 个检查点，范围与限制见下文）。总计划 20 个模块、已完成 10 个。整体通信（框架隧道/中心产品）、跨端与外壳（Tauri/TUI）尚未完成。本文约定产品方向、首版设计默认与工程验证边界，不授权删除现有能力。当前安装、构建及运行行为仍以 [README](../README.md) 为准。
+> 状态：目标架构设计，整体尚未实现。[Bot/Host 核心](../host-core/README.md) 已独立实现模块 1 本机登记、模块 2 Durable 长期主私聊、模块 3 内嵌 Billion Context、模块 4 本机工具及模块 5 本机控制面（长期本地 Host 控制 API：基础 HTTP、回环端口、Bearer 令牌认证、拒绝全部 Origin；配套 Node/浏览器兼容客户端）及模块 6 主私聊实时预览（认证本地 SSE：有界快照+整体替换更新、每订阅 sequence 非持久游标，原始历史分页保留；无群消息/中心/Tauri，无轮询或新调度器）；模块 7 已实现本机持久消息账本（作用域/成员修订、不可变信封、outbox、落地去重 ACK、本地收件/历史/缺口、特权离线 CLI；仅 messages.sqlite 本机存储，无网络认证/隧道/中心/推理）；模块 8 已实现认证设备中继与 Host 消息投递（中心只存设备注册，复用模块 7 outbox，本机进程网络端到端已通；跨设备/真机网络验收与完整中心产品尚未完成）；模块 9 已实现认证远程 Host JSON 控制（固定 10 个 JSON 方法、独立多客户端角色、Node 客户端与一次性 CLI；父助手已完成本机独立进程 171/171 个端到端检查点验收，具体范围见下文）；模块 10 已完成群与 Bot DM 的独立被动工作上下文（显式导入、独立 Durable/BC、本机 API/CLI；父助手完成 149/149 个检查点，范围与限制见下文）。模块 11 已完成自然群聊决策与通信工具（父助手完成 161/161 个端到端检查点及 18 份数据库完整性/外键检查；本机 WSS 与脚本化模型服务，范围与限制见下文）。总计划 20 个模块、已完成 11 个。整体通信（框架隧道/中心产品）、跨端与外壳（Tauri/TUI）尚未完成。本文约定产品方向、首版设计默认与工程验证边界，不授权删除现有能力。当前安装、构建及运行行为仍以 [README](../README.md) 为准。
 
 当前交付计划与完成/剩余模块见 [重构路线图](refactor-roadmap.md)。
 
@@ -106,7 +106,7 @@ Durable 保存代理执行与恢复所需状态；内部 Task 不暴露成独立
 
 每 Host 内嵌上游 acp-kernel 与必要检索/展开工具，不要求用户安装 bili、协议代理或额外常驻进程。一个 conversation 只设一个压缩所有者，避免 Durable 侧另一套压缩同时改写同一上下文。模型真实窗口仍有限，BC 管理累计历史与投影，不承诺十亿 token 实际窗口、固定节省率或必然准确找回。
 
-**需验证的接缝**是请求投影生成、kernel 状态提交、工具结果入库、重试与恢复的顺序。beforeRequest 不是任意写状态接口；没有已确认可直接套用的官方现成适配，研究中的 PrepareRequest task 也不是现有能力。应通过小原型确定安全提交点，再决定具体代码，不在设计中虚构 API。
+**跨平台迁移仍需验证的接缝**是请求投影生成、kernel 状态提交、工具结果入库、重试与恢复的顺序。模块 11 已在下述限定环境实跑原生重试、请求前取消和故障恢复，不代表全部并发交错均已覆盖。beforeRequest 不是任意写状态接口，普通抛错也不等于阻止 provider；研究中的 PrepareRequest task 不能当作现有能力，不在设计中虚构 API。
 
 Pi Durable 当前为实验性 API；实现时固定 Durable、pi-ai、chord 与 acp-kernel 的依赖版本，状态格式升级应有显式迁移，不能静默重置压缩引用或丢弃旧状态。
 
@@ -122,14 +122,14 @@ Bot DM 使用通知、请求、相关回复的语义，可查历史并允许沉�
 
 ### 模块 10：独立工作上下文（已完成父助手验收）
 
-本轮只实现**被动导入**，不实现下面的模型群决策流程。已收件是消息账本落盘并可确认 ACK；已导入是事件进入该 Bot/scope 的 Durable 历史；已推理才是模型实际处理，三者不能混同。导入水位与 `importedCount` 不是模型处理回执。
+模块 10 的已验收范围只包含**被动导入**，不包含下述已另行验收的模块 11 模型决策流程。已收件是消息账本落盘并可确认 ACK；已导入是事件进入该 Bot/scope 的 Durable 历史；已推理才是模型实际处理，三者不能混同。导入水位与 `importedCount` 不是模型处理回执。
 
 - **稳定隔离**：按本机 `(botId, scopeId)` 绑定公开 conversation UUID，不把 revision 放进绑定键；新建 ownerless conversation 和独立空 BC 文档，不 fork/复制主私聊或其他范围。群成员修订沿用上下文，DM 固定双方；同消息面向多个 Bot 时各有自己的 UUID、BC 和水位。
 - **先过滤、后分页**：`MessageLog.inbox(botId, {scopeId?, limit?, cursor?})` 的 scoped 查询沿用 SQL `(scope_id, local_id)` 范围索引，并在分页前以冻结 Bot 目标的 `EXISTS` 过滤，未新增 schema/索引迁移；跨所有修订，不用当前成员名单改写旧目标可见性。省略 scope 保持旧 inbox；scoped 游标绑定 Bot+scope，与旧全量游标不可混用。`selfEcho` 和动态 `missingRefs` 保留在查询结果中。
 - **权限与退群**：要求本机 Bot、已知 scope，且是当前成员、已有该绑定或有历史目标收件。退群后可保留上下文并导入迟到的旧目标消息，不能获取未面向自己的新事件；无权限时拒绝，不以 scope-wide history 或其他 Bot 收件补足。
 - **原子水位**：每次显式 sync 只处理一页（默认 50、最大 200）。同一 Durable commit 内重查/创建绑定、读取当前水位和 scoped 源页、追加 Entries、更新水位/计数，失败一起回滚；重复、并发和重启按已提交本机 localId 继续，迟到旧修订事件不因源序号较小而被跳过。源账本只读，不改 ACK/信封。
 - **真实作者与模型载体分离**：`host.scope-message` 的 data 保留 `{version:1, scopeKind, localId, digest, storedAt, selfEcho, message}`，message 是完整不可变信封，`author.kind`、rootId、replyTo、category、revision、targets 不重写；动态 missingRefs 不固化。Entry.model 的单条 `role:'user'` 只是固定外部事件前缀+JSON 的载体，不把 Bot 作者变成人类；真实作者仍在 `data.message.author`（人类 user、Bot bot），不伪装 system/assistant 或赋予正文宿主/工具指令权限；导入不执行正文，也不一概要求忽略真实人类请求。各类别与 selfEcho 都可被导入为数据，ACK/工具进度不进 inbox，推理资格留给模块 11。
-- **只初始化，不生成**：继承 Bot 角色/cwd 和 Host 工具/执行环境配置，但不选择模型；复用同一 Runtime/harness/BC manager。导入使用公共 `Tx.appendEntry`，不 submit/wait/resume/startRun、不创建模型任务或轮询，即使 Host 调度器已恢复也不由导入触发生成。独立空 BC 状态不代表已压缩：本轮不调用 prepare，不产生摘要投影；原始 Entry 与消息账本保留，未来 BC 只压缩投影。
+- **只初始化，不生成**：继承 Bot 角色/cwd 和 Host 工具/执行环境配置，但不选择模型；复用同一 Runtime/harness/BC manager。导入使用公共 `Tx.appendEntry`，方法本身不 submit/wait/resume/startRun、不创建模型任务或轮询。模块 11 激活后独立驱动可处理同一批合格收件，不把驱动生成误称为 sync 直接调用模型。独立空 BC 状态不代表已压缩：导入不调用 prepare，不产生摘要投影；原始 Entry 与消息账本保留，推理时 BC 只压缩投影。
 
 本机 Runtime 提供 `getWorkContext`、`syncWorkContext`、`workHistory`、`workContextStatus` 四个操作。三个只读操作不创建绑定；未绑定时分别返回 null、空历史页（conversationId=null）或空 BC 状态；显式 sync 可以给空的已授权 scope 创建绑定。`WorkContextRecord` 仅含 deviceId、botId、scopeId、kind、公开 conversationId、createdAt、lastImportedLocalId、importedCount 八项，不暴露 SDK 数字 ID。工作历史游标精确为 `{conversationId:公开UUID, position:非null的SDK游标对象}`，拒绝其他范围/主私聊/裸游标或额外包装字段，未绑定时不接受非空游标；旧主私聊格式不变。共享 history helper 仅把已识别的 SDK 原生游标错误转为 `INVALID_ARGUMENT`/400，真实 SQL 读错仍保留 `ERR_SQLITE_ERROR`/500，不因携带 cursor 就改报参数错误。
 
@@ -143,41 +143,77 @@ Bot DM 使用通知、请求、相关回复的语义，可查历史并允许沉�
 
 未实测跨物理设备/WAN、Linux/Android/arm64、Tauri/TUI、浏览器 native-fetch 适配集成及真实外部付费模型；直接 JS AbortSignal、直接 `Runtime.close` 并发调用/关闭竞态也未实跑；本轮已测 HTTP 断连和进程优雅关闭。全局 128 pending/256 连接负载、中继慢接收者压力及模块 9 既有限制保留。
 
-模块 11 的自然群聊决策/发言/通信工具、模块 12 的成员同步/历史补齐、模块 13 的长期事实记忆仍未实现。模块 9 中继远程协议保持固定 10 个方法，远程 work 版本化接线属于模块 14；不增加 Session 产品或 UI。
+以上是模块 10 的历史验收记录，不作为模块 11 自然群聊决策/发言/通信工具的验收证据；模块 11 的独立验收见下节。模块 12 成员同步/历史补齐和模块 13 长期事实记忆仍未交付。模块 9 中继远程协议保持固定 10 个方法，远程 work 版本化接线属于模块 14；不增加 Session 产品或 UI。
 
-### 首版决策流程（模块 11，尚未实现）
+### 模块 11：自然群聊决策与通信工具（已完成父助手验收）
+
+模块 11 已完成父助手在下述限定环境中的 **161/161** 个检查点，总完成数为 **11/20**；这不是跨平台或真实智能模型群聊质量的验收。执行继续由各 Bot 的所属 Host 承担，每个本机 `(botId, scopeId)` 独立决策，没有中心模型、强制 @、唯一发言人或思考/回复次数上限。
 
 ```text
-收到公开消息 -> 去重落盘 -> ACK -> 加入本 Bot/群待处理输入
-                                      |
-       自身回声/ACK/系统状态/工具进度 --+--> 不触发新决策
-                                      |
-                   人类或其他 Bot 公开消息
-                                      v
-           空闲启动决策；忙时合并排队（每 Bot/群一个当前 run）
-                                      v
-                    BC 投影 + 本次未处理消息
-                                      v
-          可用工具查证 -> 明确发送动作 / silent 结束
-                                      |
-             发布前检查已到新消息 -> 先合并复核，不发旧稿
+消息去重落盘 -> ACK（只确认落盘）-> 自身冻结目标 inbox
+                                          |
+                 显式 Runtime.resume 激活本机自动处理
+                                          v
+           分页导入、忙时合并（每 Bot/scope 至多一个 pending）
+                                          |
+       自身回声、DM notice/reply ----------+--> 仅作上下文
+       ACK/工具进度不进入消息账本           |
+       他人 room public 或 DM request ----+--> 追平后开始决策
+                                          v
+                   实际冻结来源视图 + 独立 BC 投影
+                                          v
+          多轮工具查证 -> 显式通信工具发布 / 不发布而正常结束
+                                          |
+                 发布前原子复核来源新收件 -> 旧稿失效后 replan
 ```
 
-公开消息可靠送达全部成员 Host、落盘并成为各自下一轮输入，不等于每条消息立即请求模型。Bot 独立判断是否发言，@ 和回复是自然提示，不是准入门槛；不增加中央选人模型、全群锁或强一致轮询。同机不同 Bot 也各自保有收件与处理水位。
+**主动与被动分开。** `openRuntime`、M10 get/sync/history/context 和 `getWorkActivity` 不激活工作决策；sync 仍只导入一页。只有 `Runtime.resume()` 激活独立驱动（同时恢复原生任务），立即及每约 1000ms 不重叠扫描，不等待模型自然完成；原主私聊 submit/wait 的原生执行语义保留。常驻 `openControlServer` 在监听成功后调用 resume，所以只读客户端接入的 Host 也可能正在自主推理并产生费用。
 
-消息到达正在思考的 Bot 时，不为每条消息立即取消重跑；先保存、合并。发送前比对本机已收水位，若有新增内容，先纳入判断再决定发布、修改或沉默，防止明知已有回答还发旧稿。只对本机已收到的消息负责，不能保证所有 Host 发布前看见完全相同前缀；持续新消息下的合并等待边界需验收调优。
+只使用已经安装的 room/DM scopes，不发现远端 Bot、不协商成员、不新建 DM 或补远端历史。消息库不存在时扫描不创建它；有库后按当前本机成员和已有绑定处理，不为空范围无端创建绑定。每次导入一页最多 200 条，追平后才起新决策，运行中/停止时仍可导入；原生 pending 先持久化再受理，重启按同 requestId 对账。退群后不开始推理，终止/对账旧 pending，但保留旧冻结收件、历史和未处理水位；退群不是 owner 停止，重新入群后若无停止/错误可继续。
 
-公开发布是明确动作。可拟议 send_public、send_private、silent 等工具名，但它们不是 Durable 内置能力。普通 assistant 文本、推理、工具日志、沉默理由都只留私有执行状态，不自动广播。silent 必须真正终结本轮，不再追加“我保持沉默”。接入 Durable 终止控制时须验证其工具轮规则，终结动作不与继续执行的普通工具混搭；身份与目标由 Host 校验，不信模型自报作者。
+**三个水位不能混同。** `lastImportedLocalId` 是已导入；`handledLocalId` 是策略已消费（也包括忽略的回声/notice/reply）；`pending.preparedThroughLocalId` 才是实际冻结模型请求中贡献来源内容的水位，不是最新导入、tokenCount 或 native EntryId。正常结束最多处理到自己的 prepared 水位，不跳过模型没看到的新输入。Host 触发信号明确为内部处理信号，不冒充人类；外部事件的 `message.author` 才是真实作者。
 
-每条自动接话保留因果链 rootId，各 Bot/群在本机持久记录处理水位和用户停止状态，用于去重与恢复。不以思考次数或自动续聊条数设置硬性上限；Bot 根据已收到的内容自主决定继续查证、发言或沉默。人类新发言开启新讨论链。用户主动停止时终止相关群推理与待自动续聊；停止状态跨重启保留，离线成员尚未确认停止则明确展示，不回滚已执行工具。
+**原子发布复核。** 工具在原生串行提交点核对当前 stop/决策状态，再以 `MessageLog.publish(input,{scopeId,afterLocalId})` 同事务检查来源最新成员资格、新收件并写入 ledger/outbox。guard 的 scopeId 是决策来源，可与目标 DM/room 不同；任何更晚且冻结面向自己的非自身来源事件（包括 notice/reply、其他本机 Bot）使新发布报 `STALE_INPUT`，自身回声/其他 scope/其他 Bot 独有收件不算。失败不写消息/序号/outbox，驱动持久 replan，旧生成不再继续请求 provider，不推进处理水位；下一次重新考虑新批次。只保证本 Host 已收到的内容，不承诺各 Host 看见相同前缀。
 
-沉默可能已花费推理，不能当成零成本。N 个 Bot 面对一条人类消息各判断一次，随后 F 条 Bot 发言都立即唤醒其余成员时，决策数约为 N＋F×(N−1)，尚未计工具、压缩和重试。合并、去重、沉默和明确停止减少无效唤醒；缓存与 BC 改善部分输入成本，触发控制仍由各 Host 负责。
+省略 guard 保留旧发布语义，显式 null/未知字段/坏水位拒绝；guard 只允许 Bot 作者且不进指纹/信封。同 messageId/同指纹重放先返回已存回执，再谈数据库成员/新输入限制；冲突仍拒绝。消息去重不等于外部文件/命令副作用 exactly-once。
+
+**只有工具发布。** 通信工具为 `list_scopes`、`read_scope`、`send_room`、`send_dm`、`read_dm_replies`、`wait_dm_reply`，不是 Durable 自带能力。每次从实际 conversation 解析本机 Bot，Host 注入作者；模型不能自报 author/Bot/messageId/guard。读取只取自己的冻结 inbox；列表只列当前成员 scopes。发送工具返回 stored 回执，不代表远端收到。messageId 存在 Durable task memo，重放不换 ID。最终 assistant 文本、工具日志和沉默理由保持私有，不自动广播；正常结束未发送就是沉默，没有 silent 工具或 `SILENT` 子串解析。同一决策允许多轮工具、多次发送。
+
+**DM 请求与回复。** `send_dm` 明确 notice/request/reply；关联回复使用 reply + 原 request 的 replyTo，不自动成为新 request，也不必回 ACK。底层 `MessageLog.replies(botId,requestMessageId,{limit?,cursor?})` 只允许自己在本机发出的 DM request，取对方直接 replyTo，不能按 rootId 查整个链或读其他 Bot 的请求；乱序恢复不要求回复晚于请求入库。游标为 inbox kind、key=`'reply:'+sha256(JSON.stringify([botId,requestMessageId]))`，绑定设备/Bot/request，不与普通 inbox 混用。
+
+`wait_dm_reply` 每次工具调用最多等 30 秒，等的是**首个对方回复**而非工作完成；返回 `status:'replied'|'timeout'`。截止时间存在 task memo，重放不延长；先查已有回复再判断截止，Host 停机期间到达的回复仍可读。超时不取消对方，不自动新发请求；之后继续用原 requestMessageId 查/等，新调用可有新期限，但不会把已读首回复当作“下一条”消费。群结论必须另外显式公开发送，不自动转发 DM 全文。
+
+**预览与原文。** 通信工具 JSON 输出最多 50KiB UTF-8；消息正文预览最多 4096 Unicode 安全的 UTF-16 单元并带 `textTruncated`。页在整条 item 边界缩短，游标只越过最后实际返回的条目；list_scopes 同样保留 nextOffset（目录变化下仅尽力分页），单 scope 转义超限时的前缀分页与 `RESPONSE_TOO_LARGE` 边界见 [Host 核心说明](../host-core/README.md#有界工具预览不等于原文截断)。消息账本与工作原始历史完整保留，不据预览截断原文。BC 准备后的估计 tokenCount 达到 contextWindow 时以 `CONTEXT_LIMIT` 阻止模型请求，不丢弃大事件或推进 handled；更小估计也不保证 provider 的 system/tool 开销能放下，不自动另启 compaction。
+
+**请求前原生取消修正。** pi-durable 1.3.0 的 HookRunner 会吞掉普通 beforeRequest 抛错。组合 hook 在工作策略 → BC prepare → 预算检查任一步出错、且本次 context 尚未取消时，先用**同一 invocation context** 调用 `harness.abortTask(api.taskId, context)`，再抛出错误；不取消整个 conversation/队列。正常关闭已取消该 context 时不追加持久 abort，不把暂停变成永久中止。旧稿 replan、零 provider 预算拒绝、工作 schema fatal、主私聊 BC prepare 失败无原文回退，以及等待工具关闭/恢复均已由父助手实跑。
+
+**逐 scope 停止。** `stopWork(botId,scopeId)` 先持久 stopped，再 abort 并等待仅该工作 conversation 静止，不撤销消息/outbox、其他工具效果或历史，不影响其他 scope/主私聊。`Runtime.abort(botId)` 仍只指主私聊。重启、全局 resume、新的人类发言和重入都不能清 owner 停止；必须显式 `resumeWork`（要求当前成员，先清旧执行再清 stopped/error）。该方法只在驱动已激活时促其继续，不激活被动 Runtime。Host 退出是暂停，不冒充 stop。
+
+`getWorkActivity` 被动返回 `WorkActivity`：公开 conversationId（未绑定 null）、isMember、stopped、导入/处理水位、pending、lastDecision 和小型 error；不暴露内部 nativeId/taskId/cutoff。status 优先级为 unbound → stopped → error → inactive → thinking → idle。pending 含 requestId、可空 submissionId、startedAt、可空 preparedThroughLocalId；lastDecision 含 requestId、silent/published/replan/aborted/failed outcome、可空 throughLocalId、completedAt。它是模型决策状态，不是投递 ACK 或“失败前无副作用”证明。
+
+模型缺失/不可用和生成失败只阻塞本 scope（`MODEL_REQUIRED`/`MODEL_NOT_FOUND`/`WORK_GENERATION_FAILED`，保留已有 `CONTEXT_LIMIT`），修复后显式 resumeWork，不热重试。意外存储/schema 错误保留 fatal、停止驱动并对 activity/变更暴露，不吞掉或重置；需正确关闭/重开及处理原因。自动处理、被动工作接口和通信工具共用一份懒开 MessageLog，关闭先停驱动并静止已接纳操作，等 harness 关闭后才关 log；DeviceLink 的连接与锁独立。
+
+**仅本机控制扩展。** Runtime/ControlClient 增加 `getWorkActivity`、`stopWork`、`resumeWork`；本机 HTTP 为 GET `/v1/bots/:botId/work-contexts/:scopeKey/activity`、POST `…/stop`、POST `…/resume`（两个 POST 要求解析后为空对象；零字节 body 沿用 `readControlBody` 约定视作 `{}`，客户端仍发送 JSON `{}`），均返回 WorkActivity。沿用 Bearer/Origin 规则及 scopeKey=`'~'+encodeURIComponent(scopeId)`，解码一次且只剥一个 `~`。客户端 options 仅 signal，取消 HTTP 不撤销已受理操作。CLI 为 `work-activity`/`work-stop`/`work-resume --bot-id --scope-id`（另加原 url/token-env 连接选项），拒绝无关参数。M10 四个本机 work 操作保留；远端仍是 getHostInfo/listBots/createBot/getBot/findByRequest/submit/getSubmission/history/abort/contextStatus 十方法，不增加远端 work 或群/DM live。
+
+完整参数、DTO、使用示例及 `module11-verification.json` 证据位置见 [Host 核心模块 11 说明](../host-core/README.md#模块-11自然群聊决策与-bot-通信工具已完成父助手验收)。模块 **12–20** 仍待交付，包括成员协商/历史补齐、长期事实记忆、远程 work/实时接线、跨平台/迁移/外壳与真机集成；不新增后台任务产品。
+
+**模块 11 验收范围。** 父助手在 **Windows / Git Bash、Node 26.8.2 / 22.19.0**，使用 pi-durable **1.3.0**、acp-kernel **0.0.101**，完成 **161/161 个检查点，失败 0**。实际 localhost WSS 连接 Host A/B，模型 HTTP/SSE 进程使用脚本化 Mockoon 响应；这是实际运行协议与恢复机制的验收，不是付费模型或智能决策质量验证。
+
+实跑覆盖无 @ 的独立决策、回声/notice/reply 不生新请求、真实作者及伪造字段拒绝、私有最终文本、旧请求停止且新决策实际发布、跨来源/目标 guard、退出/重入、持久 owner 停止、DM 直接关联/首回复/超时及跨 Bot 隔离。8 条预览分页恰好各一次，50KiB/Unicode 边界与完整原文通过，超大单 scope 在可用前缀之后明确报错。B Runtime 关闭时独立链路仍落盘 notice 并 ACK，重开仅导入；M10 被动方法、主私聊 history/live、空 Host 懒开、所有权、缺模型/配置后显式恢复及远端十方法回归通过，远端 work 扩展仍拒绝。
+
+等待 task **489** 优雅关闭后在 Node 22 按原 task/绝对截止恢复，不因停机过期重置 30 秒。发布 task **729** 在真实发送落盘、原生工具结果插入被 SQLite 触发器阻断后遭 SIGKILL，重开返回同一回执且只保留一条发布，更新输入未丢。原生重试也实测了请求 cutoff 与较旧 BC 缓存 cutoff 不同仍能完成，以及同一 task 下一次尝试刷新来源水位、实际模型请求正文包含新输入。
+
+公开声明通过 **strict NodeNext + `--skipLibCheck`**（既有第三方声明依赖限制保留）；**18 份 SQLite 数据库**完整性/外键检查通过，中心仍仅存设备注册。**7 个最终服务 exit 0**，验收夹具进程全部清理、剩余 0；没有新增仓库测试，所有夹具与证据留在仓库外。
+
+**限制保留。** 未验证物理跨设备/WAN、Linux、Android、arm64、Tauri/TUI 或真实智能/付费模型；未穷尽直接 JS 参数/AbortSignal 并发矩阵及每个 close-beforeRequest 微观交错。reply 先于 request 的场景用受信收件 CLI 模拟，不是网络认证证据；发布恢复是“原生结果存储故障 + 强杀”，不是无故障提交间隙的精准崩溃，也不证明任意外部副作用 exactly-once。旧模块的连接负载/中继反压等未实测项继续保留。
+
+沉默仍可能花费推理。N 个 Bot 对一条人类消息各判断一次，随后 F 条 Bot 发言都立即唤醒其余成员时，决策数约为 N＋F×(N−1)，还未计工具、压缩和重试。合并、去重、沉默和明确停止减少无效唤醒，不能因此承诺零成本；已测并发收件的旧稿防护不代表持续高负载下的成本与延迟已完成调优。
 
 ### 一个具体片段
 
 用户在群里问“手机截图上传方案有什么风险？”Windows Bot 甲和 Android Bot 乙的 Host 都先保存消息。甲查资料后公开指出隐私风险；乙正在查本机权限，收到甲的发言先合并，发布前不再重复同一意见，只补充后台限制。乙也可 silent，群里不出现沉默通知。
 
-甲随后私聊乙询问“这台手机当前是否授权 Shower？”，乙用相关回复回答；双方 DM 保存该问答，甲不自动回 ACK。甲若要告诉群成员，另发一条获准公开的结论。乙断网时请求留在甲的 outbox；重连重复投递只保存一次，回复保持原关联。人类此时说“先停止讨论”，相关推理停止，之前已经取得的截图不被假称撤销。
+甲随后私聊乙询问“这台手机当前是否授权 Shower？”，乙用相关回复回答；双方 DM 保存该问答，甲不自动回 ACK。甲若要告诉群成员，另发一条获准公开的结论。乙断网时请求留在甲的 outbox；重连重复投递只保存一次，回复保持原关联。用户此时通过本机 `stopWork` 停止选定 Bot/scope，Host 确认后该范围停止；其他成员不被假称已经停止，之前取得的截图也不被假称撤销。之后须显式 `resumeWork` 才解除该范围的 owner 停止。
 
 ## 6. 记录归属、可靠投递与历史
 
@@ -266,13 +302,13 @@ Android 仍是真正本机 Host：Durable、BC、原始历史和模型请求在�
 
 ## 9. 工程待验证与端到端验收
 
-产品已定的是 B、本机状态、轻中心、单用户、Durable/BC、Tauri＋TUI、长期私聊及保留 Android 能力。待验证的是 Durable/kernel 提交接缝、原生终止控制与发送去重、Git Bash 环境、移动运行生命周期、跨 Host 补史与发布复核。合并等待边界属于设计默认的调优项，不重开 SDK 或运行位置选择。
+产品已定的是 B、本机状态、轻中心、单用户、Durable/BC、Tauri＋TUI、长期私聊及保留 Android 能力。模块 1–11 已在各节注明的环境验证部分 Durable/kernel 接缝、原生取消、发送去重和工具链；移动运行生命周期、跨物理 Host 补史及跨平台发布/恢复等仍需继续验收。持续负载下的合并等待边界仍是调优项，不重开 SDK 或运行位置选择。
 
-以下仅提出未来端到端验收场景，本文不新增测试、不报告执行结果：
+以下是面向完整跨端产品的后续验收场景，不把上述限定范围结果外推为这些场景已完成：
 
 1. **跨端创建与续用**：手机创建 Linux Bot，Windows TUI 继续主私聊；离线创建只待发，重连丢回执不重复创建。关界面不终止 Agent，工具位置与 cwd 始终正确，中心查不到私有模型凭证。
 2. **BC 与副作用恢复**：多次压缩后重启 Host，展开旧 refs 找回原文和纠正来源；模拟工具结果不明，不重复外部动作，旧 SDK 历史可读但不冒充检查点恢复。
-3. **自然群聊与 DM**：多个 Bot 全员收件、自主补充或沉默；忙时人类纠正先于旧稿处理；DM 不泄露群中，回复不造成确认循环，处理水位与停止状态在重启后恢复，新人类输入可重开，主动停止得到范围明确的回执。
+3. **自然群聊与 DM**：多个 Bot 全员收件、自主补充或沉默；忙时人类纠正先于旧稿处理；DM 不泄露群中，回复不造成确认循环，处理水位与停止状态在重启后恢复，owner 显式 resume 后再处理未消费输入，新人类输入不自行解除停止；主动停止得到范围明确的回执。
 4. **断线与历史副本**：固定 ID 重投、接收去重、缺序补史；全部离线客户端待发，在线副本只能证明已知范围；新成员可选导入不唤醒旧消息，不误报全员同步。
 5. **Android 覆盖迁移**：原签名覆盖更新后聊天、附件、草稿、旧定时记录仍在；FGS/嵌入 JS/SQLite/桥与 Tauri 生命周期实机验证；回收、force-stop、断网显示真实离线并恢复补投，Widget 冷读不唤醒，Shower conversation 归属及非零屏边界不变。
 

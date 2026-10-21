@@ -1,13 +1,13 @@
 # @e-launcher/host-core
 
-本机 Bot/Host 核心。模块 1 提供 Bot 定义与主私聊身份登记；模块 2 接入 Pi Durable 长期主私聊、历史与执行恢复；模块 3 内嵌 Billion Context；模块 4 接入本机工具（read/write/edit/bash 与 grep/find/ls）；模块 5 接入本机长驻控制 API 与客户端；模块 6 接入 Bot 主私聊直播预览（认证本地 SSE、运行时 watch、客户端与 CLI）；模块 7 接入本机持久消息账本（messages.sqlite：作用域/成员修订、不可变信封、outbox、落地去重 ACK、本地收件/历史/缺口、特权离线 CLI）；模块 8 接入认证设备中继与 Host 消息投递（中心只存设备注册；复用模块 7 outbox，本机进程网络端到端）；模块 9 在认证中继上增加固定 10 个 JSON 方法的远程 Host 控制（独立多客户端角色、Node 客户端与一次性 CLI；父助手已完成本机独立进程 171/171 个端到端检查点验收，范围见下文）；模块 10 已完成群与 Bot DM 的独立工作上下文（显式被动导入、独立 Durable/BC、本机 API/CLI；父助手完成 149/149 个检查点，实测范围与限制见下文）。总计划 20 个模块、已完成 10 个。运行时由单 Host 所有者持有，跨进程身份稳定。包正式名为 `@e-launcher/host-core`；当前仓库尚无 workspace/包安装连接，示例直接从仓库根导入本地文件（见下文）。
+本机 Bot/Host 核心。模块 1 提供 Bot 定义与主私聊身份登记；模块 2 接入 Pi Durable 长期主私聊、历史与执行恢复；模块 3 内嵌 Billion Context；模块 4 接入本机工具（read/write/edit/bash 与 grep/find/ls）；模块 5 接入本机长驻控制 API 与客户端；模块 6 接入 Bot 主私聊直播预览（认证本地 SSE、运行时 watch、客户端与 CLI）；模块 7 接入本机持久消息账本（messages.sqlite：作用域/成员修订、不可变信封、outbox、落地去重 ACK、本地收件/历史/缺口、特权离线 CLI）；模块 8 接入认证设备中继与 Host 消息投递（中心只存设备注册；复用模块 7 outbox，本机进程网络端到端）；模块 9 在认证中继上增加固定 10 个 JSON 方法的远程 Host 控制（独立多客户端角色、Node 客户端与一次性 CLI；父助手已完成本机独立进程 171/171 个端到端检查点验收，范围见下文）；模块 10 已完成群与 Bot DM 的独立工作上下文（显式被动导入、独立 Durable/BC、本机 API/CLI；父助手完成 149/149 个检查点，实测范围与限制见下文）。模块 11 已完成自然群聊决策与 Bot 通信工具（父助手完成 161/161 个端到端检查点，含 18 份数据库完整性/外键检查；限定环境与未实测范围见下文）。总计划 20 个模块、已完成 11 个。运行时由单 Host 所有者持有，跨进程身份稳定。包正式名为 `@e-launcher/host-core`；当前仓库尚无 workspace/包安装连接，示例直接从仓库根导入本地文件（见下文）。
 
 整体方向见 [下一代多端 Bot 架构设计](../docs/next-generation-architecture.md)（目标架构，部分已实现），交付计划与完成/剩余模块见 [重构路线图](../docs/refactor-roadmap.md)。
 
 ## 实现与边界
 
 - 需要 Node >= 22.19.0（package.json 中 `engines.node` 声明的最低版本）。存储用 Node 内置 SQLite（`node:sqlite`），数据库文件即 `dataRoot/host.sqlite`；新的 dataRoot 会自动建立（含必要的目录与库文件）。
-- `openHost` 负责登记；`openRuntime` 负责 Pi Durable 主私聊、内嵌 BC 及本机工具。模块 5/6 提供认证本地 HTTP/SSE，模块 7 提供本机持久消息账本，模块 8/9 接入认证中继、投递与远程 JSON 控制。模块 10 在同一 Runtime 内增加隔离的群/DM 被动工作上下文，不新增运行时所有者；自动群决策与通信工具仍属后续模块。
+- `openHost` 负责登记；`openRuntime` 负责 Pi Durable 主私聊、内嵌 BC 及本机工具。模块 5/6 提供认证本地 HTTP/SSE，模块 7 提供本机持久消息账本，模块 8/9 接入认证中继、投递与远程 JSON 控制。模块 10 在同一 Runtime 内增加隔离的群/DM 被动工作上下文，不新增运行时所有者；模块 11 在此基础上接入显式 `Runtime.resume()` 激活的自动决策、通信工具和逐 scope 停止/恢复，已完成父助手的限定范围验收。
 - 写入由 SQLite 事务保护，重复请求重试安全。
 - `host.sqlite` 仍只保存登记数据，Durable 使用独立的 `durable.sqlite`；`runtime-owner.sqlite` 的 SQLite 事务锁保证单进程所有权。
 - SQLite 宿主适配尚未在 Android 验证；旧运行链路未被替换。
@@ -99,16 +99,18 @@ node host-core/cli.js create   --data-root '/path/to/data-root'   --request-id r
 - `index.d.ts`：登记接口，以及 `Runtime`、`PrimarySubmission`、`HistoryPage`、`OpenRuntimeOptions`（含可选 `bashPath`/`toolPaths`）、模块 6 直播预览类型（`LiveMessage`/`LiveHistoryItem`/`LiveTool`/`LiveGeneration`/`BotLiveState`/`BotLiveChanges`/`BotLiveSnapshot`/`BotLiveUpdate`/`BotLiveDataFrame`/`BotLiveEnd`/`BotLiveFrame`/`BotWatchEnd`/`BotWatch`）、模块 7 消息账本类型（`MessageMember`/`MessageAuthor`/`MessageScope`/`PublishMessageInput`/`MessageEnvelope`/`MessagePeer`/`MessageAck`/`StoredMessage`/`MessageCursor`/`MessagePageOptions`/`MessageOutboxOptions`/`MessageStreamStatus`/`MessageHistoryPage`/`MessageInboxPage`/`MessageOutboxPage`/`MessageDeliveryStatus`/`MessageLog`/`openMessageLog`）、模块 8 中继类型（`RelayDevice`/`RelayRegistry`/`RelayServerStatus`/`RelayServer`/`DeliveryPumpStatus`/`DeviceLinkStatus`/`DeviceLink`/`openRelayRegistry`/`openRelayServer`/`openDeviceLink`，`OpenDeviceLinkOptions.control` 可选）、模块 9 远程控制类型（`RemoteControlOutcome`/`RemoteControlMethodMap`/`OpenRemoteControlOptions`/`RemoteControl`/`RemoteControlError`/`openRemoteControl`）等类型。
 - `index.d.ts` 的模块 10 增量：`MessageInboxOptions`、`WorkContextRecord`、`WorkSyncOptions`、`WorkSyncResult`、`WorkHistoryCursor`、`WorkHistoryPage`、`WorkContextStatus` 与 Runtime 的四个工作上下文方法；不新增根 JS 导出。
 - `work-context-docs.js` / `work-context-codec.js` / `runtime-work-contexts.js`：模块 10 的内部持久文档、来源事件编码与被动导入引擎，不作为根 API 导出。
+- `index.d.ts` 的模块 11 增量：`MessagePublishGuard`、`MessageInboxItem`、`MessageRepliesPage`、`WorkActivity`；`MessageLog.publish(input, guard?)`、`MessageLog.replies` 和 Runtime 的 `getWorkActivity`/`stopWork`/`resumeWork`。`control-client.d.ts` 为三个本机控制方法复用 `WorkActivity`；不扩展远端方法或根 JS 导出。
+- 模块 11 内部模块：`work-decision-state.js` / `work-decision-codec.js`（持久决策与 Host 处理信号）、`runtime-work-decisions.js`（自动处理）、`bot-identity.js` / `communication-tools.js`（权威身份与通信工具）；不作为根 API 导出。
 - `messages.js`：模块 7 门面 `openMessageLog({dataRoot})`，组合 openHost 与 openMessageStore；协议边界只验证一次。
-- `message-protocol.js`：模块 7 协议校验与规范化（`messageError`/`assertId`/`assertRevision`/`normalizeScope`/`normalizePublish`/`normalizeEnvelope`/`normalizePeer`/`normalizeAck`/`normalizePageOptions`/`streamIdForScope`/`digest`/`assertScopeMessage`）。
+- `message-protocol.js`：模块 7 协议校验与规范化（`messageError`/`assertId`/`assertRevision`/`normalizeScope`/`normalizePublish`/`normalizePublishGuard`/`normalizeEnvelope`/`normalizePeer`/`normalizeAck`/`normalizePageOptions`/`streamIdForScope`/`digest`/`assertScopeMessage`）。
 - `message-store.js`：`openMessageStore(dataRoot, deviceId)`，建库 `messages.sqlite`（user_version=1）与事务读写。
-- `message-queries.js`：`createMessageQueries(db, {deviceId})` 只读查询（getScope/listScopes/getMessage/history/inbox/outbox/deliveryStatus/streamStatus）。
+- `message-queries.js`：`createMessageQueries(db, {deviceId})` 只读查询（getScope/listScopes/getMessage/history/inbox/replies/outbox/deliveryStatus/streamStatus）；replies 为模块 11 的 DM 直接关联回复查询。
 - `message-cli.js`：模块 7 特权离线 CLI（scope/get-scope/scopes/publish/get/receive/ack/history/inbox/outbox/delivery/stream）。
 - `host-environment.js`：HostExecutionEnv（NodeExecutionEnv 子类）；仅命令字符串经 Git Bash/bash 执行，argv 数组与文件操作直接透传。
 - `grep-tool.js` / `find-tool.js` / `ls-tool.js`：grep（rg）、find（fd）、ls 工具。
 - `search-bin.js`：rg/fd 固定版本、asset 规格与解析顺序；`prepare-tools.js`：显式下载并安装 rg/fd 的 CLI。
 - `control-client.js` / `control-client.d.ts`：控制客户端（`./control-client` 子路径导出），由协作任务提供。
-- `control-server-cli.js` / `control-cli.js`：模块 5 两个 CLI；`control-cli.js` 的 `live` 子命令在模块 6 增加，模块 10 增加 `work-get`/`work-sync`/`work-history`/`work-context`，仍经同一本机 HTTP 服务调用。
+- `control-server-cli.js` / `control-cli.js`：模块 5 两个 CLI；`control-cli.js` 的 `live` 子命令在模块 6 增加，模块 10 增加 `work-get`/`work-sync`/`work-history`/`work-context`，模块 11 增加 `work-activity`/`work-stop`/`work-resume`，仍经同一本机 HTTP 服务调用。
 - `runtime-live-projection.js` / `runtime-live.js`：模块 6 直播预览投影与 `Runtime.watch`。
 - `control-live.js`：模块 6 SSE 路由 `GET /v1/bots/:botId/live`。
 - `control-live-client.js`：模块 6 SSE 流式解析与 `readControlLive`。
@@ -181,7 +183,7 @@ node host-core/runtime-cli.js wait --data-root "$DATA_ROOT" --config "$CONFIG" -
 | `getSubmission(botId, requestId)` | 被动查询，无此提交返回 null |
 | `history(botId, {limit?, cursor?})` | 原始条目按时间顺序分页，默认 50，上限 200 |
 | `abort(botId)` | 停止该主私聊的当前执行与待处理输入，等待确认 |
-| `resume()` | 启动已有持久任务的调度，不创建新输入 |
+| `resume()` | 恢复原生持久任务；模块 11 起还幂等激活群/DM 自动处理，可产生新的工作决策输入（见模块 11） |
 | `close()` | 幂等关闭资源，保留未完成工作供之后恢复 |
 
 提交回执包含公开 `botId` / `conversationId`、`requestId`、Durable `submissionId`、`status`、`answerText` 和 `reason`。状态为 queued、placed、done 或 unanswered。相同请求 ID 和相同正文返回原提交；正文不同报 `REQUEST_CONFLICT`。已失败的提交重试相同 ID 仍返回失败回执，继续对话应发送新请求 ID。
@@ -307,7 +309,7 @@ await control.close(); // 幂等：先关 listener/连接与进行中 handler，
 ```
 
 - 先校验 token 再打开任何数据；服务只监听回环地址，不暴露给外部网卡。
-- 生命周期：每服务一个 openRuntime 加一个 openHost registry 连接（同一 `host.sqlite`，不启动第二个 runtime）；listen 成功后才调用一次 `resume()`。没有任何按请求关闭或客户端断开关闭；`close()` 幂等，任何一步失败仍继续后续清理并最终抛出；优雅关闭保留未完成 Durable 状态，这与 `abort` 是不同的概念。
+- 生命周期：每服务一个 openRuntime 加一个 openHost registry 连接（同一 `host.sqlite`，不启动第二个 runtime）；listen 成功后才调用一次 `resume()`（模块 11 起也激活群/DM 自动处理，不是被动查询服务）。没有任何按请求关闭或客户端断开关闭；`close()` 幂等，任何一步失败仍继续后续清理并最终抛出；优雅关闭保留未完成 Durable 状态，这与 `abort` 是不同的概念。
 - 认证：所有请求必须带 `Authorization: Bearer <token>`，token 须匹配 `/^[A-Za-z0-9_-]{32,512}$/`；校验在打开数据前完成，使用 timing-safe 比较。任何携带 `Origin` 头的请求一律拒绝（服务不是开放跨源网页 API；移动 WebView 应用 native fetch 适配，不发送 Origin）。不记录 token，不提供 CORS 通配，不接受 token 查询参数。
 
 ### 路由
@@ -352,7 +354,7 @@ node host-core/control-cli.js <host|create|list|get|find-request|send|status|his
 
 ### 客户端
 
-`@e-launcher/host-core/control-client` 导出 `createControlClient({url, token, fetch?})`，返回与路由表对应的命名方法（getHostInfo/createBot/listBots/getBot/findByRequest/submit/getSubmission/history/abort/contextStatus）。客户端 JS 没有任何 Node 导入，可在浏览器/WebView 使用；可选传入 `fetch` 实现。每个调用可传 `{signal}` 取消；`history` 选项在原 HistoryOptions 上加 `signal`。状态查询是被动的，客户端没有 wait/resume 端点。错误统一为 `ControlApiError`（带 `code`/`status`）：解析 JSON 错误响应，并把网络/协议错误区分清楚；任何情况下不记录 token。
+`@e-launcher/host-core/control-client` 导出 `createControlClient({url, token, fetch?})`，返回与路由表对应的命名方法（getHostInfo/createBot/listBots/getBot/findByRequest/submit/getSubmission/history/abort/contextStatus）。客户端 JS 没有任何 Node 导入，可在浏览器/WebView 使用；可选传入 `fetch` 实现。每个调用可传 `{signal}` 取消；`history` 选项在原 HistoryOptions 上加 `signal`。状态查询是被动的，客户端没有主私聊 wait 或全局 Runtime.resume 端点；模块 11 的 `resumeWork` 只恢复指定 Bot/scope。错误统一为 `ControlApiError`（带 `code`/`status`）：解析 JSON 错误响应，并把网络/协议错误区分清楚；任何情况下不记录 token。
 
 ### 边界与安全
 
@@ -453,7 +455,7 @@ Linux、Android、arm64、Tauri/TUI 和真实终端信号尚未验收。Runtime.
 模块 7 在 Host 本机实现持久消息账本：作用域/成员修订、不可变信封、outbox、接收落地去重与 ACK、本地收件/历史/缺口，以及特权离线 CLI。**只**存储与在本机记账；**没有**网络认证/隧道/HTTP 入口/中心/LLM 调用/推理/唤醒/UI。不要据此宣称跨设备消息已收发，或任何网络能力已就绪。
 
 - 新数据库为 `dataRoot/messages.sqlite`（user_version=1，FK ON，busy_timeout 5000，BEGIN IMMEDIATE 事务）；`host.sqlite` v1 与 `durable.sqlite` 保持不变，旧 Android 数据与 Durable 不动。
-- `openMessageLog({dataRoot})` 同步返回 `MessageLog`（`{deviceId, dataRoot, installScope, getScope, listScopes, publish, getMessage, receive, acknowledge, history, inbox, outbox, deliveryStatus, streamStatus, close}`），并同时打开既有 openHost registry 连接；不触发 runtime/harness/model 调用。close 幂等；打开失败关闭已打开部分。
+- `openMessageLog({dataRoot})` 同步返回 `MessageLog`（`{deviceId, dataRoot, installScope, getScope, listScopes, publish, getMessage, receive, acknowledge, history, inbox, replies, outbox, deliveryStatus, streamStatus, close}`），并同时打开既有 openHost registry 连接；不触发 runtime/harness/model 调用。close 幂等；打开失败关闭已打开部分。
 
 ```js
 import { openMessageLog } from './host-core/index.js';
@@ -483,7 +485,7 @@ try {
 
 - `MessageScope` 成员只能是 Bot（`{deviceId, botId}`）；`dm` 恰 2 个不同 Bot（可同机），`room` 2..64；成员按 deviceId 再 botId 确定性排序（JS code-unit，非 localeCompare）。
 - 修订不可变，kind 不变。DM 的两个参与者固定，换一对 Bot 必须创建不同 scopeId。群首次安装需至少一个本机成员，后续修订可移除本机成员并保留旧历史。相同修订重试返回同一 Scope；同 scope/rev 不同定义报 `REQUEST_CONFLICT`。
-- 隐式人类 owner 只能经至少有一个成员 Bot 的 Host 发布到 room；人类作者显式为 `{kind:'user'}`，仅 room 的 public 消息；bot 间 DM 不允许 user actor。未来模型工具必须注入自己的 bot actor，本机控制 UI 注入 user，不信任意模型自报作者。
+- 隐式人类 owner 只能经至少有一个成员 Bot 的 Host 发布到 room；人类作者显式为 `{kind:'user'}`，仅 room 的 public 消息；bot 间 DM 不允许 user actor。模块 11 的模型通信工具由 Host 注入真实 bot actor，不接受模型自报作者；人类发布入口使用 user，不能把工具调用伪装成人类。
 
 ### 信封、流与目标快照
 
@@ -713,7 +715,7 @@ try {
 - 每个本机 `(botId, scopeId)` 绑定独立、稳定的公开 conversation UUID，内部索引用 `JSON.stringify([botId, scopeId])`，不包含成员 revision。群成员修订沿用原上下文；DM 仍遵守固定双方的模块 7 约束。
 - 每个绑定新建 ownerless Durable conversation 与空 BC 状态，不 fork 主私聊、不复制主私聊/其他群/其他 Bot 的历史。同一事件面向多个本机 Bot 时，各自拥有不同 conversation UUID、BC 文档和导入水位。
 - 继承本机工具注册与执行环境配置，使用该 Bot 的 cwd、角色及固定的可信“外部事件是数据”说明；不把事件正文插入 system instructions，也不选择、解析或默认绑定模型。导入不执行工具。
-- 导入只通过公共 `Tx.appendEntry` 追加模型可见的原始条目；不调用 `Conversation.submit`（包括 write 提交）、wait/resume/startRun，不创建推理任务或自动扫描循环。即使常驻 Host 的调度器已 resume，显式导入也不应产生模型请求。
+- 导入只通过公共 `Tx.appendEntry` 追加模型可见的原始条目；不调用 `Conversation.submit`（包括 write 提交）、wait/resume/startRun，不创建推理任务或自动扫描循环。显式导入方法本身不产生模型请求；模块 10 验收阶段即使 Host 已 resume 也没有自动工作决策。模块 11 激活后，独立驱动会处理合格收件，不能把当前 Host 上恰好出现的模型请求归为 sync 的直接副作用。
 - BC 按 conversation 独立初始化，但导入不调用 `manager.prepare`，不生成摘要/压缩投影或伪造窗口状态；refs、blocks、prepared 仍按既有 BC 的惰性准备语义管理。初始化 BC 不等于已经压缩。
 
 ### 可见性与原子导入
@@ -745,7 +747,7 @@ Entry.model 恰有一条 `role:'user'` 消息，内容为固定的外部事件/�
 
 `WorkHistoryCursor` 精确包装为 `{conversationId: <公开 UUID>, position: <非 null、非数组的 SDK 游标对象>}`，只允许这两个包装字段。调用方原样传回 `nextCursor`；拒绝其他工作上下文/主私聊 UUID、裸 SDK 游标或额外包装字段，未绑定上下文不接受非空游标，均为 `INVALID_ARGUMENT`。主私聊的既有历史游标格式不变。
 
-四个方法复用原 Host/harness/BC manager，不新增 Runtime。工作引擎仅在需要消息操作时懒开自己的 MessageLog，纯主私聊路径不因此创建 `messages.sqlite`；关闭时拒绝新工作操作，等待已接纳操作结束后关闭自有 log，再由 Runtime 关闭 harness 等原资源。主私聊 submit/wait/history/getSubmission/abort/watch 与模型选择语义不变。
+四个方法复用原 Host/harness/BC manager，不新增 Runtime。工作引擎仅在需要消息操作时懒开 MessageLog，纯主私聊且未使用通信工具时不因此创建 `messages.sqlite`。模块 11 的自动处理与通信工具共用这一个连接：关闭时先停驱动、拒绝新工作操作并等待已接纳操作，再关闭 live/harness，最后关闭消息连接，避免中断已接纳工具的查询/收尾；DeviceLink 仍持有独立连接与锁。主私聊 submit/wait/history/getSubmission/abort/watch 与模型选择语义不变。
 
 ### 本机 HTTP、客户端与 CLI
 
@@ -762,7 +764,7 @@ Entry.model 恰有一条 `role:'user'` 消息，内容为固定的外部事件/�
 
 `createControlClient` 增加 `getWorkContext(botId, scopeId, options?)`、`syncWorkContext(botId, scopeId, input?, options?)`、`workHistory(botId, scopeId, options?)`、`workContextStatus(botId, scopeId, options?)`；sync 的 input 为 `WorkSyncOptions`，默认 `{}`。history 的 options 是 `{limit?, cursor?:WorkHistoryCursor|null, signal?}`，其他 options 为 `{signal?}`。signal 仅取消 HTTP 等待，不代表导入未提交、回滚收件或停止推理；不确定时可重查水位或重试 sync。
 
-新 HTTP 路径的 botId 段沿用 `encodeURIComponent`，scope 段使用 **`scopeKey='~'+encodeURIComponent(scopeId)`**。服务端对该段解码一次，要求前导 `~`，仅剥去一个 `~` 后把原始 scopeId 交给 Runtime；缺少前缀或解码后 ID 为空报 `INVALID_ARGUMENT`。例如 `'.'→'~.'`、`'..'→'~..'`、`'~.'→'~~.'`，避免 WHATWG URL 折叠点路径且不碰撞、不收窄模块 7 合法 ID。JS/CLI 调用方始终传原始 scopeId，由客户端完成编码；仅这四个新 HTTP 路由使用 scopeKey，不改 Runtime/MessageLog 标识或既有路径，也不兼容未加前缀的新路径。
+新 HTTP 路径的 botId 段沿用 `encodeURIComponent`，scope 段使用 **`scopeKey='~'+encodeURIComponent(scopeId)`**。服务端对该段解码一次，要求前导 `~`，仅剥去一个 `~` 后把原始 scopeId 交给 Runtime；缺少前缀或解码后 ID 为空报 `INVALID_ARGUMENT`。例如 `'.'→'~.'`、`'..'→'~..'`、`'~.'→'~~.'`，避免 WHATWG URL 折叠点路径且不碰撞、不收窄模块 7 合法 ID。JS/CLI 调用方始终传原始 scopeId，由客户端完成编码；这组工作上下文 HTTP 路由及模块 11 的 activity/stop/resume 路由使用 scopeKey，不改 Runtime/MessageLog 标识或既有主私聊路径，也不兼容未加前缀的新路径。
 
 ```bash
 node host-core/control-cli.js work-get --url http://127.0.0.1:8787 \
@@ -794,7 +796,143 @@ node host-core/control-cli.js work-context --url http://127.0.0.1:8787 \
 
 ### 后续边界与未实测
 
-- 模块 11 的自动收件调度、工作上下文推理/发言或沉默、Bot 通信工具尚未实现；模块 12 的成员同步/历史补齐、模块 13 的长期事实记忆也不在本轮。本模块不是新的 Session 产品或 UI。
+- 上述模块 10 验收不覆盖模块 11 的自动收件调度、工作上下文推理/发言或沉默、Bot 通信工具；模块 11 已独立完成父助手验收，接口与实测范围见下节。模块 12 的成员同步/历史补齐、模块 13 的长期事实记忆仍未交付，不新增 Session 产品或 UI。
 - 模块 9 远程协议保持原 **10 个方法**，未增加远程工作上下文控制；版本化接线属于模块 14。
 - 未实测：跨物理设备/WAN、Linux、Android、arm64、Tauri/TUI、浏览器 native-fetch 适配集成、真实外部付费模型。
 - 未实测直接 JS AbortSignal 与直接 `Runtime.close` 并发调用/关闭竞态；已实跑服务端 HTTP 断连继续导入和进程优雅关闭。全局 128 pending/256 连接负载、中继慢接收者压力测试及模块 9 原有未实测项继续保留。
+
+## 模块 11：自然群聊决策与 Bot 通信工具（已完成父助手验收）
+
+模块 11 已完成下述限定范围的实现及父助手端到端验收：**161/161 个检查点，失败 0**，总完成数为 **11/20**。验收使用 Windows 本机独立进程、真实 WSS 与脚本化 Mockoon HTTP/SSE 模型响应，不代表真实智能模型的群聊质量、跨物理设备或全端产品已完成；具体证据与限制见本节末尾。
+
+### 主动 resume 与被动查询
+
+- `openRuntime(...)` 保持被动；`getWorkContext`、`syncWorkContext`、`workHistory`、`workContextStatus` 与新 `getWorkActivity` 不激活自动决策。sync 仍只导入一页，不直接提交推理。主私聊 submit/wait 保留原有原生执行/恢复语义，不以此开启工作决策驱动。
+- 显式 `Runtime.resume()` 同时恢复原生任务并幂等激活工作决策驱动：立即扫描，之后约每 1000ms 扫描，不重叠轮询、不在轮询内等待模型结束。`openControlServer` 监听成功后会调用它，因此常驻控制服务是**主动 Host**：已安装 scope 的合格收件可产生模型调用和费用，即使客户端只在查询。
+- 只使用本机已安装的 room/DM 定义；没有自动发现其他 Bot、创建 DM、协商成员或补齐远端历史。尚无 `messages.sqlite` 时扫描跳过而不建库；有库后检查本机当前成员与已有工作绑定，空 scope 不因被扫描就新建空绑定。
+- 每个 `(botId, scopeId)` 独立导入与决策。每次导入最多 200 条，积压分后续扫描导入，追平后才开始新的决策；模型运行中或 owner 停止时仍可导入来源事件。每对 Bot/scope 至多一个待处理决策，忙时合并新收件，不按每条消息取消/重启模型；同一决策可以多轮工具、多次发布，没有思考次数或自动接话条数上限。
+- 非自身回声的 **room public**（人类或其他 Bot）以及 **DM request** 可触发新决策；自身回声、DM notice/reply 只作上下文，不触发新的请求。ACK 和工具进度本就不是消息账本事件。没有强制 @、中央选发言人或必回“收到”规则。
+
+首次工作推理使用该 conversation 已绑定模型，否则选 Bot 的 `modelRef ?? defaultModel` 并持久化；不悄悄更换已经绑定的模型。无配置为 `MODEL_REQUIRED`，模型不可用为 `MODEL_NOT_FOUND`。Host 处理信号不是人类发言；即使模型载体 role 为 user，来源作者仍以 `message.author` 为准，不把其他 Bot 当人类/system，也不一概忽略真正的人类请求。
+
+### 明确发布、沉默与输入水位复核
+
+普通 assistant 最终文本始终留在**私有工作历史**，不自动进入群/DM。只有通信发送工具发布消息；没有专用 silent 工具或 `SILENT` 字符串解析，正常结束且未发送即为沉默，群里不追加沉默通知。跨 scope 发送也必须显式调用工具，不自动转发主私聊、其他群或 DM 全文。
+
+区分三种水位：`lastImportedLocalId` 表示已导入；`handledLocalId` 表示策略已消费的来源（包括扫描到但不触发推理的回声/notice/reply）；`pending.preparedThroughLocalId` 是**本次实际冻结模型请求**中贡献来源内容的最大本机 localId，不是最新导入水位、tokenCount 或 Durable EntryId。来源 localId 可稀疏。决策正常结束最多推进到自己的 prepared 水位，不能顺手消费模型没见过的新输入。
+
+工作工具发布前，在原生串行提交点读取当前停止/决策状态，并用 `MessageLog.publish(input, guard)` 在消息库**同一事务内**复核来源成员资格与新收件，再落盘消息/outbox：
+
+- `MessagePublishGuard = {scopeId, afterLocalId}`；scopeId 是**决策来源 scope**，可以不同于发送目标（例如群决策向 DM 发送）；afterLocalId 必须为非负安全整数，来自实际 prepared 水位。
+- guard 仅用于 Bot 作者。省略/undefined 保留旧 publish 行为；显式 null、未知字段或无效值报 `INVALID_ARGUMENT`，不能静默关闭校验。目标 scope/类别/作者的既有校验不变；来源不存在为 `SCOPE_NOT_FOUND`，不再是来源成员为 `SCOPE_FORBIDDEN`。
+- 来源范围在水位之后有冻结面向该 Bot 的非自身事件即为 `STALE_INPUT`，包括另一个本机 Bot、人类及 DM notice/reply；其他 scope、只面向别的 Bot 的消息及本机自身回声不使旧稿失效。这个发布校验比“是否触发新推理”的类别规则更严格。
+- `STALE_INPUT` 不写入消息/序号/outbox/目标。驱动持久标记 replan，旧生成不再发起下一次 provider 调用，保留未处理水位，随后用新批次重新考虑；不保证远端尚未到达的消息也被看见。
+- 合法的同 messageId、同发布指纹重试在数据库 guard/成员检查前返回原回执；异内容仍报 `REQUEST_CONFLICT`。guard 不进信封或指纹。已落盘发送在停止或崩溃后可对账，不能把失败/中止结果解释为此前绝无发布或其他副作用。
+
+BC 仍是唯一压缩所有者，原文不删。模型调用前检查本次已准备投影的估计 `tokenCount >= contextWindow` 时，以 `CONTEXT_LIMIT` 阻止 provider 调用；不截掉最新大事件来强行发送、不推进 handled 水位，也不自动开启 Durable compaction。小于该估计界限仍可能因 system/tool 等额外开销在 provider 处超窗，不能据此保证必定放得下。
+
+**原生 beforeRequest 取消修正**：pi-durable 1.3.0 的 HookRunner 会吞掉普通 hook 抛错，单靠 throw 不能阻止 provider 调用。组合 hook 依次执行工作策略、`manager.prepare` 和预算检查；出错且本次 invocation context 尚未取消时，先用**同一个调用 context** 执行 `harness.abortTask(api.taskId, context)`，再抛出错误。它只取消当前生成 task，不 abort 整个 conversation 或队列；context 已因正常关闭取消时不再追加持久 abort，避免把暂停恢复变成永久中止。父助手已实跑旧稿 replan、预算拒绝、工作 schema fatal、主私聊 BC prepare 失败及等待工具关闭/重启路径，不能外推为所有关闭竞态均已覆盖。
+
+### 工作状态、逐 scope 停止与恢复
+
+三个新 Runtime 方法均返回 `Promise<WorkActivity>`：
+
+| 方法 | 语义 |
+| --- | --- |
+| `getWorkActivity(botId, scopeId)` | 被动授权查询，不创建绑定或模型任务；已授权未绑定返回 unbound，不是 404 |
+| `stopWork(botId, scopeId)` | 必要时建立绑定，先持久化 stopped=true，再 abort **仅该工作 conversation**，等待其执行静止后返回；不推进 handled 水位 |
+| `resumeWork(botId, scopeId)` | 要求当前成员，必要时建立绑定；先清理停止前残余执行，再清 stopped/error，保留未处理输入；仅当全局驱动已激活时促使其继续处理，不会独自激活被动 Runtime |
+
+`WorkActivity` 字段如下（不暴露内部 nativeId、taskId 或 cutoff）：
+
+| 字段 | 含义 |
+| --- | --- |
+| `botId`, `scopeId`, `conversationId` | 本机 Bot/范围，公开 conversation UUID；未绑定为 null |
+| `isMember`, `stopped`, `status` | 最新成员资格、持久 owner 停止位、当前状态；status 优先级为 unbound → stopped → error → inactive（非成员）→ thinking（有 pending）→ idle |
+| `lastImportedLocalId`, `handledLocalId` | 分别为导入与策略消费水位；不是投递 ACK 或逐条推理证明 |
+| `pending` | null 或 `{requestId, submissionId:number\|null, startedAt, preparedThroughLocalId:number\|null}`；时间为 ISO，准备前水位为 null |
+| `lastDecision` | null 或 `{requestId, outcome:'silent'\|'published'\|'replan'\|'aborted'\|'failed', throughLocalId:number\|null, completedAt}`；模型决策结果，不是远端投递回执，失败/中止也可能已有副作用 |
+| `error` | null 或 `{code,message}`，保留小型可操作错误，不暴露完整请求、provider 内容或凭证 |
+
+停止不撤回已提交消息/outbox，不清历史，不取消别的 scope 或主私聊；`Runtime.abort(botId)` 仍**只**中止主私聊，不是 stop-all。停止位跨重启保留，`Runtime.resume()`、新的人类消息或重新入群都不能代替 owner 的显式 `resumeWork`。Host 关闭只暂停恢复，不自动置 stopped。
+
+退出当前成员名单时不开始新推理，并终止/对账已绑定的待处理工作；旧冻结收件与历史仍可导入/读取。不把退群写成 owner stopped、不丢未处理输入；重入后若未被 owner 停止且无阻塞错误，可继续处理。
+
+模型配置/生成错误仅阻塞对应 scope，不反复热重试；普通未回答失败为 `WORK_GENERATION_FAILED`，已记录的 `CONTEXT_LIMIT` 保留。修正原因后显式 `resumeWork` 清错误再试。意外存储/schema 故障不吞掉或重置：驱动停止轮询、保留 fatal 错误，activity/变更操作向调用方暴露，需正确关闭/重开并处理原因；主私聊不因工作驱动 fatal 被自动改成停止。
+
+### Bot 通信工具与 DM 首回复等待
+
+工具每次从实际调用 conversation 解析本机 Bot 身份；不信 cwd/角色/模型参数自报身份，不为解析身份新建会话。未知/非本机上下文为 `BOT_CONTEXT_REQUIRED`。模型不能提供 author、botId、messageId 或 guard，未知参数拒绝；发送统一注入 `{kind:'bot',botId:<实际Bot>}`。
+
+| 工具 | 参数与作用 |
+| --- | --- |
+| `list_scopes` | `{offset?,limit?}`；offset 为非负整数、默认 0，limit 为 1..200 的整数、默认 50，仅列当前成员 scope；返回 `{deviceId,botId,scopes,nextOffset}`，offset 在成员变化时仅尽力分页，不是持久消息游标 |
+| `read_scope` | `{scopeId,limit?,cursor?}`；只读自身 scoped inbox，保留退出后的旧冻结目标权限，不读全 scope 或其他 Bot 的 inbox |
+| `send_room` | `{scopeId,text,replyTo?}`；仅已安装 room，类别 public |
+| `send_dm` | `{scopeId,category:'notice'\|'request'\|'reply',text,replyTo?}`；仅已安装 DM；reply 必须以 replyTo 指向原 request，不能把相关回复再次标为 request |
+| `read_dm_replies` | `{requestMessageId,limit?,cursor?}`；只查自己发出的本机 DM request 的对方直接 replyTo 回复，不产生新请求/推理 |
+| `wait_dm_reply` | `{requestMessageId}`；等该 request 的**首个对方回复**，返回至多一条回复的预览页并加 `status:'replied'\|'timeout'`，不是等对方工作全部结束 |
+
+read 工具分页默认 50、最大 200。发送只返回紧凑落盘回执 `{messageId,scopeId,author,category,rootId,replyTo,createdAt,status:'stored'}`，**stored 不代表远端收到或已回答**。每次发送工具的 messageId 保存在 Durable task memo 中，崩溃在账本写入后/工具回执前时重放沿用同 ID，并由账本指纹去重，不从模型 callId 派生。工具结果为 JSON 文本；已知消息/身份/工作策略错误以 `{code,message}` 和 `isError:true` 返回（如 `WORK_STOPPED`、`WORK_CONTEXT_INACTIVE`、`STALE_INPUT`），取消向上传递，未知存储故障不改报 `INVALID_ARGUMENT`。
+
+`wait_dm_reply` 每次工具调用最多等 30 秒，间隔不超过 1000ms，等待可取消。截止时刻持久保存在该 task memo，恢复/重放不会续满 30 秒；每次先查已有回复再判断截止，即使 Host 停机期间回复到达也能返回。timeout **不取消收件 Bot**、不发取消消息、不换 ID 重问；之后仍可针对同一个 requestMessageId 读取/等待。新的工具调用可有新的等待期限，重复等待已有回复仍返回首个回复，不是“下一条回复”。
+
+底层新增同步被动 API `log.replies(botId, requestMessageId, {limit?,cursor?})` 返回 `MessageRepliesPage {botId,requestMessageId,scopeId,items,nextCursor}`，其中 items 是完整 `MessageInboxItem`（StoredMessage + selfEcho），此底层页不另加 deviceId。原请求不存在为 `MESSAGE_NOT_FOUND`；必须是当前 Host 上该 Bot 自己发出的 DM request，否则 `SCOPE_FORBIDDEN`。只匹配对方 `category:'reply'` 且 `replyTo===requestMessageId`，不是 rootId 下所有回复；不假设回复 localId 大于请求 localId，恢复/乱序到达也可查询。游标仍为 kind inbox，key 为 `'reply:'+sha256(JSON.stringify([botId,requestMessageId]))`，绑定设备/Bot/request，不能混用普通 inbox 或其他请求游标；不新增远端查询方法或 message-cli 子命令。
+
+### 有界工具预览不等于原文截断
+
+通信工具渲染的单次 JSON 文本最多 **50KiB UTF-8**。消息投影项为 `{localId,messageId,sourceDeviceId,scopeId,author,category,rootId,replyTo,text,createdAt,selfEcho,textTruncated}`；每条 text 最多 **4096 UTF-16 单元**，避免切开 Unicode 代理对，显式报告 `textTruncated`。这不是 ledger 信封替换，也不等于 M6 primary SSE 预览。
+
+`read_scope` 页为 `{deviceId,botId,scopeId,items,nextCursor}`；`read_dm_replies` 页再含 requestMessageId，wait 在该单条页上加 status。整页超过字节预算只在 item 边界缩短，游标从**最后实际返回**的 localId 继续，不能跳过未显示条目；未缩页时保留查询 nextCursor。`list_scopes` 同样按完整 scope 截页，不输出损坏/半截 JSON。单个 scope 经 JSON 转义后也可能超过 50KiB：若当前页已有可返回前缀，则返回该前缀，nextOffset 指向首个未返回的 scope；若从当前 offset 开始的第一项就放不下，则返回 `isError:true` 的 `RESPONSE_TOO_LARGE` 工具错误。不跳过 scope、不截断标识符，也不返回 nextOffset 不前进的空成功页。
+
+预览限制不修改 `messages.sqlite` 信封、`MessageLog.history/inbox/replies` 原文或 `workHistory` 原始来源 Entries。需要完整正文时由已授权的 Host 原始查询读取；模型上下文原文过大则按前述 CONTEXT_LIMIT 阻塞，不通过截断假装已经处理。
+
+### 本机 HTTP、客户端和 CLI
+
+沿用 Bearer、Origin 拒绝、请求体限制与现有错误映射，不增加网络 ingress 或第二个 Runtime：
+
+| 方法与路径 | 请求体 | 成功响应 |
+| --- | --- | --- |
+| GET `/v1/bots/:botId/work-contexts/:scopeKey/activity` | — | 200 `WorkActivity`（允许 unbound） |
+| POST `/v1/bots/:botId/work-contexts/:scopeKey/stop` | 解析后的空对象 | 200 `WorkActivity` |
+| POST `/v1/bots/:botId/work-contexts/:scopeKey/resume` | 解析后的空对象 | 200 `WorkActivity` |
+
+stop/resume 要求 `readControlBody` 解析后的值为空对象；沿用旧约定，零字节 HTTP body 等同 `{}`，并非必须发送字面 JSON `{}`。scopeKey 仍为 `'~'+encodeURIComponent(scopeId)`，服务端只解码一次、只剥一个 `~`。客户端传原 scopeId。`ControlClient.getWorkActivity(botId,scopeId,options?)`、`stopWork(...)`、`resumeWork(...)` 只接受既有 `{signal?}` 调用选项，两个 POST 仍自动发送 JSON `{}`；Web-standard 客户端不增加 Node 导入。取消 HTTP 不回滚已接纳的 stop/resume，断线后应重新查询 activity 确认。
+
+```bash
+node host-core/control-cli.js work-activity --url http://127.0.0.1:8787 \
+  --token-env CONTROL_TOKEN --bot-id "$BOT_ID" --scope-id room-1
+node host-core/control-cli.js work-stop --url http://127.0.0.1:8787 \
+  --token-env CONTROL_TOKEN --bot-id "$BOT_ID" --scope-id room-1
+node host-core/control-cli.js work-resume --url http://127.0.0.1:8787 \
+  --token-env CONTROL_TOKEN --bot-id "$BOT_ID" --scope-id room-1
+```
+
+三个命令均要求 `--bot-id --scope-id`，除共同连接选项外不接受 limit/cursor/text 等无关参数；stdout 正常 JSON，错误沿用 stderr JSON/退出码约定。本机完整 work 操作为 M10 的 get/sync/history/context 加 M11 的 activity/stop/resume。**远端仍只有** `getHostInfo`、`listBots`、`createBot`、`getBot`、`findByRequest`、`submit`、`getSubmission`、`history`、`abort`、`contextStatus` **十个方法**；不支持远端 work 控制或群/DM 直播，版本化远程接线留给模块 14。
+
+### 模块 11 验收
+
+父助手在 **Windows / Git Bash、Node 26.8.2 与最低版本 22.19.0** 下完成 **161/161 个检查点，失败 0**。使用 pi-durable **1.3.0**、acp-kernel **0.0.101**，本机独立 Host/链路/中继进程通过真实 WSS 通信；模型服务是实际运行的 localhost HTTP/SSE 进程，使用脚本化 **Mockoon** 响应，并未验证真实智能模型的自主判断质量或调用外部付费模型。
+
+- **决策、作者与隔离**：人类及其他 Bot 的 room public 无须 @ 即可由各 Bot 独立处理；自身回声、DM notice/reply 只导入，不生成新请求。模型实际调用 send_room/send_dm，Host 注入真实作者，伪造字段被拒；最终 assistant 文本保持私有，其他 Bot 的 DM/请求不能越权读取，主私聊/live 不混入群历史。
+- **旧稿与成员边界**：新收件使旧请求停止，未继续调用 provider；新的决策确实看到合并批次并发布新内容。来源 scope 与发送目标不同的 guard、仅目标成员资格被拒而不误判来源 replan、来源退群中止及重新加入后沿用原上下文/当前目标修订均通过。
+- **逐 scope 停止**：运行中原生工作被中止且无迟发消息；停止期间继续导入但不消费输入，其他 Bot 不受影响。停止位跨 Host 重启/resume 保留，显式 resumeWork 后处理保留输入；缺模型/模型不可用错误也保留输入，修改配置不隐式清错，显式恢复后可完成。
+- **DM 关联与等待**：实际 request/reply 往返保留直接 replyTo；同 rootId 下另一 request 的回复、自身 reply 和 notice 被排除，游标绑定请求。已有回复、迟到回复及超时不重发通过。等待 task **489** 在优雅关闭后由 Node 22 恢复同一 task 与原绝对截止时刻，停机期间已过期时不重新等待 30 秒。
+- **发布故障恢复**：发送 task **729** 的 memo messageId 和实际消息已落盘后，以 SQLite 触发器使原生工具结果插入失败，再对该 Host 执行 SIGKILL。重开后同一工具返回原回执，即使已收到更新输入也只保留一条发布，更新输入仍在；这是“结果写入故障 + 强杀”的实测，不冒称无故障提交间隙中的精准崩溃实验。
+- **原生重试与来源水位**：同一重试 task **852** 的请求 cutoff 为 **858**、缓存 BC cutoff 仍为 **856** 时正常完成；task **913** 在第 2 次尝试把来源水位 **66 → 67**，实际模型 HTTP 请求正文也更新。既未把旧 BC 缓存 cutoff 差异误判为失败，也未把新来源漏掉。
+- **请求前阻断**：超大准备投影在 provider 调用前被拒，原文及未处理水位保留。工作上下文中的未知 BC kernelVersion 暴露 fatal，主私聊仍独立可用；主私聊 BC prepare 失败取消当前原生 task，**没有原文回退模型请求**，工作驱动不被该主私聊错误停止，恢复 BC 状态后可继续。
+- **有界预览与本机接口**：8 条预览消息分页恰好各返回一次，输出 ≤50KiB，Unicode 截断安全，完整原文保留。scope 列表先返回可用前缀，再对放不下的单项返回 `RESPONSE_TOO_LARGE`。零字节 stop body、resume 请求体校验、Origin/方法/路径、特殊 scope 标识、CLI 无关参数及范围游标隔离均有实跑证据。
+- **网络与原能力回归**：本机 Host A/B 经 WSS 完成实际模型协议 request/reply；B Runtime 关闭时，其独立链路仍保存新 notice 并 ACK，重开后只导入而不新建决策。原远端十方法通过，新 work 远端方法仍被拒；M10 被动方法不建推理任务，空 Host 不因扫描创建消息库，运行时独占以及 primary history/live 保留。
+
+公开声明通过父助手的 **strict NodeNext + `--skipLibCheck`** 检查；skipLibCheck 是针对既有第三方声明依赖，不表示检查了全部上游声明。**18 份 SQLite 数据库**完整性/外键检查通过，中心仍仅设备注册表，最终无活动原生任务或故障触发器残留。**7 个最终服务均 exit 0**，验收夹具进程全部清理，剩余进程数为 0。
+
+详细报告：`C:/Users/46040/AppData/Local/Temp/e-launcher-group-decisions-1792558247725/module11-verification.json`。所有夹具与证据留在仓库外，未新增仓库测试、依赖、消息 schema 或 Android 改动；以上运行结论以父助手报告为依据。
+
+### 验收限制与未交付边界
+
+- 未验证跨物理设备/WAN、Linux、Android、arm64、Tauri/TUI 或外部付费/真实智能模型行为；本机真实 WSS 与脚本化模型协议往返不等于这些场景已通过。
+- 未穷尽直接 JavaScript 参数/AbortSignal 并发矩阵或每个 close-beforeRequest 微观交错；已覆盖的是上述等待工具关闭/重启、旧稿、预算、schema 与主私聊 prepare 失败阻断路径，不承诺所有竞态均已实测。
+- reply 先于 request 的恢复场景使用受信收件 CLI 模拟，不是网络认证证据；发布恢复含刻意注入的原生结果存储失败，不是无故障窗口的精准强杀，也不证明外部命令副作用 exactly-once。
+- 旧模块的全局 128 pending/256 连接负载、中继慢接收者压力等未实测范围继续保留；完成数不代表全端产品完成。
+
+模块 **12–20** 仍待交付，包括模块 12 成员协商/历史补齐、模块 13 长期事实记忆、模块 14 远程 work/实时接线及后续跨平台/迁移/外壳/真机集成；远端仍只开放原十方法。不引入中央决策、自动 routine、Session 管理或新的后台任务产品。

@@ -20,6 +20,8 @@ import { createContextTools } from './context-tools.js';
 import { BC_KERNEL_VERSION } from './context-state.js';
 import { createRuntimeLive } from './runtime-live.js';
 import { createWorkContextRuntime } from './runtime-work-contexts.js';
+import { createWorkDecisionRuntime } from './runtime-work-decisions.js';
+import { createCommunicationTools } from './communication-tools.js';
 
 const CTX = BACKGROUND_CONTEXT;
 
@@ -48,6 +50,7 @@ export async function openRuntime(options) {
   let releaseOwner = null;
   let storage = null;
   let harness = null;
+  let workContexts = null;
 
   // 每 conversationId+cwd 一个执行环境；绝不 process.chdir 或默认 process.cwd，缺 cwd 明确报错。
   const envCache = new Map();
@@ -76,6 +79,14 @@ export async function openRuntime(options) {
 
   // 内嵌 Billion Context：每 Host 一个 registry/管理器，hook 仅随生成调度运行。
   const manager = createContextManager({ getHarness: () => harness, models });
+  const decisions = createWorkDecisionRuntime({
+    host,
+    getHarness: () => harness,
+    getWorkContexts: () => workContexts,
+    models,
+    defaultModel,
+    context: CTX,
+  });
   const registry = createRegistry();
   registry.install(createCodingTools());
   registry.install(defineExtension({
@@ -92,10 +103,38 @@ export async function openRuntime(options) {
     })],
   }));
   registry.install(defineExtension({
+    name: 'host.communication',
+    tools: createCommunicationTools({
+      host,
+      getHarness: () => harness,
+      getMessageLog: () => workContexts.getMessageLog(),
+      publishWork: decisions.publishWork,
+    }),
+  }));
+  registry.install(defineExtension({
     name: 'host.billion-context',
     tools: createContextTools(manager),
     sections: [section('billion-context', () => buildCompressSystemPrompt())],
-    hooks: [hook(GenerationTask, { beforeRequest: manager.prepare })],
+    hooks: [hook(GenerationTask, {
+      async beforeRequest(request, api, context) {
+        try {
+          await decisions.beforeRequest(request, api, context);
+          const result = await manager.prepare(request, api, context);
+          await decisions.checkBudget(request, api, context);
+          return result;
+        } catch (err) {
+          if (!context.abortSignal?.aborted) {
+            // SDK 会吞普通 hook 异常；用本次 invocation context 取消当前任务，避免 join 自身。
+            try {
+              await harness.abortTask(api.taskId, context);
+            } catch (abortErr) {
+              if (!context.abortSignal?.aborted) throw abortErr;
+            }
+          }
+          throw err;
+        }
+      },
+    })],
   }));
   // 显式传入 models 才是主动模式：把旧 tools:[] 会话升级为继承 registry 默认工具。
   const upgradeLegacy = options?.models !== undefined;
@@ -123,21 +162,22 @@ export async function openRuntime(options) {
     throw err;
   }
   const live = createRuntimeLive({ host, getHarness: () => harness });
-  const workContexts = createWorkContextRuntime({ host, harness, manager, context: CTX });
-  return createRuntime({ host, harness, models, defaultModel, releaseOwner, manager, cleanupEnvs, live, workContexts });
+  workContexts = createWorkContextRuntime({ host, harness, manager, context: CTX });
+  return createRuntime({ host, harness, models, defaultModel, releaseOwner, manager, cleanupEnvs, live, workContexts, decisions });
 }
 
-function createRuntime({ host, harness, models, defaultModel, releaseOwner, manager, cleanupEnvs, live, workContexts }) {
+function createRuntime({ host, harness, models, defaultModel, releaseOwner, manager, cleanupEnvs, live, workContexts, decisions }) {
   let closePromise = null;
   const close = () => {
     closePromise ??= (async () => {
       // 依次执行并收集每步错误：任何一步失败仍继续清理，最后显式抛出。
       const errors = [];
-      // 拒绝新工作上下文调用并等待已接受操作，避免 harness 提前关闭导致导入中断。
-      try { await workContexts.close(); } catch (err) { errors.push(err); }
-      // 停止全部 live 订阅，再关闭 harness：保持既有错误收集与资源释放语义。
+      try { await decisions.close(); } catch (err) { errors.push(err); }
+      // 排空已接纳导入，但共享消息账本须保留到原生工具退出。
+      try { await workContexts.quiesce(); } catch (err) { errors.push(err); }
       try { await live.close(); } catch (err) { errors.push(err); }
       try { await harness.close(CTX); } catch (err) { errors.push(err); }
+      try { await workContexts.close(); } catch (err) { errors.push(err); }
       try { await cleanupEnvs(); } catch (err) { errors.push(err); }
       try { host.close(); } catch (err) { errors.push(err); }
       try { releaseOwner(); } catch (err) { errors.push(err); }
@@ -268,9 +308,13 @@ function createRuntime({ host, harness, models, defaultModel, releaseOwner, mana
     syncWorkContext: workContexts.syncWorkContext,
     workHistory: workContexts.workHistory,
     workContextStatus: workContexts.workContextStatus,
+    getWorkActivity: decisions.getWorkActivity,
+    stopWork: decisions.stopWork,
+    resumeWork: decisions.resumeWork,
 
     resume() {
       harness.resume();
+      decisions.resume();
     },
 
     watch(botId, options) {

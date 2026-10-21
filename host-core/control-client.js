@@ -163,6 +163,15 @@ export function createControlClient({ url, token, fetch: fetchImpl = globalThis.
     workContextStatus(botId, scopeId, options) {
       return request('GET', ['v1', 'bots', botId, 'work-contexts', '~' + scopeId, 'context'], callOptions(options));
     },
+    getWorkActivity(botId, scopeId, options) {
+      return request('GET', ['v1', 'bots', botId, 'work-contexts', '~' + scopeId, 'activity'], callOptions(options));
+    },
+    stopWork(botId, scopeId, options) {
+      return request('POST', ['v1', 'bots', botId, 'work-contexts', '~' + scopeId, 'stop'], { ...callOptions(options), body: {} });
+    },
+    resumeWork(botId, scopeId, options) {
+      return request('POST', ['v1', 'bots', botId, 'work-contexts', '~' + scopeId, 'resume'], { ...callOptions(options), body: {} });
+    },
     async *live(botId, options = {}) {
       const signal = options.signal;
       const target = new URL(['v1', 'bots', botId, 'live'].map(encodeURIComponent).join('/'), base);
