@@ -10,6 +10,8 @@ import org.json.JSONObject;
 
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.BooleanSupplier;
 
 /** Routes each native tool call to the display owned by its host-authenticated conversation. */
 final class ShowerToolBridge {
@@ -37,45 +39,148 @@ final class ShowerToolBridge {
             Map.entry("MOVE_END", KeyEvent.KEYCODE_MOVE_END)
     );
     private final android.content.Context context;
-    private final ShowerManager manager;
+    private ShowerManager manager;
+    private boolean acquired;
+    private boolean released;
     private final Map<String, ShowerController> controllers = new ConcurrentHashMap<>();
+    private final Map<String, Integer> activeRefs = new ConcurrentHashMap<>();
+    private final AtomicBoolean bridgeClosed = new AtomicBoolean();
 
     ShowerToolBridge(android.content.Context context) {
         this.context = context.getApplicationContext();
-        manager = new ShowerManager(this.context);
+        // 非阻塞快速路径；收尾窗口内返回 null，由 run() 在 worker 上延迟阻塞获取。
+        manager = ShowerManager.tryAcquire(this.context);
+        acquired = manager != null;
+    }
+
+    /** 仅在 worker 执行的工具操作中调用；绝不阻塞 main/reader。 */
+    private ShowerManager ensureManager() {
+        ShowerManager current = manager;
+        if (current != null) return current;
+        synchronized (this) {
+            current = manager;
+            if (current == null) {
+                current = ShowerManager.acquire(context);
+                manager = current;
+                acquired = true;
+            }
+        }
+        return current;
+    }
+
+    private void releaseOwned() {
+        ShowerManager current;
+        synchronized (this) {
+            if (!acquired || released) return;
+            current = manager;
+            released = true;
+        }
+        if (current != null) current.release();
     }
 
     JSONObject execute(String conversationId, JSONObject arguments) throws Exception {
         if (conversationId == null || conversationId.isBlank()) {
             throw new IllegalArgumentException("Shower 操作必须属于一个聊天");
         }
+        return run(conversationId, arguments, null);
+    }
+
+    /** Host 原生调用：归属键只来自可信 metadata，绝不接受模型参数里的归属。 */
+    JSONObject executeOwner(String ownerKey, JSONObject arguments) throws Exception {
+        if (ownerKey == null || ownerKey.isEmpty()) {
+            throw new IllegalArgumentException("Shower 操作缺少归属键");
+        }
+        return run(ownerKey, arguments, null);
+    }
+
+    /** Host 原生调用（带任务取消标记）：取消后即使 Binder 忽略/清除中断也释放本次新建控制器。 */
+    JSONObject executeOwner(String ownerKey, JSONObject arguments, BooleanSupplier cancelled)
+            throws Exception {
+        if (ownerKey == null || ownerKey.isEmpty()) {
+            throw new IllegalArgumentException("Shower 操作缺少归属键");
+        }
+        return run(ownerKey, arguments, cancelled);
+    }
+
+    /** 长度前缀编码，杜绝分隔歧义；归属只来自可信 Host metadata。 */
+    static String ownerKey(String deviceId, String botId, String scopeId, String kind,
+            String conversationId) {
+        StringBuilder key = new StringBuilder("bot-host|");
+        appendPrefixed(key, deviceId);
+        appendPrefixed(key, botId);
+        appendPrefixed(key, scopeId == null ? "" : scopeId);
+        appendPrefixed(key, kind);
+        appendPrefixed(key, conversationId);
+        return key.toString();
+    }
+
+    private static void appendPrefixed(StringBuilder key, String value) {
+        key.append(value.length()).append(':').append(value);
+    }
+
+    private JSONObject run(String key, JSONObject arguments, BooleanSupplier cancelled)
+            throws Exception {
         if (arguments == null) throw new IllegalArgumentException("缺少 Shower 工具参数");
-        ShowerController controller = controllers.computeIfAbsent(conversationId,
-                ignored -> new ShowerController(context, manager));
-        synchronized (controller) {
-        boolean userOperated = controller.awaitAutomation();
-        String action = arguments.optString("action", "");
-        if (userOperated && !"screenshot".equals(action)) {
-            throw new IllegalStateException("用户刚结束手动接管，画面可能已改变；本次操作未执行，请先 screenshot 重新定位再继续");
+        if (bridgeClosed.get()) throw new IllegalStateException("Shower 工具桥已关闭");
+        ShowerManager manager = ensureManager();
+        if (bridgeClosed.get()) {
+            releaseOwned();
+            throw new IllegalStateException("Shower 工具桥已关闭");
         }
-        return switch (action) {
-            case "create" -> create(controller, arguments);
-            case "launch" -> controller.launch(requiredString(arguments, "packageName", 255));
-            case "screenshot" -> controller.screenshot(integer(arguments, "maxWidth", 720),
-                    integer(arguments, "maxHeight", 1280));
-            case "tap" -> controller.tap(integer(arguments, "x"), integer(arguments, "y"));
-            case "swipe" -> controller.swipe(integer(arguments, "x1"), integer(arguments, "y1"),
-                    integer(arguments, "x2"), integer(arguments, "y2"),
-                    integer(arguments, "durationMs", 300));
-            case "key" -> key(controller, arguments);
-            case "text" -> controller.text(requiredString(arguments, "text", 1000, true));
-            case "copy" -> controller.copy(requiredString(arguments, "text", 1000));
-            case "paste" -> controller.paste();
-            case "clear" -> controller.text("").put("action", "clear");
-            case "release" -> controller.release();
-            default -> throw new IllegalArgumentException("未知 Shower action：" + action);
-        };
+        ShowerController controller = controllers.get(key);
+        boolean createdHere = false;
+        if (controller == null) {
+            ShowerController created = new ShowerController(context, manager);
+            ShowerController raced = controllers.putIfAbsent(key, created);
+            controller = raced != null ? raced : created;
+            createdHere = raced == null;
         }
+        if (bridgeClosed.get() || controllers.get(key) != controller) {
+            if (createdHere && controllers.remove(key, controller)) releaseQuietly(controller);
+            throw new IllegalStateException("Shower 工具桥已关闭");
+        }
+        activeRefs.merge(key, 1, Integer::sum);
+        try {
+            synchronized (controller) {
+            boolean userOperated = controller.awaitAutomation();
+            String action = arguments.optString("action", "");
+            if (userOperated && !"screenshot".equals(action)) {
+                throw new IllegalStateException("用户刚结束手动接管，画面可能已改变；本次操作未执行，请先 screenshot 重新定位再继续");
+            }
+            return switch (action) {
+                case "create" -> create(controller, arguments);
+                case "launch" -> controller.launch(requiredString(arguments, "packageName", 255));
+                case "screenshot" -> controller.screenshot(integer(arguments, "maxWidth", 720),
+                        integer(arguments, "maxHeight", 1280));
+                case "tap" -> controller.tap(integer(arguments, "x"), integer(arguments, "y"));
+                case "swipe" -> controller.swipe(integer(arguments, "x1"), integer(arguments, "y1"),
+                        integer(arguments, "x2"), integer(arguments, "y2"),
+                        integer(arguments, "durationMs", 300));
+                case "key" -> key(controller, arguments);
+                case "text" -> controller.text(requiredString(arguments, "text", 1000, true));
+                case "copy" -> controller.copy(requiredString(arguments, "text", 1000));
+                case "paste" -> controller.paste();
+                case "clear" -> controller.text("").put("action", "clear");
+                case "release" -> controller.release();
+                default -> throw new IllegalArgumentException("未知 Shower action：" + action);
+            };
+            }
+        } finally {
+            int remaining = activeRefs.merge(key, -1, Integer::sum);
+            if (remaining <= 0) activeRefs.remove(key, remaining);
+            // 取消/关闭时释放本次新建且无其他任务复用的控制器，避免显示泄漏。
+            boolean cancelledNow = cancelled != null ? cancelled.getAsBoolean()
+                    : Thread.currentThread().isInterrupted();
+            if (createdHere && remaining == 0 && (cancelledNow || bridgeClosed.get())
+                    && controllers.remove(key, controller)) {
+                releaseQuietly(controller);
+            }
+        }
+    }
+
+    private static void releaseQuietly(ShowerController controller) {
+        try { controller.release(); }
+        catch (Exception ignored) { }
     }
 
     ShowerController existingController(String conversationId) {
@@ -104,12 +209,14 @@ final class ShowerToolBridge {
     }
 
     void shutdown() {
+        if (!bridgeClosed.compareAndSet(false, true)) return;
         for (ShowerController controller : controllers.values()) {
             try { controller.release(); }
             catch (Exception ignored) { }
         }
         controllers.clear();
-        manager.stopServer();
+        activeRefs.clear();
+        releaseOwned();
     }
 
     private JSONObject key(ShowerController controller, JSONObject arguments) throws Exception {

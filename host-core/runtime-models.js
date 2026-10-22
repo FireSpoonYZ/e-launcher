@@ -52,6 +52,13 @@ function normalizeProviderBaseUrl(raw) {
   return url.href.replace(/\/+$/, '');
 }
 
+/** bashPath 允许 bash/bash.exe；Android 另允许精确的 /system/bin/sh，不接受任意 sh.exe。 */
+function isShellExecutable(bashPath) {
+  const base = path.basename(bashPath).toLowerCase();
+  if (base === 'bash' || base === 'bash.exe') return true;
+  return process.platform === 'android' && bashPath === '/system/bin/sh';
+}
+
 /**
  * 校验执行选项边界：bashPath 与 toolPaths 均可选，仅 undefined 表示未提供；
  * 显式 null 或类型错误一律 INVALID_ARGUMENT。不探测文件存在性——路径是否可用留到实际使用。
@@ -62,9 +69,8 @@ export function parseExecutionOptions(options = {}) {
     if (typeof options.bashPath !== 'string' || options.bashPath.trim() === '' || !path.isAbsolute(options.bashPath)) {
       throw invalidArgument('bashPath must be a non-empty absolute path');
     }
-    const base = path.basename(options.bashPath).toLowerCase();
-    if (base !== 'bash' && base !== 'bash.exe') {
-      throw invalidArgument('bashPath must point to a bash or bash.exe executable');
+    if (!isShellExecutable(options.bashPath)) {
+      throw invalidArgument('bashPath must point to a bash, bash.exe, or /system/bin/sh executable');
     }
     bashPath = options.bashPath;
   }
@@ -190,7 +196,7 @@ function validateProviders(providers) {
       if (!isPlainObject(m)) {
         throw invalidArgument(`runtime config: each model of provider "${id}" must be an object`);
       }
-      rejectUnknownFields(m, new Set(['id', 'name', 'reasoning', 'contextWindow', 'maxTokens']), 'runtime config model');
+      rejectUnknownFields(m, new Set(['id', 'name', 'reasoning', 'contextWindow', 'maxTokens', 'input']), 'runtime config model');
       const modelId = m.id;
       if (typeof modelId !== 'string' || modelId.trim() === '' || !modelId.isWellFormed()) {
         throw invalidArgument('runtime config: model id must be a non-empty well-formed string');
@@ -215,9 +221,32 @@ function validateProviders(providers) {
       if (maxTokens > contextWindow) {
         throw invalidArgument(`runtime config: model "${modelId}" maxTokens must not exceed contextWindow`);
       }
+      // 显式 input 仅接受已知模态且 text 必含；规范顺序固定 text 在前、剩余模态按出现序在后。
+      let input;
+      if (m.input !== undefined) {
+        if (!Array.isArray(m.input) || m.input.length === 0) {
+          throw invalidArgument(`runtime config: model "${modelId}" input must be a non-empty array`);
+        }
+        const normalized = [];
+        for (const kind of m.input) {
+          if (typeof kind !== 'string' || (kind !== 'text' && kind !== 'image')) {
+            // 固定文本：String(kind) 对带 toString 的对象可能自身抛错。
+            throw invalidArgument(`runtime config: model "${modelId}" input has unknown kind`);
+          }
+          if (normalized.includes(kind)) {
+            throw invalidArgument(`runtime config: model "${modelId}" input has duplicate kind: ${kind}`);
+          }
+          normalized.push(kind);
+        }
+        if (!normalized.includes('text')) {
+          throw invalidArgument(`runtime config: model "${modelId}" input must include text`);
+        }
+        input = ['text', ...normalized.filter((kind) => kind !== 'text')];
+      }
       const model = { id: modelId, contextWindow, maxTokens };
       if (m.name !== undefined) model.name = m.name;
       if (m.reasoning !== undefined) model.reasoning = m.reasoning;
+      if (input !== undefined) model.input = input;
       models.push(model);
     }
     // 规范结果不带 undefined 属性，保证 normalize -> stringify/parse -> normalize 等价。
@@ -235,7 +264,7 @@ function buildProvider(provider) {
     api: 'openai-completions',
     provider: provider.id,
     baseUrl: provider.baseUrl,
-    input: ['text'],
+    input: m.input ?? ['text'],
     reasoning: m.reasoning ?? false,
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: m.contextWindow,

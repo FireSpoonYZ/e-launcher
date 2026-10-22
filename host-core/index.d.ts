@@ -319,6 +319,8 @@ export interface ModelConfig {
   reasoning?: boolean;
   contextWindow?: number;
   maxTokens?: number;
+  /** Optional input modalities; omitted stays text-only, explicit arrays require text and may add image. */
+  input?: ('text' | 'image')[];
 }
 
 export interface ProviderConfig {
@@ -336,6 +338,48 @@ export interface RuntimeConfig {
   toolPaths?: { rg?: string; fd?: string };
 }
 
+/**
+ * Module 15: trusted local Android native-bridge callback. Installed only as
+ * an in-process JS function on runtime/control/host-service options; never
+ * persisted or accepted as a JSON settings field.
+ */
+export interface NativeBridgeActorPrimary {
+  deviceId: string;
+  botId: string;
+  /** Host-public conversation UUID, distinct from SDK numeric IDs. */
+  conversationId: string;
+  scopeId: null;
+  kind: 'primary';
+}
+
+export interface NativeBridgeActorScope {
+  deviceId: string;
+  botId: string;
+  /** Host-public conversation UUID, distinct from SDK numeric IDs. */
+  conversationId: string;
+  scopeId: string;
+  kind: 'room' | 'dm';
+}
+
+/** Actor discriminates primary (scopeId null) vs room/DM scope (scopeId string). */
+export type NativeBridgeActor = NativeBridgeActorPrimary | NativeBridgeActorScope;
+
+export type NativeBridgeTool = 'android_apps' | 'android_shower' | 'android_speak';
+
+export interface NativeBridgeRequest {
+  tool: NativeBridgeTool;
+  actor: NativeBridgeActor;
+  /** Durable numeric task id of the active primary/work generation. */
+  taskId: number;
+  arguments: Record<string, unknown>;
+}
+
+/** Trusted JS bridge; resolves to a plain JSON object or array. */
+export type NativeBridge = (
+  request: NativeBridgeRequest,
+  options?: { signal?: AbortSignal },
+) => Promise<Record<string, unknown> | unknown[]>;
+
 export interface OpenRuntimeOptions {
   dataRoot: string;
   models?: Models;
@@ -346,6 +390,8 @@ export interface OpenRuntimeOptions {
   toolPaths?: { rg?: string; fd?: string };
   /** Optional Hindsight memory config; absent leaves memory disabled. */
   hindsight?: HindsightOptions;
+  /** Optional trusted JS native bridge for Android tools; never persisted as a settings field. */
+  nativeBridge?: NativeBridge;
 }
 
 export interface Runtime {
@@ -617,6 +663,8 @@ export interface HostServiceOptions {
   token: string;
   port?: number;
   initialSettings?: HostSettings;
+  /** Optional trusted JS native bridge for Android tools; never persisted as a settings field. */
+  nativeBridge?: NativeBridge;
 }
 
 export interface HostServiceStatus {

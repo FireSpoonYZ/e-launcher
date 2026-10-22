@@ -105,6 +105,14 @@ Shower 对存活的独立虚拟屏每约 4 秒报告显示活动，保留原有 
 
 设备定时执行检查：构建并覆盖安装对应 ABI 的调试 APK，配置默认模型后，运行 `node scripts/check-scheduled-alarms-device.mjs --serial=<设备序列号>`。脚本同时支持明确指定的手机或模拟器，先确认没有运行中的会话，再分别创建系统闹钟和精确定时短回复任务，验证后台进程回收、锁屏触发、实际 Pi/模型回复、无重复记录及完成后删除，并检查任务入口。它不强行停止应用、不替换模型配置或整份定时偏好，只清理自己创建的任务定义，保留执行会话和记录，不切换当前聊天。验收前后比对已安装 APK 与当前 worktree 调试包的 SHA-256，截图和报告写入系统临时目录。ROM 忽略 `am kill` 时，脚本通过调试应用自身 UID 的 `SIGKILL` 模拟进程丢失，不设置应用的强行停止状态。此检查不覆盖关机、强行停止、长时间 Doze、Shizuku 手机操作或启动失败重试的故障注入。
 
+## Android Host（Bot/Host 核心）
+
+Android 应用内集成 Host 核心：在受监督的独立 Node Mobile 子进程中运行 Pi Durable/chord/pi-ai **1.3.0** 与内嵌 acp-kernel **0.0.101**，Capacitor 外壳保持不变。Host 提供 Bot 登记、持久消息账本、工具（含 grep/find）、工作上下文与长期记忆；尚未做旧数据迁移，也未引入 Tauri。
+
+- **使用入口**：用户在设置中开启/停止 Host；Host 仅在用户显式开启 `specialUse` 前台服务时运行，无开机自启/空闲自动关闭/粘性重启。
+- **配置与数据**：Host 运行数据位于独立 `files/bot-host`；模型凭据与语音偏好分别在 `bot_host_credentials`、`bot_host_voice`、`bot_host_voice_secrets` SharedPreferences（不在 files/bot-host 内），与旧聊天数据隔离；模型/语音由用户配置，系统语音入口仍走 Android 原生路径。
+- **构建与许可**：构建命令与前提（JDK/AGP/NDK/CMake/Node/Rust 目标及自动 prepare/bundle）见 [host-core/README.md](host-core/README.md) 模块 15；依赖与 NDK 搜索工具（rg/fd）许可见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+
 ## 构建与检查（Windows PowerShell）
 
 JDK 21、Gradle 8.14.3（仓库内 `gradlew`）、SDK Platform 36、AGP 8.13.0，最低支持 Android 13（minSdk33）、targetSdk36；Android 10–12 不再支持。运行时网络使用 OkHttp 3.14.9。首次构建需下载 Gradle 发行包与构建依赖并接受 SDK 许可。先运行 `scripts/prepare-pi-runtime.ps1` 准备 Node Mobile、SDK 资源和锁定完整性的官方 npm 11.6.2 payload；JavaScript 改动后运行 `npm --prefix pi-runtime test` 重建并测试 bundle。Gradle 从 `shower-server/` 的固定来源构建精简 Binder-only APK，并以 `shower-server.jar` 生成到 App assets；不需要 Python、Lamda payload 或外部部署脚本。构建还会把真实 arm64 Node executable 以 `libnode_launcher.so` 打入 APK 的 native library 目录；npm 的完整目录保存在版本化 asset 中并仅在版本首次使用时原子展开。
@@ -199,7 +207,7 @@ Kokoro 路径请求流式 PCM（24 kHz、单声道、16 位小端），使用 Au
 
 当前自部署服务使用 Kokoro v1.0 权重；音色固定不代表韵律和发音已经通过试听。验收时应测试中文夹英文、数字、长回复、连续打断和网络中断，区分 HTTP 响应头时间、首个音频块时间与手机实际出声时间。
 
-下一代多端 Bot 架构见 [未来设计（尚未实现）](docs/next-generation-architecture.md)。[Bot/Host 核心](host-core/README.md) 已独立实现本机登记、Durable 长期主私聊与内嵌 Billion Context，尚未接入现有应用。
+下一代多端 Bot 架构与实施进度见 [下一代架构与实施进度](docs/next-generation-architecture.md)。[Bot/Host 核心](host-core/README.md) 已独立实现本机登记、Durable 长期主私聊与内嵌 Billion Context，并已作为 Android Host（M15 已交付）在应用内运行；旧数据迁移与 Tauri 尚未开始。
 
 ## 源码与许可证
 

@@ -22,6 +22,7 @@ public class MainActivity extends BridgeActivity {
     public static final String EXTRA_NEW_CHAT = "assistant_new_chat";
     public static final String EXTRA_OPEN_ARCHIVED = "assistant_open_archived";
     public static final String EXTRA_OPEN_SCHEDULE = "assistant_open_schedule";
+    public static final String EXTRA_OPEN_HOST = "assistant_open_host";
     private static final String ROUTE_KEY = "web_route";
     private static final String ENTRY_CONSUMED_KEY = "assistant_entry_consumed";
     private static final String ARCHIVED_PROMPT_KEY = "assistant_archived_prompt";
@@ -85,6 +86,7 @@ public class MainActivity extends BridgeActivity {
         registerPlugin(SettingsPlugin.class);
         registerPlugin(DevicePlugin.class);
         registerPlugin(RemoteTerminalPlugin.class);
+        registerPlugin(BotHostPlugin.class);
         bridgeBuilder.addWebViewListener(new WebViewListener() {
             @Override public void onPageStarted(WebView view) {
                 webReady = false;
@@ -133,8 +135,13 @@ public class MainActivity extends BridgeActivity {
         boolean archived = intent.getBooleanExtra(EXTRA_OPEN_ARCHIVED, false);
         String archivedId = intent.getStringExtra(TaskDetailActivity.EXTRA_ARCHIVED_ID);
         String taskId = intent.getStringExtra(EXTRA_OPEN_SCHEDULE);
+        boolean openHost = intent.getBooleanExtra(EXTRA_OPEN_HOST, false);
         clearEntryExtras(intent);
-        if (taskId != null) {
+        if (openHost) {
+            pendingArchivedId = null;
+            archivePromptShown = false;
+            launchWeb("/settings/host");
+        } else if (taskId != null) {
             pendingArchivedId = null;
             archivePromptShown = false;
             launchWeb("/schedules?taskId=" + Uri.encode(taskId));
@@ -160,6 +167,7 @@ public class MainActivity extends BridgeActivity {
         intent.removeExtra(EXTRA_NEW_CHAT);
         intent.removeExtra(EXTRA_OPEN_ARCHIVED);
         intent.removeExtra(EXTRA_OPEN_SCHEDULE);
+        intent.removeExtra(EXTRA_OPEN_HOST);
         intent.removeExtra(TaskDetailActivity.EXTRA_OPEN_CHAT);
         intent.removeExtra(TaskDetailActivity.EXTRA_ARCHIVED_ID);
     }

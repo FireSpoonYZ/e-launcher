@@ -11,6 +11,7 @@ import { AdvancedPage, EditorPage } from './Editor';
 import { SchedulesPage, ScheduleHistoryPage } from './Schedules';
 const TerminalsPage = lazy(() => import('./RemoteTerminal').then(module => ({default: module.TerminalsPage})));
 const TerminalPage = lazy(() => import('./RemoteTerminal').then(module => ({default: module.TerminalPage})));
+const HostPage = lazy(() => import('./Host').then(module => ({default: module.HostPage})));
 
 function Navigation() {
   const back = useBack(); const location = useLocation();
@@ -81,6 +82,7 @@ function Shell({initialDevice}: {initialDevice: DeviceState}) {
     <Route path="/settings/appearance" element={<AppearancePage/>}/>
     <Route path="/settings/device" element={<DevicePage/>}/>
     <Route path="/settings/providers" element={<ProvidersPage/>}/>
+    <Route path="/settings/host" element={<Suspense fallback={<Loading/>}><HostPage/></Suspense>}/>
     <Route path="/settings/voice" element={<VoicePage/>}/>
     <Route path="/settings/resources/:kind" element={<ResourcesPage/>}/>
     <Route path="/settings/advanced" element={<AdvancedPage/>}/>

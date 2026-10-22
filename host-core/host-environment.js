@@ -11,10 +11,15 @@ function errWithCode(message, code) {
 
 function isBashName(file) {
   const name = basename(file).toLowerCase();
-  return name === 'bash' || name === 'bash.exe';
+  if (name === 'bash' || name === 'bash.exe') return true;
+  // Android 系统 sh：仅精确 /system/bin/sh，不接受任意 sh.exe。
+  return process.platform === 'android' && file === '/system/bin/sh';
 }
 
 function defaultBashCandidates() {
+  if (process.platform === 'android') {
+    return ['/system/bin/sh'];
+  }
   if (process.platform === 'win32') {
     const candidates = [];
     for (const dir of [process.env.ProgramFiles, process.env['ProgramFiles(x86)']]) {
@@ -49,15 +54,22 @@ function resolveBash(bashPath) {
     }
     return candidate;
   }
-  throw errWithCode('bash unavailable: no Git Bash found in known Git install locations', 'BASH_UNAVAILABLE');
+  const message = process.platform === 'android'
+    ? 'shell unavailable: no /system/bin/sh found'
+    : process.platform === 'win32'
+      ? 'bash unavailable: no Git Bash found in known Git install locations'
+      : 'bash unavailable: no bash found in /bin or /usr/bin';
+  throw errWithCode(message, 'BASH_UNAVAILABLE');
 }
 
 /**
  * NodeExecutionEnv-based host execution environment.
  *
- * Command strings run through the selected bash (Git Bash on Windows, bash on
- * Linux) as `bash --noprofile --norc -c <command>`; the native shell discovery is
- * not used because it searches PATH and does not pass the profile flags. Anything
+ * Command strings run through the selected shell (Git Bash on Windows, bash on
+ * Linux, /system/bin/sh on Android): `bash --noprofile --norc -c <command>`
+ * when the selected executable is bash, `-c <command>` alone for /system/bin/sh.
+ * The native shell discovery is not used because it searches PATH and does not
+ * pass the profile flags. Anything
  * else -- argv arrays, file operations, id, cancellation, output, cleanup --
  * is delegated untouched to NodeExecutionEnv.
  */
@@ -82,7 +94,10 @@ class HostExecutionEnv extends NodeExecutionEnv {
       if (this._bash === undefined) {
         this._bash = resolveBash(this._bashPath);
       }
-      command = [this._bash, '--noprofile', '--norc', '-c', command];
+      // --noprofile/--norc 是 bash 专用参数；按实际选中可执行文件选择：/system/bin/sh 只用 -c，显式 bash 仍带 profile 标志。
+      command = this._bash === '/system/bin/sh'
+        ? [this._bash, '-c', command]
+        : [this._bash, '--noprofile', '--norc', '-c', command];
     }
     return super.exec(command, options, context);
   }

@@ -30,8 +30,13 @@ final class VoiceSettings {
     private final SharedPreferences prefs, secrets;
 
     VoiceSettings(Context context) {
-        prefs = context.getSharedPreferences("voice", Context.MODE_PRIVATE);
-        secrets = context.getSharedPreferences("voice_secrets", Context.MODE_PRIVATE);
+        this(context, "voice", "voice_secrets");
+    }
+
+    /** Host 使用独立命名空间，不影响旧 voice/voice_secrets。 */
+    VoiceSettings(Context context, String prefsName, String secretsName) {
+        prefs = context.getSharedPreferences(prefsName, Context.MODE_PRIVATE);
+        secrets = context.getSharedPreferences(secretsName, Context.MODE_PRIVATE);
     }
 
     String sttEngine() { return oneOf(prefs.getString("sttEngine", SYSTEM), ENGINES, SYSTEM); }

@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { Capacitor } from '@capacitor/core';
 import { App as CapacitorApp } from '@capacitor/app';
 import * as Switch from '@radix-ui/react-switch';
-import { Database, ExternalLink, FileText, Grid2X2, Info, Mic, Palette, Puzzle, RefreshCw, Settings, Share2, Shield, SlidersHorizontal } from 'lucide-react';
+import { Database, ExternalLink, FileText, Grid2X2, Info, Mic, Palette, Puzzle, RefreshCw, Server, Settings, Share2, Shield, SlidersHorizontal } from 'lucide-react';
 import { Device, NativeSettings, type DeviceState, type VoiceRemote, type VoiceState } from './native';
 import { Dialog } from './components/ui/dialog';
 import { Environment, ErrorNotice, Header, Row, Section, useAction, useText } from './ui';
@@ -17,6 +17,7 @@ export function SettingsHome() {
   </Section><Section title={t('AI 与工具','AI & tools')}>
     <Row icon={<FileText/>} title={t('全局 AGENTS.md','Global AGENTS.md')} detail={t('编辑与保存全局 Agent 指令','Edit and save global agent instructions')} onClick={() => nav('/settings/editor?project=false&file=AGENTS.md')}/>
     <Row icon={<Database/>} title={t('服务商与模型','Providers & models')} onClick={() => nav('/settings/providers')}/>
+    <Row icon={<Server/>} title={t('本机 Host','Local Host')} detail={t('本地节点与远程控制','Local Host & remote control')} onClick={() => nav('/settings/host')}/>
     <Row icon={<Mic/>} title={t('语音','Voice')} detail={t('识别、朗读与语音唤醒','Speech, read-aloud & wake word')} onClick={() => nav('/settings/voice')}/>
     <Row icon={<Puzzle/>} title={t('技能','Skills')} onClick={() => nav('/settings/resources/skills')}/>
     <Row icon={<Share2/>} title="MCP" onClick={() => nav('/settings/resources/mcp')}/>

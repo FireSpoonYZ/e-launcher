@@ -6,6 +6,7 @@ import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { createModels } from '@earendil-works/pi-ai/models';
 import { buildCompressSystemPrompt } from 'acp-kernel';
 import { createCodingTools } from '@earendil-works/pi-durable/tools';
+import { createAndroidTools } from './android-tools.js';
 import { createHostExecutionEnv } from './host-environment.js';
 import { openHost } from './host.js';
 import { acquireRuntimeOwner } from './runtime-owner.js';
@@ -49,6 +50,11 @@ function assertNonBlank(value, name) {
 export async function openRuntime(options) {
   // 执行选项先于任何写数据校验：bashPath/toolPaths 类型错误在打开 host 前拒绝。
   const execution = parseExecutionOptions(options);
+  // 可信原生桥接仅进程注入时接受：非函数直接拒绝，且绝不来自配置/HTTP/relay。
+  const nativeBridge = options?.nativeBridge;
+  if (nativeBridge !== undefined && typeof nativeBridge !== 'function') {
+    throw errWithCode('nativeBridge must be a function', 'INVALID_ARGUMENT');
+  }
   // hindsight 配置在打开 host/任何写入前归一化；未配置返回 null，控制器仍创建为禁用态。
   const hindsightOptions = parseHindsightOptions(options?.hindsight);
   const host = openHost({ dataRoot: options?.dataRoot });
@@ -114,7 +120,10 @@ export async function openRuntime(options) {
       createLsTool(),
     ],
     sections: [section('host-execution', (input) => {
-      const shell = process.platform === 'win32' ? 'Git Bash' : 'bash';
+      // Android 系统 sh 在描述中显式；Windows Git Bash 与 Linux bash 保持不变。
+      const shell = process.platform === 'android'
+        ? '/system/bin/sh'
+        : process.platform === 'win32' ? 'Git Bash' : 'bash';
       const cwd = input.env?.cwd ?? input.agent.cwd;
       return `Tools execute on this host (device ${host.deviceId}) through ${shell}; they are not sandboxed. Default working directory: ${JSON.stringify(cwd ?? null)}.`;
     })],
@@ -128,6 +137,13 @@ export async function openRuntime(options) {
       publishWork: decisions.publishWork,
     }),
   }));
+  // 原生桥接工具仅显式注入时注册：主会话与 work 身份共享同一 registry，二者均可见。
+  if (nativeBridge) {
+    registry.install(defineExtension({
+      name: 'host.android-tools',
+      tools: createAndroidTools({ host, getHarness: () => harness, nativeBridge }),
+    }));
+  }
   if (hindsightOptions) {
     registry.install(defineExtension({
       name: 'host.hindsight',

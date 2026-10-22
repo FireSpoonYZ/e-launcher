@@ -102,6 +102,11 @@ export async function openControlServer(options) {
   // 仍把原始字段传给 openRuntime，绝不把归一化后的 apiKey 对象送回公共解析器。
   parseHindsightOptions(runtimeOptions.hindsight);
 
+  // nativeBridge 只能注入函数；在打开本服务 Host 前拒绝，避免已开资源泄漏。
+  if (runtimeOptions.nativeBridge !== undefined && typeof runtimeOptions.nativeBridge !== 'function') {
+    throw new ControlHttpError(400, 'INVALID_ARGUMENT', 'nativeBridge must be a function');
+  }
+
   const host = openHost({ dataRoot: runtimeOptions.dataRoot });
   let runtime;
   try {

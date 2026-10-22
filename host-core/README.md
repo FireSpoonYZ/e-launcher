@@ -1,6 +1,6 @@
 # @e-launcher/host-core
 
-本机 Bot/Host 核心。模块 1 提供 Bot 定义与主私聊身份登记；模块 2 接入 Pi Durable 长期主私聊、历史与执行恢复；模块 3 内嵌 Billion Context；模块 4 接入本机工具（read/write/edit/bash 与 grep/find/ls）；模块 5 接入本机长驻控制 API 与客户端；模块 6 接入 Bot 主私聊直播预览（认证本地 SSE、运行时 watch、客户端与 CLI）；模块 7 接入本机持久消息账本（messages.sqlite：作用域/成员修订、不可变信封、outbox、落地去重 ACK、本地收件/历史/缺口、特权离线 CLI）；模块 8 接入认证设备中继与 Host 消息投递（中心只存设备注册；复用模块 7 outbox，本机进程网络端到端）；模块 9 在认证中继上增加固定 10 个 JSON 方法的远程 Host 控制（独立多客户端角色、Node 客户端与一次性 CLI；父助手已完成本机独立进程 171/171 个端到端检查点验收，范围见下文）；模块 10 已完成群与 Bot DM 的独立工作上下文（显式被动导入、独立 Durable/BC、本机 API/CLI；父助手完成 149/149 个检查点，实测范围与限制见下文）。模块 11 已完成自然群聊决策与 Bot 通信工具（父助手完成 161/161 个端到端检查点，含 18 份数据库完整性/外键检查；限定环境与未实测范围见下文）。模块 12（成员范围管理与历史补齐）已完成父助手限定范围验收：实际运行 122/122 个检查点通过，总完成数 **12/20**。模块 13（Hindsight → Pi Durable 可追溯长期记忆）已完成 Host 侧适配及限定范围验收，总完成数 **13/20**。模块 14（统一 Host 服务与设备接入）已完成父助手限定范围验收（139/139 检查点，范围见下文），总完成数 **14/20**；模块 15–20 共 6 个待交付。运行时由单 Host 所有者持有，跨进程身份稳定。包正式名为 `@e-launcher/host-core`；当前仓库尚无 workspace/包安装连接，示例直接从仓库根导入本地文件（见下文）。
+本机 Bot/Host 核心。模块 1 提供 Bot 定义与主私聊身份登记；模块 2 接入 Pi Durable 长期主私聊、历史与执行恢复；模块 3 内嵌 Billion Context；模块 4 接入本机工具（read/write/edit/bash 与 grep/find/ls）；模块 5 接入本机长驻控制 API 与客户端；模块 6 接入 Bot 主私聊直播预览（认证本地 SSE、运行时 watch、客户端与 CLI）；模块 7 接入本机持久消息账本（messages.sqlite：作用域/成员修订、不可变信封、outbox、落地去重 ACK、本地收件/历史/缺口、特权离线 CLI）；模块 8 接入认证设备中继与 Host 消息投递（中心只存设备注册；复用模块 7 outbox，本机进程网络端到端）；模块 9 在认证中继上增加固定 10 个 JSON 方法的远程 Host 控制（独立多客户端角色、Node 客户端与一次性 CLI；父助手已完成本机独立进程 171/171 个端到端检查点验收，范围见下文）；模块 10 已完成群与 Bot DM 的独立工作上下文（显式被动导入、独立 Durable/BC、本机 API/CLI；父助手完成 149/149 个检查点，实测范围与限制见下文）。模块 11 已完成自然群聊决策与 Bot 通信工具（父助手完成 161/161 个端到端检查点，含 18 份数据库完整性/外键检查；限定环境与未实测范围见下文）。模块 12（成员范围管理与历史补齐）已完成父助手限定范围验收：实际运行 122/122 个检查点通过，总完成数 **12/20**。模块 13（Hindsight → Pi Durable 可追溯长期记忆）已完成 Host 侧适配及限定范围验收，总完成数 **13/20**。模块 14（统一 Host 服务与设备接入）已完成父助手限定范围验收（139/139 检查点，范围见下文），总完成数 **14/20**。模块 15（Android 本机 Host）已交付并获父助手验收，总完成数 **15/20**；模块 16–20 共 5 个待交付。运行时由单 Host 所有者持有，跨进程身份稳定。包正式名为 `@e-launcher/host-core`；当前仓库尚无 workspace/包安装连接，示例直接从仓库根导入本地文件（见下文）。
 
 整体方向见 [下一代多端 Bot 架构设计](../docs/next-generation-architecture.md)（目标架构，部分已实现），交付计划与完成/剩余模块见 [重构路线图](../docs/refactor-roadmap.md)。
 
@@ -998,13 +998,13 @@ node host-core/control-cli.js work-resume --url http://127.0.0.1:8787 \
 
 剩余限制：未验证物理 WAN/Linux/Android/arm64/Tauri/TUI；M7–M11 为选定回归而非全量历史场景重跑；M12 高水位/反压分支未单独饱和测试（沿用 M8 共享路径）；未穷尽并发微观交错；原始作者端到端签名/加密**未实现**，当前信任模型是认证通道+TLS 认证 peer；Mockoon 夹具不代表付费/智能模型验收。
 
-模块 **13** 已完成 Host 侧适配交付。模块 **14**（远程 work/实时接线、统一服务与本机设置、客户端待发送/对账）已完成父助手限定范围验收（139/139 检查点，见下节），总完成数 **14/20**；模块 **15–20 共 6 个**仍待交付：跨平台/迁移/外壳/真机集成。不引入中央决策、自动 routine、Session 管理或新的后台任务产品。
+模块 **13** 已完成 Host 侧适配交付。模块 **14**（远程 work/实时接线、统一服务与本机设置、客户端待发送/对账）已完成父助手限定范围验收（139/139 检查点，见下节），总完成数 **14/20**；模块 **15**（Android 本机 Host）已完成父助手验收（见下节），总完成数 **15/20**；模块 **16–20 共 5 个**仍待交付：跨平台/迁移/外壳/真机集成。不引入中央决策、自动 routine、Session 管理或新的后台任务产品。
 
 <a id="hindsight-memory"></a>
 
 ## 模块 13：可追溯长期记忆（Hindsight → Pi Durable，Host 侧适配交付）
 
-模块 13 为每个 Bot 接入 Hindsight 的长期事实提取、召回与纠正能力，保留来源和适用范围。Host 侧适配已交付（M13 交付时为 13/20；当前含 M14 为 14/20）；运行环境与后端联调范围见本节末尾。
+模块 13 为每个 Bot 接入 Hindsight 的长期事实提取、召回与纠正能力，保留来源和适用范围。Host 侧适配已交付（M13 交付时为 13/20；当前含 M15 为 15/20）；运行环境与后端联调范围见本节末尾。
 
 ### 版本与外接方式
 
@@ -1094,7 +1094,7 @@ CLI 均要求 `--bot-id`。`memory-status` 可选 `--input`，其余命令必须
 
 模块 14 把模块 5 本机控制面、模块 8/9 认证中继与远程控制、模块 10–12 工作上下文/scope、模块 13 记忆整合为**统一本机服务**（`openHostService`），并新增本机设置持久化、远端协议 v2（35 方法）、受控远端实时预览与客户端待发送/对账。
 
-**状态**：模块 14 已完成交付并获父助手限定范围验收，总完成数 **14/20**；模块 15–20 共 6 个待交付，未开始任何 M15 工作。
+**状态**：模块 14 已完成交付并获父助手限定范围验收，总完成数 **14/20**；模块 15 已交付（见下节），模块 16–20 共 5 个待交付。
 
 ### 验收覆盖
 
@@ -1234,3 +1234,81 @@ node host-core/pending-cli.js reconcile --data-root "$CLIENT_STATE" --device-id 
 - 类型检查：skipLibCheck 通过；完整检查仍有既有 genai 声明缺 `@modelcontextprotocol/sdk/client/index.js`（TS2307），不宣称全量第三方类型检查通过。
 - 统一长驻服务不是操作系统服务安装器，也不保证始终在线；Android/Tauri/TUI、迁移与既有原生兼容属于后续模块。
 - TLS+认证通道 peer 不等于原始作者的端到端签名/加密；relay 仅有界瞬时转发业务，不持久保存业务正文/工作上下文/模型与 Hindsight API 凭证或运行推理；中心仅持久保存设备登记与认证校验信息（设备 token 哈希/credentialVersion）。模块 13 的记忆接线与限制保留，不改路线 M15–M20。
+
+## 模块 15：Android 本机 Host 与原生能力桥
+
+**状态**：M15 已交付并获父助手验收，总完成数 **15/20**；模块 16–20 共 5 个待交付。M14 历史记录及其验收边界保留。
+
+### 架构与生命周期
+
+Android 本地 Host 在受监督的独立 Node Mobile 子进程中运行 Durable/chord/pi-ai 1.3.0 + acp-kernel 0.0.101；Capacitor 保留；未做旧数据迁移或 Tauri。仅用户显式开启的 specialUse FGS；无 boot/auto-start/空闲关闭/粘性重启。专用私有 JSONL、onStarting/真实 spawn/reap、生成清理 fence、固定 debug-only stage/exitCode/优雅日志；Capacitor payload loggingBehavior none。
+
+### 路径、凭据与语音
+
+Host 运行数据在独立 `files/bot-host`（含 `bot-host/workspaces`）；模型凭据在 `bot_host_credentials` SharedPreferences（仅存别名映射，无 getter 不返回值），语音偏好/秘密在 `bot_host_voice`/`bot_host_voice_secrets`；凭据不在 files/bot-host 内。旧路径与签名保留；不读取/清除真实用户数据。
+
+### 构建与前提
+
+JDK 21、SDK Platform 36、NDK 28.2.13676358、CMake 3.22.1、Node ≥ 22.19，另需 Rust cargo/rustup 与 `aarch64-linux-android`、`x86_64-linux-android` 目标。app/build.gradle 自动 prepare Android Host 资源（prepareHostTools/buildHostRuntime 挂 preBuild，构建 Host 运行时并生成 jniLibs 工具）。
+
+在 Git Bash 中使用 `./gradlew`（可先按需 export 环境变量）：
+
+```bash
+# 默认 arm64-v8a：
+export ANDROID_HOME="$LOCALAPPDATA/Android/Sdk"
+export JAVA_HOME="/c/Program Files/Microsoft/jdk-21.0.9.10-hotspot"
+./gradlew :app:assembleDebug --no-daemon --console=plain
+# APK：app/build/outputs/apk/debug/app-debug.apk
+
+# 模拟器 x86_64（app + instrumentation）：
+./gradlew :app:assembleDebug :app:assembleDebugAndroidTest -PlauncherAbis=x86_64 --no-daemon --console=plain
+```
+
+Android 搜索工具（rg/fd）固定 API 29，不改变 App minSdk33。NDK/16KiB rg15.1.0 fd10.3.0（x86_64、arm64-v8a）固定 crate SHA 与锁定 Cargo 隔离环境；真实 untrusted_app 7/7 文件工具通过（含 grep/find）；私有祖先 Cargo 配置被拒，迁移 pins 后 4/4 缓存复验；许可见 THIRD_PARTY_NOTICES.md。
+
+### 设置、凭据与桥
+
+设置与凭据写入仅下次显式重启生效：`settingsSet({input:{expectedRevision,settings}})`，在线保存标记 restartRequired（ready 绑定成功后清除）；saveCredentials 只写整个 aliases 映射替换（validateCredentials 无增量更新）。请求并发满/过渡期拒绝为 BUSY/not-sent。
+
+专用 Capacitor `BotHostPlugin`（name="BotHost"）方法组：
+
+| 方法 | 输入/语义 |
+| --- | --- |
+| `snapshot` | 返回状态快照 |
+| `status` | 状态（phase/deviceId/restartRequired/errorCode 等） |
+| `start` / `stop` | 显式启动/停止 Host |
+| `settingsGet` | 读取设置 |
+| `settingsSet` | `{input:{expectedRevision,settings}}`，仅重启生效 |
+| `saveCredentials` | `{aliases}`，整表替换 |
+| `call` | `{method,params}`，返回 `{type:'result',id,result}` 信封（result 可为数组） |
+| `observe` | `{observationId,target}`，观察订阅 |
+| `cancelObservation` | `{observationId}`，仅结束观察订阅 |
+| `voiceSettings` | 读取语音设置 |
+| `saveVoiceSettings` | `{settings}`，保存语音设置 |
+| `startVoice` | `{botId,requestId}`，仅前台显式启动，需麦克风权限 |
+| `finishVoice` | 无参数，结束当前输入捕获 |
+| `cancelVoice` | 无参数，拒绝 pending 语音并取消当前捕获 |
+
+`call({method,params})` 经 `BotHostProcess.request("call",{method,params})` 发送，返回完整 `{type:'result',id,result}` 信封（result 可为数组，不做二次包装）；Node 侧由 `normalizeControlCall` 校验。hostFrame/voiceEvent 事件带身份字段（hostFrame: observationId+frame/error；voiceEvent: type/botId/requestId/text/receipt/code/outcome/message）。
+
+### 语义边界
+
+观察取消（cancelObservation/close）仅结束观察订阅，不取消进程/录音/Agent；语音仅前台显式启动（foregroundUi + 麦克风权限），最终转录仅原生提交一次，文字草稿独立保留；unconfirmed create/submit 仅只读对账，不自动重发。
+
+### 验证
+
+#### 主运行
+
+真实 App BC 压缩 1 块/1791 tokens、原 65 条前缀保留、文档隐藏期间 placed→done；文件工具（grep/find 等）7/7 通过；ARM64 仅构建；ASR 为合成。服务通知专项实测：失败/offline 读保留 3151，显式 Stop 或恢复 running 清 3151，正常 Stop 清 3150 且无 child。父验收：5/5 SQLite integrity+FK、109 任务 terminal（63 generation/46 tool）、17 submission done。
+
+#### 旧功能回归
+
+8 组旧回归（chat-persistence 仅组件持久化、voice-continuity/widget/share-ui/notifications/search-consistency/questionnaire/shower-preview）在服务小修前通过，不标成新 APK 全量重跑；notifications 曾两次立即删除查询断言失败、原源码未改、原 AVD 重启后 PASS（不能说某补丁修复）；Shower 恢复 shell UID 2000 Shizuku 后 PASS（124 帧/触摸 Settings/Unicode/全屏返回/预览截图）。
+
+#### 哨兵说明
+
+附件未引用哨兵在旧回归后缺失；AttachmentStore 既有 GC 会删未引用文件，父用不同文件名新建未引用探针、经 Chat.newConversation/deleteConversation 实际验证删除（Host 一直 stopped），原缺失 marker 未重造。覆盖安装专测当时 4/4 仍有效，不能声称最新 4/4 或全部真实旧数据检查。
+
+### 证据边界
+
+仅模拟器（emulator-5556/m15_api36）无真机；合成 providers/ASR；`speak` accepted 不代表播放完成；ARM64 仅构建（zipalign 16KiB）未运行；无 ARM64/Linux 运行时。未构造无法回收子进程的 CLEANUP_FAILED 场景，也未穷举跨代、持续背压和交互信号的全部交错；真实 ASR 准确率/Hindsight 生产验证未做；Tauri/TUI、迁移尚未开始。最终夹具清理已完成（临时 CA 在 zygote/App 命名空间均不存在且源目录/主机私钥已删除，22 tails 清理，CDP exit 0，相关端口无 socket/无 forward reverse，独立 AVD 已关闭保 userdata）。

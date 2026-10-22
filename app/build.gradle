@@ -50,6 +50,34 @@ def installPiDependencies = tasks.register('installPiDependencies', Exec) {
             rootProject.fileTree('pi-runtime') { include '.npmrc' }, rootProject.fileTree('.') { include '.npmrc' }
     outputs.dir rootProject.file('pi-runtime/node_modules')
 }
+def installHostDependencies = tasks.register('installHostDependencies', Exec) {
+    workingDir rootProject.file('host-core')
+    commandLine npmCommand + ['ci']
+    inputs.files rootProject.file('host-core/package.json'), rootProject.file('host-core/package-lock.json'),
+            rootProject.fileTree('host-core') { include '.npmrc' }, rootProject.fileTree('.') { include '.npmrc' }
+    outputs.dir rootProject.file('host-core/node_modules')
+}
+def prepareHostTools = tasks.register('prepareHostTools', Exec) {
+    workingDir rootProject.file('host-core')
+    commandLine 'node', 'prepare-android-tools.js',
+            '--abis', launcherAbis.join(','),
+            '--ndk', file("${android.sdkDirectory}/ndk/${android.ndkVersion}").absolutePath
+    inputs.files rootProject.file('host-core/prepare-android-tools.js'),
+            rootProject.file('host-core/package.json'), rootProject.file('host-core/package-lock.json')
+    inputs.property 'abis', launcherAbis.join(',')
+    outputs.dir file("$buildDir/generated/jniLibs/hostTools")
+    outputs.dir file("$buildDir/host-native-tools/licenses")
+}
+def buildHostRuntime = tasks.register('buildHostRuntime', Exec) {
+    dependsOn installHostDependencies, installPiDependencies, prepareHostTools
+    workingDir rootProject.file('host-core')
+    commandLine 'node', 'build-android.js'
+    inputs.files rootProject.fileTree('host-core') { exclude 'build/**', 'node_modules/**' },
+            rootProject.file('licenses/pi-v1.3.0-MIT.txt'),
+            file("$buildDir/host-native-tools/licenses")
+    inputs.file file('build.gradle')
+    outputs.dir file("$buildDir/generated/assets/botHost")
+}
 def buildPiRuntime = tasks.register('buildPiRuntime', Exec) {
     dependsOn installPiDependencies
     workingDir rootProject.file('pi-runtime')
@@ -60,7 +88,10 @@ def buildPiRuntime = tasks.register('buildPiRuntime', Exec) {
             file('src/main/assets/image-resize-worker.js'), file('src/main/assets/photon_rs_bg.wasm')
     outputs.dirs file('src/main/assets/pi-sdk'), file('src/main/assets/npm')
 }
-tasks.named('preBuild') { dependsOn copyWebAssets, buildPiRuntime }
+tasks.named('preBuild') { dependsOn copyWebAssets, buildPiRuntime, buildHostRuntime, prepareHostTools }
+tasks.matching { it.name in ['mergeDebugAssets', 'mergeReleaseAssets']
+        || it.name.toLowerCase().contains('lint') }
+        .configureEach { dependsOn buildHostRuntime }
 
 android {
     namespace 'com.example.launcherprobe'
@@ -131,6 +162,8 @@ android {
     }
 
     sourceSets.main.assets.srcDir "$buildDir/generated/showerAssets"
+    sourceSets.main.assets.srcDir "$buildDir/generated/assets/botHost"
+    sourceSets.main.jniLibs.srcDir "$buildDir/generated/jniLibs/hostTools"
     sourceSets.debug.jniLibs.srcDir "$buildDir/generated/jniLibs/nodeLauncher/debug"
     sourceSets.release.jniLibs.srcDir "$buildDir/generated/jniLibs/nodeLauncher/release"
 }
@@ -155,7 +188,7 @@ android {
         }
     }
     tasks.matching { it.name == "merge${buildType}NativeLibs" || it.name == "merge${buildType}JniLibFolders" }
-            .configureEach { dependsOn syncTask }
+            .configureEach { dependsOn syncTask, prepareHostTools }
 }
 
 def syncShowerServer = tasks.register('syncShowerServer', Copy) {

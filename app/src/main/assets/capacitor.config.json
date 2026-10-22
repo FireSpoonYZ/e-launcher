@@ -4,5 +4,6 @@
 	"webDir": "web/dist",
 	"android": {
 		"path": "."
-	}
+	},
+	"loggingBehavior": "none"
 }

@@ -1,6 +1,6 @@
 # 下一代多端 Bot 架构设计
 
-> 状态：目标架构设计，整体尚未实现。[Bot/Host 核心](../host-core/README.md) 已独立实现模块 1 本机登记、模块 2 Durable 长期主私聊、模块 3 内嵌 Billion Context、模块 4 本机工具及模块 5 本机控制面（长期本地 Host 控制 API：基础 HTTP、回环端口、Bearer 令牌认证、拒绝全部 Origin；配套 Node/浏览器兼容客户端）及模块 6 主私聊实时预览（认证本地 SSE：有界快照+整体替换更新、每订阅 sequence 非持久游标，原始历史分页保留；无群消息/中心/Tauri，无轮询或新调度器）；模块 7 已实现本机持久消息账本（作用域/成员修订、不可变信封、outbox、落地去重 ACK、本地收件/历史/缺口、特权离线 CLI；仅 messages.sqlite 本机存储，无网络认证/隧道/中心/推理）；模块 8 已实现认证设备中继与 Host 消息投递（中心只存设备注册，复用模块 7 outbox，本机进程网络端到端已通；跨设备/真机网络验收与完整中心产品尚未完成）；模块 9 已实现认证远程 Host JSON 控制（固定 10 个 JSON 方法、独立多客户端角色、Node 客户端与一次性 CLI；父助手已完成本机独立进程 171/171 个端到端检查点验收，具体范围见下文）；模块 10 已完成群与 Bot DM 的独立被动工作上下文（显式导入、独立 Durable/BC、本机 API/CLI；父助手完成 149/149 个检查点，范围与限制见下文）。模块 11 已完成自然群聊决策与通信工具（父助手完成 161/161 个端到端检查点及 18 份数据库完整性/外键检查；本机 WSS 与脚本化模型服务，范围与限制见下文）。模块 12（成员范围管理与历史补齐）已完成父助手限定范围验收（122/122 检查点，见下节）。模块 13（Hindsight → Pi Durable 长期事实记忆）已完成 Host 侧适配交付（进度 13/20；真实 Hindsight 服务联调未做）。模块 14（统一 Host 服务与设备接入）已完成父助手限定范围验收（139/139 检查点，见下节）。总计划 20 个模块、已完成 14 个、15–20 共 6 个待交付。整体通信（框架隧道/中心产品）、跨端与外壳（Tauri/TUI）尚未完成。本文约定产品方向、首版设计默认与工程验证边界，不授权删除现有能力。当前安装、构建及运行行为仍以 [README](../README.md) 为准。
+> 状态：目标架构设计，整体尚未实现。[Bot/Host 核心](../host-core/README.md) 已独立实现模块 1 本机登记、模块 2 Durable 长期主私聊、模块 3 内嵌 Billion Context、模块 4 本机工具及模块 5 本机控制面（长期本地 Host 控制 API：基础 HTTP、回环端口、Bearer 令牌认证、拒绝全部 Origin；配套 Node/浏览器兼容客户端）及模块 6 主私聊实时预览（认证本地 SSE：有界快照+整体替换更新、每订阅 sequence 非持久游标，原始历史分页保留；无群消息/中心/Tauri，无轮询或新调度器）；模块 7 已实现本机持久消息账本（作用域/成员修订、不可变信封、outbox、落地去重 ACK、本地收件/历史/缺口、特权离线 CLI；仅 messages.sqlite 本机存储，无网络认证/隧道/中心/推理）；模块 8 已实现认证设备中继与 Host 消息投递（中心只存设备注册，复用模块 7 outbox，本机进程网络端到端已通；跨设备/真机网络验收与完整中心产品尚未完成）；模块 9 已实现认证远程 Host JSON 控制（固定 10 个 JSON 方法、独立多客户端角色、Node 客户端与一次性 CLI；父助手已完成本机独立进程 171/171 个端到端检查点验收，具体范围见下文）；模块 10 已完成群与 Bot DM 的独立被动工作上下文（显式导入、独立 Durable/BC、本机 API/CLI；父助手完成 149/149 个检查点，范围与限制见下文）。模块 11 已完成自然群聊决策与通信工具（父助手完成 161/161 个端到端检查点及 18 份数据库完整性/外键检查；本机 WSS 与脚本化模型服务，范围与限制见下文）。模块 12（成员范围管理与历史补齐）已完成父助手限定范围验收（122/122 检查点，见下节）。模块 13（Hindsight → Pi Durable 长期事实记忆）已完成 Host 侧适配交付（进度 13/20；真实 Hindsight 服务联调未做）。模块 14（统一 Host 服务与设备接入）已完成父助手限定范围验收（139/139 检查点，见下节）。模块 15（Android 本机 Host）已交付并获父助手验收（见 §7），总完成数 **15/20**。总计划 20 个模块、已完成 15 个、16–20 共 5 个待交付。整体通信（框架隧道/中心产品）、跨端与外壳（Tauri/TUI）尚未完成。本文约定产品方向、首版设计默认与工程验证边界，不授权删除现有能力。当前安装、构建及运行行为仍以 [README](../README.md) 为准。
 
 当前交付计划与完成/剩余模块见 [重构路线图](refactor-roadmap.md)。
 
@@ -195,7 +195,7 @@ Bot DM 使用通知、请求、相关回复的语义，可查历史并允许沉�
 
 **仅本机控制扩展。** Runtime/ControlClient 增加 `getWorkActivity`、`stopWork`、`resumeWork`；本机 HTTP 为 GET `/v1/bots/:botId/work-contexts/:scopeKey/activity`、POST `…/stop`、POST `…/resume`（两个 POST 要求解析后为空对象；零字节 body 沿用 `readControlBody` 约定视作 `{}`，客户端仍发送 JSON `{}`），均返回 WorkActivity。沿用 Bearer/Origin 规则及 scopeKey=`'~'+encodeURIComponent(scopeId)`，解码一次且只剥一个 `~`。客户端 options 仅 signal，取消 HTTP 不撤销已受理操作。CLI 为 `work-activity`/`work-stop`/`work-resume --bot-id --scope-id`（另加原 url/token-env 连接选项），拒绝无关参数。M10 四个本机 work 操作保留；远端仍是 getHostInfo/listBots/createBot/getBot/findByRequest/submit/getSubmission/history/abort/contextStatus 十方法，不增加远端 work 或群/DM live（截至 M11；M14 v2 起已支持固定 work/memory RPC 与远端 live，见下节）。
 
-完整参数、DTO、使用示例及 `module11-verification.json` 证据位置见 [Host 核心模块 11 说明](../host-core/README.md#模块-11自然群聊决策与-bot-通信工具已完成父助手验收)。模块 **12** 已完成父助手限定范围验收（122/122 检查点，见下节 [模块 12](../host-core/README.md#模块-12成员范围管理与历史补齐已完成父助手验收)）；模块 **13** 已完成 Host 侧适配交付。模块 **14**（远程 work/实时接线、统一服务与本机设置、客户端待发送/对账）已完成父助手限定范围验收（139/139 检查点，见下节），总完成数 **14/20**；模块 **15–20 共 6 个**仍待交付：跨平台/迁移/外壳与真机集成；不新增后台任务产品。
+完整参数、DTO、使用示例及 `module11-verification.json` 证据位置见 [Host 核心模块 11 说明](../host-core/README.md#模块-11自然群聊决策与-bot-通信工具已完成父助手验收)。模块 **12** 已完成父助手限定范围验收（122/122 检查点，见下节 [模块 12](../host-core/README.md#模块-12成员范围管理与历史补齐已完成父助手验收)）；模块 **13** 已完成 Host 侧适配交付。模块 **14**（远程 work/实时接线、统一服务与本机设置、客户端待发送/对账）已完成父助手限定范围验收（139/139 检查点，见下节），总完成数 **14/20**；模块 **15**（Android 本机 Host）已完成父助手验收（见 §7），总完成数 **15/20**；模块 **16–20 共 5 个**仍待交付：跨平台/迁移/外壳与真机集成；不新增后台任务产品。
 
 **模块 11 验收范围。** 父助手在 **Windows / Git Bash、Node 26.8.2 / 22.19.0**，使用 pi-durable **1.3.0**、acp-kernel **0.0.101**，完成 **161/161 个检查点，失败 0**。实际 localhost WSS 连接 Host A/B，模型 HTTP/SSE 进程使用脚本化 Mockoon 响应；这是实际运行协议与恢复机制的验收，不是付费模型或智能决策质量验证。
 
@@ -290,7 +290,7 @@ Bot DM 使用通知、请求、相关回复的语义，可查历史并允许沉�
 
 ### 模块 13：可追溯长期记忆（Hindsight → Pi Durable，Host 侧适配交付）
 
-模块 13 把长期记忆落地为**派生事实**：自动提取的稳定偏好与事实存放在由宿主显式配置的 Hindsight 服务中，可追溯来源、适用范围与纠正，按范围控制共享。已完成 Host 侧适配交付（M13 交付时为 13/20；当前含 M14 为 14/20）。验证环境为真实 Durable/BC/HTTP/CLI/SQLite + 隔离 Mockoon 协议夹具；真实 Hindsight 服务联调未做。
+模块 13 把长期记忆落地为**派生事实**：自动提取的稳定偏好与事实存放在由宿主显式配置的 Hindsight 服务中，可追溯来源、适用范围与纠正，按范围控制共享。已完成 Host 侧适配交付（M13 交付时为 13/20；当前含 M15 为 15/20）。验证环境为真实 Durable/BC/HTTP/CLI/SQLite + 隔离 Mockoon 协议夹具；真实 Hindsight 服务联调未做。
 
 - **版本与外接**：复用 Pi Hindsight **0.13.0** 策略与 REST 客户端 schema **0.9.2**，适配 pi-durable **1.3.0** 生命周期，不直接加载 Pi 扩展；客户端版本不是已验证的服务端版本。
 - **显式服务配置与数据归属**：每 Host 显式配置 `options.hindsight {baseUrl, apiKeyEnv?, sharedMemory?}`（apiKeyEnv 仅为环境变量名）；事实提取与检索由该服务执行；本机 `hindsight.sqlite` 仅作适配侧输入跟踪/outbox/召回缓存/来源出处/纠正审计，不是第二个事实引擎；原始 Native Entry 与消息账本历史保持完整。M13 阶段记忆接口仅本机；M14 v2 可经中继有界瞬时转发记忆业务结果。中心仅持久保存设备登记与认证校验信息，不持久保存聊天、工作上下文、记忆正文或模型/Hindsight API 凭证；不继承 Pi 个人/项目/全局 banks、HOME 配置或会话文件身份；URL 绑定固定 endpointHash，防止旧 outbox 静默改投另一端点。
@@ -315,9 +315,9 @@ Bot DM 使用通知、请求、相关回复的语义，可查历史并允许沉�
 
 ## 7. 外壳与 Android 生命周期
 
-Tauri 提供 Android/Windows/Linux 界面与平台集成，Windows/Linux TUI 使用相同业务协议。桌面 Host 不依附一个窗口或 TUI 连接，关闭客户端不停止 Agent。Android 可先保留原生/Capacitor 宿主承接统一核心，再迁 Tauri 外壳；迁移期不是第二套永久架构。
+Tauri 提供 Android/Windows/Linux 界面与平台集成，Windows/Linux TUI 使用相同业务协议。桌面 Host 不依附一个窗口或 TUI 连接，关闭客户端不停止 Agent。Android 继续保留原生/Capacitor 宿主，M15 已在应用内运行统一核心，Tauri 外壳迁移仍未开始。
 
-Android 仍是真正本机 Host：Durable、BC、原始历史和模型请求在手机。按远程持续接单设计，前台服务、嵌入 JS、SQLite、原生桥及 Tauri 移动插件的生命周期需要真机验证，不能照搬桌面 sidecar。系统电池/后台授权由用户决定，无应用自定空闲休眠；现有 Shower 虚拟屏资源回收也不等于休眠整个 Host。
+Android 是真正本机 Host（M15 已交付）：Durable、BC、原始历史和模型请求在手机，运行于受监督的独立 Node Mobile 子进程。前台服务仅用户显式开启的 specialUse FGS，无 boot/auto-start/空闲关闭/粘性重启；运行数据在独立 `files/bot-host`，模型凭据在 `bot_host_credentials` SharedPreferences，语音偏好与秘密在 `bot_host_voice`/`bot_host_voice_secrets`。覆盖安装保留包名、签名与既有数据路径。系统电池/后台授权由用户决定，无应用自定空闲休眠；现有 Shower 虚拟屏资源回收也不等于休眠整个 Host。M15 在隔离模拟器中使用合成数据、模型和 ASR 验收；构建用法、验证范围与清理记录见 [Host 核心模块 15](../host-core/README.md#模块-15android-本机-host-与原生能力桥)。
 
 系统回收、force-stop、断网或 ROM 限制时明确离线，未确认项在来源端保留；应用获得合法运行条件后恢复、补投、校对状态。不保证白名单即可 24 小时可用，不承诺远端总能冷唤醒。Widget 冷态只读快照，不能借“持续接单”扩大成启动 Pi、Shizuku、Shower 或 FGS。
 

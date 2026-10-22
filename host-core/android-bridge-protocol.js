@@ -1,0 +1,434 @@
+// host-core/android-bridge-protocol.js
+// M15 Android Host bridge wire protocol: pure boundary parsers/encoders for
+// the private JSONL child IPC between the Java supervisor and this Node host.
+// No I/O, no Runtime/service/storage. Structural violations throw fixed
+// control codes and fail the connection; per-command payload mistakes throw
+// BridgeCommandError which the runtime answers with an error frame.
+import path from 'node:path';
+import { messageError, assertId } from './message-protocol.js';
+import { CONTROL_ERROR_CODES, CONTROL_OUTCOMES } from './remote-control-protocol.js';
+import { normalizeHostSettings } from './host-settings.js';
+
+export const BRIDGE_PROTOCOL_VERSION = 1;
+export const BRIDGE_MAX_FRAME_BYTES = 20971520; // 20 MiB hard frame cap (UTF-8 bytes)
+export const BRIDGE_MAX_CONTROL_BYTES = 1048576; // 1 MiB init/command/result frames
+export const BRIDGE_MAX_CONTROL_CALLS = 8;
+export const BRIDGE_MAX_OBSERVERS = 8;
+export const BRIDGE_MAX_NATIVE_CALLS = 8;
+export const BRIDGE_NATIVE_TIMEOUT_MS = 20000;
+export const BRIDGE_MAX_ERROR_MESSAGE_BYTES = 512;
+export const BRIDGE_MAX_CREDENTIALS = 64;
+export const BRIDGE_MAX_CREDENTIAL_BYTES = 65536;
+export const BRIDGE_MAX_CREDENTIAL_VALUE_BYTES = 4096;
+
+const ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const TOKEN_PATTERN = /^[A-Za-z0-9_-]{32,512}$/;
+// Never allow credential aliases to replace variables the runtime / Android
+// host environment depends on.
+const PROTECTED_ENV = new Set([
+  'PATH',
+  'HOME',
+  'PWD',
+  'SHELL',
+  'USER',
+  'LOGNAME',
+  'HOSTNAME',
+  'LANG',
+  'LC_ALL',
+  'TMPDIR',
+  'TEMP',
+  'TMP',
+  'ANDROID_ROOT',
+  'ANDROID_DATA',
+  'ANDROID_STORAGE',
+  'LD_LIBRARY_PATH',
+  'JAVA_HOME',
+  'NODE_OPTIONS',
+  'SYSTEMROOT',
+  'WINDIR',
+]);
+
+export const ANDROID_NATIVE_CODES = new Set([
+  'ANDROID_NATIVE_UNAVAILABLE',
+  'ANDROID_NATIVE_BUSY',
+  'ANDROID_NATIVE_UNCONFIRMED',
+  'ANDROID_NATIVE_ERROR',
+]);
+
+export const BRIDGE_ERROR_CODES = new Set([...CONTROL_ERROR_CODES, ...ANDROID_NATIVE_CODES]);
+export const BRIDGE_OUTCOMES = CONTROL_OUTCOMES;
+
+function invalid(code, message) {
+  return messageError(code, message);
+}
+
+function isPlainObject(value) {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function rejectUnknownFields(value, allowed, label) {
+  for (const key of Object.keys(value)) {
+    if (!allowed.has(key)) {
+      throw invalid('INVALID_ARGUMENT', `${label} has unknown field: ${key}`);
+    }
+  }
+}
+
+function assertFrameId(value) {
+  assertId(value, 'id');
+}
+
+
+function assertDataRoot(value) {
+  if (typeof value !== 'string' || value.trim() === '' || !path.isAbsolute(value)) {
+    throw invalid('INVALID_ARGUMENT', 'dataRoot must be a non-empty absolute path');
+  }
+  return path.resolve(value);
+}
+
+// Truncate to a UTF-8 byte budget without splitting a code point.
+function boundUtf8(text, maxBytes, label) {
+  if (Buffer.byteLength(text, 'utf8') <= maxBytes) return text;
+  let out = '';
+  for (const ch of text) {
+    const next = out + ch;
+    if (Buffer.byteLength(next, 'utf8') > maxBytes) break;
+    out = next;
+  }
+  if (out === '') throw invalid('INVALID_ARGUMENT', `${label} cannot fit in ${maxBytes} bytes`);
+  return out;
+}
+
+function normalizeCredentials(value) {
+  // Explicit null (or any non-object) is invalid; absence is handled by caller.
+  if (!isPlainObject(value)) throw invalid('INVALID_ARGUMENT', 'credentials must be a plain object');
+  const entries = Object.entries(value);
+  if (entries.length > BRIDGE_MAX_CREDENTIALS) {
+    throw invalid('INVALID_ARGUMENT', `credentials must have at most ${BRIDGE_MAX_CREDENTIALS} aliases`);
+  }
+  let total = 0;
+  const out = Object.create(null); // null-prototype so __proto__ aliases are preserved
+  for (const [name, val] of entries) {
+    if (!ENV_NAME_RE.test(name) || name === '__proto__') {
+      throw invalid('INVALID_ARGUMENT', `credential environment name is not a standard variable name: ${name}`);
+    }
+    if (PROTECTED_ENV.has(name) || /^(NODE_|PI_|npm_)/.test(name)) {
+      throw invalid('INVALID_ARGUMENT', `credential would replace a reserved runtime environment variable: ${name}`);
+    }
+    if (typeof val !== 'string' || !val.isWellFormed() || val.length === 0) {
+      throw invalid('INVALID_ARGUMENT', `credential value for ${name} must be a non-empty well-formed string`);
+    }
+    if (val.includes('\0')) {
+      throw invalid('INVALID_ARGUMENT', `credential value for ${name} must not contain NUL`);
+    }
+    const bytes = Buffer.byteLength(val, 'utf8');
+    if (bytes > BRIDGE_MAX_CREDENTIAL_VALUE_BYTES) {
+      throw invalid('INVALID_ARGUMENT', `credential value for ${name} exceeds 4096 bytes`);
+    }
+    total += bytes + Buffer.byteLength(name, 'utf8');
+    if (total > BRIDGE_MAX_CREDENTIAL_BYTES) {
+      throw invalid('INVALID_ARGUMENT', 'credentials exceed 64KiB total');
+    }
+    out[name] = val;
+  }
+  return out;
+}
+
+/**
+ * Validate the single init frame. Everything here is pure validation before
+ * any resource is opened; any violation fails the connection. Host mode
+ * carries dataRoot/token/optional credentials/initialSettings; settings mode
+ * carries only dataRoot. initialSettings passes through normalizeHostSettings
+ * (canonical config + 512KiB budget) so no malformed settings ever reach the
+ * store.
+ */
+export function normalizeInitFrame(parsed) {
+  if (!isPlainObject(parsed)) throw invalid('INVALID_BODY', 'init frame must be an object');
+  if (parsed.type !== 'init') throw invalid('INVALID_BODY', 'init frame type must be init');
+  if (parsed.protocol !== BRIDGE_PROTOCOL_VERSION) {
+    throw invalid('UNSUPPORTED_SCHEMA', 'unsupported bridge protocol version');
+  }
+  if (parsed.mode !== 'host' && parsed.mode !== 'settings') {
+    throw invalid('INVALID_ARGUMENT', "init mode must be 'host' or 'settings'");
+  }
+  const dataRoot = assertDataRoot(parsed.dataRoot);
+  if (parsed.mode === 'settings') {
+    rejectUnknownFields(parsed, new Set(['type', 'protocol', 'mode', 'dataRoot']), 'settings init frame');
+    return { mode: 'settings', dataRoot };
+  }
+  rejectUnknownFields(parsed, new Set(['type', 'protocol', 'mode', 'dataRoot', 'token', 'credentials', 'initialSettings']), 'host init frame');
+  if (typeof parsed.token !== 'string' || !TOKEN_PATTERN.test(parsed.token)) {
+    throw invalid('INVALID_ARGUMENT', 'token must be a URL-safe opaque string of 32-512 characters');
+  }
+  let credentials = null;
+  if (parsed.credentials !== undefined) {
+    credentials = normalizeCredentials(parsed.credentials); // explicit null is invalid
+  }
+  const init = { mode: 'host', dataRoot, token: parsed.token, credentials };
+  if (parsed.initialSettings !== undefined) {
+    init.initialSettings = normalizeHostSettings(parsed.initialSettings);
+  }
+  return init;
+}
+
+/**
+ * Bridge command payload errors that the runtime answers with an error frame
+ * instead of failing the connection (malformed but recognizable frames).
+ */
+export class BridgeCommandError extends Error {
+  constructor(code, message) {
+    super(message);
+    this.name = 'BridgeCommandError';
+    this.code = code;
+  }
+}
+
+/**
+ * Validate one command frame from Java. Returns a normalized command. Frames
+ * with an unknown top-level type or non-object body are fatal (throw plain
+ * messageError); recognized types with malformed payloads throw
+ * BridgeCommandError.
+ */
+export function normalizeBridgeCommandFrame(parsed) {
+  if (!isPlainObject(parsed)) throw invalid('INVALID_BODY', 'bridge frame must be an object');
+  switch (parsed.type) {
+    case 'call': {
+      rejectUnknownFields(parsed, new Set(['type', 'id', 'method', 'params']), 'call frame');
+      assertFrameId(parsed.id);
+      if (typeof parsed.method !== 'string' || parsed.method.length === 0) {
+        throw new BridgeCommandError('INVALID_ARGUMENT', 'call method must be a non-empty string');
+      }
+      if (!isPlainObject(parsed.params)) {
+        throw new BridgeCommandError('INVALID_ARGUMENT', 'call params must be an object');
+      }
+      return { type: 'call', id: parsed.id, method: parsed.method, params: parsed.params };
+    }
+    case 'observe': {
+      rejectUnknownFields(parsed, new Set(['type', 'id', 'target']), 'observe frame');
+      assertFrameId(parsed.id);
+      if (!isPlainObject(parsed.target)) {
+        throw new BridgeCommandError('INVALID_ARGUMENT', 'observe target must be an object');
+      }
+      return { type: 'observe', id: parsed.id, target: parsed.target };
+    }
+    case 'cancel': {
+      rejectUnknownFields(parsed, new Set(['type', 'id']), 'cancel frame');
+      assertFrameId(parsed.id);
+      return { type: 'cancel', id: parsed.id };
+    }
+    case 'status': {
+      rejectUnknownFields(parsed, new Set(['type', 'id']), 'status frame');
+      assertFrameId(parsed.id);
+      return { type: 'status', id: parsed.id };
+    }
+    case 'settings_get': {
+      rejectUnknownFields(parsed, new Set(['type', 'id']), 'settings_get frame');
+      assertFrameId(parsed.id);
+      return { type: 'settings_get', id: parsed.id };
+    }
+    case 'settings_set': {
+      rejectUnknownFields(parsed, new Set(['type', 'id', 'input']), 'settings_set frame');
+      assertFrameId(parsed.id);
+      return { type: 'settings_set', id: parsed.id, input: normalizeSettingsUpdateInput(parsed.input) };
+    }
+    case 'shutdown': {
+      rejectUnknownFields(parsed, new Set(['type', 'id']), 'shutdown frame');
+      assertFrameId(parsed.id);
+      return { type: 'shutdown', id: parsed.id };
+    }
+    default:
+      throw invalid('BAD_FRAME', `unknown bridge frame type: ${parsed.type}`);
+  }
+}
+
+// Mirror control-server validateSettingsUpdate: exact {expectedRevision, settings}
+// shape; deeper content validation is delegated to the online control server or
+// the offline settings store.
+function normalizeSettingsUpdateInput(value) {
+  if (!isPlainObject(value)) throw new BridgeCommandError('INVALID_ARGUMENT', 'settings_set input must be an object');
+  const keys = Object.keys(value);
+  if (keys.length !== 2 || !keys.includes('expectedRevision') || !keys.includes('settings')) {
+    throw new BridgeCommandError('INVALID_ARGUMENT', 'settings_set input must contain exactly expectedRevision and settings');
+  }
+  if (!Number.isSafeInteger(value.expectedRevision) || value.expectedRevision <= 0) {
+    throw new BridgeCommandError('INVALID_ARGUMENT', 'expectedRevision must be a positive safe integer');
+  }
+  if (!isPlainObject(value.settings)) {
+    throw new BridgeCommandError('INVALID_ARGUMENT', 'settings must be an object');
+  }
+  return { expectedRevision: value.expectedRevision, settings: value.settings };
+}
+
+/**
+ * Validate a native_result frame from Java. Exactly one of result/error;
+ * unknown ids are a protocol failure, duplicate replies are a protocol failure.
+ * Error message is bounded to 512 UTF-8 bytes.
+ */
+export function normalizeNativeResultFrame(parsed) {
+  if (!isPlainObject(parsed)) throw invalid('INVALID_BODY', 'native_result frame must be an object');
+  rejectUnknownFields(parsed, new Set(['type', 'id', 'result', 'error']), 'native_result frame');
+  if (parsed.type !== 'native_result') throw invalid('BAD_FRAME', 'frame type must be native_result');
+  assertFrameId(parsed.id);
+  const hasResult = parsed.result !== undefined;
+  const hasError = parsed.error !== undefined;
+  if (hasResult === hasError) {
+    throw invalid('BAD_FRAME', 'native_result must carry exactly one of result or error');
+  }
+  if (hasResult) {
+    if (parsed.result === null || typeof parsed.result !== 'object') {
+      throw invalid('BAD_FRAME', 'native_result must be a non-null JSON object or array');
+    }
+    return { id: parsed.id, result: parsed.result };
+  }
+  if (!isPlainObject(parsed.error)) throw invalid('BAD_FRAME', 'native_result error must be an object');
+  rejectUnknownFields(parsed.error, new Set(['code', 'message']), 'native_result error');
+  if (typeof parsed.error.code !== 'string' || !ANDROID_NATIVE_CODES.has(parsed.error.code)) {
+    throw invalid('BAD_FRAME', 'native_result error code must be an allowed android native error code');
+  }
+  if (parsed.error.message !== undefined && (typeof parsed.error.message !== 'string' || !parsed.error.message.isWellFormed())) {
+    throw invalid('BAD_FRAME', 'native_result error message must be a well-formed string');
+  }
+  return {
+    id: parsed.id,
+    error: {
+      code: parsed.error.code,
+      message: parsed.error.message === undefined
+        ? ''
+        : boundUtf8(parsed.error.message, BRIDGE_MAX_ERROR_MESSAGE_BYTES, 'native_result error message'),
+    },
+  };
+}
+
+const NATIVE_TOOLS = new Set(['android_apps', 'android_shower', 'android_speak']);
+const NATIVE_KINDS = new Set(['primary', 'room', 'dm']);
+
+/**
+ * Normalize the trusted native tool request (core factory contract) into the
+ * native_call context. Caller metadata only, no arbitrary fields. taskId is
+ * a Durable numeric Id<'task'>; kind is primary|room|dm with scope relation
+ * (primary has no scope, work kinds require one). Only the three real native
+ * tools are allowed.
+ */
+export function normalizeNativeRequest(request) {
+  if (!isPlainObject(request)) throw invalid('INVALID_ARGUMENT', 'native request must be an object');
+  if (typeof request.tool !== 'string' || !NATIVE_TOOLS.has(request.tool)) {
+    throw invalid('INVALID_ARGUMENT', 'native tool must be one of android_apps, android_shower, android_speak');
+  }
+  const args = request.arguments === undefined ? {} : request.arguments;
+  if (!isPlainObject(args)) throw invalid('INVALID_ARGUMENT', 'native request arguments must be an object');
+  const actor = request.actor;
+  if (!isPlainObject(actor)) throw invalid('INVALID_ARGUMENT', 'native request actor must be an object');
+  rejectUnknownFields(actor, new Set(['deviceId', 'botId', 'conversationId', 'scopeId', 'kind']), 'native actor');
+  assertId(actor.deviceId, 'actor.deviceId');
+  assertId(actor.botId, 'actor.botId');
+  if (typeof actor.conversationId !== 'string') throw invalid('INVALID_ARGUMENT', 'actor.conversationId must be a string');
+  assertId(actor.conversationId, 'actor.conversationId');
+  if (!NATIVE_KINDS.has(actor.kind)) {
+    throw invalid('INVALID_ARGUMENT', "actor.kind must be 'primary', 'room' or 'dm'");
+  }
+  if (actor.kind === 'primary') {
+    if (actor.scopeId !== null && actor.scopeId !== undefined) {
+      throw invalid('INVALID_ARGUMENT', 'primary actor must not carry a scopeId');
+    }
+  } else if (typeof actor.scopeId !== 'string') {
+    throw invalid('INVALID_ARGUMENT', 'work actor must carry a string scopeId');
+  } else {
+    assertId(actor.scopeId, 'actor.scopeId');
+  }
+  if (!Number.isSafeInteger(request.taskId) || request.taskId <= 0) {
+    throw invalid('INVALID_ARGUMENT', 'taskId must be a positive safe integer');
+  }
+  return {
+    context: {
+      deviceId: actor.deviceId,
+      botId: actor.botId,
+      conversationId: actor.conversationId,
+      scopeId: actor.scopeId === undefined ? null : actor.scopeId,
+      kind: actor.kind,
+      taskId: request.taskId,
+    },
+    tool: request.tool,
+    arguments: args,
+  };
+}
+
+function assertSerializable(frame, label) {
+  try {
+    JSON.stringify(frame);
+  } catch {
+    throw invalid('INVALID_ARGUMENT', `${label} is not JSON-serializable`);
+  }
+}
+
+export function encodeReadyFrame({ deviceId, url, nodeVersion, platform, arch }) {
+  const frame = { type: 'ready', protocol: BRIDGE_PROTOCOL_VERSION, deviceId, url, nodeVersion, platform, arch };
+  assertSerializable(frame, 'ready frame');
+  return frame;
+}
+
+export function encodeClosedFrame(id) {
+  assertFrameId(id);
+  return { type: 'closed', id };
+}
+
+export function encodeResultFrame(id, result) {
+  assertFrameId(id);
+  if (result === undefined) throw invalid('INVALID_ARGUMENT', 'result must not be undefined');
+  const frame = { type: 'result', id, result };
+  assertSerializable(frame, 'result frame');
+  return frame;
+}
+
+export function encodeErrorFrame(id, code, outcome, message) {
+  assertFrameId(id);
+  if (typeof code !== 'string' || !BRIDGE_ERROR_CODES.has(code)) {
+    throw invalid('INTERNAL', 'error frame code must be an allowed bridge error code');
+  }
+  if (typeof outcome !== 'string' || !BRIDGE_OUTCOMES.has(outcome)) {
+    throw invalid('INTERNAL', 'error frame outcome must be one of not-sent, unconfirmed, responded');
+  }
+  const frame = { type: 'error', id, code, outcome };
+  if (message !== undefined && message !== null) {
+    if (typeof message !== 'string') throw invalid('INTERNAL', 'error message must be a string');
+    frame.message = boundUtf8(message, BRIDGE_MAX_ERROR_MESSAGE_BYTES, 'error message');
+  }
+  return frame;
+}
+
+// Wrapped live frame (snapshot/update/end) for observe.
+export function encodeFrameFrame(id, frame) {
+  assertFrameId(id);
+  if (!isPlainObject(frame)) throw invalid('INVALID_ARGUMENT', 'live frame must be an object');
+  const out = { type: 'frame', id, frame };
+  assertSerializable(out, 'frame frame');
+  return out;
+}
+
+export function encodeNativeCallFrame(id, context, tool, args) {
+  assertFrameId(id);
+  const frame = { type: 'native_call', id, context, tool, arguments: args };
+  assertSerializable(frame, 'native_call frame');
+  return frame;
+}
+
+export function encodeNativeCancelFrame(id) {
+  assertFrameId(id);
+  return { type: 'native_cancel', id };
+}
+
+/**
+ * Serialize an outgoing frame as a single JSONL line with a hard byte cap.
+ * maxBytes must cover the whole serialized line; oversized frames throw
+ * REQUEST_TOO_LARGE and are never written.
+ */
+export function buildLine(object, maxBytes, label) {
+  let json;
+  try {
+    json = JSON.stringify(object);
+  } catch {
+    throw invalid('INVALID_ARGUMENT', `${label} is not JSON-serializable`);
+  }
+  const bytes = Buffer.byteLength(json, 'utf8');
+  if (bytes > maxBytes) throw invalid('REQUEST_TOO_LARGE', `${label} exceeds ${maxBytes} bytes`);
+  return json + '\n';
+}

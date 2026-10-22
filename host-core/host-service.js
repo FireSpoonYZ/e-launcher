@@ -11,7 +11,7 @@ import { readTextFile } from './cli-input.js';
 
 const TOKEN_PATTERN = /^[A-Za-z0-9_-]{32,512}$/;
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
-const ALLOWED_OPTIONS = new Set(['dataRoot', 'token', 'port', 'initialSettings']);
+const ALLOWED_OPTIONS = new Set(['dataRoot', 'token', 'port', 'initialSettings', 'nativeBridge']);
 
 function invalidArgument(message) {
   const err = new Error(message);
@@ -45,6 +45,7 @@ export async function openHostService(options) {
   const token = options?.token;
   const port = options?.port;
   const initialSettings = options?.initialSettings;
+  const nativeBridge = options?.nativeBridge;
 
   if (typeof dataRoot !== 'string' || dataRoot.trim() === '' || !path.isAbsolute(dataRoot)) {
     throw invalidArgument('dataRoot must be a non-empty absolute path');
@@ -57,6 +58,9 @@ export async function openHostService(options) {
   }
   if (initialSettings !== undefined) {
     normalizeHostSettings(initialSettings);
+  }
+  if (nativeBridge !== undefined && typeof nativeBridge !== 'function') {
+    throw invalidArgument('nativeBridge must be a function');
   }
 
   // 探针登记连接取 deviceId，随即关闭；不持有额外 Host。
@@ -123,6 +127,7 @@ export async function openHostService(options) {
       hindsight: runtimeConfig.hindsight,
       settings: { store: settingsStore, activeRevision },
       getServiceStatus: () => getStatus(),
+      nativeBridge,
     });
     listening = true;
     phase = 'running';
