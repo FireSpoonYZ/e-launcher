@@ -89,9 +89,9 @@ exit $LASTEXITCODE
 
 ## 子代理约定
 
-- worker 统一使用 `inception/mercury-3:high`，默认配置在 `.pi/agents/worker.md`；只做静态开发，不执行测试、构建、类型检查、语法检查或其他运行验证，最终验收由父助手负责。
+- worker 只做静态开发，不执行测试、构建、类型检查、语法检查或其他运行验证，最终验收由父助手负责。
 
-- scout 只负责现有代码探索，使用 `inception/mercury-3:high`，默认配置在 `.pi/agents/scout.md`。开发方案由父助手确定，代码实现交给 worker；父助手负责集成和运行验收。
+- scout 只负责现有代码探索。开发方案由父助手确定，代码实现交给 worker；父助手负责集成和运行验收。
 - 每次启动 scout 必须读取 `.pi/agents/scout-output.schema.json`，将解析后的对象传入调用的 `outputSchema`（单次调用放在 `options` 中，workflow 子项直接指定）。只写提示词不算格式约束。
 - 输出由框架保存到仓库外的任务产物目录，不能让 scout 写 `context.md`、`progress.md` 或修改代码；其工具仅限静态读取与联系父助手。
 - 接收结果时检查真实模型、Schema、精确源码行号、factIds 引用及事实/探索建议分离；不合格时要求原子代理修正，不直接交给开发 worker。scout 的 recommendations/steps 仅限继续阅读和核实代码，不包含开发方案。静态盘点不记为运行验收。
