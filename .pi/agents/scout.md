@@ -3,7 +3,7 @@ name: scout
 description: 使用 Mercury 3 探索现有代码，按固定 JSON Schema 交付文件定位、接口与调用关系
 tools: read, grep, find, ls, contact_supervisor
 model: inception/mercury-3
-thinking: low
+thinking: high
 systemPromptMode: replace
 inheritProjectContext: true
 inheritSkills: false
