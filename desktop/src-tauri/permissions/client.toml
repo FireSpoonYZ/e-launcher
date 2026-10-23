@@ -1,0 +1,13 @@
+[default]
+description = "Default desktop client command permissions."
+permissions = ["client"]
+
+[[set]]
+identifier = "client"
+description = "Allows only the fixed desktop client commands."
+permissions = [
+  "allow-desktop-request",
+  "allow-desktop-observe",
+  "allow-desktop-unobserve",
+  "allow-desktop-pick-file",
+]

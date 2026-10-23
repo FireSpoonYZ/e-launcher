@@ -1517,6 +1517,39 @@ export class RemoteControlError extends Error {
   readonly outcome: RemoteControlOutcome;
 }
 
+export interface LocalControlAdapterOptions {
+  /** Loopback HTTP base URL (http://127.0.0.1 or http://[::1], path /). */
+  url: string;
+  /** Opaque URL-safe bearer token (32-512 chars). */
+  token: string;
+}
+
+export interface LocalControlAdapterCallOptions {
+  signal?: AbortSignal;
+}
+
+export interface LocalControlAdapter {
+  <K extends keyof RemoteControlMethodMap>(
+    expectedDeviceId: string,
+    method: K,
+    params?: RemoteControlMethodMap[K]['params'],
+    options?: LocalControlAdapterCallOptions,
+  ): Promise<RemoteControlMethodMap[K]['result']>;
+  live(
+    expectedDeviceId: string,
+    target: LiveTarget,
+    options?: LocalControlAdapterCallOptions,
+  ): AsyncIterable<BotLiveFrame | WorkLiveFrame>;
+  getHostInfo(options?: LocalControlAdapterCallOptions): Promise<ControlHostInfo>;
+  getSettings(expectedDeviceId: string, options?: LocalControlAdapterCallOptions): Promise<LocalSettingsSnapshot>;
+  setSettings(
+    expectedDeviceId: string,
+    input: SettingsUpdate,
+    options?: LocalControlAdapterCallOptions,
+  ): Promise<LocalSettingsSnapshot>;
+  getServiceStatus(expectedDeviceId: string, options?: LocalControlAdapterCallOptions): Promise<HostServiceStatus>;
+}
+
 /**
  * Module 14 types: client-side pending outbox for fixed business operations.
  */
@@ -1574,6 +1607,8 @@ export interface PendingClient {
   list(options?: PendingListOptions): Promise<PendingListPage>;
   send(id: string, options?: { signal?: AbortSignal }): Promise<PendingRecord>;
   reconcile(id: string, options?: { signal?: AbortSignal }): Promise<PendingRecord>;
+  /** Locally withdraw a queued record only; never aborts or stops remote Host work. */
+  cancel(id: string): Promise<PendingRecord>;
   close(): Promise<void>;
 }
 

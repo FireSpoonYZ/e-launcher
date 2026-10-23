@@ -998,7 +998,7 @@ node host-core/control-cli.js work-resume --url http://127.0.0.1:8787 \
 
 剩余限制：未验证物理 WAN/Linux/Android/arm64/Tauri/TUI；M7–M11 为选定回归而非全量历史场景重跑；M12 高水位/反压分支未单独饱和测试（沿用 M8 共享路径）；未穷尽并发微观交错；原始作者端到端签名/加密**未实现**，当前信任模型是认证通道+TLS 认证 peer；Mockoon 夹具不代表付费/智能模型验收。
 
-模块 **13** 已完成 Host 侧适配交付。模块 **14**（远程 work/实时接线、统一服务与本机设置、客户端待发送/对账）已完成父助手限定范围验收（139/139 检查点，见下节），总完成数 **14/20**；模块 **15**（Android 本机 Host）已完成父助手验收（见下节），总完成数 **15/20**；模块 **16**（旧数据迁移与 Android 兼容）已完成父助手限定范围验收（见下节），总完成数 **16/20**；模块 **17–20 共 4 个**仍待交付：跨平台/外壳/真机集成。不引入中央决策、自动 routine、Session 管理或新的后台任务产品。
+模块 **13** 已完成 Host 侧适配交付。模块 **14**（远程 work/实时接线、统一服务与本机设置、客户端待发送/对账）已完成父助手限定范围验收（139/139 检查点，见下节），总完成数 **14/20**；模块 **15**（Android 本机 Host）已完成父助手验收（见下节），总完成数 **15/20**；模块 **16**（旧数据迁移与 Android 兼容）已完成父助手限定范围验收（见下节），总完成数 **16/20**；截至 M16，模块 **17–20 共 4 个**仍待交付（M17 后续已交付，见末节）：跨平台/外壳/真机集成。不引入中央决策、自动 routine、Session 管理或新的后台任务产品。
 
 <a id="hindsight-memory"></a>
 
@@ -1094,7 +1094,7 @@ CLI 均要求 `--bot-id`。`memory-status` 可选 `--input`，其余命令必须
 
 模块 14 把模块 5 本机控制面、模块 8/9 认证中继与远程控制、模块 10–12 工作上下文/scope、模块 13 记忆整合为**统一本机服务**（`openHostService`），并新增本机设置持久化、远端协议 v2（35 方法）、受控远端实时预览与客户端待发送/对账。
 
-**状态**：模块 14 已完成交付并获父助手限定范围验收，总完成数 **14/20**；模块 15 已交付（见下节），模块 16 已交付（见下节），模块 17–20 共 4 个待交付。
+**状态**：模块 14 已完成交付并获父助手限定范围验收，总完成数 **14/20**；模块 15–17 后续已交付（见下节与末节），当前 M18–M20 共 3 个待交付。
 
 ### 验收覆盖
 
@@ -1311,11 +1311,11 @@ Android 搜索工具（rg/fd）固定 API 29，不改变 App minSdk33。NDK/16Ki
 
 ### 证据边界
 
-仅模拟器（emulator-5556/m15_api36）无真机；合成 providers/ASR；`speak` accepted 不代表播放完成；ARM64 仅构建（zipalign 16KiB）未运行；无 ARM64/Linux 运行时。未构造无法回收子进程的 CLEANUP_FAILED 场景，也未穷举跨代、持续背压和交互信号的全部交错；真实 ASR 准确率/Hindsight 生产验证未做；Tauri/TUI 尚未开始。最终夹具清理已完成（临时 CA 在 zygote/App 命名空间均不存在且源目录/主机私钥已删除，22 tails 清理，CDP exit 0，相关端口无 socket/无 forward reverse，独立 AVD 已关闭保 userdata）。
+仅模拟器（emulator-5556/m15_api36）无真机；合成 providers/ASR；`speak` accepted 不代表播放完成；ARM64 仅构建（zipalign 16KiB）未运行；无 ARM64/Linux 运行时。未构造无法回收子进程的 CLEANUP_FAILED 场景，也未穷举跨代、持续背压和交互信号的全部交错；真实 ASR 准确率/Hindsight 生产验证未做；Tauri/TUI 当时尚未开始（桌面外壳后续见末节 M17，Tauri Android 与 TUI 仍属 M18/M19）。最终夹具清理已完成（临时 CA 在 zygote/App 命名空间均不存在且源目录/主机私钥已删除，22 tails 清理，CDP exit 0，相关端口无 socket/无 forward reverse，独立 AVD 已关闭保 userdata）。
 
 ## 模块 16：旧数据迁移与 Android 兼容（已完成父助手限定范围验收）
 
-**状态**：模块 16 已完成交付并获父助手限定范围验收，总完成数 **16/20**；模块 17 为下一待交付，M17–M20 尚未实现。
+**状态**：模块 16 已完成交付并获父助手限定范围验收，总完成数 **16/20**；M17 后续已交付（见末节），M18–M20 共 3 个仍待交付。
 
 ### 旧聊天迁移（用户显式）
 
@@ -1347,3 +1347,30 @@ Android 搜索工具（rg/fd）固定 API 29，不改变 App minSdk33。NDK/16Ki
 ### 清理
 
 父已通过保留 userdata 的模拟器重启移除测试 CA 挂载/文件，恢复旧设置与 provider，清空新 Host providers/default/凭据，停止合成服务与 tail，恢复麦克风权限与精确闹钟 appop，并撤销测试专用 WRITE_SECURE_SETTINGS 授权；首次权限回退经重新应用与平台命令处理后二次重启确认保留。
+
+## 模块 17：Tauri Windows / Linux 客户端（已完成父助手限定范围验收）
+
+**状态**：模块 17 已完成交付并获父助手限定范围验收，总完成数 **17/20**；M18–M20 共 3 个仍待交付。本模块只增加桌面客户端侧文件，不新增 Host 方法（仍为固定 35 个 v2 方法）、不改 Android。
+
+### 客户端组成
+
+- `desktop-client.js`：纯客户端 Node broker，复用 `local-control-adapter`、`remote-control-client`、`pending-client` 与 `desktop-ui-store`；不打开 Host 数据库、不启动 Runtime、不运行模型。
+- `desktop-client-cli.js`：broker 的 stdio 入口，由 `build-desktop.js` 以 esbuild（`platform=node`、`format=esm`、`target=node22`）打成 `desktop/build/desktop-client.mjs`，与官方 Node 22.19.0 sidecar 一起打包，cwd 为客户端数据根。
+- `desktop-ui-store.js`：`desktop-ui.sqlite`（schema v1）持久 clientId、连接档案、草稿与冻结意图；不存 token/CA，损坏或更高版本拒绝打开且不自动重置。
+- 待发送账本按连接 key 隔离（`pending/<profileKey>/client-pending.sqlite` 加 `pending-owner.sqlite` 独占锁，`profileKey = sha256(JSON.stringify([kind, url, relay 客户端 deviceId]))`，不是 UI profileId：同一 endpoint 的不同显示名称档案共用一份账本），沿用模块 14 的 `openPendingClient` 语义（无自动 flush/重连重放）。
+- `build-desktop.js`（prepare、`--web`、`--dev`）与 `desktop-tauri.js`（固定 argv、`cwd=desktop`、`shell=false`）是唯一构建入口，根 `package.json` 的 `desktop:prepare`/`desktop:dev`/`desktop:build` 调它们。
+
+### 边界
+
+- 传输仍为只读/控制回环 HTTP 或认证中继，本机 `settings_get`/`settings_set`（CAS）与 `service_status` 复用既有方法；Rust 侧只有 `desktop_request`、`desktop_observe`、`desktop_unobserve`、`desktop_pick_file` 四个命令，观察流控 `observe_ack` 仅在 Rust 本地处理。
+- 不持有 Host 生命周期：只有用户显式 `abort`（主私聊）或 `stopWork`（群/DM）才向目标 Host 发停止请求；关闭窗口不停止 Host 任务。
+- 文件选择只产生 `{name, path, size}` 本地路径引用，不存在跨设备上传协议。
+- 公开方法表、Host/消息 schema 与 Android 路径本模块均未修改；完整用法、数据路径与安装包输出见 [desktop/README.md](../desktop/README.md)。
+
+### 验收范围
+
+父在本机实际运行：Windows/Linux debug 与 no-bundle 构建、Windows Release（MSI + NSIS）与 Linux Release（DEB + RPM + AppImage，未削减 targets）；Windows NSIS 静默安装到私有测试目录后运行并完成合成 Host 任务，MSI 仅以 WiX `dark` 解包核实（Product Codepage 936、Language 2052）未安装；Linux 实际安装 DEB 并运行，卸载后以 `AppImage --appimage-extract-and-run` 运行且 clientId/配置保留、冷态不自动连接。另实测 Node 客户端冷启动/重开、Unicode 与含空格 cwd、900x600 聊天与群聊布局、展开原始历史后发送区仍可见、真实丢失 enqueue 回执保留原 ID（先冻结完整输入、目标与业务 ID 再入队）、离线/取消/重连不重放、设置 CAS 冲突与双丢失回执保持锁定到显式采用完整基线、草稿两种冲突码、房间发布/回复与成员 CAS、选中成员的 `getWorkActivity` 1 秒只读刷新收敛（work `LIVE` 观察流与原始历史另计）、原生文件选择返回本地路径引用；Windows 实测关闭窗口与 Node 子进程退出后 busy Host 任务继续完成，Linux 分别验证普通窗口与 AppImage 原生关闭后客户端子进程回收且 Host 仍存活（未在 Linux 复现 busy 任务连续性）；9 份客户端 SQLite 完整性/FK 检查通过，安装版数据目录未检出精确合成 token（profile 名称阳性对照命中），输入框 token 清空，localStorage/sessionStorage 均 0 条。
+
+### 限制与未实测边界
+
+所有模型响应为 Mockoon 合成 SSE，无付费模型或真实用户配置；本模块未验证 Hindsight 服务，也未做中继 GUI 联调；GUI 运行验证主要为各自机器的本机 Host，跨设备 Relay/CA、目标切换与全链路压力/交错验收归 M20；未测 FUSE 挂载、MSI 安装/卸载与 RPM 安装；Tauri Android 是 M18、TUI 是 M19。本模块不扩大内存/加密作者身份/上传能力声明。

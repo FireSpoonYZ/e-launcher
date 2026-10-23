@@ -36,6 +36,22 @@ function isPlainObject(value) {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+function isLocallyCancelled(record) {
+  return (
+    record.state === 'rejected' &&
+    record.receipt === null &&
+    record.lastError?.code === 'CANCELLED' &&
+    record.lastError?.outcome === 'not-sent'
+  );
+}
+
+function isTerminalRejected(record) {
+  return (
+    (record.state === 'rejected' && record.lastError?.code === 'REQUEST_CONFLICT') ||
+    isLocallyCancelled(record)
+  );
+}
+
 function classifyTransportError(err) {
   let rawCode = null;
   if (isPlainObject(err) && typeof err.code === 'string' && err.code !== '') {
@@ -255,8 +271,7 @@ export function openPendingClient({ dataRoot, deviceId, call }) {
     if (closed) throw new Error('pending client is closed');
     const record = store.get(id);
     if (!record) throw messageError('INVALID_ARGUMENT', 'pending record not found');
-    const conflictRejected = record.state === 'rejected' && record.lastError?.code === 'REQUEST_CONFLICT';
-    if (record.state === 'accepted' || conflictRejected || signal.aborted) return record;
+    if (record.state === 'accepted' || isTerminalRejected(record) || signal.aborted) return record;
     const { record: updated } = await reconcileOnce(record, signal);
     return updated;
   }
@@ -265,9 +280,8 @@ export function openPendingClient({ dataRoot, deviceId, call }) {
     if (closed) throw new Error('pending client is closed');
     let record = store.get(id);
     if (!record) throw messageError('INVALID_ARGUMENT', 'pending record not found');
-    // accepted 永不再次 mutation；REQUEST_CONFLICT rejected 保持（其余 rejected 可显式重试）。
-    const conflictRejected = record.state === 'rejected' && record.lastError?.code === 'REQUEST_CONFLICT';
-    if (record.state === 'accepted' || conflictRejected || signal.aborted) return record;
+    // accepted 永不再次 mutation；REQUEST_CONFLICT 与本机已取消 rejected 保持（其余 rejected 可显式重试）。
+    if (record.state === 'accepted' || isTerminalRejected(record) || signal.aborted) return record;
 
     // sending 与本机 transition 失败后的同进程残留同样先只读对账，匹配/失败保留，
     // 仅明确 missing 才允许显式重发，避免未重启恢复时直接重复 mutation。
@@ -333,6 +347,21 @@ export function openPendingClient({ dataRoot, deviceId, call }) {
     });
   }
 
+  async function doCancel(id) {
+    if (closed) throw new Error('pending client is closed');
+    const record = store.get(id);
+    if (!record) throw messageError('INVALID_ARGUMENT', 'pending record not found');
+    if (isLocallyCancelled(record)) return record;
+    if (record.state !== 'pending') {
+      throw messageError('REQUEST_CONFLICT', `cannot cancel pending record in state ${record.state}`);
+    }
+    return store.transition(record.id, {
+      state: 'rejected',
+      receipt: null,
+      lastError: { code: 'CANCELLED', outcome: 'not-sent' },
+    });
+  }
+
   function close() {
     // 缓存同一 promise：重复 close 等同一次 join。
     if (!closePromise) {
@@ -371,6 +400,11 @@ export function openPendingClient({ dataRoot, deviceId, call }) {
       assertOpen();
       assertUuid(id, 'id');
       return scheduleRowOperation(id, () => withSignal(options?.signal, (sig) => doReconcile(id, sig)));
+    },
+    async cancel(id) {
+      assertOpen();
+      assertUuid(id, 'id');
+      return scheduleRowOperation(id, () => doCancel(id));
     },
     close,
   };

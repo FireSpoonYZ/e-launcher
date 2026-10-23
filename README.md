@@ -208,7 +208,7 @@ Kokoro 路径请求流式 PCM（24 kHz、单声道、16 位小端），使用 Au
 
 当前自部署服务使用 Kokoro v1.0 权重；音色固定不代表韵律和发音已经通过试听。验收时应测试中文夹英文、数字、长回复、连续打断和网络中断，区分 HTTP 响应头时间、首个音频块时间与手机实际出声时间。
 
-下一代多端 Bot 架构与实施进度见 [下一代架构与实施进度](docs/next-generation-architecture.md)。[Bot/Host 核心](host-core/README.md) 已独立实现本机登记、Durable 长期主私聊与内嵌 Billion Context，并已作为 Android Host（M15 已交付）在应用内运行；旧数据迁移与 Tauri 尚未开始。
+下一代多端 Bot 架构与实施进度见 [下一代架构与实施进度](docs/next-generation-architecture.md)。[Bot/Host 核心](host-core/README.md) 已独立实现本机登记、Durable 长期主私聊与内嵌 Billion Context，并已作为 Android Host（M15）在应用内运行；旧数据迁移（M16）与 Windows/Linux 桌面客户端（M17，[`desktop/`](desktop/README.md)）已交付并获父助手限定范围验收，当前 17/20。Tauri Android 外壳（M18）与 Windows/Linux TUI（M19）尚未开始，完整跨设备打包与真机验收归 M20；桌面客户端不替代本机 Android 应用，也不打包模型推理。
 
 ## 源码与许可证
 

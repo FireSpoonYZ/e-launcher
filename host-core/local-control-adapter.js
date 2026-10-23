@@ -36,6 +36,7 @@ const LOCAL_DOMAIN_CODES = new Set([
   'UNSUPPORTED_MEDIA_TYPE',
   'UNAUTHORIZED',
   'ORIGIN_FORBIDDEN',
+  'CONTROL_UNAVAILABLE',
   'SCOPE_NOT_FOUND',
   'SCOPE_FORBIDDEN',
   'SCOPE_UNMANAGED',
@@ -357,6 +358,139 @@ async function* live(config, expectedDeviceId, target, { signal } = {}) {
   }
 }
 
+function isPlainObject(value) {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isNonEmptyWellFormedString(value) {
+  return typeof value === 'string' && value.isWellFormed() && value.trim() !== '';
+}
+
+function validateHostInfo(info) {
+  if (
+    !isPlainObject(info) ||
+    Object.keys(info).length !== 4 ||
+    info.protocolVersion !== 1 ||
+    !isNonEmptyWellFormedString(info.deviceId) ||
+    !isNonEmptyWellFormedString(info.platform) ||
+    !isNonEmptyWellFormedString(info.arch)
+  ) {
+    throw controlError('BAD_RESPONSE', 'responded');
+  }
+  try {
+    assertId(info.deviceId, 'deviceId');
+  } catch {
+    throw controlError('BAD_RESPONSE', 'responded');
+  }
+  return {
+    protocolVersion: 1,
+    deviceId: info.deviceId,
+    platform: info.platform,
+    arch: info.arch,
+  };
+}
+
+function validateSettingsUpdateInput(input) {
+  if (!isPlainObject(input)) {
+    throw controlError('INVALID_ARGUMENT', 'not-sent');
+  }
+  const keys = Object.keys(input);
+  if (keys.length !== 2 || !keys.includes('expectedRevision') || !keys.includes('settings')) {
+    throw controlError('INVALID_ARGUMENT', 'not-sent');
+  }
+  if (!Number.isSafeInteger(input.expectedRevision) || input.expectedRevision <= 0) {
+    throw controlError('INVALID_ARGUMENT', 'not-sent');
+  }
+  if (!isPlainObject(input.settings)) {
+    throw controlError('INVALID_ARGUMENT', 'not-sent');
+  }
+  const normalized = { expectedRevision: input.expectedRevision, settings: input.settings };
+  let json;
+  try {
+    json = JSON.stringify(normalized);
+  } catch {
+    throw controlError('INVALID_ARGUMENT', 'not-sent');
+  }
+  if (Buffer.byteLength(json, 'utf8') > MAX_CONTROL_JSON_BYTES) {
+    throw controlError('REQUEST_TOO_LARGE', 'not-sent');
+  }
+  return normalized;
+}
+
+async function fetchHostInfo(config, { signal } = {}) {
+  const state = { tooLarge: false };
+  const control = createControlClient({
+    url: config.url,
+    token: config.token,
+    fetch: boundedFetch(state),
+  });
+  let info;
+  try {
+    info = await control.getHostInfo({ signal });
+  } catch (err) {
+    throw preflightError(err, state, signal);
+  }
+  if (state.tooLarge) throw controlError('RESPONSE_TOO_LARGE', 'not-sent');
+  return validateHostInfo(info);
+}
+
+async function executeLocalEndpoint(config, expectedDeviceId, invoke, { signal } = {}) {
+  const state = { tooLarge: false };
+  const control = createControlClient({
+    url: config.url,
+    token: config.token,
+    fetch: boundedFetch(state),
+  });
+  let info;
+  try {
+    info = await control.getHostInfo({ signal });
+  } catch (err) {
+    throw preflightError(err, state, signal);
+  }
+  if (state.tooLarge) throw controlError('RESPONSE_TOO_LARGE', 'not-sent');
+  if (info === null || typeof info !== 'object' || info.deviceId !== expectedDeviceId) {
+    throw controlError('CONTROL_IDENTITY_MISMATCH', 'not-sent');
+  }
+  try {
+    const result = await invoke(control, signal);
+    if (state.tooLarge) throw controlError('RESPONSE_TOO_LARGE', 'responded');
+    return result;
+  } catch (err) {
+    throw dispatchError(err, state, signal);
+  }
+}
+
+async function getSettings(config, expectedDeviceId, callOptions = {}) {
+  requireValidId(expectedDeviceId);
+  return executeLocalEndpoint(
+    config,
+    expectedDeviceId,
+    (control, signal) => control.getLocalSettings({ signal }),
+    callOptions,
+  );
+}
+
+async function setSettings(config, expectedDeviceId, input, callOptions = {}) {
+  requireValidId(expectedDeviceId);
+  const normalized = validateSettingsUpdateInput(input);
+  return executeLocalEndpoint(
+    config,
+    expectedDeviceId,
+    (control, signal) => control.replaceLocalSettings(normalized, { signal }),
+    callOptions,
+  );
+}
+
+async function getServiceStatus(config, expectedDeviceId, callOptions = {}) {
+  requireValidId(expectedDeviceId);
+  return executeLocalEndpoint(
+    config,
+    expectedDeviceId,
+    (control, signal) => control.getServiceStatus({ signal }),
+    callOptions,
+  );
+}
+
 export function createLocalControlAdapter(options) {
   const config = validateOptions(options);
   const execute = async function execute(expectedDeviceId, method, params, callOptions = {}) {
@@ -364,5 +498,12 @@ export function createLocalControlAdapter(options) {
   };
   execute.live = (expectedDeviceId, target, liveOptions = {}) =>
     live(config, expectedDeviceId, target, liveOptions);
+  execute.getHostInfo = (callOptions = {}) => fetchHostInfo(config, callOptions);
+  execute.getSettings = (expectedDeviceId, callOptions = {}) =>
+    getSettings(config, expectedDeviceId, callOptions);
+  execute.setSettings = (expectedDeviceId, input, callOptions = {}) =>
+    setSettings(config, expectedDeviceId, input, callOptions);
+  execute.getServiceStatus = (expectedDeviceId, callOptions = {}) =>
+    getServiceStatus(config, expectedDeviceId, callOptions);
   return execute;
 }

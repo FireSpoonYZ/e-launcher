@@ -1,0 +1,14 @@
+{
+  "identifier": "main",
+  "description": "Explicit local capability for the main desktop window only.",
+  "local": true,
+  "windows": ["main"],
+  "webviews": ["main"],
+  "platforms": ["windows", "linux"],
+  "permissions": [
+    "allow-desktop-request",
+    "allow-desktop-observe",
+    "allow-desktop-unobserve",
+    "allow-desktop-pick-file"
+  ]
+}

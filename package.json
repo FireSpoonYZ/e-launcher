@@ -6,7 +6,10 @@
   "scripts": {
     "test": "node --test web/test/*.test.mjs",
     "build": "tsc -p web/tsconfig.json --noEmit && vite build",
-    "sync:android": "cap sync android"
+    "sync:android": "cap sync android",
+    "desktop:prepare": "node host-core/build-desktop.js",
+    "desktop:dev": "node host-core/desktop-tauri.js dev",
+    "desktop:build": "node host-core/desktop-tauri.js build"
   },
   "dependencies": {
     "@capacitor/android": "8.0.0",
@@ -15,6 +18,7 @@
     "@radix-ui/react-dialog": "1.1.15",
     "@radix-ui/react-switch": "1.2.6",
     "@radix-ui/react-tabs": "1.1.13",
+    "@tauri-apps/api": "2.12.4",
     "@xterm/addon-fit": "0.12.0-beta.300",
     "@xterm/addon-unicode11": "0.10.0-beta.300",
     "@xterm/addon-webgl": "0.20.0-beta.299",
@@ -32,6 +36,7 @@
   "devDependencies": {
     "@capacitor/cli": "8.0.0",
     "@tailwindcss/vite": "4.1.18",
+    "@tauri-apps/cli": "2.12.4",
     "@types/react": "19.2.7",
     "@types/react-dom": "19.2.3",
     "@vitejs/plugin-react": "5.1.2",

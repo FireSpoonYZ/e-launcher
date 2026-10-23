@@ -13,7 +13,7 @@ import { openRemoteControl } from './remote-control-client.js';
 import { invalid, readTextFile, readInputObject } from './cli-input.js';
 import { assertId } from './message-protocol.js';
 
-const USAGE = `usage: node host-core/pending-cli.js <enqueue|get|list|send|reconcile> --data-root <dir> --device-id <id> [options]
+const USAGE = `usage: node host-core/pending-cli.js <enqueue|get|list|send|reconcile|cancel> --data-root <dir> --device-id <id> [options]
 
 commands:
   enqueue        queue a client message/request; requires --input
@@ -21,6 +21,7 @@ commands:
   list           list pending records; [--state] [--limit] [--cursor]
   send           explicitly send one pending record; requires --id and exactly one transport
   reconcile      read-only reconcile one pending record; requires --id and exactly one transport
+  cancel         locally cancel one queued pending record; requires --id
 
 options:
   --data-root <dir>       absolute client-state directory (required)
@@ -58,6 +59,7 @@ const REQUIRED = {
   list: ['data-root', 'device-id'],
   send: ['data-root', 'device-id', 'id'],
   reconcile: ['data-root', 'device-id', 'id'],
+  cancel: ['data-root', 'device-id', 'id'],
 };
 
 const ALLOWED_EXTRA = {
@@ -66,6 +68,7 @@ const ALLOWED_EXTRA = {
   list: ['state', 'limit', 'cursor'],
   send: ['local-url', 'url', 'token-env', 'ca'],
   reconcile: ['local-url', 'url', 'token-env', 'ca'],
+  cancel: [],
 };
 
 const ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -280,6 +283,9 @@ async function main() {
         break;
       case 'reconcile':
         result = await pending.reconcile(values.id, { signal: ac.signal });
+        break;
+      case 'cancel':
+        result = await pending.cancel(values.id);
         break;
     }
     if (signalCode !== null) return signalCode;

@@ -1,0 +1,144 @@
+pub mod bridge;
+
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use tauri::{AppHandle, Manager, RunEvent, State, Webview, ipc::Channel};
+use tauri_plugin_dialog::DialogExt;
+
+pub use bridge::{BridgeError, DesktopBridge, DesktopObserveAck, DesktopRequestInput, PickedFileRef};
+
+fn ensure_main_webview(webview: &Webview) -> Result<(), BridgeError> {
+  if webview.label() != "main" || webview.window().label() != "main" {
+    return Err(BridgeError::new(
+      "UNAUTHORIZED",
+      "desktop commands are restricted to the main window",
+      "not-sent",
+    ));
+  }
+  Ok(())
+}
+
+fn is_allowed_navigation(url: &tauri::Url) -> bool {
+  match url.scheme() {
+    "tauri" => url.host_str() == Some("localhost"),
+    "http" if cfg!(windows) && url.host_str() == Some("tauri.localhost") && url.port().is_none() => {
+      true
+    }
+    "http" if cfg!(dev) && url.host_str() == Some("127.0.0.1") && url.port() == Some(1420) => true,
+    _ => false,
+  }
+}
+
+#[tauri::command]
+async fn desktop_request(
+  app: AppHandle,
+  webview: Webview,
+  bridge: State<'_, DesktopBridge>,
+  request: DesktopRequestInput,
+) -> Result<Value, BridgeError> {
+  ensure_main_webview(&webview)?;
+  bridge
+    .request(&app, &request.op, request.params)
+    .await
+}
+
+#[tauri::command]
+async fn desktop_observe(
+  app: AppHandle,
+  webview: Webview,
+  bridge: State<'_, DesktopBridge>,
+  observation_id: String,
+  target_device_id: String,
+  target: Value,
+  on_event: Channel<Value>,
+) -> Result<DesktopObserveAck, BridgeError> {
+  ensure_main_webview(&webview)?;
+  bridge
+    .observe(&app, observation_id, target_device_id, target, on_event)
+    .await
+}
+
+#[tauri::command]
+async fn desktop_unobserve(
+  app: AppHandle,
+  webview: Webview,
+  bridge: State<'_, DesktopBridge>,
+  observation_id: String,
+) -> Result<(), BridgeError> {
+  ensure_main_webview(&webview)?;
+  bridge.unobserve(&app, observation_id).await
+}
+
+#[tauri::command]
+async fn desktop_pick_file(
+  app: AppHandle,
+  webview: Webview,
+) -> Result<Option<PickedFileRef>, BridgeError> {
+  ensure_main_webview(&webview)?;
+  let picked = tauri::async_runtime::spawn_blocking(move || {
+    let mut dialog = app.dialog().file();
+    if let Some(window) = app.get_webview_window("main") {
+      dialog = dialog.set_parent(&window);
+    }
+    dialog.blocking_pick_file()
+  })
+  .await
+  .map_err(|_| {
+    BridgeError::new(
+      "INTERNAL",
+      "file dialog worker failed",
+      "not-sent",
+    )
+  })?;
+
+  let Some(file_path) = picked else {
+    return Ok(None);
+  };
+
+  let raw_path = file_path.into_path().map_err(|_| {
+    BridgeError::new(
+      "INVALID_ARGUMENT",
+      "selected item is not a local filesystem path",
+      "not-sent",
+    )
+  })?;
+
+  bridge::validate_picked_regular_file(&raw_path).map(Some)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NavigationGuardConfig {
+  pub main_label: String,
+}
+
+pub fn run() {
+  let bridge = DesktopBridge::new();
+  let app = tauri::Builder::default()
+    .manage(bridge)
+    .plugin(
+      tauri::plugin::Builder::<tauri::Wry, ()>::new("navigation-guard")
+        .on_navigation(|webview, url| webview.label() == "main" && is_allowed_navigation(url))
+        .build(),
+    )
+    .plugin(tauri_plugin_dialog::init())
+    .setup(|app| {
+      if let Some(window) = app.get_webview_window("main") {
+        let _ = window.set_title("e-助手");
+      }
+      Ok(())
+    })
+    .invoke_handler(tauri::generate_handler![
+      desktop_request,
+      desktop_observe,
+      desktop_unobserve,
+      desktop_pick_file,
+    ])
+    .build(tauri::generate_context!())
+    .expect("failed to build e-launcher desktop application");
+
+  app.run(|app_handle, event| {
+    if matches!(event, RunEvent::Exit) {
+      app_handle.state::<DesktopBridge>().shutdown();
+    }
+  });
+}
