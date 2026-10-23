@@ -3,8 +3,8 @@ name: worker
 description: 按父助手契约做最小静态实现；不运行测试、构建或验证
 aliases: developer, coder, implementer, develop
 tools: read, grep, find, ls, edit, write, contact_supervisor
-model: inception/mercury-3
-thinking: max
+model: google-vertex/gemini-4-argon
+thinking: high
 systemPromptMode: replace
 inheritProjectContext: true
 inheritSkills: false
