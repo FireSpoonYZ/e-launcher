@@ -5,6 +5,8 @@ import android.content.Intent;
 import android.content.res.Configuration;
 import android.net.Uri;
 import android.os.Bundle;
+import android.os.Looper;
+import android.util.Log;
 import android.view.ViewGroup;
 import android.view.WindowManager;
 import android.webkit.WebView;
@@ -30,6 +32,7 @@ public class MainActivity extends BridgeActivity {
 
     private ChatCoordinator chatCoordinator;
     private ChatStore chatStore;
+    private volatile boolean hostOnly;
     private WebView chatWebView;
     private volatile String initialWebRoute;
     private String pendingRoute;
@@ -58,6 +61,10 @@ public class MainActivity extends BridgeActivity {
         return route != null && route.matches("/terminals/[^/]+/[^/?]+(?:\\?.*)?");
     }
 
+    static boolean isHostRoute(String route) {
+        return route != null && (route.equals("/settings/host") || route.startsWith("/settings/host?"));
+    }
+
     static int terminalTextZoom(boolean terminalPage, float fontScale) {
         return terminalPage ? 100 : Math.round(fontScale * 100);
     }
@@ -68,18 +75,42 @@ public class MainActivity extends BridgeActivity {
     @Override protected void attachBaseContext(Context base) { super.attachBaseContext(UiText.wrap(base)); }
 
     @Override public void onCreate(Bundle savedInstanceState) {
-        chatCoordinator = ChatCoordinator.get(this);
-        chatStore = chatCoordinator.store();
-        initialWebRoute = savedInstanceState == null ? "/chat/" + Uri.encode(chatStore.activeId())
-                : savedInstanceState.getString(ROUTE_KEY, "/chat/" + Uri.encode(chatStore.activeId()));
-        pendingRoute = initialWebRoute;
-        boolean consumed = savedInstanceState != null && savedInstanceState.getBoolean(ENTRY_CONSUMED_KEY);
-        if (consumed) {
-            pendingArchivedId = savedInstanceState.getString(ARCHIVED_PROMPT_KEY);
+        // A Host-only entry must not touch legacy chat business on the cold start chain.
+        // Explicit entry extras win over a restored Host route; openHost keeps its consumeIntent precedence.
+        String savedRoute = savedInstanceState == null ? null : savedInstanceState.getString(ROUTE_KEY);
+        boolean intentHost = getIntent().getBooleanExtra(EXTRA_OPEN_HOST, false);
+        boolean intentLegacy = getIntent().hasExtra(EXTRA_NEW_CHAT)
+                || getIntent().hasExtra(EXTRA_OPEN_ARCHIVED)
+                || getIntent().hasExtra(EXTRA_OPEN_SCHEDULE)
+                || getIntent().hasExtra(TaskDetailActivity.EXTRA_OPEN_CHAT)
+                || getIntent().hasExtra(TaskDetailActivity.EXTRA_ARCHIVED_ID);
+        boolean savedHost = isHostRoute(savedRoute);
+        // An explicit legacy entry must never be swallowed by a saved Host route.
+        boolean hostConflict = savedHost && intentLegacy;
+        hostOnly = intentHost || (savedHost && !intentLegacy);
+        if (hostOnly) {
+            initialWebRoute = intentHost ? "/settings/host" : savedRoute;
+            pendingRoute = initialWebRoute;
+            pendingArchivedId = null;
+            archivePromptShown = false;
             clearEntryExtras(getIntent());
         } else {
-            // Device.state() can run while BridgeActivity creates the WebView: establish its route first.
-            consumeIntent(getIntent());
+            chatCoordinator = ChatCoordinator.get(this);
+            chatStore = chatCoordinator.store();
+            boolean consumed = savedInstanceState != null && savedInstanceState.getBoolean(ENTRY_CONSUMED_KEY);
+            if (consumed && !hostConflict) {
+                initialWebRoute = savedInstanceState.getString(ROUTE_KEY, "/chat/" + Uri.encode(chatStore.activeId()));
+                pendingRoute = initialWebRoute;
+                pendingArchivedId = savedInstanceState.getString(ARCHIVED_PROMPT_KEY);
+                clearEntryExtras(getIntent());
+            } else {
+                // A fresh explicit entry wins over the saved route; Device.state() can run while
+                // BridgeActivity creates the WebView, so establish its route before that.
+                initialWebRoute = savedInstanceState == null ? "/chat/" + Uri.encode(chatStore.activeId())
+                        : savedInstanceState.getString(ROUTE_KEY, "/chat/" + Uri.encode(chatStore.activeId()));
+                pendingRoute = initialWebRoute;
+                consumeIntent(getIntent());
+            }
         }
         registerPlugin(ChatPlugin.class);
         registerPlugin(ScheduledTasksPlugin.class);
@@ -114,8 +145,8 @@ public class MainActivity extends BridgeActivity {
             chatWebView.requestApplyInsets();
             applyPendingRoute();
         }
-        // Registers read-aloud for finished replies even before the first dictation.
-        VoiceManager.get(this);
+        // Registers read-aloud for finished replies even before the first dictation (legacy entries only).
+        if (!hostOnly) VoiceManager.get(this);
         uiReady = true;
         showPendingEntry();
     }
@@ -154,8 +185,8 @@ public class MainActivity extends BridgeActivity {
             pendingArchivedId = null;
             archivePromptShown = false;
             try {
-                chatStore.newAssistantConversation();
-                launchWeb("/chat/" + Uri.encode(chatStore.activeId()));
+                store().newAssistantConversation();
+                launchWeb("/chat/" + Uri.encode(store().activeId()));
             } catch (RuntimeException exception) { failure(exception); }
         }
         if (archivedId != null) pendingUndoId = archivedId;
@@ -184,8 +215,10 @@ public class MainActivity extends BridgeActivity {
         super.onResume();
         resumedActivity = new WeakReference<>(this);
         LegacyNavigationRecovery.recover(this);
-        WakeWordService.sync(this);
-        TaskWidgetProvider.requestRefresh(this, true);
+        if (!hostOnly) {
+            WakeWordService.sync(this);
+            TaskWidgetProvider.requestRefresh(this, true);
+        }
         if (!AppAppearance.revision(this).equals(appearanceRevision)) { recreate(); return; }
         showPendingEntry();
         refreshWeb();
@@ -198,7 +231,8 @@ public class MainActivity extends BridgeActivity {
 
     @Override public void onDestroy() {
         if (resumedActivity.get() == this) resumedActivity.clear();
-        VoiceManager.get(this).cancelListening();
+        VoiceManager manager = VoiceManager.instanceIfPresent();
+        if (manager != null) manager.cancelListening();
         super.onDestroy();
     }
 
@@ -229,11 +263,51 @@ public class MainActivity extends BridgeActivity {
 
     boolean isTaskConversationVisible(String conversationId) {
         if (resumed() != this || !hasWindowFocus() || !webReady || pendingRoute != null
-                || conversationId == null || !conversationId.equals(chatStore.activeId())) return false;
+                || conversationId == null) return false;
         String route = currentWebRoute();
         if (route == null) return false;
         route = route.split("\\?", 2)[0];
-        return route.equals("/chat") || route.equals("/chat/" + conversationId);
+        if (!route.equals("/chat") && !route.equals("/chat/" + conversationId)) return false;
+        // Consult legacy storage only when a legacy chat route is actually visible.
+        return conversationId.equals(store().activeId());
+    }
+
+    private ChatCoordinator coordinator() {
+        if (chatCoordinator == null) chatCoordinator = ChatCoordinator.get(this);
+        return chatCoordinator;
+    }
+
+    private ChatStore store() {
+        if (chatStore == null) chatStore = coordinator().store();
+        return chatStore;
+    }
+
+    boolean hostOnly() { return hostOnly; }
+
+    /**
+     * First legacy business call after a Host-only entry: switch to legacy mode once.
+     * Runs on the main thread so the flag flip and service start are single-threaded;
+     * never starts foreground/microphone services after finish or while paused.
+     */
+    void resumeLegacyIfHost() {
+        if (!hostOnly) return;
+        if (Looper.myLooper() == Looper.getMainLooper()) resumeLegacyOnMain();
+        else runOnUiThread(this::resumeLegacyOnMain);
+    }
+
+    private void resumeLegacyOnMain() {
+        if (!hostOnly) return;
+        hostOnly = false;
+        if (isFinishing() || isDestroyed()) return;
+        restoreLegacySchedules();
+        if (resumed() != this) return; // Paused: the next onResume restores wake word/widget sync.
+        WakeWordService.sync(this);
+        TaskWidgetProvider.requestRefresh(this, true);
+    }
+
+    private void restoreLegacySchedules() {
+        try { ScheduledTasks.get(this).restore(); }
+        catch (Exception failure) { Log.w("ScheduledTasks", "Unable to restore schedules", failure); }
     }
 
     String launchRoute() { return initialWebRoute == null ? "/chat" : initialWebRoute; }
@@ -244,9 +318,9 @@ public class MainActivity extends BridgeActivity {
         try {
             if (conversationId == null || conversationId.isEmpty()) {
                 // An empty voice return is a fresh conversation, not consumption of the migration draft.
-                chatStore.newConversation();
-                launchWeb("/chat/" + Uri.encode(chatStore.activeId()));
-            } else if (chatStore.isArchived(conversationId)) {
+                store().newConversation();
+                launchWeb("/chat/" + Uri.encode(store().activeId()));
+            } else if (store().isArchived(conversationId)) {
                 pendingArchivedId = conversationId;
                 showPendingEntry();
             } else selectAndOpen(conversationId);
@@ -255,7 +329,7 @@ public class MainActivity extends BridgeActivity {
 
     private void selectAndOpen(String conversationId) {
         // The currently open, still-empty conversation need not have an index entry yet.
-        if (!conversationId.equals(chatStore.activeId())) chatStore.selectConversation(conversationId);
+        if (!conversationId.equals(store().activeId())) store().selectConversation(conversationId);
         launchWeb("/chat/" + Uri.encode(conversationId));
     }
 
@@ -300,8 +374,8 @@ public class MainActivity extends BridgeActivity {
         if (pendingArchivedId != null && !archivePromptShown) {
             String id = pendingArchivedId;
             archivePromptShown = true;
-            if (chatStore.isArchived(id)) {
-                ConversationArchiveUi.promptArchived(this, chatStore.archivedAt(id),
+            if (store().isArchived(id)) {
+                ConversationArchiveUi.promptArchived(this, store().archivedAt(id),
                         () -> resolveArchived(id, true), () -> resolveArchived(id, false));
             } else resolveArchived(id, false);
         }
@@ -310,7 +384,7 @@ public class MainActivity extends BridgeActivity {
             pendingUndoId = null;
             ViewGroup root = findViewById(android.R.id.content);
             ConversationArchiveUi.showUndo(root, UiText.get(this, "对话已归档"), () -> {
-                try { chatCoordinator.restoreConversation(id); refreshWeb(); }
+                try { coordinator().restoreConversation(id); refreshWeb(); }
                 catch (RuntimeException exception) { failure(exception); }
             }, this);
         }
@@ -322,7 +396,7 @@ public class MainActivity extends BridgeActivity {
         pendingArchivedId = null;
         archivePromptShown = false;
         try {
-            if (restore) chatCoordinator.restoreConversation(id);
+            if (restore) coordinator().restoreConversation(id);
             selectAndOpen(id);
         } catch (RuntimeException exception) { failure(exception); }
     }

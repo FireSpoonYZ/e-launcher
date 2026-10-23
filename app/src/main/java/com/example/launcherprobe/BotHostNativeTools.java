@@ -29,9 +29,10 @@ final class BotHostNativeTools {
     private static final int AUX_QUEUE_CAPACITY = 32;
     private static final long MAX_SAFE_INTEGER = 9007199254740991L;
     private static final int MAX_TEXT_OUTPUT_BYTES = 50 * 1024;
-    private static final Set<String> TOOLS = Set.of("android_apps", "android_shower", "android_speak");
+    private static final Set<String> TOOLS = Set.of("android_apps", "android_shower", "android_speak", "schedule_task");
     private static final Set<String> KINDS = Set.of("primary", "room", "dm");
 
+    private final Context appContext;
     private final ShowerToolBridge showerTools;
     private final AppCatalog appCatalog;
     private final BotHostVoice voice;
@@ -44,6 +45,7 @@ final class BotHostNativeTools {
     private volatile String deviceId;
 
     BotHostNativeTools(Context context, BotHostVoice voice) {
+        this.appContext = context.getApplicationContext();
         this.voice = voice;
         showerTools = new ShowerToolBridge(context);
         appCatalog = new AppCatalog(context);
@@ -137,6 +139,9 @@ final class BotHostNativeTools {
                 || context.optString("scopeId").isEmpty()) {
             return "work 调用缺少 scopeId";
         }
+        if ("schedule_task".equals(frame.optString("tool")) && !"primary".equals(kind)) {
+            return "schedule_task 仅支持 primary";
+        }
         if (!(context.opt("taskId") instanceof Number number)) return "taskId 必须是正整数";
         double value = number.doubleValue();
         long rounded = Math.round(value);
@@ -156,6 +161,8 @@ final class BotHostNativeTools {
 
     void close() {
         if (!closed.compareAndSet(false, true)) return;
+        BotHostSchedules schedules = BotHostSchedules.instanceIfPresent();
+        if (schedules != null && boundProcess != null) schedules.unbind(boundProcess);
         for (Task task : tasks.values()) {
             if (tasks.remove(task.id, task)) {
                 task.cancelled.set(true);
@@ -220,7 +227,7 @@ final class BotHostNativeTools {
             Object result = null;
             JSONObject error = null;
             try {
-                result = execute(frame, cancelled::get);
+                result = execute(frame, cancelled);
             } catch (Throwable t) {
                 error = fixedError(t);
             }
@@ -237,15 +244,17 @@ final class BotHostNativeTools {
         }
     }
 
-    private Object execute(JSONObject frame, BooleanSupplier cancelled) throws Exception {
+    private Object execute(JSONObject frame, AtomicBoolean cancelled) throws Exception {
         String tool = frame.optString("tool");
         JSONObject arguments = frame.optJSONObject("arguments");
         if (arguments == null) arguments = new JSONObject();
         JSONObject context = frame.getJSONObject("context");
         return switch (tool) {
             case "android_apps" -> apps(arguments);
-            case "android_shower" -> shower(context, arguments, cancelled);
+            case "android_shower" -> shower(context, arguments, cancelled::get);
             case "android_speak" -> speak(arguments);
+            case "schedule_task" -> BotHostSchedules.get(appContext)
+                    .applyTool(boundProcess, context, arguments, cancelled);
             default -> throw new IllegalArgumentException("未知原生工具");
         };
     }

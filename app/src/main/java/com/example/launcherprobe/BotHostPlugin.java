@@ -150,6 +150,104 @@ public final class BotHostPlugin extends Plugin {
         }
     }
 
+    // ---------- 遗留导入（M16 显式用户动作；运行中走 Host 私有命令，离线走 settings 子进程） ----------
+
+    @PluginMethod public void legacyList(PluginCall call) {
+        try {
+            String cursor = null;
+            JSONObject data = call.getData();
+            if (data.has("cursor") && !data.isNull("cursor")) {
+                Object value = data.opt("cursor");
+                if (!(value instanceof String)) throw new IllegalArgumentException("cursor 无效");
+                cursor = (String) value;
+            }
+            int limit = 0;
+            if (data.has("limit") && !data.isNull("limit")) {
+                Object value = data.opt("limit");
+                if (!(value instanceof Number)) throw new IllegalArgumentException("limit 无效");
+                double number = ((Number) value).doubleValue();
+                if (number != Math.floor(number) || number < 0 || number > 200) {
+                    throw new IllegalArgumentException("limit 超出范围");
+                }
+                limit = (int) number;
+            }
+            manager().legacyList(cursor, limit).whenComplete((payload, ex) -> complete(call, payload, ex));
+        } catch (Exception exception) {
+            reject(call, exception);
+        }
+    }
+
+    @PluginMethod public void legacyPreview(PluginCall call) {
+        try {
+            JSONObject input = new JSONObject()
+                    .put("conversationId", required(call, "conversationId"))
+                    .put("role", required(call, "role"))
+                    .put("cwd", required(call, "cwd"))
+                    .put("modelRef", required(call, "modelRef"));
+            manager().legacyPreview(input).whenComplete((payload, ex) -> complete(call, payload, ex));
+        } catch (Exception exception) {
+            reject(call, exception);
+        }
+    }
+
+    @PluginMethod public void legacyStatus(PluginCall call) {
+        try {
+            JSONObject input = new JSONObject().put("sourceKey", required(call, "sourceKey"));
+            JSONObject data = call.getData();
+            if (data.has("requestId")) {
+                Object value = data.opt("requestId");
+                if (!(value instanceof String)) throw new IllegalArgumentException("requestId 无效");
+                input.put("requestId", value);
+            }
+            manager().legacyStatus(input).whenComplete((payload, ex) -> complete(call, payload, ex));
+        } catch (Exception exception) {
+            reject(call, exception);
+        }
+    }
+
+    @PluginMethod public void legacyImport(PluginCall call) {
+        try {
+            JSONObject input = call.getObject("input");
+            if (input == null) throw new IllegalArgumentException("input is required");
+            manager().legacyImport(input).whenComplete((payload, ex) -> complete(call, payload, ex));
+        } catch (Exception exception) {
+            reject(call, exception);
+        }
+    }
+
+    @PluginMethod public void legacyDraft(PluginCall call) {
+        try {
+            JSONObject input = new JSONObject()
+                    .put("sourceKey", required(call, "sourceKey"))
+                    .put("requestId", required(call, "requestId"));
+            JSONObject data = call.getData();
+            if (data.has("textOffset")) {
+                Object value = data.opt("textOffset");
+                if (value == null) value = JSONObject.NULL;
+                input.put("textOffset", value);
+            }
+            if (data.has("attachmentOffset")) {
+                Object value = data.opt("attachmentOffset");
+                if (value == null) value = JSONObject.NULL;
+                input.put("attachmentOffset", value);
+            }
+            manager().legacyDraft(input).whenComplete((payload, ex) -> complete(call, payload, ex));
+        } catch (Exception exception) {
+            reject(call, exception);
+        }
+    }
+
+    @PluginMethod public void legacyDiscard(PluginCall call) {
+        try {
+            JSONObject input = new JSONObject()
+                    .put("sourceKey", required(call, "sourceKey"))
+                    .put("snapshotId", required(call, "snapshotId"));
+            manager().legacyDiscard(input).whenComplete((payload, ex) -> complete(call, payload, ex));
+        } catch (Exception exception) {
+            reject(call, exception);
+        }
+    }
+
     // ---------- 观察（宿主 UI 专用；断开不会停止 Host/Agent） ----------
 
     @PluginMethod public void observe(PluginCall call) {

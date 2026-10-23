@@ -10,16 +10,20 @@ import org.json.JSONObject;
 
 import java.io.File;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
 import java.util.Arrays;
 import java.util.Base64;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
@@ -55,6 +59,17 @@ public final class BotHostManager {
             "PATH", "HOME", "PWD", "SHELL", "USER", "LOGNAME", "HOSTNAME", "LANG", "LC_ALL",
             "TMPDIR", "TEMP", "TMP", "ANDROID_ROOT", "ANDROID_DATA", "ANDROID_STORAGE",
             "LD_LIBRARY_PATH", "JAVA_HOME", "NODE_OPTIONS", "SYSTEMROOT", "WINDIR"));
+
+    /** M16 遗留导入冻结字段形状：snapshotId 小写 SHA64，sourceKey=android-chat:<id>，requestId=64 小写 hex。 */
+    private static final Pattern SNAPSHOT_ID = Pattern.compile("[0-9a-f]{64}");
+    private static final Pattern LEGACY_SOURCE_KEY = Pattern.compile("android-chat:[^\\p{Cntrl}]{1,256}");
+    private static final Pattern LEGACY_REQUEST_ID = Pattern.compile("[0-9a-f]{64}");
+    private static final Pattern LEGACY_ID_TEXT = Pattern.compile("[^\\p{Cntrl}]{1,65536}");
+    /** M16 遗留迁移 UTF-8 预算对齐合同 boundaryAlignment。 */
+    private static final int LEGACY_ROLE_MAX_UTF8_BYTES = 65536;
+    private static final int LEGACY_CWD_MAX_UTF8_BYTES = 65536;
+    private static final int LEGACY_MODELREF_MAX_UTF8_BYTES = 4096;
+    private static final int LEGACY_SOURCEKEY_MAX_UTF8_BYTES = 256;
 
     enum Phase { STOPPED, STARTING, RUNNING, STOPPING, FAILED }
 
@@ -175,7 +190,10 @@ public final class BotHostManager {
     private volatile BotHostService service;
     private volatile BotHostVoice spareVoice;
     private volatile Gen pendingCleanupGen; // 清理失败残留代：确认死亡前禁止替换。
+    private volatile BotHostProcess offlineCleanupPending; // 离线遗留 child 清理失败仍存活：阻止替代启动/另一 settings child。
     private long epoch; // 受 lock 保护：停止递增以取消未提交/进行中的启动。
+    /** M16 遗留导入不确定状态（仅控制线程修改）：已送出但结果不明时按原进程真实存活禁止误删 staging。 */
+    private final Map<String, PendingLegacyImport> pendingLegacyImports = new HashMap<>();
 
     private BotHostManager(Context context) {
         this.context = context.getApplicationContext();
@@ -248,6 +266,7 @@ public final class BotHostManager {
             if (phase == Phase.STOPPING) throw new IllegalStateException("Host 正在停止");
             if (pendingCleanupGen != null) throw new IllegalStateException("上一代清理未完成，无法启动");
         }
+        if (offlineCleanupBlocked()) throw new IllegalStateException("上一离线进程清理未完成，无法启动");
         final long e;
         synchronized (lock) {
             e = epoch;
@@ -256,6 +275,7 @@ public final class BotHostManager {
     }
 
     private CompletableFuture<JSONObject> startTask(long e) {
+        if (offlineCleanupBlocked()) throw new IllegalStateException("上一离线进程清理未完成，无法启动");
         Gen g;
         synchronized (lock) {
             if (phase == Phase.RUNNING) return CompletableFuture.completedFuture(snapshot());
@@ -360,6 +380,7 @@ public final class BotHostManager {
                 setPhaseLocked(Phase.STOPPING, null, false);
             }
         }
+        unbindSchedules(g != null ? g.process : null);
         awaitCleanup(g, promise);
         return promise;
     }
@@ -471,6 +492,7 @@ public final class BotHostManager {
             // 复用 triggerCleanup/confirmDead/pendingCleanupGen，直到确认 spawn/exit。
             if (pendingCleanupGen == null) pendingCleanupGen = g;
         }
+        unbindSchedules(g.process);
         notifyServiceStop(true, code);
         triggerCleanup(g);
     }
@@ -527,6 +549,17 @@ public final class BotHostManager {
             }
         }
         if (accepted) {
+            // 前置复核：ready 释放锁后、bind 前 stop/exit 可能已接管，旧代不得重新绑定。
+            if (!currentRunning(g) || g.process != process) {
+                return;
+            }
+            // 锁外绑定 Schedule 连接引用；bind 不做同步磁盘 IO。
+            BotHostSchedules.get(context).bind(this, process, ready.optString("deviceId"));
+            // 后置复核：bind 期间换代则仅解除本次 process，不清新代。
+            if (!currentRunning(g) || g.process != process) {
+                unbindSchedules(process);
+                return;
+            }
             notifyServiceState();
             return;
         }
@@ -558,6 +591,7 @@ public final class BotHostManager {
                 }
             }
         }
+        unbindSchedules(process);
         if (resolvedCleanup) notifyServiceStop(false, null);
         else if (code != null) notifyServiceStop(true, code);
     }
@@ -586,6 +620,33 @@ public final class BotHostManager {
                 return failedFuture(new BridgeException("INVALID_ARGUMENT", "not-sent", "请求字段无效"));
             }
         });
+    }
+
+    /** Schedule 引擎专用（package-private）：仅 submit/getSubmission，且必须仍是同一 RUNNING 代才发送。 */
+    CompletableFuture<JSONObject> scheduleCall(BotHostProcess expected, String method, JSONObject params) {
+        if (!"submit".equals(method) && !"getSubmission".equals(method)) {
+            return failedFuture(new BridgeException("INVALID_ARGUMENT", "not-sent", "方法不允许"));
+        }
+        return onControl(() -> {
+            Gen g = gen;
+            if (expected == null || !currentRunning(g) || g.process != expected) {
+                return failedFuture(new BridgeException("NOT_CONNECTED", "not-sent", "Host 未运行"));
+            }
+            try {
+                JSONObject fields = new JSONObject().put("method", method)
+                        .put("params", params != null ? params : new JSONObject());
+                return processRequest(g, "call", fields);
+            } catch (JSONException e) {
+                return failedFuture(new BridgeException("INVALID_ARGUMENT", "not-sent", "请求字段无效"));
+            }
+        });
+    }
+
+    /** 解除 Schedule 绑定（仅匹配进程；Schedules 未实例化时无操作）。 */
+    private void unbindSchedules(BotHostProcess process) {
+        if (process == null) return;
+        BotHostSchedules schedules = BotHostSchedules.instanceIfPresent();
+        if (schedules != null) schedules.unbind(process);
     }
 
     /** 观察固定目标；绝不启动 Host。close() 只取消捕获时的进程/id。 */
@@ -651,6 +712,426 @@ public final class BotHostManager {
                 return failedFuture(t);
             }
         });
+    }
+
+    // ---------- 遗留迁移（M16） ----------
+
+    /** 遗留源列表：仅构造 exporter 读取，不访问旧 ChatStore/PiConfigStore/SDK，不启动 Host。 */
+    public CompletableFuture<JSONObject> legacyList(String cursor, int limit) {
+        return onControl(() -> {
+            try {
+                String effectiveCursor = (cursor != null && cursor.isEmpty()) ? null : cursor;
+                if (effectiveCursor != null && effectiveCursor.length() > 1024) {
+                    return failedFuture(new BridgeException("INVALID_ARGUMENT", "not-sent", "cursor 超限"));
+                }
+                return CompletableFuture.completedFuture(new BotHostLegacySnapshot(context).list(effectiveCursor, limit));
+            } catch (Throwable t) {
+                return failedFuture(t);
+            }
+        });
+    }
+
+    /** 遗留预览：先 exporter capture 发布 staging 快照，再在线/离线 settings 模式请求 legacy_preview。 */
+    public CompletableFuture<JSONObject> legacyPreview(JSONObject input) {
+        if (input == null) {
+            return failedFuture(new BridgeException("INVALID_ARGUMENT", "not-sent", "输入无效"));
+        }
+        final JSONObject frozen;
+        try {
+            frozen = new JSONObject(input.toString());
+        } catch (JSONException e) {
+            return failedFuture(new BridgeException("INVALID_ARGUMENT", "not-sent", "输入无效"));
+        }
+        if (transitionBlocked()) {
+            return failedFuture(new BridgeException("BUSY", "not-sent", "Host 正在启动/停止"));
+        }
+        return onControl(() -> {
+            if (transitionBlocked()) {
+                return failedFuture(new BridgeException("BUSY", "not-sent", "Host 正在启动/停止"));
+            }
+            Gen g = gen;
+            try {
+                String conversationId = requireLegacyConversationId(frozen);
+                String role = requireLegacyText(frozen, "role", LEGACY_ROLE_MAX_UTF8_BYTES);
+                String cwd = requireLegacyCwd(frozen);
+                String modelRef = requireLegacyText(frozen, "modelRef", LEGACY_MODELREF_MAX_UTF8_BYTES);
+                JSONObject capture = new BotHostLegacySnapshot(context).capture(conversationId);
+                JSONObject previewInput = new JSONObject()
+                        .put("snapshotId", capture.getString("snapshotId"))
+                        .put("role", role)
+                        .put("cwd", cwd)
+                        .put("modelRef", modelRef);
+                if (running(g)) {
+                    return CompletableFuture.completedFuture(requireObjectResult(
+                            processRequest(g, "legacy_preview", new JSONObject().put("input", previewInput)).join()));
+                }
+                return CompletableFuture.completedFuture(offlineLegacyCommand("legacy_preview", previewInput));
+            } catch (Throwable t) {
+                return failedFuture(t);
+            }
+        });
+    }
+
+    /** 遗留状态：运行中走 Host 私有命令，离线走 settings 子进程 registry 只读。 */
+    public CompletableFuture<JSONObject> legacyStatus(JSONObject input) {
+        if (input == null) {
+            return failedFuture(new BridgeException("INVALID_ARGUMENT", "not-sent", "输入无效"));
+        }
+        final JSONObject frozen;
+        try {
+            frozen = new JSONObject(input.toString());
+        } catch (JSONException e) {
+            return failedFuture(new BridgeException("INVALID_ARGUMENT", "not-sent", "输入无效"));
+        }
+        if (transitionBlocked()) {
+            return failedFuture(new BridgeException("BUSY", "not-sent", "Host 正在启动/停止"));
+        }
+        return onControl(() -> {
+            if (transitionBlocked()) {
+                return failedFuture(new BridgeException("BUSY", "not-sent", "Host 正在启动/停止"));
+            }
+            Gen g = gen;
+            try {
+                String sourceKey = requireLegacySourceKey(frozen);
+                String requestId = optionalLegacyRequestId(frozen);
+                JSONObject statusInput = new JSONObject().put("sourceKey", sourceKey);
+                if (requestId != null) statusInput.put("requestId", requestId);
+                if (running(g)) {
+                    return CompletableFuture.completedFuture(requireObjectResult(
+                            processRequest(g, "legacy_status", new JSONObject().put("input", statusInput)).join()));
+                }
+                return CompletableFuture.completedFuture(offlineLegacyCommand("legacy_status", statusInput));
+            } catch (Throwable t) {
+                return failedFuture(t);
+            }
+        });
+    }
+
+    /** 遗留导入：必须先运行 Host；先 legacy_status 核对，prepared/completed 仍派发 legacy_import 由 core 校验完整冻结定义/digest，missing 经 matches 才私有导入。 */
+    public CompletableFuture<JSONObject> legacyImport(JSONObject input) {
+        if (input == null) {
+            return failedFuture(new BridgeException("INVALID_ARGUMENT", "not-sent", "输入无效"));
+        }
+        final JSONObject frozen;
+        try {
+            frozen = new JSONObject(input.toString());
+        } catch (JSONException e) {
+            return failedFuture(new BridgeException("INVALID_ARGUMENT", "not-sent", "输入无效"));
+        }
+        try {
+            requireLegacySourceKey(frozen);
+            requireLegacySnapshotId(frozen);
+            requireLegacyRequestId(frozen);
+            requireLegacyText(frozen, "role", LEGACY_ROLE_MAX_UTF8_BYTES);
+            requireLegacyCwd(frozen);
+            requireLegacyText(frozen, "modelRef", LEGACY_MODELREF_MAX_UTF8_BYTES);
+        } catch (BridgeException e) {
+            return failedFuture(e);
+        }
+        if (transitionBlocked()) {
+            return failedFuture(new BridgeException("BUSY", "not-sent", "Host 正在启动/停止"));
+        }
+        return onControl(() -> {
+            if (transitionBlocked()) {
+                return failedFuture(new BridgeException("BUSY", "not-sent", "Host 正在启动/停止"));
+            }
+            Gen g = gen;
+            if (!currentRunning(g)) {
+                return failedFuture(new BridgeException("NOT_CONNECTED", "not-sent", "Host 未运行"));
+            }
+            try {
+                JSONObject statusInput = new JSONObject()
+                        .put("sourceKey", frozen.getString("sourceKey"))
+                        .put("requestId", frozen.getString("requestId"));
+                JSONObject status = requireObjectResult(
+                        processRequest(g, "legacy_status", new JSONObject().put("input", statusInput)).join());
+                String phase = status.optString("phase");
+                if ("prepared".equals(phase) || "completed".equals(phase)) {
+                    // 继续/幂等也须经 core 对完整冻结定义/digest 校验；不直接信 status 绕过 role/cwd/modelRef。
+                    if (transitionBlocked()) {
+                        return failedFuture(new BridgeException("BUSY", "not-sent", "Host 正在启动/停止"));
+                    }
+                    if (!currentRunning(g)) {
+                        return failedFuture(new BridgeException("NOT_CONNECTED", "not-sent", "Host 未运行"));
+                    }
+                    return dispatchLegacyImport(g, frozen);
+                }
+                if (!"missing".equals(phase)) {
+                    return failedFuture(new BridgeException("INVALID_ARGUMENT", "not-sent", "未知导入状态"));
+                }
+                String conversationId = frozen.getString("sourceKey").substring("android-chat:".length());
+                if (!new BotHostLegacySnapshot(context).matches(conversationId, frozen.getString("snapshotId"))) {
+                    return failedFuture(new BridgeException("REQUEST_CONFLICT", "not-sent", "快照与源会话不一致"));
+                }
+                if (transitionBlocked()) {
+                    return failedFuture(new BridgeException("BUSY", "not-sent", "Host 正在启动/停止"));
+                }
+                if (!currentRunning(g)) {
+                    return failedFuture(new BridgeException("NOT_CONNECTED", "not-sent", "Host 未运行"));
+                }
+                return dispatchLegacyImport(g, frozen);
+            } catch (Throwable t) {
+                return failedFuture(t);
+            }
+        });
+    }
+
+    /** 遗留草稿分页：运行中走 Host 私有命令，离线走 settings 子进程纯核心函数。 */
+    public CompletableFuture<JSONObject> legacyDraft(JSONObject input) {
+        if (input == null) {
+            return failedFuture(new BridgeException("INVALID_ARGUMENT", "not-sent", "输入无效"));
+        }
+        final JSONObject frozen;
+        try {
+            frozen = new JSONObject(input.toString());
+        } catch (JSONException e) {
+            return failedFuture(new BridgeException("INVALID_ARGUMENT", "not-sent", "输入无效"));
+        }
+        if (transitionBlocked()) {
+            return failedFuture(new BridgeException("BUSY", "not-sent", "Host 正在启动/停止"));
+        }
+        return onControl(() -> {
+            if (transitionBlocked()) {
+                return failedFuture(new BridgeException("BUSY", "not-sent", "Host 正在启动/停止"));
+            }
+            Gen g = gen;
+            try {
+                String sourceKey = requireLegacySourceKey(frozen);
+                String requestId = requireLegacyRequestId(frozen);
+                long textOffset = optionalLegacyOffset(frozen, "textOffset");
+                long attachmentOffset = optionalLegacyOffset(frozen, "attachmentOffset");
+                JSONObject draftInput = new JSONObject()
+                        .put("sourceKey", sourceKey)
+                        .put("requestId", requestId)
+                        .put("textOffset", textOffset)
+                        .put("attachmentOffset", attachmentOffset);
+                if (running(g)) {
+                    return CompletableFuture.completedFuture(requireObjectResult(
+                            processRequest(g, "legacy_draft", new JSONObject().put("input", draftInput)).join()));
+                }
+                return CompletableFuture.completedFuture(offlineLegacyCommand("legacy_draft", draftInput));
+            } catch (Throwable t) {
+                return failedFuture(t);
+            }
+        });
+    }
+
+    /** 遗留丢弃：仅删 staging 快照；先与实际 manifest 绑定 sourceKey，再 registry 只读核对；prepared/不确定导入拒绝，completed 核同 source/snapshot 身份后放行（归档不动）。 */
+    public CompletableFuture<JSONObject> legacyDiscard(JSONObject input) {
+        if (input == null) {
+            return failedFuture(new BridgeException("INVALID_ARGUMENT", "not-sent", "输入无效"));
+        }
+        final JSONObject frozen;
+        try {
+            frozen = new JSONObject(input.toString());
+        } catch (JSONException e) {
+            return failedFuture(new BridgeException("INVALID_ARGUMENT", "not-sent", "输入无效"));
+        }
+        if (transitionBlocked()) {
+            return failedFuture(new BridgeException("BUSY", "not-sent", "Host 正在启动/停止"));
+        }
+        return onControl(() -> {
+            if (transitionBlocked()) {
+                return failedFuture(new BridgeException("BUSY", "not-sent", "Host 正在启动/停止"));
+            }
+            Gen g = gen;
+            try {
+                String sourceKey = requireLegacySourceKey(frozen);
+                String snapshotId = requireLegacySnapshotId(frozen);
+                // 先取真实 manifest sourceKey 并比较：不信调用方伪造 sourceKey/路径。
+                String manifestSourceKey = new BotHostLegacySnapshot(context).readSnapshotSourceKey(snapshotId);
+                if (!manifestSourceKey.equals(sourceKey)) {
+                    return failedFuture(new BridgeException("REQUEST_CONFLICT", "not-sent", "sourceKey 与快照不符"));
+                }
+                // registry 只读核对（先于 fence：completed 必须能对账并清 fence）。
+                JSONObject statusInput = new JSONObject().put("sourceKey", sourceKey);
+                JSONObject status = currentRunning(g)
+                        ? requireObjectResult(processRequest(g, "legacy_status",
+                                new JSONObject().put("input", statusInput)).join())
+                        : offlineLegacyCommand("legacy_status", statusInput);
+                String phase = status.optString("phase");
+                if ("prepared".equals(phase) || "completed".equals(phase)) {
+                    if (!snapshotId.equals(status.optString("snapshotId"))) {
+                        return failedFuture(new BridgeException("REQUEST_CONFLICT", "not-sent", "快照与注册不一致"));
+                    }
+                }
+                if ("prepared".equals(phase)) {
+                    return failedFuture(new BridgeException("BUSY", "not-sent", "导入已准备，禁止丢弃"));
+                }
+                if ("completed".equals(phase)) {
+                    // 同 source/snapshot 身份已核：确定性完成，释放 fence 并放行。
+                    clearPendingLegacyImport(snapshotId);
+                } else if ("missing".equals(phase)) {
+                    PendingLegacyImport pending;
+                    synchronized (lock) {
+                        pending = pendingLegacyImports.get(snapshotId);
+                    }
+                    if (pending != null) {
+                        if (legacyImportUncertain(pending)) {
+                            return failedFuture(new BridgeException("BUSY", "not-sent", "上一导入结果未明，禁止丢弃"));
+                        }
+                        clearPendingLegacyImport(snapshotId);
+                    }
+                } else {
+                    return failedFuture(new BridgeException("INVALID_ARGUMENT", "not-sent", "未知导入状态"));
+                }
+                new BotHostLegacySnapshot(context).discard(snapshotId);
+                return CompletableFuture.completedFuture(new JSONObject());
+            } catch (Throwable t) {
+                return failedFuture(t);
+            }
+        });
+    }
+
+    /** 离线 settings 模式私有遗留命令：瞬态子进程一次性调用后关闭（同 offlineSettingsSync 语义）。关闭失败沿错误信封抛出固定安全信息，绝不吞掉。 */
+    private JSONObject offlineLegacyCommand(String type, JSONObject input) {
+        JSONObject init;
+        try {
+            init = settingsInit();
+        } catch (IOException e) {
+            throw new CompletionException(e);
+        }
+        BotHostProcess child;
+        try {
+            child = BotHostProcess.launch(context, init, OFFLINE_LISTENER).join();
+        } catch (Throwable t) {
+            throw new CompletionException(t);
+        }
+        try {
+            try {
+                CompletableFuture<JSONObject> request = child.request(type, new JSONObject().put("input", input));
+                return requireObjectResult(request.join());
+            } catch (IOException | JSONException e) {
+                throw new CompletionException(e);
+            }
+        } finally {
+            try {
+                child.close().join();
+            } catch (Throwable closeFailure) {
+                retainOfflineCleanupChild(child);
+                Throwable root = rootCause(closeFailure);
+                if (root instanceof BridgeException) {
+                    throw new CompletionException(root);
+                }
+                throw new CompletionException(
+                        new BridgeException("CLEANUP_FAILED", "not-graceful", "临时进程清理失败"));
+            }
+        }
+    }
+
+    // ---------- 遗留迁移校验 ----------
+
+    private static String requireLegacyConversationId(JSONObject o) throws BridgeException {
+        if (!o.has("conversationId") || o.isNull("conversationId")) {
+            throw new BridgeException("INVALID_ARGUMENT", "not-sent", "conversationId is required");
+        }
+        Object value = o.opt("conversationId");
+        if (!(value instanceof String) || ((String) value).trim().isEmpty()
+                || !LEGACY_ID_TEXT.matcher((String) value).matches()) {
+            throw new BridgeException("INVALID_ARGUMENT", "not-sent", "conversationId 无效");
+        }
+        return (String) value;
+    }
+
+    private static String requireLegacySourceKey(JSONObject o) throws BridgeException {
+        if (!o.has("sourceKey") || o.isNull("sourceKey")) {
+            throw new BridgeException("INVALID_ARGUMENT", "not-sent", "sourceKey is required");
+        }
+        Object value = o.opt("sourceKey");
+        if (!(value instanceof String)) {
+            throw new BridgeException("INVALID_ARGUMENT", "not-sent", "sourceKey 无效");
+        }
+        String key = (String) value;
+        if (!LEGACY_SOURCE_KEY.matcher(key).matches() || !isWellFormedUtf16(key)
+                || utf8Length(key) > LEGACY_SOURCEKEY_MAX_UTF8_BYTES
+                || key.substring("android-chat:".length()).trim().isEmpty()) {
+            throw new BridgeException("INVALID_ARGUMENT", "not-sent", "sourceKey 无效");
+        }
+        return key;
+    }
+
+    private static String requireLegacySnapshotId(JSONObject o) throws BridgeException {
+        Object value = o.opt("snapshotId");
+        if (!(value instanceof String) || !SNAPSHOT_ID.matcher((String) value).matches()) {
+            throw new BridgeException("INVALID_ARGUMENT", "not-sent", "snapshotId 无效");
+        }
+        return (String) value;
+    }
+
+    private static String requireLegacyRequestId(JSONObject o) throws BridgeException {
+        if (!o.has("requestId") || o.isNull("requestId")) {
+            throw new BridgeException("INVALID_ARGUMENT", "not-sent", "requestId is required");
+        }
+        Object value = o.opt("requestId");
+        if (!(value instanceof String) || !LEGACY_REQUEST_ID.matcher((String) value).matches()) {
+            throw new BridgeException("INVALID_ARGUMENT", "not-sent", "requestId 无效");
+        }
+        return (String) value;
+    }
+
+    /** optional requestId：显式 null 不算省略，直接拒绝。 */
+    private static String optionalLegacyRequestId(JSONObject o) throws BridgeException {
+        if (!o.has("requestId")) return null;
+        return requireLegacyRequestId(o);
+    }
+
+    /** role/cwd/modelRef：真实字符串、非空白、well-formed UTF16、UTF-8 预算内；允许换行/制表，保持原文。 */
+    private static String requireLegacyText(JSONObject o, String key, int maxUtf8Bytes) throws BridgeException {
+        if (!o.has(key) || o.isNull(key)) {
+            throw new BridgeException("INVALID_ARGUMENT", "not-sent", key + " is required");
+        }
+        Object value = o.opt(key);
+        if (!(value instanceof String)) {
+            throw new BridgeException("INVALID_ARGUMENT", "not-sent", key + " 无效");
+        }
+        String text = (String) value;
+        if (text.trim().isEmpty() || !isWellFormedUtf16(text)) {
+            throw new BridgeException("INVALID_ARGUMENT", "not-sent", key + " 无效");
+        }
+        if (utf8Length(text) > maxUtf8Bytes) {
+            throw new BridgeException("INVALID_ARGUMENT", "not-sent", key + " 超限");
+        }
+        return text;
+    }
+
+    /** cwd：absolute、无 NUL、UTF-8 预算 65536，保持原文。 */
+    private static String requireLegacyCwd(JSONObject o) throws BridgeException {
+        String cwd = requireLegacyText(o, "cwd", LEGACY_CWD_MAX_UTF8_BYTES);
+        if (cwd.indexOf('\u0000') >= 0 || !new File(cwd).isAbsolute()) {
+            throw new BridgeException("INVALID_ARGUMENT", "not-sent", "cwd 无效");
+        }
+        return cwd;
+    }
+
+    private static long optionalLegacyOffset(JSONObject o, String key) throws BridgeException {
+        if (!o.has(key)) return 0L;
+        Object value = o.opt(key);
+        if (value == null || !(value instanceof Number)) {
+            throw new BridgeException("INVALID_ARGUMENT", "not-sent", key + " 无效");
+        }
+        double number = ((Number) value).doubleValue();
+        if (number != Math.floor(number) || number < 0 || number > 9007199254740991L) {
+            throw new BridgeException("INVALID_ARGUMENT", "not-sent", key + " 无效");
+        }
+        return (long) number;
+    }
+
+    private static int utf8Length(String text) {
+        return text.getBytes(StandardCharsets.UTF_8).length;
+    }
+
+    /** Java String 为 UTF-16：拒绝未配对的 surrogate（malformed UTF16）。 */
+    private static boolean isWellFormedUtf16(String text) {
+        for (int i = 0; i < text.length(); i++) {
+            char c = text.charAt(i);
+            if (Character.isHighSurrogate(c)) {
+                if (i + 1 >= text.length() || !Character.isLowSurrogate(text.charAt(i + 1))) return false;
+                i++;
+            } else if (Character.isLowSurrogate(c)) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /** 离线 settings 整事务：阻塞等待请求与子进程关闭，失败不触发数据库；与 Host 串行。 */
@@ -838,6 +1319,100 @@ public final class BotHostManager {
         return g != null && !g.closed && g.process != null && phase == Phase.RUNNING;
     }
 
+    /** 仅当前代且运行中才是合法发送目标：防止等待期间换代后误发到旧进程。 */
+    private boolean currentRunning(Gen g) {
+        synchronized (lock) {
+            return g != null && gen == g && !g.closed && g.process != null && phase == Phase.RUNNING;
+        }
+    }
+
+    private static final class PendingLegacyImport {
+        final String snapshotId;
+        final BotHostProcess process;
+
+        PendingLegacyImport(String snapshotId, BotHostProcess process) {
+            this.snapshotId = snapshotId;
+            this.process = process;
+        }
+    }
+
+    /** 已送出结果不明的导入：保留 snapshotId+原进程，供 discard 按真实存活防护。 */
+    private void rememberPendingLegacyImport(String snapshotId, BotHostProcess process) {
+        if (process == null) return;
+        synchronized (lock) {
+            pendingLegacyImports.put(snapshotId, new PendingLegacyImport(snapshotId, process));
+        }
+    }
+
+    private void clearPendingLegacyImport(String snapshotId) {
+        synchronized (lock) {
+            pendingLegacyImports.remove(snapshotId);
+        }
+    }
+
+    /** 不确定＝原导入进程仍存活；不凭 phase/代替换清除。 */
+    private boolean legacyImportUncertain(PendingLegacyImport pending) {
+        return pending.process != null && pending.process.isAlive();
+    }
+
+    /** 派发 legacy_import；结果不明（unconfirmed）时记录不确定保护，不自动重发。 */
+    private CompletableFuture<JSONObject> dispatchLegacyImport(Gen g, JSONObject frozen) {
+        final String snapshotId = frozen.optString("snapshotId");
+        final BotHostProcess process = g.process;
+        try {
+            JSONObject result = requireObjectResult(processRequest(g, "legacy_import",
+                    new JSONObject().put("input", frozen)).join());
+            clearPendingLegacyImport(snapshotId);
+            return CompletableFuture.completedFuture(result);
+        } catch (Throwable t) {
+            if (isUnconfirmed(t)) {
+                rememberPendingLegacyImport(snapshotId, process);
+            }
+            return failedFuture(t);
+        }
+    }
+
+    private static Throwable rootCause(Throwable t) {
+        Throwable current = t;
+        while ((current instanceof CompletionException || current instanceof ExecutionException)
+                && current.getCause() != null && current.getCause() != current) {
+            current = current.getCause();
+        }
+        return current;
+    }
+
+    private static boolean isUnconfirmed(Throwable t) {
+        Throwable root = rootCause(t);
+        return root instanceof BridgeException && "unconfirmed".equals(((BridgeException) root).outcome);
+    }
+
+    /** 离线遗留子进程清理失败：仅当仍存活时保留句柄，阻止替代启动/另一 settings child；不持 lock 等 IO。 */
+    private void retainOfflineCleanupChild(BotHostProcess child) {
+        if (child == null || !child.isAlive()) return;
+        BotHostProcess prior = offlineCleanupPending;
+        if (prior != null && !prior.isAlive()) {
+            synchronized (lock) {
+                if (offlineCleanupPending == prior) offlineCleanupPending = null;
+            }
+        }
+        synchronized (lock) {
+            if (offlineCleanupPending == null) offlineCleanupPending = child;
+        }
+    }
+
+    /** 离线遗留 child 清理失败且仍存活：阻断替代启动与离线 settings/遗留命令（死亡后惰性释放）。 */
+    private boolean offlineCleanupBlocked() {
+        BotHostProcess leftover = offlineCleanupPending;
+        if (leftover == null) return false;
+        if (!leftover.isAlive()) {
+            synchronized (lock) {
+                if (offlineCleanupPending == leftover) offlineCleanupPending = null;
+            }
+            return false;
+        }
+        return true;
+    }
+
     private CompletableFuture<JSONObject> processRequest(Gen g, String type, JSONObject fields) {
         try {
             return g.process.request(type, fields);
@@ -902,6 +1477,7 @@ public final class BotHostManager {
 
     /** STARTING/STOPPING/残留清理中：禁止启动离线 child 与写配置。 */
     private boolean transitionBlocked() {
+        if (offlineCleanupBlocked()) return true;
         synchronized (lock) {
             return phase == Phase.STARTING || phase == Phase.STOPPING || pendingCleanupGen != null;
         }

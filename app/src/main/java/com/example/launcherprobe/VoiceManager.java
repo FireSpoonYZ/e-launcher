@@ -52,6 +52,9 @@ final class VoiceManager {
         return instance;
     }
 
+    /** Teardown/cancel path that never constructs the singleton or its legacy chat storage. */
+    static VoiceManager instanceIfPresent() { return instance; }
+
     private final Context context;
     private final VoiceSettings settings;
     private final SpeechOutput output;

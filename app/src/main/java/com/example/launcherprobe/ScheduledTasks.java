@@ -38,7 +38,7 @@ final class ScheduledTasks {
     private ScheduleCalendar calendar;
     private final ScheduleCalendarRefresh calendarRefresh;
     private final java.util.function.LongSupplier clock = System::currentTimeMillis;
-    private final ChatCoordinator coordinator;
+    private ChatCoordinator coordinator;
     private final Set<Runnable> listeners = new CopyOnWriteArraySet<>();
     private final String processId = UUID.randomUUID().toString();
 
@@ -47,8 +47,15 @@ final class ScheduledTasks {
         calendar = ScheduleCalendar.load(context);
         calendarRefresh = new ScheduleCalendarRefresh(context, calendar);
         preferences = context.getSharedPreferences("scheduled_tasks", Context.MODE_PRIVATE);
-        coordinator = ChatCoordinator.get(context);
-        coordinator.addListener((messages, event) -> onChatEvent(event));
+    }
+
+    /** Lazy join on first real chat use; listener registration must precede any send. */
+    private ChatCoordinator coordinator() {
+        if (coordinator == null) {
+            coordinator = ChatCoordinator.get(context);
+            coordinator.addListener((messages, event) -> onChatEvent(event));
+        }
+        return coordinator;
     }
 
     void addListener(Runnable listener) { listeners.add(listener); }
@@ -92,6 +99,7 @@ final class ScheduledTasks {
     synchronized JSONObject snapshot() throws Exception {
         JSONObject state = read();
         if (recoverRuns(state)) write(state);
+        ChatCoordinator coordinator = coordinator();
         Set<String> conversations = new HashSet<>();
         for (ChatStore.Conversation conversation : coordinator.store().conversations()) conversations.add(conversation.id);
         for (ChatStore.Conversation conversation : coordinator.store().archivedConversations()) conversations.add(conversation.id);
@@ -350,7 +358,7 @@ final class ScheduledTasks {
             write(state); // Never submit unless the starting fence has reached durable storage.
             String request = null;
             try {
-                request = coordinator.sendScheduled(run.getString("conversationId"),
+                request = coordinator().sendScheduled(run.getString("conversationId"),
                         task.getString("title"), task.getString("prompt"));
                 if (request == null || request.isEmpty()) throw new IllegalStateException("任务未成功发起");
             } catch (Exception failure) {

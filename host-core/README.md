@@ -998,13 +998,13 @@ node host-core/control-cli.js work-resume --url http://127.0.0.1:8787 \
 
 剩余限制：未验证物理 WAN/Linux/Android/arm64/Tauri/TUI；M7–M11 为选定回归而非全量历史场景重跑；M12 高水位/反压分支未单独饱和测试（沿用 M8 共享路径）；未穷尽并发微观交错；原始作者端到端签名/加密**未实现**，当前信任模型是认证通道+TLS 认证 peer；Mockoon 夹具不代表付费/智能模型验收。
 
-模块 **13** 已完成 Host 侧适配交付。模块 **14**（远程 work/实时接线、统一服务与本机设置、客户端待发送/对账）已完成父助手限定范围验收（139/139 检查点，见下节），总完成数 **14/20**；模块 **15**（Android 本机 Host）已完成父助手验收（见下节），总完成数 **15/20**；模块 **16–20 共 5 个**仍待交付：跨平台/迁移/外壳/真机集成。不引入中央决策、自动 routine、Session 管理或新的后台任务产品。
+模块 **13** 已完成 Host 侧适配交付。模块 **14**（远程 work/实时接线、统一服务与本机设置、客户端待发送/对账）已完成父助手限定范围验收（139/139 检查点，见下节），总完成数 **14/20**；模块 **15**（Android 本机 Host）已完成父助手验收（见下节），总完成数 **15/20**；模块 **16**（旧数据迁移与 Android 兼容）已完成父助手限定范围验收（见下节），总完成数 **16/20**；模块 **17–20 共 4 个**仍待交付：跨平台/外壳/真机集成。不引入中央决策、自动 routine、Session 管理或新的后台任务产品。
 
 <a id="hindsight-memory"></a>
 
 ## 模块 13：可追溯长期记忆（Hindsight → Pi Durable，Host 侧适配交付）
 
-模块 13 为每个 Bot 接入 Hindsight 的长期事实提取、召回与纠正能力，保留来源和适用范围。Host 侧适配已交付（M13 交付时为 13/20；当前含 M15 为 15/20）；运行环境与后端联调范围见本节末尾。
+模块 13 为每个 Bot 接入 Hindsight 的长期事实提取、召回与纠正能力，保留来源和适用范围。Host 侧适配已交付（M13 交付时为 13/20；当前含 M16 为 16/20）；运行环境与后端联调范围见本节末尾。
 
 ### 版本与外接方式
 
@@ -1094,7 +1094,7 @@ CLI 均要求 `--bot-id`。`memory-status` 可选 `--input`，其余命令必须
 
 模块 14 把模块 5 本机控制面、模块 8/9 认证中继与远程控制、模块 10–12 工作上下文/scope、模块 13 记忆整合为**统一本机服务**（`openHostService`），并新增本机设置持久化、远端协议 v2（35 方法）、受控远端实时预览与客户端待发送/对账。
 
-**状态**：模块 14 已完成交付并获父助手限定范围验收，总完成数 **14/20**；模块 15 已交付（见下节），模块 16–20 共 5 个待交付。
+**状态**：模块 14 已完成交付并获父助手限定范围验收，总完成数 **14/20**；模块 15 已交付（见下节），模块 16 已交付（见下节），模块 17–20 共 4 个待交付。
 
 ### 验收覆盖
 
@@ -1237,7 +1237,7 @@ node host-core/pending-cli.js reconcile --data-root "$CLIENT_STATE" --device-id 
 
 ## 模块 15：Android 本机 Host 与原生能力桥
 
-**状态**：M15 已交付并获父助手验收，总完成数 **15/20**；模块 16–20 共 5 个待交付。M14 历史记录及其验收边界保留。
+**状态**：M15 已交付并获父助手验收，总完成数 **15/20**；模块 16 已交付（见下节），M17–M20 共 4 个待交付。M14 历史记录及其验收边界保留。
 
 ### 架构与生命周期
 
@@ -1311,4 +1311,39 @@ Android 搜索工具（rg/fd）固定 API 29，不改变 App minSdk33。NDK/16Ki
 
 ### 证据边界
 
-仅模拟器（emulator-5556/m15_api36）无真机；合成 providers/ASR；`speak` accepted 不代表播放完成；ARM64 仅构建（zipalign 16KiB）未运行；无 ARM64/Linux 运行时。未构造无法回收子进程的 CLEANUP_FAILED 场景，也未穷举跨代、持续背压和交互信号的全部交错；真实 ASR 准确率/Hindsight 生产验证未做；Tauri/TUI、迁移尚未开始。最终夹具清理已完成（临时 CA 在 zygote/App 命名空间均不存在且源目录/主机私钥已删除，22 tails 清理，CDP exit 0，相关端口无 socket/无 forward reverse，独立 AVD 已关闭保 userdata）。
+仅模拟器（emulator-5556/m15_api36）无真机；合成 providers/ASR；`speak` accepted 不代表播放完成；ARM64 仅构建（zipalign 16KiB）未运行；无 ARM64/Linux 运行时。未构造无法回收子进程的 CLEANUP_FAILED 场景，也未穷举跨代、持续背压和交互信号的全部交错；真实 ASR 准确率/Hindsight 生产验证未做；Tauri/TUI 尚未开始。最终夹具清理已完成（临时 CA 在 zygote/App 命名空间均不存在且源目录/主机私钥已删除，22 tails 清理，CDP exit 0，相关端口无 socket/无 forward reverse，独立 AVD 已关闭保 userdata）。
+
+## 模块 16：旧数据迁移与 Android 兼容（已完成父助手限定范围验收）
+
+**状态**：模块 16 已完成交付并获父助手限定范围验收，总完成数 **16/20**；模块 17 为下一待交付，M17–M20 尚未实现。
+
+### 旧聊天迁移（用户显式）
+
+用户先在迁移面板选择旧会话，并分别设定新的 role/cwd/modelRef 做预览；预览会生成快照与请求 ID。确认导入后该定义被锁定，此后输入变更需要重新预览，不能靠改参数继续旧请求。状态查询只读、不恢复写操作；prepared 只有用户显式继续原冻结请求才恢复，completed 则回到同一已导入 Bot；不明结果不自动重发。
+
+原字节/分支/SDK/附件/草稿永久归档，与选中历史被动投影分开；旧工具不执行，不继承旧凭据/banks/cwd。草稿完整分页后仅向当前匹配 Bot 输入框手动追加文本与永久附件路径，不覆盖、不自动发送。只读 SAX 偏好解析、backup 权威、坏 backup 不回退、不读写 .new、不用 SharedPreferences/ChatStore 做 export；旧 ScheduledTasks 仅延迟 Coordinator/listener 到 snapshot/实际发送。
+
+### 新 Host schedule_task
+
+新 Host 定时任务仅限 Android 原生桥且主私聊，归属持久可信，不接受模型自报身份；unsafe 不自动重放。每定义修订 CAS；每个发生时刻先持久记录提交标记与请求 ID，之后最多提交一次，后续只读查询；删除定义仍保留已尝试运行的对账。Host 仅显式启动时运行，离线错过不补发，新接收器不因广播自动拉起 Host；独立存储与签名日历资产，公开 v2 方法仍 35，迁移私有本地接口不进 HTTP/relay。
+
+### 验收范围（父合成 Windows 私有桥 + emulator-5556/m15_api36）
+
+- 迁移：Windows 私有 JSONL + 真实 Durable 两次导入/两 Bot/四条目、零任务零提交；原 ID 幂等与 prepared 恢复；Android 四次完成导入，含原始结构/SDK/实际旧 SDK 输出；completed 导入在旧源或 staging 移走后仍可读取；哈希与无效 XML/UTF8/SDK 分支检查边界通过；旧工具仅引用被动。
+- 冷启动：真实冷启动下 chat.xml/.bak/.new 字节与哈希均保留；旧 BOOT receiver 延迟 ScheduledTasks Coordinator 修复；合成 HTTPS 下真实冷旧任务执行且定义删除；新离线时钟 receiver 不启动 Host/FGS/提交。
+- UI：真实 React 终页 8191+5 UTF16/空页，追加不覆盖不发送，匹配 Bot，双击单次，丢回执冻结对账，畸形游标拒绝，迟到页忽略。
+- 日程：真实定时执行；同 owner revision CAS/分页/跨 owner 与伪造身份拒绝；运行中自删保留 run；写触发器故障不发送且重开跳过离线；deleteAfterRun；权限拒绝定义保留带 schedulingError（非失败创建）；100 条预置定义/2400462-byte JSON 列表与第 101 条拒绝；坏头/版本/额外行拒绝且不重置坏存储。
+- 范围守卫：room 用户消息触发 A schedule_task 拒绝；B primary send_dm 触发 A DM schedule_task 拒绝；调度状态字节前后一致；room A 停止而 DM A 仍触发、B DM 停止而 B primary 仍成功；公开控制拒绝 legacyImport/schedule_task。
+- 回归：chat-persistence/share-intake/share-ui/voice-continuity/search-consistency/migration/widget/questionnaire/shower-preview/notifications/shower-lockscreen 旧组通过；此前四次立即删除通知断言失败保留（撤掉临时 Node CA 启动包装后，附加调试器运行和不附加调试器的普通运行均通过；独立完成任务删除在父派发后 325ms 观察到消失，非仅 cancel 时间；原始精确原因仍未确认，未改产品/测试规避）。
+- 锁屏：真实非零屏 3 锁定闲置 30 秒仍可见；滑动改变 12% 采样设置内容；主屏保持锁定/关闭；释放移除屏。
+- 最终数据：8 份 SQLite 完整性/FK 通过（含 2 诊断库）；180 个 Native tasks 全部 terminal、41 次提交全部 done；4 次 Android 导入完成；4 条定义禁用，6 条 run：4 done、2 skipped_offline。
+- 产物：Stage11 x86_64 APK 实际运行于 API36 模拟器 m15_api36；ARM64 APK 仅构建；apksigner 与 16KiB ZIP 对齐通过。
+- 注意：skipped_offline 记录的 submitted:true 是终态封闭标志，不代表实际 RPC 已尝试。
+
+### 限制与未实测边界
+
+无真机验收（按用户指令）；合成 provider/ASR，无付费/生产服务。不宣称全部 instrumentation 组、真实手指/桌面 Widget 视觉或进程死亡验收、ARM64 运行、32 active run 饱和或 100 次实际 create。公开 35 v2 方法不变，迁移保持私有本地桥；当前 Android 仍 Capacitor/原生 Durable Host，Tauri Android 是 M18。完整第三方声明检查仍缺可选 MCP SDK，无依赖变通。
+
+### 清理
+
+父已通过保留 userdata 的模拟器重启移除测试 CA 挂载/文件，恢复旧设置与 provider，清空新 Host providers/default/凭据，停止合成服务与 tail，恢复麦克风权限与精确闹钟 appop，并撤销测试专用 WRITE_SECURE_SETTINGS 授权；首次权限回退经重新应用与平台命令处理后二次重启确认保留。

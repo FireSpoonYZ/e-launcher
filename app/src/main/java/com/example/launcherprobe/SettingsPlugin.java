@@ -35,14 +35,15 @@ public final class SettingsPlugin extends Plugin {
     private final Map<String, PendingQuery> queries = new java.util.concurrent.ConcurrentHashMap<>();
     private volatile boolean destroyed;
     private volatile okhttp3.Call publicCall;
+    private boolean initialized;
 
     @Override public void load() {
-        store = new PiConfigStore(getContext());
-        migrateDrafts();
+        // Host-only cold starts defer Pi config/draft migration to the first actual settings call.
+        if (!(getActivity() instanceof MainActivity activity) || !activity.hostOnly()) ensureInitialized();
     }
 
     @Override protected void handleOnDestroy() {
-        destroyed = true;
+        synchronized (this) { destroyed = true; }
         for (Map.Entry<String, PendingQuery> entry : queries.entrySet()) {
             PendingQuery pending = entry.getValue();
             synchronized (pending.bridge) {
@@ -438,13 +439,27 @@ public final class SettingsPlugin extends Plugin {
         });
     }
 
+    private void ensureInitialized() {
+        synchronized (this) {
+            if (initialized) return;
+            if (destroyed) throw new IllegalStateException("设置页面已关闭");
+            if (store == null) store = new PiConfigStore(getContext());
+            migrateDrafts();
+            initialized = true;
+        }
+        if (getActivity() instanceof MainActivity activity) activity.resumeLegacyIfHost();
+    }
     private void initialize() throws Exception { initialize(null); }
     private void initialize(String requestedConversationId) throws Exception {
+        ensureInitialized();
         SharedPreferences chat = getContext().getSharedPreferences("chat", Context.MODE_PRIVATE);
         String conversationId = requestedConversationId == null || requestedConversationId.isEmpty()
                 ? chat.getString("active_chat", "legacy") : requestedConversationId;
-        if (store == null || !conversationId.equals(store.conversationId())) {
-            store = new PiConfigStore(getContext(), conversationId);
+        synchronized (this) {
+            if (destroyed) throw new IllegalStateException("设置页面已关闭");
+            if (!conversationId.equals(store.conversationId())) {
+                store = new PiConfigStore(getContext(), conversationId);
+            }
         }
         store.initialize(chat);
     }

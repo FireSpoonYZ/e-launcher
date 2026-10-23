@@ -56,6 +56,19 @@ final class ChatCoordinator {
     ChatStore store() { return store; }
     boolean running() { return !activeRuns.isEmpty(); }
     boolean running(String conversationId) { return activeRuns.containsKey(conversationId); }
+
+    /** Read-only: true while this conversation has an active or terminating run in this process. */
+    static boolean runningIfPresent(String conversationId) {
+        ChatCoordinator current;
+        synchronized (ChatCoordinator.class) {
+            current = instance;
+            if (current == null || conversationId == null) return false;
+        }
+        synchronized (current.runLock) {
+            return current.activeRuns.containsKey(conversationId)
+                    || current.terminatingRuns.containsKey(conversationId);
+        }
+    }
     String requestId() {
         SessionRun run = activeRuns.get(store.activeId());
         return run == null ? null : run.requestId;

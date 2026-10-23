@@ -20,6 +20,10 @@ export const BRIDGE_MAX_ERROR_MESSAGE_BYTES = 512;
 export const BRIDGE_MAX_CREDENTIALS = 64;
 export const BRIDGE_MAX_CREDENTIAL_BYTES = 65536;
 export const BRIDGE_MAX_CREDENTIAL_VALUE_BYTES = 4096;
+export const BRIDGE_MAX_LEGACY_ROLE_BYTES = 65536;
+export const BRIDGE_MAX_LEGACY_CWD_BYTES = 65536;
+export const BRIDGE_MAX_LEGACY_MODELREF_BYTES = 4096;
+export const BRIDGE_LEGACY_SOURCE_KEY_PREFIX = 'android-chat:';
 
 const ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const TOKEN_PATTERN = /^[A-Za-z0-9_-]{32,512}$/;
@@ -55,7 +59,14 @@ export const ANDROID_NATIVE_CODES = new Set([
   'ANDROID_NATIVE_ERROR',
 ]);
 
-export const BRIDGE_ERROR_CODES = new Set([...CONTROL_ERROR_CODES, ...ANDROID_NATIVE_CODES]);
+// Private bridge legacy migration codes: the public remote control table must
+// stay untouched; these extra codes are allowed on this private JSONL IPC only.
+export const BRIDGE_LEGACY_CODES = new Set(['INVALID_SOURCE', 'BUSY', 'IO_ERROR', 'TOO_LARGE']);
+export const BRIDGE_ERROR_CODES = new Set([
+  ...CONTROL_ERROR_CODES,
+  ...ANDROID_NATIVE_CODES,
+  ...BRIDGE_LEGACY_CODES,
+]);
 export const BRIDGE_OUTCOMES = CONTROL_OUTCOMES;
 
 function invalid(code, message) {
@@ -236,6 +247,26 @@ export function normalizeBridgeCommandFrame(parsed) {
       assertFrameId(parsed.id);
       return { type: 'shutdown', id: parsed.id };
     }
+    case 'legacy_preview': {
+      rejectUnknownFields(parsed, new Set(['type', 'id', 'input']), 'legacy_preview frame');
+      assertFrameId(parsed.id);
+      return { type: 'legacy_preview', id: parsed.id, input: normalizeLegacyPreviewInput(parsed.input) };
+    }
+    case 'legacy_status': {
+      rejectUnknownFields(parsed, new Set(['type', 'id', 'input']), 'legacy_status frame');
+      assertFrameId(parsed.id);
+      return { type: 'legacy_status', id: parsed.id, input: normalizeLegacyStatusInput(parsed.input) };
+    }
+    case 'legacy_import': {
+      rejectUnknownFields(parsed, new Set(['type', 'id', 'input']), 'legacy_import frame');
+      assertFrameId(parsed.id);
+      return { type: 'legacy_import', id: parsed.id, input: normalizeLegacyFrozenInput(parsed.input) };
+    }
+    case 'legacy_draft': {
+      rejectUnknownFields(parsed, new Set(['type', 'id', 'input']), 'legacy_draft frame');
+      assertFrameId(parsed.id);
+      return { type: 'legacy_draft', id: parsed.id, input: normalizeLegacyDraftInput(parsed.input) };
+    }
     default:
       throw invalid('BAD_FRAME', `unknown bridge frame type: ${parsed.type}`);
   }
@@ -257,6 +288,145 @@ function normalizeSettingsUpdateInput(value) {
     throw new BridgeCommandError('INVALID_ARGUMENT', 'settings must be an object');
   }
   return { expectedRevision: value.expectedRevision, settings: value.settings };
+}
+
+const SHA256_HEX_RE = /^[0-9a-f]{64}$/;
+const ASCII_CONTROLS_RE = /[\u0000-\u001F\u007F]/;
+
+// Fixed safe message: never echo an unknown field name (it may carry hostile
+// content); the label alone identifies the failing payload.
+function rejectLegacyUnknownFields(value, allowed, label) {
+  for (const key of Object.keys(value)) {
+    if (!allowed.has(key)) {
+      throw new BridgeCommandError('INVALID_ARGUMENT', `${label} has an unknown field`);
+    }
+  }
+}
+
+function assertLegacySourceKey(value) {
+  if (
+    typeof value !== 'string' ||
+    !value.isWellFormed() ||
+    value.trim() === '' ||
+    !value.startsWith(BRIDGE_LEGACY_SOURCE_KEY_PREFIX) ||
+    value.slice(BRIDGE_LEGACY_SOURCE_KEY_PREFIX.length).trim() === '' ||
+    ASCII_CONTROLS_RE.test(value) ||
+    Buffer.byteLength(value, 'utf8') > 256
+  ) {
+    throw new BridgeCommandError('INVALID_ARGUMENT', 'sourceKey must be android-chat:<non-blank id> within 256 UTF-8 bytes without ASCII controls');
+  }
+  return value;
+}
+
+function assertLegacySnapshotId(value) {
+  if (typeof value !== 'string' || !SHA256_HEX_RE.test(value)) {
+    throw new BridgeCommandError('INVALID_ARGUMENT', 'snapshotId must be a lowercase 64-character hex SHA-256');
+  }
+  return value;
+}
+
+function assertLegacyRequestId(value) {
+  if (typeof value !== 'string' || !SHA256_HEX_RE.test(value)) {
+    throw new BridgeCommandError('INVALID_ARGUMENT', 'requestId must be a lowercase 64-character hex SHA-256');
+  }
+  return value;
+}
+
+function assertLegacyRole(value) {
+  if (
+    typeof value !== 'string' ||
+    !value.isWellFormed() ||
+    value.trim() === '' ||
+    Buffer.byteLength(value, 'utf8') > BRIDGE_MAX_LEGACY_ROLE_BYTES
+  ) {
+    throw new BridgeCommandError('INVALID_ARGUMENT', 'role must be non-blank well-formed text within 65536 UTF-8 bytes');
+  }
+  return value;
+}
+
+function assertLegacyCwd(value) {
+  if (
+    typeof value !== 'string' ||
+    !value.isWellFormed() ||
+    value.trim() === '' ||
+    !path.isAbsolute(value) ||
+    value.includes('\0') ||
+    Buffer.byteLength(value, 'utf8') > BRIDGE_MAX_LEGACY_CWD_BYTES
+  ) {
+    throw new BridgeCommandError('INVALID_ARGUMENT', 'cwd must be a well-formed absolute path within 65536 UTF-8 bytes without NUL');
+  }
+  return value;
+}
+
+function assertLegacyModelRef(value) {
+  if (
+    typeof value !== 'string' ||
+    !value.isWellFormed() ||
+    value.trim() === '' ||
+    Buffer.byteLength(value, 'utf8') > BRIDGE_MAX_LEGACY_MODELREF_BYTES
+  ) {
+    throw new BridgeCommandError('INVALID_ARGUMENT', 'modelRef must be a non-blank well-formed string');
+  }
+  return value;
+}
+
+// Strict private legacy command payloads: exact keys, bounded values. Deeper
+// semantic validation (parseModelRef, frozen digest, normalized cwd) stays in
+// the legacy import core; this boundary only enforces shape/budgets.
+function normalizeLegacyPreviewInput(value) {
+  if (!isPlainObject(value)) throw new BridgeCommandError('INVALID_ARGUMENT', 'legacy_preview input must be an object');
+  rejectLegacyUnknownFields(value, new Set(['snapshotId', 'role', 'cwd', 'modelRef']), 'legacy_preview input');
+  return {
+    snapshotId: assertLegacySnapshotId(value.snapshotId),
+    role: assertLegacyRole(value.role),
+    cwd: assertLegacyCwd(value.cwd),
+    modelRef: assertLegacyModelRef(value.modelRef),
+  };
+}
+
+function normalizeLegacyStatusInput(value) {
+  if (!isPlainObject(value)) throw new BridgeCommandError('INVALID_ARGUMENT', 'legacy_status input must be an object');
+  rejectLegacyUnknownFields(value, new Set(['sourceKey', 'requestId']), 'legacy_status input');
+  const input = { sourceKey: assertLegacySourceKey(value.sourceKey) };
+  if (value.requestId !== undefined) input.requestId = assertLegacyRequestId(value.requestId);
+  return input;
+}
+
+function normalizeLegacyFrozenInput(value) {
+  if (!isPlainObject(value)) throw new BridgeCommandError('INVALID_ARGUMENT', 'legacy_import input must be an object');
+  rejectLegacyUnknownFields(value, new Set(['sourceKey', 'snapshotId', 'requestId', 'role', 'cwd', 'modelRef']), 'legacy_import input');
+  return {
+    sourceKey: assertLegacySourceKey(value.sourceKey),
+    snapshotId: assertLegacySnapshotId(value.snapshotId),
+    requestId: assertLegacyRequestId(value.requestId),
+    role: assertLegacyRole(value.role),
+    cwd: assertLegacyCwd(value.cwd),
+    modelRef: assertLegacyModelRef(value.modelRef),
+  };
+}
+
+function normalizeLegacyDraftInput(value) {
+  if (!isPlainObject(value)) throw new BridgeCommandError('INVALID_ARGUMENT', 'legacy_draft input must be an object');
+  rejectLegacyUnknownFields(value, new Set(['sourceKey', 'requestId', 'textOffset', 'attachmentOffset']), 'legacy_draft input');
+  const input = {
+    sourceKey: assertLegacySourceKey(value.sourceKey),
+    requestId: assertLegacyRequestId(value.requestId),
+    textOffset: 0,
+    attachmentOffset: 0,
+  };
+  if (value.textOffset !== undefined) {
+    if (!Number.isSafeInteger(value.textOffset) || value.textOffset < 0) {
+      throw new BridgeCommandError('INVALID_ARGUMENT', 'textOffset must be a non-negative safe integer');
+    }
+    input.textOffset = value.textOffset;
+  }
+  if (value.attachmentOffset !== undefined) {
+    if (!Number.isSafeInteger(value.attachmentOffset) || value.attachmentOffset < 0) {
+      throw new BridgeCommandError('INVALID_ARGUMENT', 'attachmentOffset must be a non-negative safe integer');
+    }
+    input.attachmentOffset = value.attachmentOffset;
+  }
+  return input;
 }
 
 /**
@@ -299,20 +469,20 @@ export function normalizeNativeResultFrame(parsed) {
   };
 }
 
-const NATIVE_TOOLS = new Set(['android_apps', 'android_shower', 'android_speak']);
+const NATIVE_TOOLS = new Set(['android_apps', 'android_shower', 'android_speak', 'schedule_task']);
 const NATIVE_KINDS = new Set(['primary', 'room', 'dm']);
 
 /**
  * Normalize the trusted native tool request (core factory contract) into the
  * native_call context. Caller metadata only, no arbitrary fields. taskId is
  * a Durable numeric Id<'task'>; kind is primary|room|dm with scope relation
- * (primary has no scope, work kinds require one). Only the three real native
+ * (primary has no scope, work kinds require one). Only the four real native
  * tools are allowed.
  */
 export function normalizeNativeRequest(request) {
   if (!isPlainObject(request)) throw invalid('INVALID_ARGUMENT', 'native request must be an object');
   if (typeof request.tool !== 'string' || !NATIVE_TOOLS.has(request.tool)) {
-    throw invalid('INVALID_ARGUMENT', 'native tool must be one of android_apps, android_shower, android_speak');
+    throw invalid('INVALID_ARGUMENT', 'native tool must be one of android_apps, android_shower, android_speak, schedule_task');
   }
   const args = request.arguments === undefined ? {} : request.arguments;
   if (!isPlainObject(args)) throw invalid('INVALID_ARGUMENT', 'native request arguments must be an object');

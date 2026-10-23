@@ -107,9 +107,10 @@ Shower 对存活的独立虚拟屏每约 4 秒报告显示活动，保留原有 
 
 ## Android Host（Bot/Host 核心）
 
-Android 应用内集成 Host 核心：在受监督的独立 Node Mobile 子进程中运行 Pi Durable/chord/pi-ai **1.3.0** 与内嵌 acp-kernel **0.0.101**，Capacitor 外壳保持不变。Host 提供 Bot 登记、持久消息账本、工具（含 grep/find）、工作上下文与长期记忆；尚未做旧数据迁移，也未引入 Tauri。
+Android 应用内集成 Host 核心：在受监督的独立 Node Mobile 子进程中运行 Pi Durable/chord/pi-ai **1.3.0** 与内嵌 acp-kernel **0.0.101**，Capacitor 外壳保持不变。Host 提供 Bot 登记、持久消息账本、工具（含 grep/find）、工作上下文与长期记忆；旧数据迁移已交付（父限定范围验收，见 host-core 模块 16），Tauri 未引入。
 
 - **使用入口**：用户在设置中开启/停止 Host；Host 仅在用户显式开启 `specialUse` 前台服务时运行，无开机自启/空闲自动关闭/粘性重启。
+- **旧聊天导入与新 Host 定时任务**：设置中的 Local Host / Legacy import 面板可列出旧会话，显式预览（单独选 role/cwd/model）后导入；导入的草稿仅手动追加到对应 Bot，不自动发送。新 Host 定时任务（schedule_task）只在 Host 运行时执行，离线错过不补发。详见 [host-core/README.md](host-core/README.md) 模块 16。
 - **配置与数据**：Host 运行数据位于独立 `files/bot-host`；模型凭据与语音偏好分别在 `bot_host_credentials`、`bot_host_voice`、`bot_host_voice_secrets` SharedPreferences（不在 files/bot-host 内），与旧聊天数据隔离；模型/语音由用户配置，系统语音入口仍走 Android 原生路径。
 - **构建与许可**：构建命令与前提（JDK/AGP/NDK/CMake/Node/Rust 目标及自动 prepare/bundle）见 [host-core/README.md](host-core/README.md) 模块 15；依赖与 NDK 搜索工具（rg/fd）许可见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 

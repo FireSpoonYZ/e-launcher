@@ -26,7 +26,155 @@ export interface Host {
   getBot(botId: string): BotRecord | null;
   findByRequest(requestId: string): BotRecord | null;
   listBots(): BotRecord[];
+  /**
+   * Module 16 internal legacy-import registry methods. @internal: trusted only
+   * by host-core/legacy-import.js; never exposed over HTTP/relay/remote/client.
+   */
+  reserveLegacyImport(input: LegacyImportReserveInput): LegacyImportRow;
+  getLegacyImport(sourceKey: string): LegacyImportRow | null;
+  completeLegacyImport(sourceKey: string, requestId: string): LegacyImportRow;
   close(): void;
+}
+
+/**
+ * Module 16: legacy Android-chat import. Preview/status/draft are read-only;
+ * import passively replays a staging snapshot into a new Host Bot. Types match
+ * the exact core shapes (host-core/legacy-import.js) and the internal store
+ * row; prepared rows never expose a public Bot.
+ */
+
+/** Source metadata from the validated snapshot manifest. */
+export interface LegacyImportSource {
+  kind: 'android-chat';
+  applicationId: string;
+  conversationId: string;
+  title: string | null;
+  createdAt: number | null;
+  updatedAt: number | null;
+  archivedAt: number | null;
+  draftOnly: boolean;
+  modelSelection: { provider: string; model: string; thinkingLevel: string | null } | null;
+}
+
+export interface LegacyImportCounts {
+  nodes: number;
+  selectedNodes: number;
+  sdkEntries: number;
+  contextRecords: number;
+  attachments: number;
+}
+
+/** Analysis warning; count present only when the warning is countable. */
+export interface LegacyImportWarning {
+  code: string;
+  count?: number;
+}
+
+export interface LegacyImportDefinition {
+  role: string;
+  cwd: string;
+  modelRef: string;
+}
+
+export interface LegacyPreviewInput {
+  snapshotId: string;
+  role: string;
+  cwd: string;
+  modelRef: string;
+}
+
+/** Frozen import payload; requestId is the fixed SHA-256 digest of the whole definition. */
+export interface LegacyImportFrozenInput {
+  sourceKey: string;
+  snapshotId: string;
+  requestId: string;
+  role: string;
+  cwd: string;
+  modelRef: string;
+}
+
+export interface LegacyImportStatusInput {
+  sourceKey: string;
+  /** Omitted only; explicit null is rejected by core/native. */
+  requestId?: string;
+}
+
+export interface LegacyImportDraftInput {
+  sourceKey: string;
+  requestId: string;
+  textOffset?: number;
+  attachmentOffset?: number;
+}
+
+/**
+ * Import status. missing has null fields; prepared keeps the reserved identity
+ * internal (bot null). bot is populated only when completed.
+ */
+export interface LegacyStatus {
+  phase: 'missing' | 'prepared' | 'completed';
+  sourceKey: string;
+  requestId: string | null;
+  snapshotId: string | null;
+  definition: LegacyImportDefinition | null;
+  bot: BotRecord | null;
+}
+
+export interface LegacyPreviewResult {
+  sourceKey: string;
+  snapshotId: string;
+  requestId: string;
+  source: LegacyImportSource;
+  selectedLeafId: string | null;
+  definition: LegacyImportDefinition;
+  counts: LegacyImportCounts;
+  warnings: LegacyImportWarning[];
+  draft: { bytes: number; attachments: number };
+  existing: LegacyStatus;
+}
+
+/** Copied permanent archive attachment descriptor; never an arbitrary source path. */
+export interface LegacyDraftAttachment {
+  id: string;
+  name: string;
+  mimeType: string;
+  kind: 'image' | 'file';
+  size: number;
+  path: string;
+  sourcePath: string;
+  sha256: string;
+}
+
+export interface LegacyDraftPage {
+  sourceKey: string;
+  requestId: string;
+  botId: string;
+  snapshotId: string;
+  text: string;
+  textOffset: number;
+  nextTextOffset: number | null;
+  totalTextLength: number;
+  attachments: LegacyDraftAttachment[];
+  attachmentOffset: number;
+  nextAttachmentOffset: number | null;
+  totalAttachments: number;
+}
+
+/** Internal registry row; reserved identities are not public until completed. */
+export interface LegacyImportRow {
+  sourceKey: string;
+  requestId: string;
+  snapshotId: string;
+  phase: 'prepared' | 'completed';
+  bot: BotRecord;
+}
+
+export interface LegacyImportReserveInput {
+  sourceKey: string;
+  requestId: string;
+  snapshotId: string;
+  role: string;
+  cwd: string;
+  modelRef: string;
 }
 
 export function openHost(options: { dataRoot: string }): Host;
@@ -364,7 +512,12 @@ export interface NativeBridgeActorScope {
 /** Actor discriminates primary (scopeId null) vs room/DM scope (scopeId string). */
 export type NativeBridgeActor = NativeBridgeActorPrimary | NativeBridgeActorScope;
 
-export type NativeBridgeTool = 'android_apps' | 'android_shower' | 'android_speak';
+/**
+ * Trusted native tools. schedule_task manages only the current Bot's primary
+ * private-chat tasks and runs only while the user has explicitly started this
+ * Host; it never trusts model-declared ownership fields.
+ */
+export type NativeBridgeTool = 'android_apps' | 'android_shower' | 'android_speak' | 'schedule_task';
 
 export interface NativeBridgeRequest {
   tool: NativeBridgeTool;
@@ -430,6 +583,11 @@ export interface Runtime {
   getMemorySource(botId: string, input: MemorySourceInput): Promise<MemorySourceResult>;
   correctMemory(botId: string, input: MemoryCorrectionInput): Promise<MemoryCorrectionReceipt>;
   retryMemory(botId: string, input: MemoryRetryInput): Promise<MemoryReceipt>;
+  /** Module 16: legacy import local methods; reads never create primary/model tasks. */
+  previewLegacyImport(input: LegacyPreviewInput): Promise<LegacyPreviewResult>;
+  getLegacyImportStatus(input: LegacyImportStatusInput): Promise<LegacyStatus>;
+  importLegacySnapshot(input: LegacyImportFrozenInput): Promise<LegacyStatus>;
+  readLegacyDraft(input: LegacyImportDraftInput): Promise<LegacyDraftPage>;
   watch(botId: string, options?: { signal?: AbortSignal }): Promise<BotWatch>;
   /** Module 14: work-context live preview; same handle shape as primary watch, full snapshots only. */
   watchWork(botId: string, scopeId: string, options?: { signal?: AbortSignal }): Promise<WorkWatch>;
@@ -610,6 +768,11 @@ export interface OpenControlServerOptions extends OpenRuntimeOptions {
 export interface ControlServer {
   deviceId: string;
   url: string;
+  /** Private legacy migration local methods only; no HTTP/remote/relay routes. */
+  previewLegacyImport(input: LegacyPreviewInput): Promise<LegacyPreviewResult>;
+  getLegacyImportStatus(input: LegacyImportStatusInput): Promise<LegacyStatus>;
+  importLegacySnapshot(input: LegacyImportFrozenInput): Promise<LegacyStatus>;
+  readLegacyDraft(input: LegacyImportDraftInput): Promise<LegacyDraftPage>;
   close(): Promise<void>;
 }
 
@@ -681,6 +844,11 @@ export interface HostService {
   readonly deviceId: string;
   readonly url: string;
   getStatus(): HostServiceStatus;
+  /** Private legacy migration local methods forwarded from the control server; never HTTP/remote/relay routes. */
+  previewLegacyImport(input: LegacyPreviewInput): Promise<LegacyPreviewResult>;
+  getLegacyImportStatus(input: LegacyImportStatusInput): Promise<LegacyStatus>;
+  importLegacySnapshot(input: LegacyImportFrozenInput): Promise<LegacyStatus>;
+  readLegacyDraft(input: LegacyImportDraftInput): Promise<LegacyDraftPage>;
   close(): Promise<void>;
 }
 

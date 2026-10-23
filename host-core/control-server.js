@@ -183,7 +183,16 @@ export async function openControlServer(options) {
     return closePromise;
   };
 
-  return { deviceId: host.deviceId, url, close };
+  return {
+    deviceId: host.deviceId,
+    url,
+    close,
+    // Private legacy migration local methods only; no new HTTP/remote/relay routes.
+    previewLegacyImport: (input) => runtime.previewLegacyImport(input),
+    getLegacyImportStatus: (input) => runtime.getLegacyImportStatus(input),
+    importLegacySnapshot: (input) => runtime.importLegacySnapshot(input),
+    readLegacyDraft: (input) => runtime.readLegacyDraft(input),
+  };
 }
 
 async function dispatch(host, runtime, authorize, req, res, ctx) {

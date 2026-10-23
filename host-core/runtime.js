@@ -25,6 +25,12 @@ import { createWorkContextRuntime } from './runtime-work-contexts.js';
 import { createWorkDecisionRuntime } from './runtime-work-decisions.js';
 import { normalizeUserMessage } from './scope-protocol.js';
 import { createCommunicationTools } from './communication-tools.js';
+import {
+  previewLegacyImport as corePreviewLegacyImport,
+  getLegacyImportStatus as coreGetLegacyImportStatus,
+  importLegacySnapshot as coreImportLegacySnapshot,
+  readLegacyDraft as coreReadLegacyDraft,
+} from './legacy-import.js';
 import { parseHindsightOptions } from './hindsight-client.js';
 import { createRuntimeHindsight } from './runtime-hindsight.js';
 import { createHindsightTools } from './hindsight-tools.js';
@@ -228,12 +234,29 @@ export async function openRuntime(options) {
 function createRuntime({ host, harness, models, defaultModel, releaseOwner, manager, cleanupEnvs, live, workContexts, decisions, memory }) {
   let closePromise = null;
   let closing = false;
+  // 已接纳的异步迁移操作（preview/status/import/draft）：closing 关准入，
+  // close 在 harness/host 关闭前排空，避免半完成的导入或读取悬空。
+  const legacyOps = new Set();
+  const runLegacyOp = (operation) => {
+    if (closing) return Promise.reject(errWithCode('host is closing', 'NOT_CONNECTED'));
+    const op = Promise.resolve().then(operation);
+    legacyOps.add(op);
+    op.then(() => legacyOps.delete(op), () => legacyOps.delete(op));
+    return op;
+  };
+  const drainLegacyOps = async () => {
+    while (legacyOps.size > 0) {
+      await Promise.allSettled([...legacyOps]);
+    }
+  };
   const close = () => {
     closing = true;
     closePromise ??= (async () => {
       // 依次执行并收集每步错误：任何一步失败仍继续清理，最后显式抛出。
       const errors = [];
       try { await decisions.close(); } catch (err) { errors.push(err); }
+      // 排空已接纳迁移操作：必须在 harness/host 关闭前等待完成。
+      try { await drainLegacyOps(); } catch (err) { errors.push(err); }
       // 排空已接纳导入，但共享消息账本须保留到原生工具退出。
       try { await workContexts.quiesce(); } catch (err) { errors.push(err); }
       try { await live.close(); } catch (err) { errors.push(err); }
@@ -408,6 +431,14 @@ function createRuntime({ host, harness, models, defaultModel, releaseOwner, mana
     scopeHistory: (scopeId, options) => runMessageOperation((log) => readScopeHistory(log, scopeId, options)),
     getScopeMessage: (scopeId, messageId) => runMessageOperation((log) => readScopeMessage(log, scopeId, messageId)),
     getScopeMessageDelivery: (scopeId, messageId) => runMessageOperation((log) => readScopeMessageDelivery(log, scopeId, messageId)),
+
+    // Legacy migration methods: reads never create primary or model tasks;
+    // import runs the passive core importer on the shared harness. All are
+    // admitted async ops drained before harness/host close.
+    previewLegacyImport: (input) => runLegacyOp(() => corePreviewLegacyImport(host, input)),
+    getLegacyImportStatus: (input) => runLegacyOp(() => coreGetLegacyImportStatus(host, input)),
+    importLegacySnapshot: (input) => runLegacyOp(() => coreImportLegacySnapshot(host, harness, input, CTX)),
+    readLegacyDraft: (input) => runLegacyOp(() => coreReadLegacyDraft(host, input)),
 
     resume() {
       harness.resume();

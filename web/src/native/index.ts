@@ -189,6 +189,63 @@ export type HostVoiceSettings = { sttEngine: HostVoiceEngine; ttsEngine: HostVoi
 /** Write shape: apiKey omitted keeps the stored key, empty string clears it, a value replaces it. */
 export type HostVoiceSaveInput = { sttEngine?: HostVoiceEngine; ttsEngine?: HostVoiceEngine; language?: string; speechRate?: number; stt?: HostVoiceRemote & {apiKey?: string}; tts?: HostVoiceRemote & {apiKey?: string} };
 export type HostVoiceEvent = { type: 'partial'|'submitted'|'error'; botId: string; requestId: string; text?: string; receipt?: Record<string, unknown>; code?: string; outcome?: string; message?: string };
+
+// Module 16 legacy migration: shapes mirror the Java exporter and Node core DTOs.
+export type LegacyModelSelection = { provider: string | null; model: string | null; thinkingLevel: string | null };
+export type LegacySourceMeta = {
+  kind: string;
+  applicationId: string;
+  conversationId: string;
+  title: string | null;
+  createdAt: number | null;
+  updatedAt: number | null;
+  archivedAt: number | null;
+  draftOnly: boolean;
+  modelSelection: LegacyModelSelection | null;
+};
+export type LegacyListItem = LegacySourceMeta & { snapshotId?: string | null; sourceKey?: string | null };
+export type LegacyListResult = { items: LegacyListItem[]; nextCursor: string | null };
+export type LegacyTargetDefinition = { role: string; cwd: string; modelRef: string };
+export type FrozenInput = { sourceKey: string; snapshotId: string; requestId: string; role: string; cwd: string; modelRef: string };
+export type LegacyStatusPhase = 'missing' | 'prepared' | 'completed';
+export type LegacyStatus = {
+  phase: LegacyStatusPhase;
+  sourceKey: string;
+  requestId: string | null;
+  snapshotId: string | null;
+  definition: LegacyTargetDefinition | null;
+  bot: HostBot | null;
+};
+export type LegacyCounts = { nodes: number; selectedNodes: number; sdkEntries: number; contextRecords: number; attachments: number };
+// codec analyze warnings: code plus optional count (e.g. no-sdk-lineage has no count).
+export type LegacyWarning = { code: string; count?: number };
+export type LegacyPreview = {
+  sourceKey: string;
+  snapshotId: string;
+  requestId: string;
+  source: LegacySourceMeta;
+  selectedLeafId: string | null;
+  definition: LegacyTargetDefinition;
+  counts: LegacyCounts;
+  warnings: LegacyWarning[];
+  draft: { bytes: number; attachments: number };
+  existing: LegacyStatus;
+};
+export type LegacyDraftAttachment = { id: string; name: string; mimeType: string; kind: string; size: number; path: string; sourcePath: string; sha256: string };
+export type LegacyDraftPage = {
+  sourceKey: string;
+  requestId: string;
+  botId: string;
+  snapshotId: string;
+  text: string;
+  textOffset: number;
+  nextTextOffset: number | null;
+  totalTextLength: number;
+  attachments: LegacyDraftAttachment[];
+  attachmentOffset: number;
+  nextAttachmentOffset: number | null;
+  totalAttachments: number;
+};
 export interface BotHostPlugin {
   snapshot(): Promise<HostSnapshot>;
   status(): Promise<HostStatus>;
@@ -207,5 +264,11 @@ export interface BotHostPlugin {
   finishVoice(): Promise<Record<string, never>>;
   cancelVoice(): Promise<Record<string, never>>;
   addListener(event: 'voiceEvent', listener: (event: HostVoiceEvent) => void): ListenerPromise;
+  legacyList(options?: {cursor?: string | null; limit?: number}): Promise<LegacyListResult>;
+  legacyPreview(options: {conversationId: string; role: string; cwd: string; modelRef: string}): Promise<LegacyPreview>;
+  legacyImport(options: {input: FrozenInput}): Promise<LegacyStatus>;
+  legacyStatus(options: {sourceKey: string; requestId?: string | null}): Promise<LegacyStatus>;
+  legacyDraft(options: {sourceKey: string; requestId: string; textOffset?: number; attachmentOffset?: number}): Promise<LegacyDraftPage>;
+  legacyDiscard(options: {sourceKey: string; snapshotId: string}): Promise<Record<string, never>>;
 }
 export const BotHost = registerPlugin<BotHostPlugin>('BotHost');

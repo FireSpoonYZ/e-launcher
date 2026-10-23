@@ -82,7 +82,8 @@ final class BotHostProcess {
     private static final int QUEUE_CAPACITY = 4;
     private static final long QUEUE_BYTE_BUDGET = 24L * 1024 * 1024;
     private static final List<String> REQUEST_TYPES =
-            Arrays.asList("call", "status", "settings_get", "settings_set");
+            Arrays.asList("call", "status", "settings_get", "settings_set",
+                    "legacy_preview", "legacy_status", "legacy_import", "legacy_draft");
 
     private final Context context;
     private final JSONObject init;
@@ -676,7 +677,7 @@ final class BotHostProcess {
     }
 
     private static final List<String> NATIVE_TOOLS =
-            Arrays.asList("android_apps", "android_shower", "android_speak");
+            Arrays.asList("android_apps", "android_shower", "android_speak", "schedule_task");
 
     private boolean validNativeCall(JSONObject message) {
         if (message.optString("id").isEmpty()) return false;

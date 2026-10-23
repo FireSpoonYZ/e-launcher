@@ -346,5 +346,51 @@ export function createAndroidTools({ host, getHarness, nativeBridge }) {
         return checkedTextOutput(JSON.stringify(result), 'RESPONSE_TOO_LARGE', '语音朗读原生响应文本超过 50 KiB；未发送完整内容');
       },
     }),
+    defineTool({
+      name: 'schedule_task',
+      description: '只管理当前 Bot 的主私聊定时任务（owner=本机当前 Bot 的 primary 会话），不创建/修改其他聊天或其他 Bot 的任务；'
+        + '任务仅在用户已在本机显式启动 Host 期间执行，Host 离线或未运行时错过的时刻不补发。'
+        + 'action=list 列出当前 Bot 的任务摘要（可选 cursor/limit 分页）；create 新建任务，title/prompt/repeat/time 必填，'
+        + 'ID 由宿主分配，不接受 id/revision；update/delete/setEnabled 必须提供 id 和正整数 revision 做严格 CAS，'
+        + '不允许更改归属。repeat 支持 once/daily/weekly/monthly/statutoryWorkday/statutoryHoliday，time 格式 HH:mm，'
+        + '可选 alarmMode exact|alarmClock（默认 alarmClock）、vibrate、deleteAfterRun。'
+        + 'done 仅表示整轮提交结束，不代表每个步骤成功；getSubmission 返回 null 不能证明未执行，只能只读核对回执。'
+        + '不采信请求参数中的任何归属字段（owner/deviceId/botId/conversationId/scopeId 等），归属仅取已验证持久会话身份。',
+      parameters: {
+        type: 'object',
+        properties: {
+          action: { type: 'string', enum: ['list', 'create', 'update', 'delete', 'setEnabled'] },
+          title: { type: 'string', minLength: 1, maxLength: 80 },
+          prompt: { type: 'string', minLength: 1, maxLength: 8000 },
+          repeat: { type: 'string', enum: ['once', 'daily', 'weekly', 'monthly', 'statutoryWorkday', 'statutoryHoliday'] },
+          time: { type: 'string', pattern: '^([01][0-9]|2[0-3]):[0-5][0-9]$' },
+          weekday: { type: 'integer', minimum: 1, maximum: 7 },
+          weekdays: { type: 'array', items: { type: 'integer', minimum: 1, maximum: 7 }, uniqueItems: true, maxItems: 7 },
+          monthDay: { type: 'integer', minimum: 1, maximum: 31 },
+          id: { type: 'string', minLength: 1, maxLength: 64 },
+          revision: { type: 'integer', minimum: 1 },
+          enabled: { type: 'boolean' },
+          cursor: { type: 'string', pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' },
+          limit: { type: 'integer', minimum: 1, maximum: 50 },
+          alarmMode: { type: 'string', enum: ['exact', 'alarmClock'] },
+          vibrate: { type: 'boolean' },
+          deleteAfterRun: { type: 'boolean' },
+        },
+        required: ['action'],
+        additionalProperties: false,
+      },
+      replay: 'unsafe',
+      async execute(args, api, context) {
+        const identity = await resolveIdentity(host, getHarness, api, context);
+        if (identity.kind !== 'primary') {
+          return errorOutput('INVALID_ARGUMENT', 'schedule_task 仅管理当前 Bot 的主私聊任务；room/dm 会话不接受');
+        }
+        const result = await nativeCall(nativeBridge, 'schedule_task', identity, args, api, context);
+        if (!result || typeof result !== 'object' || Array.isArray(result)) {
+          throw new Error('定时任务原生响应无效');
+        }
+        return checkedTextOutput(JSON.stringify(result), 'RESPONSE_TOO_LARGE', '定时任务原生响应文本超过 50 KiB；未发送完整内容');
+      },
+    }),
   ];
 }

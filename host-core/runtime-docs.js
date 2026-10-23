@@ -28,6 +28,33 @@ export const RequestKeys = defineDoc({
 });
 
 /**
+ * 在调用方事务内创建 ownerless 主会话并写 PrimaryIndex 映射。只适合在 commit 回调内调用；
+ * 返回 Durable 数字会话 ID；已映射或并发重入时幂等返回既有 ID。
+ * 缺模型显式抛 MODEL_REQUIRED（parseModelRef 对空值抛 INVALID_ARGUMENT），提交回滚，不产生半成品会话。
+ */
+export async function createPrimaryInTransaction(tx, bot, options = {}) {
+  const primaryId = bot.primaryConversationId;
+  const draft = await tx.doc(PrimaryIndex);
+  const existing = draft.byPrimary[primaryId];
+  if (existing !== undefined) return existing;
+
+  const modelRef = bot.modelRef ?? options.defaultModel;
+  if (!modelRef) {
+    throw errWithCode('model is required', 'MODEL_REQUIRED');
+  }
+  const model = parseModelRef(modelRef);
+  const record = await tx.createConversation({ ownership: { kind: 'ownerless' } });
+  await configure(tx, record.id, {
+    model,
+    instructions: bot.role,
+    cwd: bot.cwd,
+    tools: null,
+  });
+  draft.byPrimary[primaryId] = record.id;
+  return record.id;
+}
+
+/**
  * 解析 Bot 在本 Host Durable 库中的主私聊会话。
  * - 已映射：返回现有会话句柄。
  * - 未映射且 create=false：返回 null，不创建、不调度。
@@ -47,28 +74,7 @@ export async function getPrimaryConversation(harness, bot, options, context) {
   if (!create) return null;
 
   // commit 回调里只允许通过 tx 读写；会话句柄在提交完成后解析。
-  const conversationId = await harness.commit(async (tx) => {
-    // 事务内重新查重：并发同 Bot 的创建串行化后在此看到已写入映射。
-    const draft = await tx.doc(PrimaryIndex);
-    const existing = draft.byPrimary[primaryId];
-    if (existing !== undefined) return existing;
-
-    // 缺模型显式抛 MODEL_REQUIRED（parseModelRef 对空值抛 INVALID_ARGUMENT），提交回滚，不产生半成品会话。
-    if (!(bot.modelRef ?? options?.defaultModel)) {
-      throw errWithCode('model is required', 'MODEL_REQUIRED');
-    }
-    const model = parseModelRef(bot.modelRef ?? options?.defaultModel);
-    const record = await tx.createConversation({ ownership: { kind: 'ownerless' } });
-    await configure(tx, record.id, {
-      model,
-      instructions: bot.role,
-      cwd: bot.cwd,
-      tools: null,
-    });
-    draft.byPrimary[primaryId] = record.id;
-    return record.id;
-  }, context);
-
+  const conversationId = await harness.commit(async (tx) => createPrimaryInTransaction(tx, bot, options), context);
   return harness.conversation(conversationId, context);
 }
 

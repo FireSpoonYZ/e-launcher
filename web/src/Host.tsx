@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { BotHost, type HostBot, type HostFrameEvent, type HostHistoryPage, type HostLiveFrame, type HostPhase, type HostSettings, type HostSettingsPayload, type HostSnapshot, type HostSubmission, type HostVoiceEvent, type HostVoiceRemote, type HostVoiceSaveInput, type HostVoiceSettings } from './native';
 import { Dialog } from './components/ui/dialog';
 import { ErrorNotice, Header, Row, Section, useAction, useText, array, errorText, record } from './ui';
+import { HostLegacyImport } from './HostLegacyImport';
 
 type Home = (zh: string, en: string) => string;
 
@@ -482,6 +483,13 @@ export function HostPage() {
     clearCapture(cap);
   });
   const lastFrameError = [...frames].reverse().find(frame => frame.error)?.error;
+  const openImportedBot = (bot: HostBot) => { void chooseBot(bot); };
+  const refreshBotsAfterImport = () => { void listBots(); };
+  const applyImportedDraft = (botId: string, text: string) => {
+    if (selected?.botId !== botId) return false;
+    setDraft(prev => prev ? `${prev}\n\n${text}` : text);
+    return true;
+  };
 
   return <main className="page">
     <Header title={t('本机 Host','Local Host')} actions={<button className="button secondary-button" onClick={() => void refreshSnapshot()}>{t('刷新','Refresh')}</button>}/>
@@ -515,6 +523,7 @@ export function HostPage() {
           </>
         : <p className="secondary">{t('Host 运行后可用。','Available while the Host is running.')}</p>}
     </Section>
+    <HostLegacyImport phase={host?.phase ?? 'stopped'} workspace={host?.workspace} locked={!!pending || !!capture} activeBotId={selected?.botId} onOpenBot={openImportedBot} onRefreshBots={refreshBotsAfterImport} onApplyDraft={applyImportedDraft}/>
     {pending && <Section title={t('待确认请求','Pending requests')}>
       {pending.kind === 'text' && <>
         <p className="secondary" role="status">{t('冻结的请求（目标与内容已锁定）：','Frozen request (target and content locked): ')}<br/><code>{pending.botId}</code> · <code>{pending.requestId}</code><br/>{pending.text}</p>

@@ -207,5 +207,16 @@ export async function openHostService(options) {
     return closePromise;
   };
 
-  return { deviceId, url: control.url, getStatus, close };
+  return {
+    deviceId,
+    url: control.url,
+    getStatus,
+    close,
+    // Private legacy migration local methods forwarded from the control server;
+    // never exposed as HTTP/remote/relay routes.
+    previewLegacyImport: (input) => control.previewLegacyImport(input),
+    getLegacyImportStatus: (input) => control.getLegacyImportStatus(input),
+    importLegacySnapshot: (input) => control.importLegacySnapshot(input),
+    readLegacyDraft: (input) => control.readLegacyDraft(input),
+  };
 }

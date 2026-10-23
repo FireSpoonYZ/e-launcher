@@ -14,19 +14,44 @@ public final class ChatPlugin extends Plugin {
     private ChatCoordinator coordinator;
     private final ChatCoordinator.Listener listener = (messages, event) ->
             notifyListeners("chatEvent", js(event), true);
+    private volatile boolean destroyed;
 
     @Override public void load() {
-        coordinator = ChatCoordinator.get(getContext());
-        coordinator.addListener(listener);
+        // Host-only cold starts defer legacy business to the first actual chat call.
+        if (!(getActivity() instanceof MainActivity activity) || !activity.hostOnly()) coordinator();
+    }
+
+    private ChatCoordinator coordinator() {
+        synchronized (this) {
+            if (coordinator == null) {
+                if (destroyed) throw new IllegalStateException("聊天页面已关闭");
+                coordinator = ChatCoordinator.get(getContext());
+                coordinator.addListener(listener);
+            }
+        }
+        if (getActivity() instanceof MainActivity activity) {
+            activity.resumeLegacyIfHost();
+            // The old MainActivity.onCreate eagerly built VoiceManager; keep its read-aloud listener attached.
+            // Check survival so a late runnable never constructs legacy storage after destroy.
+            activity.runOnUiThread(() -> {
+                if (!destroyed && !activity.isDestroyed() && !activity.isFinishing())
+                    VoiceManager.get(getContext());
+            });
+        }
+        return coordinator;
     }
 
     @Override protected void handleOnDestroy() {
-        if (coordinator != null) coordinator.removeListener(listener);
+        synchronized (this) {
+            destroyed = true;
+            if (coordinator != null) coordinator.removeListener(listener);
+        }
     }
 
     @PluginMethod public void markTaskRead(PluginCall call) {
         try {
             String id = required(call, "conversationId");
+            ChatCoordinator coordinator = coordinator();
             getActivity().runOnUiThread(() -> {
                 if (getActivity() instanceof MainActivity activity && activity.isTaskConversationVisible(id))
                     coordinator.markTaskRead(id);
@@ -35,71 +60,71 @@ public final class ChatPlugin extends Plugin {
         } catch (Exception exception) { reject(call, exception); }
     }
 
-    @PluginMethod public void snapshot(PluginCall call) { resolve(call, coordinator.snapshot()); }
-    @PluginMethod public void getConversation(PluginCall call) { resolve(call, NativeJson.conversation(coordinator.store())); }
+    @PluginMethod public void snapshot(PluginCall call) { resolve(call, coordinator().snapshot()); }
+    @PluginMethod public void getConversation(PluginCall call) { resolve(call, NativeJson.conversation(coordinator().store())); }
     @PluginMethod public void listConversations(PluginCall call) {
         try { resolve(call, new JSONObject().put("conversations", NativeJson.conversations(
-                coordinator.store().conversations(call.getString("query"))))); }
+                coordinator().store().conversations(call.getString("query"))))); }
         catch (Exception exception) { reject(call, exception); }
     }
 
     @PluginMethod public void newConversation(PluginCall call) {
         try {
-            coordinator.store().newAssistantConversation();
-            resolve(call, coordinator.snapshot());
+            coordinator().store().newAssistantConversation();
+            resolve(call, coordinator().snapshot());
         } catch (Exception exception) { reject(call, exception); }
     }
 
     @PluginMethod public void selectConversation(PluginCall call) {
         try {
-            coordinator.store().selectConversation(required(call, "conversationId"));
-            resolve(call, coordinator.snapshot());
+            coordinator().store().selectConversation(required(call, "conversationId"));
+            resolve(call, coordinator().snapshot());
         } catch (Exception exception) { reject(call, exception); }
     }
 
     @PluginMethod public void deleteConversation(PluginCall call) {
         try {
             String id = required(call, "conversationId");
-            coordinator.deleteConversation(id);
-            resolve(call, coordinator.snapshot());
+            coordinator().deleteConversation(id);
+            resolve(call, coordinator().snapshot());
         } catch (Exception exception) { reject(call, exception); }
     }
 
     @PluginMethod public void archiveConversation(PluginCall call) {
         try {
-            coordinator.archiveConversation(required(call, "conversationId"));
-            resolve(call, coordinator.snapshot());
+            coordinator().archiveConversation(required(call, "conversationId"));
+            resolve(call, coordinator().snapshot());
         } catch (Exception exception) { reject(call, exception); }
     }
 
     @PluginMethod public void restoreConversation(PluginCall call) {
         try {
-            coordinator.restoreConversation(required(call, "conversationId"));
-            resolve(call, coordinator.snapshot());
+            coordinator().restoreConversation(required(call, "conversationId"));
+            resolve(call, coordinator().snapshot());
         } catch (Exception exception) { reject(call, exception); }
     }
 
     @PluginMethod public void listArchivedConversations(PluginCall call) {
         try { resolve(call, new JSONObject().put("conversations", NativeJson.conversations(
-                coordinator.store().archivedConversations(call.getString("query"))))); }
+                coordinator().store().archivedConversations(call.getString("query"))))); }
         catch (Exception exception) { reject(call, exception); }
     }
 
     @PluginMethod public void saveDraft(PluginCall call) {
         try {
             String id = required(call, "conversationId");
-            if (!id.equals(coordinator.store().activeId())) throw new IllegalStateException("会话已切换");
-            coordinator.store().saveDraft(id, call.getString("text", ""));
+            if (!id.equals(coordinator().store().activeId())) throw new IllegalStateException("会话已切换");
+            coordinator().store().saveDraft(id, call.getString("text", ""));
             call.resolve();
         } catch (Exception exception) { reject(call, exception); }
     }
 
     @PluginMethod public void selectNode(PluginCall call) {
         try {
-            ChatStore store = coordinator.store();
+            ChatStore store = coordinator().store();
             String conversation = required(call, "conversationId");
             if (!conversation.equals(store.activeId())) throw new IllegalStateException("会话已切换");
-            if (coordinator.running(conversation)) throw new IllegalStateException("请先停止此会话的当前生成");
+            if (coordinator().running(conversation)) throw new IllegalStateException("请先停止此会话的当前生成");
             ConversationTree.Node node = store.tree(conversation).node(required(call, "nodeId"));
             if (node == null) throw new IllegalArgumentException("历史节点不存在");
             boolean edit = call.getBoolean("edit", false);
@@ -115,9 +140,9 @@ public final class ChatPlugin extends Plugin {
     @PluginMethod public void send(PluginCall call) {
         try {
             String id = required(call, "conversationId");
-            if (!id.equals(coordinator.store().activeId())) throw new IllegalStateException("会话已切换");
+            if (!id.equals(coordinator().store().activeId())) throw new IllegalStateException("会话已切换");
             getActivity().runOnUiThread(() -> TaskNotifications.requestPermission(getActivity()));
-            String request = coordinator.send(id, call.getString("text", ""), call.getString("submissionId"));
+            String request = coordinator().send(id, call.getString("text", ""), call.getString("submissionId"));
             JSObject result = new JSObject();
             result.put("accepted", request != null);
             result.put("requestId", request == null ? JSONObject.NULL : request);
@@ -126,7 +151,7 @@ public final class ChatPlugin extends Plugin {
     }
 
     @PluginMethod public void cancel(PluginCall call) {
-        try { coordinator.cancel(required(call, "conversationId")); call.resolve(); }
+        try { coordinator().cancel(required(call, "conversationId")); call.resolve(); }
         catch (Exception exception) { reject(call, exception); }
     }
 
@@ -134,7 +159,7 @@ public final class ChatPlugin extends Plugin {
         try {
             JSArray answers = call.getArray("answers");
             if (answers == null) throw new IllegalArgumentException("answers is required");
-            coordinator.submitQuestionnaire(required(call, "conversationId"), required(call, "requestId"),
+            coordinator().submitQuestionnaire(required(call, "conversationId"), required(call, "requestId"),
                     required(call, "questionnaireId"), answers, call.getData().opt("globalNote"));
             call.resolve();
         } catch (Exception exception) { reject(call, exception); }
@@ -142,7 +167,7 @@ public final class ChatPlugin extends Plugin {
 
     @PluginMethod public void cancelQuestionnaire(PluginCall call) {
         try {
-            coordinator.cancelQuestionnaire(required(call, "conversationId"), required(call, "requestId"),
+            coordinator().cancelQuestionnaire(required(call, "conversationId"), required(call, "requestId"),
                     required(call, "questionnaireId"));
             call.resolve();
         } catch (Exception exception) { reject(call, exception); }
@@ -166,10 +191,10 @@ public final class ChatPlugin extends Plugin {
 
     private void select(PluginCall call, boolean modelChange) {
         try {
-            ChatStore store = coordinator.store();
+            ChatStore store = coordinator().store();
             String conversation = required(call, "conversationId");
             if (!conversation.equals(store.activeId())) throw new IllegalStateException("会话已切换");
-            if (coordinator.running(conversation)) throw new IllegalStateException("请先停止此会话的当前生成");
+            if (coordinator().running(conversation)) throw new IllegalStateException("请先停止此会话的当前生成");
             String expected = call.getString("expectedSelection");
             if (expected != null && !new JSONObject(expected).toString().equals(new JSONObject(store.piSelection(conversation)).toString()))
                 throw new IllegalStateException("模型或思考强度已更改，请重新选择");
