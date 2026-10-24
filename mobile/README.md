@@ -1,6 +1,6 @@
 # Tauri Android 界面（`mobile/`，模块 18）
 
-M18（Tauri Android 外壳）已交付并获父助手限定范围验收，总完成数 **18/20**；M19（Windows/Linux TUI）已由用户暂停（未验收代码只在 git stash `02f1396fda08d1b666ca83597ebbcea805c74d28`，不在交付树、不计完成），M20（跨设备集成、打包与真机验收）进行中，本轮已交付 **M20-01 手机远端入口 + 限定范围跨设备联调**，但 M20 并未整体完成。本目录只提供 Android 手机侧可见界面：默认是本机 Host，“其他设备”页是同一份桌面客户端实现跑在手机原生桥上（见下节）；不替代本机 Host，也不含桌面 GUI 安装包（见 [`desktop/`](../desktop/README.md)）。
+M18（Tauri Android 外壳）已交付并获父助手限定范围验收，总完成数 **18/20**；M19（Windows/Linux TUI）已由用户暂停（未验收代码只在 git stash `02f1396fda08d1b666ca83597ebbcea805c74d28`，不在交付树、不计完成），M20（跨设备集成、打包与真机验收）进行中，本轮已交付 **M20-01 手机远端入口 + 限定范围跨设备联调**，并在 REDMI K80 真机完成限定运行验证（首次安装 + 覆盖重装，见「验证边界」），但 M20 并未整体完成。本目录只提供 Android 手机侧可见界面：默认是本机 Host，“其他设备”页是同一份桌面客户端实现跑在手机原生桥上（见下节）；不替代本机 Host，也不含桌面 GUI 安装包（见 [`desktop/`](../desktop/README.md)）。
 
 ## 组成：现有 APK 内的一块界面，不是第二个应用
 
@@ -42,7 +42,7 @@ Tauri 的 Android 运行链路（App.run → tauri-runtime-wry.run → tao `Even
 - 远端使用步骤（需先有可连的目标 Host）：① 在“连接配置”保存档案：local 只存 url（可带 expectedDeviceId）与非密名称，relay 只存 url、非密设备 ID 与名称，**档案不含 token/CA**；② 选档案后输入 token（relay 可贴 CA）并点 **连接**，token 与 CA 只在本会话内存；③ 等设备目录出结果，relay 连接成功后还要在目录里显式选目标设备；④ 在聊天/群聊与 Bot 私聊/待发送/Host设置里操作，发送前草稿先持久化。
 - 验收（M20-01，父限定，合成模型不付费）：隔离真实 TLS relay 在 Linux，Windows 与 Linux Host 上线；手机 UI 经 CA 认证 relay 创建 Linux Bot（host cwd 校验，首次 `INVALID_CWD` 按明确失败修目录后显式重建）、提交 Unicode/emoji/多行写入真实 Durable/BC 原始 history 并收到合成 SSE 回复；UI 进程 SIGKILL 后 clientNode 退出、Linux 已受理任务仍完成；Windows debug GUI 经同一 relay 续聊手机创建的原 Bot；实际 8 路 primary LIVE 各取 snapshot，8 句柄并发 close 后又开 8 路再关闭通过（真实手机 API，不是纯 mock）；设置页重连无 React 循环且 child 释放。布局在 412x684 验证：折叠后输入可见、聚焦+滚动发送可见；ADB 点输入使软键盘把 viewport 压到 412x400，输入与发送均可滚动触达（ADB 注入不算真实手指）。
 - 最终验收：APK sha256 `2b50fccfaef5b1da5f8f47777fe4aea30b91f90d57af9a123e78443be52bba39` 已原签名覆盖安装到模拟器；同目标断开后重连并显式选回原设备，面板自动收起（实际通过）；离线草稿发送只进入 pending，重连后仍为 pending，对目标 `getSubmission` 返回 `SUBMISSION_NOT_FOUND`，不自动重放，用户式本地取消到 `CANCELLED`/`not-sent`。原 Host 6 库 + 新 client 3 库完整性/FK 通过，client 目录合成 token 零匹配（profile 名称阳性对照命中）。
-- 未完成：ARM64 真机、手机 UI × Windows Host 的跨机聊天（本轮只用 CLI 建了共用 room/DM 并验元数据传播与 room 持久 ACK，不宣称完整自然群聊智能或 DM 对话）、多格式安装升级卸载、真实 Hindsight/ASR/付费模型；这些不被本轮的远端页结果外推。
+- 未完成：ARM64 旧版本覆盖迁移与 16 KiB 页设备（K80 真机首次安装+覆盖重装限定运行验证见「验证边界」）、手机 UI × Windows Host 的跨机聊天（本轮只用 CLI 建了共用 room/DM 并验元数据传播与 room 持久 ACK，不宣称完整自然群聊智能或 DM 对话）、多格式安装升级卸载、真实 Hindsight/ASR/付费模型；这些不被本轮的远端页结果外推。
 
 ## 数据、生命周期与凭据
 
@@ -83,8 +83,9 @@ exit $LASTEXITCODE
 
 ## 验证边界（父助手限定范围）
 
-- 环境：保留 userdata 的专用 `emulator-5556`（Android 36 / x86_64）；`-no-audio` 静音模拟器 + 自有可信 HTTPS 合成 ASR。**无真机、无付费模型、无真实 Hindsight/ASR**；ARM64 只构建（ELF 对齐、zipalign `-P16`）未运行。
+- 环境：保留 userdata 的专用 `emulator-5556`（Android 36 / x86_64）；`-no-audio` 静音模拟器 + 自有可信 HTTPS 合成 ASR。M18 验收时无真机、无付费模型、无真实 Hindsight/ASR，ARM64 只构建（ELF 对齐、zipalign `-P16`）未运行；其后 M20 已用 K80 真机做限定运行验证（见下条）。
 - 已实测：真实 Tauri React 资源/启动/桥；冷启动不拉起 Host/Node 且保留 deviceId 与初始 DB 哈希；Unicode/emoji 创建与聊天、文字与语音回执到 done；界面返回/SIGKILL 后已受理任务仍由同一 Host/Node 完成，冻结原 ID 在回执丢失与 UI 进程死亡后仍可对账且无重放；存储读/写失败阻止发送、owner 冲突、缺失重发与非法 modelRef、条件清理；8 个 RPC 准入与第 9 个 `RPC_BUSY`、已写出 25 s `TIMEOUT`/unconfirmed、超 2 MiB/未知方法/非法 legacy 动作拒绝；8 观察 + 最多一个等待 ACK 的事件帧、溢出锁存、显式重连恢复、旧/重复 ACK 无害；空闲 EOF 只发一条私有 `streamError` 并显示提示；首次授权/拒绝/权限期间 Home/显式取消后迟到授权不启动采集；竖/横屏工具栏、原生 systembar padding、键盘把视口从 684 压到 400 且输入可滚动；固定旧会话/设置/Host 路由与独立 WebView 存储隔离。
-- 未实测：ARM64 运行时、真实模型/ASR/Hindsight、手机 UI × Windows Host 的跨机聊天、全部传输字节饱和与竞态、5 s 绑定故障定时器、全部外观组合。手机远端页已在本轮用隔离真实 TLS relay + 合成模型完成限定验收，不等于完整跨设备中继/目标切换与真机全部通过。
-- 法务资源改动之后没有重跑设备 E2E：上述设备验收适用于字节一致的原有 APK 条目（Stage 12 已逐条 SHA256 比对），新增的只有 `META-INF/LICENSE|NOTICE` 等法务条目与构建/CI 接线；远端 GitHub Actions 仍未实际运行。
+- 未实测：真实模型/ASR/Hindsight、手机 UI × Windows Host 的跨机聊天、ARM64 旧版本覆盖迁移与 16 KiB 页设备、全部传输字节饱和与竞态、5 s 绑定故障定时器、全部外观组合。手机远端页已在本轮用隔离真实 TLS relay + 合成模型完成限定验收，不等于完整跨设备中继/目标切换与真机全部通过。
+- 真机限定运行（REDMI K80 / 24117RK2CC，Android 16、arm64-v8a、页 4096；旁置 K90 未操作）：同 APK（sha256 `2b50fccfaef5b1da5f8f47777fe4aea30b91f90d57af9a123e78443be52bba39`）先首次安装（安装前设备无此包，故非旧版本真实用户数据迁移验收），再覆盖重装 `-r`；冷启动无 Host Node/FGS，显式启动后真实 ARM64 Node + specialUse FGS 运行，本机 Bot 中文/emoji/多行写入真实 Durable/BC 历史并取回合成 SSE 回复；UI 进程被 kill 后默认进程与 Host Node 同 PID 保持、重开读到持久回复（关闭前受理回执未捕获，不写精确 busy 接纳时序）；打开“其他设备”后 Host/client 两个 ARM64 Node 并存且 client 用独立数据目录；经真实 CA TLS relay 连 Linux Host，提交唯一 K80 marker 多行消息并在 Linux 原始历史读到输入与回复；8 路 LIVE 各 snapshot，批量 close 后再开 8 路再关闭通过；设置页显式重连后 client Node 退出、本机 Host 同 PID 继续且 UI 无循环；清空合成配置/alias 并停 Host 后覆盖重装，Host state + client store + shared_prefs 字节一致、7 份 SQLite integrity/FK 通过，重开冷态无 Node；无崩溃 buffer 条目。页为 4 KiB，不宣称 16 KiB 实测；本轮未跑 `notifications` 组。
+- 法务资源改动后 M18 未重跑设备 E2E：上述 M18 设备验收适用于字节一致的原有 APK 条目（Stage 12 已逐条 SHA256 比对），新增的只有 `META-INF/LICENSE|NOTICE` 等法务条目与构建/CI 接线；M20 的 K80 真机验收另使用 `9c495e3` 构建的 APK，摘要见上条；这是独立的运行验收。远端 GitHub Actions 仍未实际运行。
 - 旧回归的普通检查里 `notifications` 组仍在“立即删除是否清空通知”断言处失败（M16 起的既有问题；调试器暂停下通过但不属普通通过，确切原因未确认）；本轮普通检查基线通过一次、stage1 新 APK 仍失败，未改产品或断言，不宣称已修好；其余 10 组正常通过是 M18 的历史结果，本轮未复跑这 10 组，不要宣称 11 组全部普通通过。

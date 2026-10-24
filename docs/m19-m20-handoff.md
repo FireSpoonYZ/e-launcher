@@ -1,6 +1,6 @@
 # M19 / M20 交接：Windows / Linux TUI 与跨设备验收
 
-> 状态（当前）：**M19 已由用户暂停**——未验收的 TUI 代码只保存在 git stash `02f1396fda08d1b666ca83597ebbcea805c74d28`，不在交付树、不计完成；**M20 进行中**，本轮已交付 **M20-01 手机远端入口 + 限定范围跨设备联调**；总完成仍 **18/20**。当前进度、已测范围与剩余项见 [重构路线图](refactor-roadmap.md) 末节与 [mobile/README.md](../mobile/README.md)。
+> 状态（当前）：**M19 已由用户暂停**——未验收的 TUI 代码只保存在 git stash `02f1396fda08d1b666ca83597ebbcea805c74d28`，不在交付树、不计完成；**M20 进行中**，本轮已交付 **M20-01 手机远端入口 + 限定范围跨设备联调**，另有 REDMI K80 真机限定运行验证（首次安装 + 覆盖重装、本机 Host 与 relay 到 Linux Host，见 §5.2/§8）；总完成仍 **18/20**。当前进度、已测范围与剩余项见 [重构路线图](refactor-roadmap.md) 末节与 [mobile/README.md](../mobile/README.md)。
 > 本文其余部分是 M19/M20 开始前写下的交接计划与工程默认（建议、环境、差距记录保留）；正文中“完全未开始”“手机只有本机 Host”“缺远端入口”等描述只反映交接时点，**不代表现在的状态**。
 > 基线：分支 `refactor/bot-host-core`，交接时提交 `5466b428`（父助手已用 git 核实；撰写时未执行 git）。若接手时 HEAD 已前进，先读后续变更再动手，**绝不 `reset`/`clean` 回旧基线**。
 > 标记约定：**【事实】** 已在仓库或已验收记录中成立；**【建议】** 本文为后续实施给出的工程默认，接手者需按当次任务确认；**【待实现】** 现在不存在。
@@ -136,11 +136,12 @@ M20 不只是“跑一遍测试”：它包含完成原定场景所必需的集�
 | Linux GUI（M17 Tauri） | 跨机待跑 | 同机历史已测；跨机待跑 | 跨机待跑（认证 TLS relay） |
 | Windows TUI（M19） | M19 用户暂停，未交付 | 同上 | 同上 |
 | Linux TUI（M19） | M19 用户暂停，未交付 | 同上 | 同上 |
-| Android UI（M18 + M20-01 远端页） | 本轮 CLI 建立共用 room/DM 与元数据；手机 UI 跨机聊天待跑 | 本轮已测（经 CA 认证 relay 创建 Bot、提交并收到合成回复） | 同机历史已测（模拟器限定）；真机待跑 |
+| Android UI（M18 + M20-01 远端页） | 本轮 CLI 建立共用 room/DM 与元数据；手机 UI 跨机聊天待跑 | 本轮已测（经 CA 认证 relay 创建 Bot、提交并收到合成回复）；K80 真机经真实 CA TLS relay 复验 | K80 真机本机 Host 已限定验证（首次安装，非旧版本升级）；模拟器历史已测 |
 
 - 本轮实测环境：Windows x64 Node 26.12.1、Linux x64（Ubuntu 26.04.1）Node 22.19.0、`emulator-5556`（Android 36/x86_64）；隔离真实 TLS relay 在 Linux，Windows 与 Linux Host 上线。模型与回复是合成服务，不付费。
 - 手机→Windows TUI 续聊因 M19 暂停而未做；Linux GUI 全矩阵、DM 智能、完整故障/BC 恢复仍待。
 - 最终验收：APK sha256 `2b50fccfaef5b1da5f8f47777fe4aea30b91f90d57af9a123e78443be52bba39` 已原签名覆盖安装；同一目标断开后重连并显式选回原设备，面板自动收起；离线草稿只入 pending，重连后仍 pending，目标 `getSubmission` 返回 `SUBMISSION_NOT_FOUND`，不自动重放，用户式本地取消到 `CANCELLED`/`not-sent`；原 Host 6 库 + 新 client 3 库完整性/FK 通过，client 目录合成 token 零匹配（profile 名称阳性对照命中）。
+- K80 真机（REDMI K80 / 24117RK2CC，Android 16、arm64-v8a、页 4096；旁置 K90 未操作）是本轮新增的限定运行验证：同 APK 先首次安装（安装前设备无此包，故**不**是旧版本用户数据迁移验收）再覆盖重装 `-r`（原签名保留）；冷启动无 Host Node/FGS，显式启动后真实 ARM64 Node + specialUse FGS 运行，本机 Bot 中文/emoji/多行写入真实 Durable/BC 历史并取回合成 SSE 回复；UI 进程被 kill 后默认进程与 Host Node 同 PID 保持、重开读到持久回复（关闭前受理回执未捕获，不写精确 busy 接纳时序）；打开“其他设备”后 Host/client 两个 ARM64 Node 并存且 client 用独立数据目录；经真实 CA TLS relay 连 Linux Host，提交唯一 K80 marker 多行消息并在 Linux 原始历史读到输入与回复；8 路 LIVE 各 snapshot、批量 close 后再开 8 路再关闭通过；设置页显式重连后 client Node 退出、本机 Host 同 PID 继续且 UI 无循环；清空合成配置/alias 并停 Host 后覆盖重装，Host state + client store + shared_prefs 字节一致、7 份 SQLite integrity/FK 通过，重开冷态无 Node；无崩溃 buffer 条目。页为 4 KiB，不宣称 16 KiB 设备实测；手机 UI × Windows Host 仍未测（本轮是手机 UI → Linux Host + K80 本机 Host）；本轮未跑 `notifications` 组。
 
 - **同平台不同机器也算跨机**：M17 的“本机已测”只覆盖客户端与 Host 在同一台机器的情况，**不能**当作跨机通过。
 - local 连接只接受受支持的回环地址（以既有 client 校验为准，不允许 LAN/远端地址）；跨设备一律走认证 TLS relay，不得把“本机地址”当远端直连。
@@ -166,7 +167,7 @@ M20 不只是“跑一遍测试”：它包含完成原定场景所必需的集�
 | Linux DEB | M17 已实际安装运行；M20 验证升级与数据保留 |
 | Linux RPM | M17 未安装；需合适隔离发行版，不能在不兼容系统强装 |
 | Linux AppImage | M17 已 `--appimage-extract-and-run` 运行；M20 需 FUSE 正常运行 + extract-and-run |
-| Android ARM64 | 仅构建/对齐校验，**未运行**；M20 需真机运行与覆盖升级，APK 签名/16 KiB/完整许可 |
+| Android ARM64 | 已由 REDMI K80 真机限定运行（首次安装 + 同 APK 覆盖重装，页 4 KiB）；旧版本覆盖升级、16 KiB 设备与完整许可仍未测 |
 | 远端 GitHub Actions | 接线已实现，**未实际运行** |
 
 M19 TUI 在 M20 需要“可用的 Node 入口”；独立分发形式（单文件/打包器/系统包）按目标环境确定，不要虚构当前不存在的 TUI 安装包。
@@ -179,7 +180,7 @@ M20-11：远端 GitHub Actions 实际运行（接线已存在，尚未跑）并�
 
 ## 6. 环境与授权
 
-- 【事实】Android 侧的历史授权设备只有保留 userdata 的 `emulator-5556` / `m15_api36`（Android 36, x86_64）；M18 结束时已停止模拟器与自有夹具，清理测试 CA、临时权限与 forward/reverse，配置空、revision 10、8 份 DB 完整。M20-01 复用同一 `emulator-5556` 做手机远端页联调，另用 Windows x64（Node 26.12.1）与 Linux x64 验收机（Ubuntu 26.04.1，Node 22.19.0）。M17 的 Windows/Linux 本机历史运行/授权不因此失效，但当前新的目标主机、新物理设备与新服务仍需按本次任务明确授权。
+- 【事实】Android 侧的历史授权设备只有保留 userdata 的 `emulator-5556` / `m15_api36`（Android 36, x86_64）；M18 结束时已停止模拟器与自有夹具，清理测试 CA、临时权限与 forward/reverse，配置空、revision 10、8 份 DB 完整。M20-01 复用同一 `emulator-5556` 做手机远端页联调，另用 Windows x64（Node 26.12.1）与 Linux x64 验收机（Ubuntu 26.04.1，Node 22.19.0）。后续真机环节另按用户明确授权使用 REDMI K80（24117RK2CC，Android 16/arm64-v8a，页 4 KiB），旁置 K90 未操作。M17 的 Windows/Linux 本机历史运行/授权不因此失效，但当前新的目标主机、新物理设备与新服务仍需按本次任务明确授权。
 - 【事实】本轮授权边界是“手机远端入口 + 限定跨设备联调”：不 push、不启动 CI；在环境中发现物理设备不构成本次授权，后续需用户选具体设备/服务并允许推送 CI。
 - 【建议】不要连其它物理设备，也不要因为“能看到设备”就自动视为授权；M20 的真机、新远端主机与真实付费服务需要当次明确目标与授权。历史 SSH 地址/PID/端口不代表现在的状态。
 - 【建议】M17 的 Windows/Linux 旧服务或隧道状态未在 M18 逐一复核：先只读盘点归属，再决定是否停止，**不要**按历史 PID 直接 kill。
@@ -218,10 +219,10 @@ Relay、CA 与模型配置的完整参数见 [`host-core/README.md`](../host-cor
 
 | 差距 | 现状 |
 | --- | --- |
-| Android 远端入口 | 已由 M20-01 补齐（手机 UI 可经 relay 连接远端 Host，见 §5.1/§5.2）；手机 UI × Windows Host 的跨机聊天与真机仍未跑 |
+| Android 远端入口 | 已由 M20-01 补齐（手机 UI 可经 relay 连接远端 Host，见 §5.1/§5.2）；手机 UI × Windows Host 的跨机聊天仍未跑；K80 真机已做本机 Host 与 Linux Host 限定验证 |
 | TUI | M19 用户暂停；未验收代码只在 git stash `02f1396f`，不在交付树，不计完成 |
 | M17 Relay GUI 联调 | Windows GUI 本轮已经真实 TLS relay 续聊手机创建的 Bot；Linux GUI 跨机全矩阵仍未跑 |
-| ARM64 运行时 | 仅构建与 16 KiB 校验，未在真机运行 |
+| ARM64 运行时 | 已由 REDMI K80（Android 16/arm64-v8a，4 KiB 页）限定运行验证：本机 Host、remote client、CA TLS relay 到 Linux Host；旧版本覆盖迁移与 16 KiB 设备未测 |
 | 真实 Hindsight / ASR / 付费模型 | 未联调 |
 | 远端 GitHub Actions | 工作流接线已实现，**未实际运行**，本轮不启动 |
 | MSI 安装 / RPM 安装 / AppImage FUSE | 未测（MSI 仅解包） |
@@ -238,15 +239,16 @@ Relay、CA 与模型配置的完整参数见 [`host-core/README.md`](../host-cor
   - `e-launcher-desktop-client-1792726911550`：`module17-completion.json`、`module17-delivery-evidence.json`。
   - `e-launcher-tauri-android-1792774112316`：`module18-completion.json`、`module18-commit-manifest.json`、`stage12-package-acceptance.json`、`cleanup-complete.json`、`notification-final-summary.json`。
   - `e-launcher-m19-m20-1792820895768`：M19/M20 本轮验收产物（合成模型、不付费）。只按目录 basename 引用，不写用户名绝对路径、机器地址或测试 token。
+  - `e-launcher-k80-1792825796727`：K80 真机限定验证 `k80-verification.json`（不含用户名路径、设备 serial 或临时 token）。
   - 这些文件在原机器的系统临时目录，**不是仓库文件**；换机器需移交到可访问的仓外位置。没有原文件时，以仓内限定说明作为历史摘要，并重新建新夹具，不得声称复跑。
-- 本轮收尾已完成（限定范围）：最终窗口、client Node、自有 Windows/Linux Host、relay、Mockoon、SSH 转发、3 个自有终端与模拟器均已停止；userdata 与 fixture 记录保留，自有 adb 19220 forward 已删，物理设备未动；不外推其他 M20 项。
+- 首轮模拟器/桌面收尾已完成：最终窗口、client Node、自有 Windows/Linux Host、relay、Mockoon、SSH 转发、3 个自有终端与模拟器均已停止；userdata 与 fixture 记录保留，自有 adb 19220 forward 已删；该阶段未操作物理设备；不外推其他 M20 项。
 - 收尾：只停自有进程、释放自有观察与虚拟屏、清理测试 CA/转发/临时权限、恢复自有测试配置；只读检查保留数据。每个模块单独汇报 commit、产物、已测、未测、已知失败与清理结果。
 
 ## 9. 收尾顺序（当前）
 
 1. M19 已被用户暂停：未验收 TUI 代码只在 git stash `02f1396f`，不进入交付、不计完成；恢复工作需用户重新授权并从 stash 取回后单独验收、提交。
 2. M20 仍进行中，本轮只交付 M20-01；已交付不等于 M20 完成，不得记 20/20。不要静默连做到下一个场景。
-3. M20 完成条件：每个 M20-xx 先具备所需功能/环境，再逐项给出证据；任一必需项未完成或未给出处置，就不能改成 20/20。剩余项：手机→Windows TUI 续聊（待 M19）、Linux GUI 全矩阵、完整故障/BC 恢复、DM 智能、全格式安装升级卸载、ARM64 真机、真实 Hindsight/ASR/付费模型、远端 CI（本轮不 push/不启动）。
+3. M20 完成条件：每个 M20-xx 先具备所需功能/环境，再逐项给出证据；任一必需项未完成或未给出处置，就不能改成 20/20。剩余项：手机→Windows TUI 续聊（待 M19）、Linux GUI 全矩阵、完整故障/BC 恢复、DM 智能、全格式安装升级卸载、ARM64 旧版本覆盖迁移与 16 KiB 页设备（K80 真机本机 Host/remote client 已限定验证，不计完成）、真实 Hindsight/ASR/付费模型、远端 CI（本轮不 push/不启动）。
 
 ## 10. 交接任务模板（未来操作者直接用）
 
@@ -261,6 +263,6 @@ Relay、CA 与模型配置的完整参数见 [`host-core/README.md`](../host-cor
 ```text
 接手 M20：跨设备集成、打包与真机验收。先读本文 §5/§6 与架构 §9，并看 docs/refactor-roadmap.md 末节的当前进度。
 M20-01（手机远端入口 + 限定跨设备联调）已交付，不重复实现；下一步按剩余项推进：手机→Windows TUI 续聊（依赖 M19 恢复）、
-Linux GUI 全矩阵、完整故障/BC 恢复与 DM 智能、M20-09 全格式安装升级卸载、ARM64 真机与原生功能、M20-10 真实服务、M20-11 远端 CI。
+Linux GUI 全矩阵、完整故障/BC 恢复与 DM 智能、M20-09 全格式安装升级卸载、ARM64 旧版本覆盖迁移与 16 KiB 页设备（K80 真机本机 Host/remote client 已限定验证，见 §5.2/§8）、M20-10 真实服务、M20-11 远端 CI。
 每项标注已跑/待跑/前置未实现/环境不可用；未完成不改成 20/20；需要新设备/服务/CI 推送时先向用户申请授权。
 ```
