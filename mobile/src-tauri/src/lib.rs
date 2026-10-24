@@ -495,7 +495,7 @@ fn navigation_guard() -> TauriPlugin<Wry> {
 
 /// 注册本进程内唯一的 Kotlin 插件；注册失败直接让 App 启动失败，不留占位实现。
 fn host_plugin() -> TauriPlugin<Wry> {
-  PluginBuilder::<Wry, ()>::new(PLUGIN_NAME)
+  let builder = PluginBuilder::<Wry, ()>::new(PLUGIN_NAME)
     .setup(|app, api| {
       let hub = Arc::new(EventHub::default());
       let proxy = {
@@ -510,8 +510,15 @@ fn host_plugin() -> TauriPlugin<Wry> {
         proxy,
       });
       Ok(())
-    })
-    .build()
+    });
+  // Activity 最终销毁后由 Java 终止 UI 进程，避免 tao 的 C 全局析构与绘图线程冲突。
+  #[cfg(target_os = "android")]
+  let builder = builder.on_event(|_app, event| {
+    if let tauri::RunEvent::ExitRequested { code: None, api, .. } = event {
+      api.prevent_exit();
+    }
+  });
+  builder.build()
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

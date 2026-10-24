@@ -31,7 +31,7 @@
 | 17 | Tauri Windows / Linux 客户端 | 已完成 · 父助手限定范围验收 | 以 Bot 为中心的设备目录、主私聊、群聊/DM、待发送与 Host 设置界面，复用固定 35 个 v2 方法与 4 个 Tauri 命令，不持有 Host 生命周期；Windows/Linux 构建与 NSIS/DEB/AppImage 实机运行、关闭客户端不停止 Host 通过，跨设备 Relay/CA 与全格式安装验收归 M20。17/20。 |
 | 18 | Tauri Android 外壳 | 已完成 · 父助手限定范围验收 | Tauri 界面运行在独立 `:tauri_ui` 进程（exported=false、WebView 后缀隔离），经私有同 UID Binder socket 桥接默认进程 Host；4 个移动命令与公开 35 方法不变；模拟器实测聊天与关闭 UI 后 Host 继续、无重放且设备数据保留，ARM64 仅构建（其后 M20 已在 K80 真机限定运行，见末节）。18/20。 |
 | 19 | Windows / Linux TUI | 本期不交付（编号保留） | 同一 Host 业务协议的终端客户端：Bot/设备选择、对话、实时观察及显式停止。按用户决定移出本期：原规格保留为历史/后续计划，未验收代码仅在 git stash `02f1396f`（仅未来草稿，禁止取回或删除），不在交付树、不计完成；其终端界面验收不再是本期或 M20 的完成条件。 |
-| 20 | 跨设备集成、打包与真机验收 | 进行中（本期唯一剩余模块；M20-01 已交付） | 手机远端入口与限定跨设备联调已交付，K80 真机本机 Host 及 remote client 已限定运行验证，跨端创建续聊已按手机→Windows 桌面 GUI 有限验证；本轮补充验收已覆盖 9 组 GUI→Host 矩阵、Windows MSI/NSIS 与 Linux DEB/RPM 的安装相关检查及 AppImage 两种运行模式、K80 真机 Shower/Widget/通知删除、Host/回执故障、群/DM、BC 与认证撤销（见末节）；真实旧版本迁移与 16 KiB 设备、真实服务与远端 CI 仍待。完成条件见末节。 |
+| 20 | 跨设备集成、打包与真机验收 | 进行中（本期唯一剩余模块；M20-01 已交付） | 手机远端入口与限定跨设备联调已交付，K80 真机本机 Host 及 remote client 已限定运行验证，跨端创建续聊已按手机→Windows 桌面 GUI 有限验证；本轮补充验收已覆盖 9 组 GUI→Host 矩阵、Windows MSI/NSIS 与 Linux DEB/RPM 的安装相关检查及 AppImage 两种运行模式、K80 真机 Shower/Widget/通知删除、Host/回执故障、群/DM、BC 与认证撤销（见末节）；已复现的 `:tauri_ui` 退出 FORTIFY 已修复并完成限定回归（见末节）；16 KiB 适配与专项运行验收已明确为本期排除（保留技术对齐设置），真实旧版本迁移与真实服务、远端 CI 仍待。完成条件见末节。 |
 
 ## 模块 9 验收依据与限制
 
@@ -177,7 +177,7 @@ M20 尚未整体完成，是本期的唯一剩余模块。已交付 **M20-01 手
 - **生命周期**：进程单例、UI 关闭/EOF 只释放 child，不停止远端 Agent；本机页与远端页保持挂载、不可见时取消观察与轮询；主动重连清旧 identity，不自动重连、不重放；批量取消用 owned 8 槽 + 串行幂等清理。
 - **验收（合成模型，不付费）**：Windows x64 Node 26.12.1、Linux x64（Ubuntu 26.04.1）Node 22.19.0、`emulator-5556`（Android 36/x86_64）。隔离真实 TLS relay 在 Linux，Windows 与 Linux Host 上线；手机 UI 经 CA 认证 relay 创建 Linux Bot、提交 Unicode/emoji/多行到真实 Durable/BC 原始 history 并收到合成 SSE 回复；UI 进程 SIGKILL 后 clientNode 退出且已受理任务仍完成；Windows debug GUI 经同一 relay 续聊手机创建的原 Bot；CLI 建立 Windows/Linux 共用 room 与 DM，元数据传播与 room 持久 ACK 通过（不宣称完整自然群聊智能行为或 DM 对话已测）。8 路 primary LIVE 各取 snapshot、8 句柄并发 close 后再开 8 路再关闭通过（真实手机桥，不是纯 mock）。
 - **构建**：`npm run mobile:web`、`npm run build`、`node host-core/build-desktop.js --web`、Windows `desktop:build -- --debug --no-bundle`、最终双 ABI `assembleDebug`+`assembleDebugAndroidTest`（40 s）、apksigner 与 `zipalign -P16` 通过；无新增测试。一次桌面重建因自有测试 exe 占用文件失败，关闭后成功，不是代码失败。
-- **未完成/不计通过**：Linux GUI 全矩阵、完整故障与 BC 恢复、DM 智能、多格式安装升级卸载、ARM64 旧版本覆盖迁移与 16 KiB 页设备（K80 已限定运行，见下条）、真实 Hindsight/ASR/付费模型、远端 GitHub Actions；本轮不 push、不启动 CI。（其中 Linux GUI 全矩阵、故障/BC/DM/认证场景及安装相关项已由其后一轮补充验收覆盖——安装类只到 MSI/NSIS/DEB/RPM 的安装、升级/重装、卸载，AppImage 只到两种运行模式，见下一节；本节保留 M20-01 当时的未完成清单。）跨端创建续聊已按 手机创建 Bot → Windows 桌面 GUI 经 relay 续聊验证（有限范围，TUI 客户端已移出本期，不计待办）。`notifications` 普通检查本次基线通过一次，stage1 新 APK 仍在 historical deleting clears notification 断言失败，未改产品或断言，不宣称修好；K80 本轮未跑 `notifications` 组，也不宣称该回归已修。
+- **未完成/不计通过**：Linux GUI 全矩阵、完整故障与 BC 恢复、DM 智能、多格式安装升级卸载、ARM64 旧版本覆盖迁移与 16 KiB 页设备（K80 已限定运行，见下条；16 KiB 适配与专项运行验收其后已明确本期排除，见末节）、真实 Hindsight/ASR/付费模型、远端 GitHub Actions；本轮不 push、不启动 CI。（其中 Linux GUI 全矩阵、故障/BC/DM/认证场景及安装相关项已由其后一轮补充验收覆盖——安装类只到 MSI/NSIS/DEB/RPM 的安装、升级/重装、卸载，AppImage 只到两种运行模式，见下一节；本节保留 M20-01 当时的未完成清单。）跨端创建续聊已按 手机创建 Bot → Windows 桌面 GUI 经 relay 续聊验证（有限范围，TUI 客户端已移出本期，不计待办）。`notifications` 普通检查本次基线通过一次，stage1 新 APK 仍在 historical deleting clears notification 断言失败，未改产品或断言，不宣称修好；K80 本轮未跑 `notifications` 组，也不宣称该回归已修。
 - **K80 真机限定运行（较早阶段历史记录，仍不计 19/19）**：REDMI K80 / 型号 24117RK2CC（Android 16、arm64-v8a、页 4096，旁置 K90 未操作）。同 APK（sha256 `2b50fccfaef5b1da5f8f47777fe4aea30b91f90d57af9a123e78443be52bba39`）先首次安装（安装前设备无此包，故不是旧版本真实用户数据迁移验收），再覆盖重装 `-r`；冷启动无 Host Node/FGS，显式启动后真实 ARM64 Node + specialUse FGS 运行，本机 Bot 中文/emoji/多行写入真实 Durable/BC 历史并取回合成 SSE 回复；UI 进程被 kill 后默认进程与 Host Node 同 PID 保持、重开读到持久回复（关闭前受理回执未捕获，不写精确 busy 接纳时序）；打开“其他设备”后 Host/client 两个 ARM64 Node 并存且 client 用独立数据目录；经真实 CA TLS relay 连 Linux Host，提交唯一 K80 marker 多行消息并在 Linux 原始历史读到输入与回复；8 路 LIVE 各 snapshot、批量 close 后再开 8 路再关闭通过；设置页显式重连后 client Node 退出、本机 Host 同 PID 继续且 UI 无循环；清空合成配置/alias 并停 Host 后覆盖重装，Host state + client store + shared_prefs 字节一致、7 份 SQLite integrity/FK 通过，重开冷态无 Node；该阶段检查时未发现 crash buffer 条目（其后的 UI 退出阶段另有 FORTIFY 日志，见末节）。页为 4 KiB，不宣称 16 KiB 设备实测；手机 UI × Windows Host 当时仍未测（该轮是手机 UI → Linux Host + K80 本机 Host），其后补充验收已覆盖（见末节）。证据：仓外目录 basename `e-launcher-k80-1792825796727` 的 `k80-verification.json`。
 - **K80 收尾**：App 与测试会话保留在 K80 供查看；本机 Host 已停，`runtime.providers=[]`、`defaultModel=null`、`relay=null`（revision 3）、`credential_aliases={}`；`POST_NOTIFICATIONS` 临时授权后已恢复 false；adb forward 19230 / reverse 18929 已删；自有 Linux Host/relay/Mockoon/SSH 转发/CDP 终端已停；未改电池/自启/无障碍/HOME；未涉及付费模型/真实 ASR/Hindsight。
 - **首轮模拟器/桌面收尾（已完成）**：最终窗口、client Node、自有 Windows/Linux Host、relay、Mockoon、SSH 转发、3 个自有终端与模拟器均已停止；userdata 与 fixture 记录保留，自有 adb 19220 forward 已删；该阶段未操作物理设备。不外推其他 M20 项。
@@ -205,12 +205,24 @@ M20 尚未整体完成，是本期的唯一剩余模块。已交付 **M20-01 手
 - Windows GUI 在 busy 时发 WM_CLOSE 后最终进程退出时序未独立确认，不记作客户端退出后 busy 任务完成证据；Linux 侧有完整证据（客户端会话删除、Host 进程保留、同一请求 `done`）。
 - 语音本轮只验证拒绝麦克风权限后正常返回且草稿保留（`microphoneGranted:false`），未验真实采集/识别/播报。
 - K80 页大小 4096，不是 16 KiB 设备；安装前设备无该包，是首次安装 + 同 APK 覆盖重装，**不是**真实旧版本用户数据迁移。
-- 较早的一条 `FORTIFY pthread_mutex_lock on destroyed mutex` 日志（pid 30306，2026-10-24 15:22:33，UI 退出阶段）与系统 `EXIT_SELF`/status 0、`trace=null` 记录已保留，原因未定位。
+- 较早的一条 `FORTIFY pthread_mutex_lock on destroyed mutex` 日志（pid 30306，2026-10-24 15:22:33，UI 退出阶段）与系统 `EXIT_SELF`/status 0、`trace=null` 记录已保留；该现象其后已按普通流程复现（K80 普通打开 `:tauri_ui` 后按返回即 3 条 FORTIFY、UI 进程 `EXIT_SELF`/status 0，默认进程仍在（本次复现未启动 Host）），原因假设为 tao Android `std::process::exit` 的 C 清理与仍存活的 HWUI 线程冲突；该已复现退出路径已完成修复与限定回归（见下节），但**无 native 符号化栈**，C 全局析构与 `libhwui` 锁的归属仍只是有依据假设，不记作已定位。
+
+### 退出路径修复与回归（2026-10-25）
+
+基提交 `dd91f68`；产品改动只有 `mobile/src-tauri/src/lib.rs`（Android 仅对 `RunEvent::ExitRequested{code:None}` 调 `api.prevent_exit()`）与 `app/src/main/java/com/example/launcherprobe/TauriMainActivity.java`（非 `isChangingConfigurations` 的最终 `onDestroy` 里 `Process.killProcess(myPid())`）；未写/未改测试代码。新 APK sha256 `9956832a59355254fc25a05ff19d7964cc1fe09be7b25544b574851cfcb350c4`，签名 `6f6ff43d800aa2eb8444a78d4f3992a0157f5bae2ca0a31a97da753187d01ffb`；实际 Android ARM64 产品构建（Gradle `:app:assembleDebug`，含 Rust 与 Java/Kotlin 编译）35 秒。证据在仓库外目录 basename `e-launcher-m20-followup-1792852771822`（入口 `exit-fix-acceptance.json`）。
+
+- **旧版复现**：普通 MAIN/LAUNCHER 入口进 `:tauri_ui`、Host 未启动，按 Back 即 3 条 `FORTIFY pthread_mutex_lock called on destroyed mutex`（UI pid 26273），UI 进程 `EXIT_SELF`/status 0，默认进程 23380 仍在（`exit-reproduction.json`）——与 pid 30306 旧日志同一已复现路径。
+- **新版回归**：7 次最终退出（pid 8627/10154/13530/13531/15083/15706/16384，含 `exit-cold-loops.json` 连续 3 次）无新增 FORTIFY、crash buffer 逐字节不变；UI 按设计在 SDK 清理后自 SIGKILL，默认进程 8109 保留，重开正常。
+- **Host 连续性与回执**：20 s 合成延迟任务 `m20-exit-busy-2-1792852771822` submit 33 受理（`placed`）后关闭 UI，UI 不存在期间由同一 Host PID 19203 完成（模型 20126 ms），重开按原请求读到 `done` 与 `M20_EXIT_CONTINUITY_ACK`（`busy-accepted.json`/`busy-after-reopen.json`/`busy-continuity-result.json`）。
+- **客户端**：client 24420 随 UI 结束，重开后新建 25431、保存的 profile 保留，Host/默认进程/FGS 不受影响；本轮**未连 relay**，不宣称重测活跃远端 LIVE（`client-release-result.json`/`client-reopened.json`）。
+- **非退出路径**：`hide` 保持 UI/Host PID 并存并可回到同一界面；方向 `lock 1→lock 0` 同 PID（manifest 已处理配置变化，不是强制 Activity 重建）；旧会话/旧 Host 路由保持 UI/默认/Host PID，但不是旧功能全量重跑（`hide-result.json`/`rotation-result.json`/`legacy-chat-result.json`）。
+- **数据**：原签名覆盖安装后备份的 Host/client/prefs/配置逐项一致（`data-install-diff.txt`，备份 `app-data-before-exit-fix-repaired.tar`/`app-data-after-install.tar`）。
+- **边界**：无 native 符号化 abort 栈，`libhwui` 锁的具体归属与 C 全局析构归因仍是假设，只证明该退出路径的普通复现消失；模型为合成夹具，无真实 ASR/Hindsight/付费模型；不 push、不启动 CI。系统通知授权弹窗停留期间曾出现启动回执超时，刷新对账后确认 Host 运行；该过程另有记录。
 
 ### 仍未验收（M20 不能记完成）
 
-真实模型/ASR/Hindsight 服务、远端 push 与 GitHub Actions 实际运行、长时锁屏/ROM 后台与定时执行、真实旧版迁移与 16 KiB 硬件、完整传输饱和/竞态。M19 仍未取回、不计完成。故本期仍是 **18/19**，M20 进行中，不得记成全量验收完成。
+真实模型/ASR/Hindsight 服务、远端 push 与 GitHub Actions 实际运行、长时锁屏/ROM 后台与定时执行、真实旧版迁移、完整传输饱和/竞态。16 KiB 页适配与专项运行验收按用户决定不在本期范围、不作为 M20 结项门槛（K80 为 4 KiB 页的历史事实、既有 ELF/zipalign 对齐设置与构建配置均保留不动）。M19 仍未取回、不计完成。故本期仍是 **18/19**，M20 进行中，不得记成全量验收完成。
 
 ### 清理与保留
 
-K80 临时 models/settings 已按原字节哈希恢复，临时授权（含 `POST_NOTIFICATIONS`）、自有 Shizuku、测试 APK 与 Widget/测试会话、自有 ADB 转发均已清理；手工 Widget 与通知检查的临时 fixtures 清理标记均已为 complete（原先的 pending 字段已更新）。桌面自有 Host/relay/模型服务/SSH 隧道/Xvfb/driver/容器与三个验收终端已停止，原 M17 driver 保留。保留 APK、五种桌面安装包、合成 Host/client 数据集、仓库外证据与 M19 stash（`02f1396f`，未动）。
+K80 临时 models/settings 已按原字节哈希恢复，临时授权（含 `POST_NOTIFICATIONS`）、自有 Shizuku、测试 APK 与 Widget/测试会话、自有 ADB 转发均已清理；手工 Widget 与通知检查的临时 fixtures 清理标记均已为 complete（原先的 pending 字段已更新）。桌面自有 Host/relay/模型服务/SSH 隧道/Xvfb/driver/容器与三个验收终端已停止，原 M17 driver 保留。退出修复回归的收尾：Host 已停，配置恢复为 revision 7（`providers=[]`、`defaultModel=null`、`relay=null`）、`credential_aliases={}`，通知权限及 flags、屏幕方向 lock 0 已恢复，自有模型服务/端口/logcat 捕获/终端已停；数据与 APK 保留，默认 App 进程 8109 可作为普通缓存存在。保留 APK、五种桌面安装包、合成 Host/client 数据集、仓库外证据与 M19 stash（`02f1396f`，未动）。

@@ -1,6 +1,7 @@
 package com.example.launcherprobe;
 
 import android.os.Bundle;
+import android.os.Process;
 import android.view.View;
 import android.webkit.WebView;
 
@@ -75,6 +76,10 @@ public class TauriMainActivity extends TauriActivity {
     @Override protected void onDestroy() {
         resumed = false;
         super.onDestroy();
+        // SDK 清理完成后只终止隔离 UI 进程，避免 C 全局析构与绘图线程冲突。
+        if (!isChangingConfigurations()) {
+            Process.killProcess(Process.myPid());
+        }
     }
 
     /** 插件原生前台校验：真实 resumed 且未结束/销毁。 */
