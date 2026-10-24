@@ -1,14 +1,20 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { BotHost, type HostBot, type HostFrameEvent, type HostHistoryPage, type HostLiveFrame, type HostPhase, type HostSettings, type HostSettingsPayload, type HostSnapshot, type HostSubmission, type HostVoiceEvent, type HostVoiceRemote, type HostVoiceSaveInput, type HostVoiceSettings } from './native';
+import { BotHost, type HostBot, type HostCallResult, type HostFrameEvent, type HostHistoryPage, type HostLiveFrame, type HostPhase, type HostSettings, type HostSettingsPayload, type HostSnapshot, type HostSubmission, type HostVoiceEvent, type HostVoiceRemote, type HostVoiceSaveInput, type HostVoiceSettings } from './native';
 import { Dialog } from './components/ui/dialog';
 import { ErrorNotice, Header, Row, Section, useAction, useText, array, errorText, record } from './ui';
 import { HostLegacyImport } from './HostLegacyImport';
+// 窄接口：只用于知道“事件传输已失败”，以便暂停只读轮询；不存在其它注入。
+import { onMobileStreamFailure } from './native/tauri-host';
 
 type Home = (zh: string, en: string) => string;
 
 type PendingText = { kind: 'text'; botId: string; requestId: string; text: string };
 type PendingCreate = { kind: 'create'; requestId: string; role: string; cwd: string; modelRef: string | null };
-type Pending = PendingText | PendingCreate;
+// 语音只冻结业务 ID，不带转写文本：未知语音不得被当成空文本重发。
+type PendingVoice = { kind: 'voice'; botId: string; requestId: string };
+// 存储里存在但无法识别的记录：保留原文，挡住新的发送，只能显式本地清除。
+type PendingUnknown = { kind: 'unknown'; raw: string };
+type Pending = PendingText | PendingCreate | PendingVoice | PendingUnknown;
 type LifecycleShape = {target:'running'|'stopped'; since:number; deadline:number};
 
 const uuid = () => typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function' ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -27,9 +33,63 @@ const parsePending = (value: unknown): Pending | undefined => {
     return {kind:'text', botId: raw.botId, requestId: raw.requestId, text: raw.text};
   }
   if (raw.kind === 'create' && typeof raw.requestId === 'string' && typeof raw.role === 'string' && typeof raw.cwd === 'string') {
-    return {kind:'create', requestId: raw.requestId, role: raw.role, cwd: raw.cwd, modelRef: typeof raw.modelRef === 'string' ? raw.modelRef : null};
+    // modelRef 只接受缺失（旧 sessionStorage）、null 或字符串；其它类型保留为 unknown，重发时不改载荷。
+    const modelRef = raw.modelRef;
+    if (modelRef !== undefined && modelRef !== null && typeof modelRef !== 'string') return undefined;
+    return {kind:'create', requestId: raw.requestId, role: raw.role, cwd: raw.cwd, modelRef: typeof modelRef === 'string' ? modelRef : null};
+  }
+  if (raw.kind === 'voice' && typeof raw.botId === 'string' && typeof raw.requestId === 'string') {
+    return {kind:'voice', botId: raw.botId, requestId: raw.requestId};
   }
   return undefined;
+};
+// 冻结的待确认记录只含业务 ID/正文，不含凭据、设置或 CA。
+// Tauri 独立 UI 进程退出后仍需保留原 ID，所以由调用方选 localStorage；旧 Capacitor 入口保持 sessionStorage。
+const PENDING_KEY = 'bot-host-pending';
+const pendingStore = (persistent: boolean): Storage => persistent ? window.localStorage : window.sessionStorage;
+// 只读：raw 存在但无法解析时保留原文，boot 绝不删除或覆盖未知记录。
+type StoredPending = { record?: Pending; raw?: string; error?: boolean };
+const readPending = (persistent: boolean): StoredPending => {
+  let raw: string | null;
+  try { raw = pendingStore(persistent).getItem(PENDING_KEY); } catch { return { error: true }; }
+  // 只有 getItem 返回 null 才算不存在；空字符串也是已有记录，必须保留。
+  if (raw === null) return {};
+  try { return { record: parsePending(JSON.parse(raw)), raw }; } catch { return { raw }; }
+};
+// 存储里的原记录必须 kind、业务 ID 与不可变内容全部一致，才允许删除或替换。
+const samePending = (current: Pending, original: Pending): boolean => {
+  if (current.kind !== original.kind) return false;
+  if (current.kind === 'unknown' && original.kind === 'unknown') return current.raw === original.raw;
+  if (current.kind === 'create' && original.kind === 'create') {
+    return current.requestId === original.requestId && current.role === original.role
+      && current.cwd === original.cwd && current.modelRef === original.modelRef;
+  }
+  if (current.kind === 'create' || original.kind === 'create' || current.kind === 'unknown' || original.kind === 'unknown') return false;
+  if (current.requestId !== original.requestId || current.botId !== original.botId) return false;
+  if (current.kind === 'voice' || original.kind === 'voice') return true;
+  return current.text === original.text;
+};
+// Host 对不存在的提交返回 404 SUBMISSION_NOT_FOUND（responded）；其它错误不证明缺失。
+const MISSING_SUBMISSION = 'SUBMISSION_NOT_FOUND';
+const RECEIPT_STATUSES = ['queued', 'placed', 'done', 'unanswered'];
+// reject 的 outcome 可能在顶层（Tauri 适配器）或 data.outcome（Capacitor reject）。
+const errorOutcome = (error: unknown): string => {
+  const shape = record(error);
+  if (typeof shape.outcome === 'string') return shape.outcome;
+  const data = record(shape.data);
+  return typeof data.outcome === 'string' ? data.outcome : '';
+};
+// 语音一次性提交的回执必须完整、同 bot/request、状态受支持；缺失或畸形不猜造字段。
+const completeVoiceReceipt = (value: Record<string, unknown> | undefined, botId: string, requestId: string): boolean => {
+  if (!value) return false;
+  if (typeof value.botId !== 'string' || value.botId !== botId) return false;
+  if (typeof value.requestId !== 'string' || value.requestId !== requestId) return false;
+  if (typeof value.conversationId !== 'string' || value.conversationId.length === 0) return false;
+  if (typeof value.submissionId !== 'number' || !Number.isInteger(value.submissionId) || value.submissionId <= 0) return false;
+  if (typeof value.status !== 'string' || RECEIPT_STATUSES.indexOf(value.status) < 0) return false;
+  const safeAnswer = typeof value.answerText === 'string' || value.answerText === null || value.answerText === undefined;
+  const safeReason = typeof value.reason === 'string' || value.reason === null || value.reason === undefined;
+  return safeAnswer && safeReason;
 };
 const liveSummary = (frame: HostLiveFrame): string => {
   if (frame.type === 'end') return `end · ${frame.reason ?? ''}`;
@@ -75,16 +135,37 @@ const remoteDetail = (remote: HostVoiceRemote, t: Home): string =>
   remote.baseUrl ? `${remote.model} · ${remote.baseUrl}${remote.hasApiKey ? ` · ${t('已保存 API Key','API key saved')}` : ''}` : t('未配置','Not configured');
 const rates = [0.75, 1, 1.25, 1.5, 2];
 
-export function HostPage() {
+export function HostPage({onBack, persistentPending = false, connectionEpoch = 0}: {onBack?(): void; persistentPending?: boolean; connectionEpoch?: number} = {}) {
   const t = useText(); const action = useAction();
   const [host, setHost] = useState<HostSnapshot>();
   const [snapshotError, setSnapshotError] = useState('');
   const [bots, setBots] = useState<HostBot[]>();
   const [selected, setSelected] = useState<HostBot>();
   const [draft, setDraft] = useState('');
-  const [pending, setPending] = useState<Pending>();
-  const [storageNotice, setStorageNotice] = useState('');
+  // boot 只读一次：合法记录直接显示（不写不删）；存在但无法识别的原文保留为“未知”记录。
+  const [boot] = useState(() => readPending(persistentPending));
+  const [pending, setPending] = useState<Pending | undefined>((): Pending | undefined => {
+    if (boot.record) return boot.record;
+    // 空字符串也是“存储里已有记录”，按原文保留为 unknown 并阻止派发。
+    if (boot.raw !== undefined) return {kind:'unknown', raw: boot.raw};
+    return undefined;
+  });
+  const [storageNotice, setStorageNotice] = useState(() => boot.error
+    ? t('无法读取本地待确认记录（存储不可用）；清理前不会发送新请求。','Unable to read the local pending record (storage unavailable); sends stay blocked until cleared.')
+    : boot.raw !== undefined && !boot.record
+      ? t('检测到无法识别的本地待确认记录，未自动清除；清理前不会发送新请求。','An unrecognized local pending record was found; nothing was cleared and sends stay blocked.')
+      : '');
+  // 渲染用状态 + 同步持有者：事件回调与转换不依赖 setState 时序。
+  const pendingRef = useRef<Pending | undefined>(pending);
+  // 发送尝试代际：旧的缺失确认/旧的对账结果一律失效。
+  const attemptRef = useRef(0);
+  // 缺失确认只属某一条冻结记录与某一次尝试；跨 attempt 一律失效。
+  const [missing, setMissing] = useState<{requestId: string; botId: string; attempt: number}>();
+  const [reconcileNotice, setReconcileNotice] = useState('');
   const [receipt, setReceipt] = useState<HostSubmission>();
+  // 事件传输失败后暂停只读轮询；只有显式重连（connectionEpoch 变化）才恢复。
+  const [transportFailed, setTransportFailed] = useState(false);
+  const connectionRef = useRef(connectionEpoch);
   const [observeId, setObserveId] = useState<string>();
   const [live, setLive] = useState<HostLiveFrame>();
   const [frames, setFrames] = useState<HostFrameEvent[]>([]);
@@ -102,6 +183,8 @@ export function HostPage() {
   const [modelRef, setModelRef] = useState('');
   const observeIdRef = useRef<string | undefined>(undefined);
   const captureRef = useRef<{botId:string; requestId:string} | undefined>(undefined);
+  // 正在等原生 startVoice（Tauri 授权弹窗会暂停 Activity 并触发 hidden）的那一次 capture。
+  const startingRef = useRef<{botId:string; requestId:string} | undefined>(undefined);
   const selectedRef = useRef<HostBot | undefined>(undefined);
   const listenersReady = useRef<Promise<void>>(Promise.resolve());
   captureRef.current = capture;
@@ -187,6 +270,69 @@ export function HostPage() {
   useEffect(() => { void refreshSnapshot(); }, []);
   useEffect(() => { if (host?.workspace && !cwd) setCwd(host.workspace); }, [host?.workspace]);
 
+  // 传输层报告事件流失败：只暂停轮询/只读读取；显式重连成功后恢复。
+  useEffect(() => onMobileStreamFailure(() => setTransportFailed(true)), []);
+  useEffect(() => {
+    if (connectionRef.current === connectionEpoch) return;
+    connectionRef.current = connectionEpoch;
+    // 显式重连成功：只恢复只读能力。旧代的观察/实时画面/录音 UI 身份作废
+    //（旧事件流已不可用），但不自动 cancel/observe、不删冻结 pending 也不删草稿；
+    // 冻结的语音 ID 保留供后续只读对账。
+    setTransportFailed(false);
+    observeIdRef.current = undefined;
+    setObserveId(undefined);
+    setLive(undefined);
+    captureRef.current = undefined;
+    startingRef.current = undefined;
+    setCapture(undefined);
+  }, [connectionEpoch]);
+
+  // 回执被动刷新：已受理（queued/placed）的回执用只读 getSubmission 跟进到终态；
+  // 不新增 submit、不 resume、不并入 history。隐藏/传输故障/Host 未运行/卸载即停。
+  useEffect(() => {
+    if (!receipt || (receipt.status !== 'queued' && receipt.status !== 'placed')) return;
+    if (transportFailed || host?.phase !== 'running') return;
+    const owner = {botId: receipt.botId, requestId: receipt.requestId};
+    let alive = true;
+    let timer = 0;
+    let inFlight = false;
+    const schedule = () => {
+      if (!alive || timer) return;
+      timer = window.setTimeout(() => { timer = 0; void tick(); }, 1000);
+    };
+    const tick = async () => {
+      if (!alive || inFlight) return;
+      if (document.hidden) return; // 隐藏时不读；可见事件再重新安排
+      inFlight = true;
+      let next: HostSubmission | undefined;
+      try {
+        const envelope = await BotHost.call({method:'getSubmission', params:{botId: owner.botId, requestId: owner.requestId}});
+        next = envelope.result as HostSubmission;
+      } catch { next = undefined; } // 只读失败不改写现有回执，下一轮再读
+      inFlight = false;
+      if (!alive) return;
+      // await 之后重新检查可见性：隐藏后不写回也不排程（可见事件再重新安排）。
+      if (document.hidden) return;
+      // 迟到的旧读不得覆盖新的回执或已切换的目标；只接受受支持的状态。
+      const nextStatus = next && typeof next.status === 'string' ? next.status : '';
+      if (next && next.botId === owner.botId && next.requestId === owner.requestId && RECEIPT_STATUSES.indexOf(nextStatus) >= 0) {
+        setReceipt(prev => prev && prev.botId === owner.botId && prev.requestId === owner.requestId ? next : prev);
+      }
+      schedule();
+    };
+    schedule();
+    const onVisible = () => {
+      if (document.hidden) { window.clearTimeout(timer); timer = 0; return; }
+      schedule();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      alive = false;
+      window.clearTimeout(timer);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
+  }, [receipt?.botId, receipt?.requestId, receipt?.status, transportFailed, host?.phase]);
+
   const clearObserveId = useCallback(() => { observeIdRef.current = undefined; setObserveId(undefined); }, []);
   const cancelObserve = useCallback(() => {
     const id = observeIdRef.current;
@@ -204,23 +350,88 @@ export function HostPage() {
     void BotHost.cancelVoice().catch(() => {});
     clearCapture(cap);
   }, [clearCapture]);
-
-  // Frozen pending survives reload via a dedicated sessionStorage key (no credentials).
-  useEffect(() => {
-    try {
-      const saved = sessionStorage.getItem('bot-host-pending');
-      if (saved) {
-        const restored = parsePending(JSON.parse(saved));
-        if (restored) setPending(restored);
+  // 状态与 ref 同步更新：存储副作用绝不放进 setState updater。
+  const setFrozen = (next: Pending | undefined) => {
+    pendingRef.current = next;
+    setPending(next);
+  };
+  const storageFailure = () => setStorageNotice(t('无法保存本地待确认记录（存储不可用）','Unable to save pending record locally (storage unavailable)'));
+  // 读失败单独提示：读不到不等于写不了，也不能据此去写/删。
+  const verifyFailure = () => setStorageNotice(t('无法读取本地待确认记录，未发送。','Unable to read the local pending record; nothing was sent.'));
+  // 同步写入冻结记录：写前先核对存储现状，读不到/未知/不同/已被移除都禁止分派并保留输入。
+  // expected 为 undefined 表示新尝试（存储必须为空）；提供时表示重发/替换（存储必须仍是那条原记录）。
+  const freeze = (record: Pending, expected?: Pending): boolean => {
+    const stored = readPending(persistentPending);
+    if (stored.error) { verifyFailure(); return false; }
+    if (expected) {
+      if (stored.raw === undefined || !stored.record || !samePending(stored.record, expected)) {
+        setStorageNotice(t('本地待确认记录已变化或缺失，未发送。','The local pending record changed or is missing; nothing was sent.'));
+        return false;
       }
-    } catch { /* drop invalid storage */ }
-  }, []);
+    } else if (stored.raw !== undefined) {
+      setStorageNotice(t('已有本地待确认记录，未发送。','A local pending record already exists; nothing was sent.'));
+      return false;
+    }
+    try { pendingStore(persistentPending).setItem(PENDING_KEY, JSON.stringify(record)); }
+    catch { storageFailure(); return false; }
+    attemptRef.current += 1; // 新一次尝试：旧缺失确认与旧读结果全部失效
+    setStorageNotice('');
+    setFrozen(record);
+    return true;
+  };
+  // 条件删除：存储里必须仍是这条原记录（kind/ID/不可变内容）才删除。
+  const clearFrozen = (original: Pending): boolean => {
+    const stored = readPending(persistentPending);
+    if (stored.error) { verifyFailure(); return false; }
+    if (stored.raw !== undefined) {
+      const matches = original.kind === 'unknown'
+        ? stored.raw === original.raw
+        : !!stored.record && samePending(stored.record, original);
+      if (!matches) {
+        setStorageNotice(t('本地待确认记录已变化，未自动删除。','The local pending record changed; nothing was deleted.'));
+        return false;
+      }
+    }
+    try { pendingStore(persistentPending).removeItem(PENDING_KEY); }
+    catch { storageFailure(); return false; }
+    setStorageNotice('');
+    setFrozen(undefined);
+    return true;
+  };
+  // 语音终态回调：只删除存储中确属本次 capture 的记录（voice 或同 ID 的 text）。
+  const clearFrozenCapture = (botId: string, requestId: string): boolean => {
+    const stored = readPending(persistentPending);
+    if (stored.error) { verifyFailure(); return false; }
+    const current = stored.record;
+    if (stored.raw !== undefined && (!current || current.kind === 'create' || current.kind === 'unknown'
+      || current.botId !== botId || current.requestId !== requestId)) return false;
+    try { pendingStore(persistentPending).removeItem(PENDING_KEY); }
+    catch { storageFailure(); return false; }
+    setStorageNotice('');
+    setFrozen(undefined);
+    return true;
+  };
+  // 语音 error 带最终文本时替换本次 capture 自己的记录；其它记录（含 create）一律保留。
+  const replaceFrozenCapture = (botId: string, requestId: string, expected: Pending | undefined, text: string): boolean => {
+    const stored = readPending(persistentPending);
+    if (stored.error) { verifyFailure(); return false; }
+    const current = stored.record;
+    // 必须仍是同一 capture 的记录（voice 或同 ID 的 text），且与本地已知记录一致。
+    const belongs = !!current && current.kind !== 'create' && current.kind !== 'unknown'
+      && current.botId === botId && current.requestId === requestId
+      && (!expected || samePending(current, expected));
+    if (stored.raw !== undefined && !belongs) return false;
+    const record: PendingText = {kind:'text', botId, requestId, text};
+    try { pendingStore(persistentPending).setItem(PENDING_KEY, JSON.stringify(record)); }
+    catch { storageFailure(); return false; }
+    setStorageNotice('');
+    setFrozen(record);
+    return true;
+  };
+  // 记录换代就丢弃上一条的缺失确认与对账提示（只动状态，不碰存储）。
   useEffect(() => {
-    try {
-      if (pending) sessionStorage.setItem('bot-host-pending', JSON.stringify(pending));
-      else sessionStorage.removeItem('bot-host-pending');
-      setStorageNotice('');
-    } catch { setStorageNotice(t('无法保存本地待确认记录（存储不可用）','Unable to save pending record locally (storage unavailable)')); }
+    setMissing(undefined);
+    setReconcileNotice('');
   }, [pending]);
 
   // Listeners register (and are awaited before observe) so no event is missed.
@@ -258,16 +469,22 @@ export function HostPage() {
       if (event.type === 'submitted') {
         if (matches) {
           clearCapture(cap);
-          // Clear only the pending whose requestId matches this capture.
-          setPending(prev => prev?.kind === 'text' && prev.requestId === cap.requestId ? undefined : prev);
+          // 完整且同 bot/request 的回执：直接保留真实字段作为当前 Bot 的主回执，
+          // 后续由既有只读采样器跟进到 done/unanswered；不触发 submit/resume/history。
+          const receipt = event.receipt;
+          if (receipt && completeVoiceReceipt(receipt, cap.botId, cap.requestId) && selectedRef.current?.botId === cap.botId) {
+            setReceipt(receipt as unknown as HostSubmission);
+            // 只有真实回执才条件清除冻结记录。
+            clearFrozenCapture(cap.botId, cap.requestId);
+          }
+          // 无效/缺失回执：已清录音 UI，但保留冻结记录供只读核对（不猜造字段）。
         }
       } else if (event.type === 'error') {
         if (!matches) return;
         clearCapture(cap);
-        // Frozen transcript payload only when the error actually carries final text.
-        if (event.text && event.text.length > 0) {
-          setPending({kind:'text', botId: event.botId, requestId: event.requestId, text: event.text});
-        }
+        // 只在原生给出最终文本时替换本次 capture 自己的记录；不编造文本、不覆盖别的记录。
+        const finalText = event.text;
+        if (finalText && finalText.length > 0) replaceFrozenCapture(event.botId, event.requestId, pendingRef.current, finalText);
       }
     };
     listenersReady.current = Promise.all([
@@ -281,7 +498,7 @@ export function HostPage() {
       alive = false;
       handles.forEach(handle => handle.remove());
     };
-  }, [clearObserveId]);
+  }, [clearObserveId, connectionEpoch]);
 
   // Cancel owned observer and voice capture on page leave/hidden; never Agent abort.
   // Cleanup immediately clears the UI capture state too, so no lingering
@@ -290,14 +507,15 @@ export function HostPage() {
   useEffect(() => {
     const onHidden = () => {
       if (!document.hidden) return;
-      // Native permission dialogs do not hide the page, so this only fires on
-      // real page hide; cancel voice + clear UI capture there and then.
-      if (captureRef.current) cancelCaptureVoice(captureRef.current);
+      const cap = captureRef.current;
+      // Tauri：授权弹窗会暂停 Activity 并触发隐藏，此时 startVoice 仍在途，不得取消；
+      // 真进入后台由原生 ON_STOP / 作用域 voiceEvent.error 处理，旧入口行为不变。
+      if (cap && !(persistentPending && startingRef.current === cap)) cancelCaptureVoice(cap);
       cancelObserve(); // Native onPause already closes observations; clear client id too
     };
     document.addEventListener('visibilitychange', onHidden);
     return () => document.removeEventListener('visibilitychange', onHidden);
-  }, [cancelObserve, cancelCaptureVoice]);
+  }, [cancelObserve, cancelCaptureVoice, persistentPending]);
 
 
   const startHost = () => {
@@ -346,10 +564,11 @@ export function HostPage() {
     if (captureRef.current || pending) return; // single pending design: no parallel input
     if (!role.trim() || !cwd.trim()) return;
     const payload: PendingCreate = {kind:'create', requestId: createReqId, role, cwd, modelRef: modelRef.trim() || null};
-    setPending(payload);
+    // 先同步落盘再分派；写失败则不发送，输入保留。
+    if (!freeze(payload)) return;
     const envelope = await BotHost.call({method:'createBot', params:{requestId: payload.requestId, role: payload.role, cwd: payload.cwd, modelRef: payload.modelRef}});
     setSelected(envelope.result as HostBot);
-    setPending(undefined);
+    clearFrozen(payload);
     setCreateReqId(uuid());
     const list = await BotHost.call({method:'listBots', params:{}});
     setBots(array<HostBot>(list.result));
@@ -366,30 +585,70 @@ export function HostPage() {
     if (captureRef.current) return; // single pending design: no parallel input
     if (!selected || !draft.trim() || pending) return;
     const payload: PendingText = {kind:'text', botId: selected.botId, requestId: uuid(), text: draft};
-    setPending(payload);
+    // 先同步落盘再分派；写失败则不发送，草稿保留。
+    if (!freeze(payload)) return;
     const envelope = await BotHost.call({method:'submit', params:{botId: payload.botId, requestId: payload.requestId, text: payload.text}});
     setReceipt(envelope.result as HostSubmission);
-    setPending(undefined);
+    clearFrozen(payload);
     setDraft('');
   });
+  // 只读核对：Host 无此提交返回 SUBMISSION_NOT_FOUND（responded）；其它错误不得当作缺失，也不清除记录。
+  const reconcile = (frozen: PendingText | PendingVoice) => action.run(async () => {
+    setReconcileNotice('');
+    const attempt = attemptRef.current;
+    // 过期读：期间已换记录/开始新尝试，不得标记缺失、替换回执或清除记录。
+    const stillCurrent = () => {
+      const current = pendingRef.current;
+      return attemptRef.current === attempt && !!current && samePending(current, frozen);
+    };
+    let envelope: HostCallResult;
+    try {
+      envelope = await BotHost.call({method:'getSubmission', params:{botId: frozen.botId, requestId: frozen.requestId}});
+    } catch (error) {
+      if (!stillCurrent()) return;
+      // 只有真实 responded 的 SUBMISSION_NOT_FOUND 才算确认缺失。
+      if (record(error).code === MISSING_SUBMISSION && errorOutcome(error) === 'responded') {
+        setMissing({requestId: frozen.requestId, botId: frozen.botId, attempt});
+        setReconcileNotice(t('Host 未找到该请求的回执；这不证明未执行。','Host has no receipt for this request; that does not prove it never ran.'));
+        return;
+      }
+      throw error; // 不支持/未确认的核对不得改动冻结记录
+    }
+    if (!stillCurrent()) return;
+    const answer = envelope.result as HostSubmission;
+    const status = answer && typeof answer.status === 'string' ? answer.status : '';
+    if (!answer || answer.botId !== frozen.botId || answer.requestId !== frozen.requestId || RECEIPT_STATUSES.indexOf(status) < 0) {
+      setReconcileNotice(t('回执归属或状态不可用，保留本地记录。','Receipt identity or status is not usable; local record kept.'));
+      return;
+    }
+    setReceipt(answer);
+    clearFrozen(frozen);
+    setMissing(undefined);
+  });
+  // 缺失已确认后的独立用户动作：同 ID 同正文重发（Host 对同 ID 同正文幂等返回原提交）。
   const retryPending = () => action.run(async () => {
     if (!pending || pending.kind !== 'text') return;
-    const envelope = await BotHost.call({method:'submit', params:{botId: pending.botId, requestId: pending.requestId, text: pending.text}});
+    const frozen = pending;
+    if (!missing || missing.attempt !== attemptRef.current
+      || missing.requestId !== frozen.requestId || missing.botId !== frozen.botId) return;
+    // 新一次发送即作废旧缺失确认：即使结果 unconfirmed，也必须重新只读核对后才能再重发。
+    setMissing(undefined);
+    // 重发属于替换：存储里必须仍是那条冻结记录，否则不分派也不动输入。
+    if (!freeze(frozen, frozen)) return;
+    const envelope = await BotHost.call({method:'submit', params:{botId: frozen.botId, requestId: frozen.requestId, text: frozen.text}});
     setReceipt(envelope.result as HostSubmission);
-    setPending(undefined);
+    clearFrozen(frozen);
     setDraft('');
-  });
-  const fetchSubmission = () => action.run(async () => {
-    if (!pending || pending.kind !== 'text') return;
-    const envelope = await BotHost.call({method:'getSubmission', params:{botId: pending.botId, requestId: pending.requestId}});
-    setReceipt(envelope.result as HostSubmission);
-    setPending(undefined);
   });
   const findCreate = () => action.run(async () => {
     if (!pending || pending.kind !== 'create') return;
-    const envelope = await BotHost.call({method:'findByRequest', params:{requestId: pending.requestId}});
+    const frozen = pending;
+    const attempt = attemptRef.current;
+    const envelope = await BotHost.call({method:'findByRequest', params:{requestId: frozen.requestId}});
+    const current = pendingRef.current;
+    if (attemptRef.current !== attempt || !current || !samePending(current, frozen)) return;
     setSelected(envelope.result as HostBot);
-    setPending(undefined);
+    clearFrozen(frozen);
   });
   const abortAgent = () => action.run(async () => {
     if (!selected) return;
@@ -460,6 +719,9 @@ export function HostPage() {
     // Freeze ownership before awaiting listeners so leaving the page during the
     // await cannot start a mic afterwards.
     const cap = {botId: selected.botId, requestId: uuid()};
+    // Tauri：原生开始录音前先同步落盘语音业务 ID（无转写文本）；写失败则不录音。
+    const voiceRecord: PendingVoice = {kind:'voice', botId: cap.botId, requestId: cap.requestId};
+    if (persistentPending && !freeze(voiceRecord)) return;
     captureRef.current = cap;
     setCapture(cap);
     try {
@@ -467,12 +729,20 @@ export function HostPage() {
       // Re-check after the await: still the same capture, page visible.
       if (captureRef.current !== cap || document.hidden) {
         clearCapture(cap);
+        if (persistentPending) clearFrozen(voiceRecord);
         return;
       }
+      // Tauri：原生 startVoice 期间（含授权弹窗）用本次 cap 精确标记，
+      // 让 hidden 处理器不要提前 cancelVoice；结束后在身份守卫的 finally 里清除。
+      if (persistentPending) startingRef.current = cap;
       await BotHost.startVoice(cap);
     } catch (error) {
       clearCapture(cap); // identity guard keeps a newer capture intact
+      // 仅平台明确 not-sent（未派发）才撤销语音记录；其它情况保留原 ID 供显式对账。
+      if (persistentPending && errorOutcome(error) === 'not-sent') clearFrozen(voiceRecord);
       throw error;
+    } finally {
+      if (startingRef.current === cap) startingRef.current = undefined;
     }
   });
   const finishCapture = () => action.run(async () => { await BotHost.finishVoice(); });
@@ -481,6 +751,8 @@ export function HostPage() {
     if (!cap) return;
     await BotHost.cancelVoice();
     clearCapture(cap);
+    // 取消回执不能证明原生尚未受理提交：保留冻结的语音 ID，由只读核对或显式本地清除处理。
+    if (persistentPending) setReconcileNotice(t('已停止录音；本地语音记录保留（取消不代表未提交），可用只读查询对账或显式清除。','Recording stopped; the local voice record is kept because cancelling does not prove it was never submitted. Use the read-only lookup or clear it explicitly.'));
   });
   const lastFrameError = [...frames].reverse().find(frame => frame.error)?.error;
   const openImportedBot = (bot: HostBot) => { void chooseBot(bot); };
@@ -490,9 +762,17 @@ export function HostPage() {
     setDraft(prev => prev ? `${prev}\n\n${text}` : text);
     return true;
   };
+  // 显式本地丢弃：只删本地记录（含无法识别的记录），不假装停止已提交的 Host 工作。
+  const clearLocalPending = () => {
+    const frozen = pending;
+    if (!frozen) return;
+    if (!clearFrozen(frozen)) return;
+    setMissing(undefined);
+    setReconcileNotice('');
+  };
 
   return <main className="page">
-    <Header title={t('本机 Host','Local Host')} actions={<button className="button secondary-button" onClick={() => void refreshSnapshot()}>{t('刷新','Refresh')}</button>}/>
+    <Header title={t('本机 Host','Local Host')} onBack={onBack} actions={<button className="button secondary-button" onClick={() => void refreshSnapshot()}>{t('刷新','Refresh')}</button>}/>
     <Section title={t('运行状态','Host status')}>
       {!host && <p className="secondary">{t('正在读取状态…','Loading status…')}</p>}
       {host && <>
@@ -512,7 +792,7 @@ export function HostPage() {
         ? <>
             <Row title={t('列出 Bot','List bots')} onClick={listBots}/>
             {bots?.map(bot => <Row key={bot.botId} title={bot.role} detail={`${bot.botId} · ${bot.cwd}${bot.modelRef ? ` · ${bot.modelRef}` : ''}`} onClick={() => chooseBot(bot)}/>)}
-            {pending?.kind === 'create' && <div className="form"><p className="secondary" role="status">{t('创建未确认：','Unconfirmed create: ')}<code>{pending.requestId}</code> · {pending.role} · {pending.cwd}</p><div className="action-row"><button type="button" className="button secondary-button" onClick={findCreate}>{t('按请求查找','Find by request')}</button></div></div>}
+            {pending?.kind === 'create' && <div className="form"><p className="secondary" role="status">{t('创建未确认：','Unconfirmed create: ')}<code>{pending.requestId}</code> · {pending.role} · {pending.cwd}</p><div className="action-row"><button type="button" className="button secondary-button" onClick={findCreate}>{t('按请求查找','Find by request')}</button><button type="button" className="button secondary-button" onClick={clearLocalPending}>{t('清除本地记录（不停止已提交任务）','Clear local record (accepted work keeps running)')}</button></div></div>}
             <form className="form" onSubmit={e => { e.preventDefault(); void createBot(); }}>
               <label>{t('角色','Role')}<input required aria-label={t('角色','Role')} value={role} disabled={pending?.kind === 'create'} onChange={e => setRole(e.target.value)}/></label>
               <label>{t('工作目录','Working directory')}<input required aria-label={t('工作目录','Working directory')} value={cwd} disabled={pending?.kind === 'create'} placeholder={host.workspace ?? ''} onChange={e => setCwd(e.target.value)}/></label>
@@ -524,14 +804,29 @@ export function HostPage() {
         : <p className="secondary">{t('Host 运行后可用。','Available while the Host is running.')}</p>}
     </Section>
     <HostLegacyImport phase={host?.phase ?? 'stopped'} workspace={host?.workspace} locked={!!pending || !!capture} activeBotId={selected?.botId} onOpenBot={openImportedBot} onRefreshBots={refreshBotsAfterImport} onApplyDraft={applyImportedDraft}/>
-    {pending && <Section title={t('待确认请求','Pending requests')}>
+    {pending && pending.kind !== 'create' && <Section title={t('待确认请求','Pending requests')}>
       {pending.kind === 'text' && <>
         <p className="secondary" role="status">{t('冻结的请求（目标与内容已锁定）：','Frozen request (target and content locked): ')}<br/><code>{pending.botId}</code> · <code>{pending.requestId}</code><br/>{pending.text}</p>
         <div className="action-row">
-          <button className="button secondary-button" onClick={fetchSubmission}>{t('查询提交','Get submission')}</button>
-          <button className="button secondary-button" onClick={retryPending}>{t('重试原请求','Retry original request')}</button>
+          <button className="button secondary-button" onClick={() => reconcile(pending)}>{t('查询提交（只读）','Get submission (read-only)')}</button>
+          {missing && missing.attempt === attemptRef.current && missing.requestId === pending.requestId && missing.botId === pending.botId && <button className="button secondary-button" onClick={retryPending}>{t('重发原请求（同 ID 同正文）','Resend original (same id and text)')}</button>}
+          <button className="button secondary-button" onClick={clearLocalPending}>{t('清除本地记录（不停止已提交任务）','Clear local record (accepted work keeps running)')}</button>
         </div>
       </>}
+      {pending.kind === 'voice' && <>
+        <p className="secondary" role="status">{t('语音请求（只冻结业务 ID，无转写文本）：','Voice request (business ids only, no transcript): ')}<br/><code>{pending.botId}</code> · <code>{pending.requestId}</code></p>
+        <div className="action-row">
+          <button className="button secondary-button" onClick={() => reconcile(pending)}>{t('查询提交（只读）','Get submission (read-only)')}</button>
+          <button className="button secondary-button" onClick={clearLocalPending}>{t('清除本地记录（不停止已提交任务）','Clear local record (accepted work keeps running)')}</button>
+        </div>
+      </>}
+      {pending.kind === 'unknown' && <>
+        <p className="secondary" role="status">{t('检测到无法识别的本地待确认记录，未自动清除；清理前不会发送新的请求。','An unrecognized local pending record was found. Nothing was cleared and new sends stay blocked until you clear it.')}</p>
+        <div className="action-row">
+          <button className="button secondary-button" onClick={clearLocalPending}>{t('清除本地记录','Clear local record')}</button>
+        </div>
+      </>}
+      {reconcileNotice && <p className="secondary" role="status">{reconcileNotice}</p>}
     </Section>}
     {selected && <Section title={t('主会话','Primary chat')}>
       <Row title={selected.role} detail={`${selected.botId} · ${selected.cwd}${selected.modelRef ? ` · ${selected.modelRef}` : ''}`}/>

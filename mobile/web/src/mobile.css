@@ -1,0 +1,11 @@
+/* M18 mobile（Tauri 辅助进程）外壳样式：复用 web/src/styles.css，只补工具栏与滚动区。 */
+.mobile-shell { display: flex; flex-direction: column; height: 100%; min-height: 0; min-width: 0; }
+/* 5 个控件在 360dp 单行放不下：允许换行，工具栏自身不再横向滚动/裁切，页面不产生横向溢出。 */
+.mobile-toolbar { flex: none; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--line); background: var(--surface); min-width: 0; }
+.mobile-toolbar .button { min-height: 40px; min-width: 0; max-width: 100%; padding: 6px 12px; font-size: .85rem; white-space: nowrap; }
+/* 窄屏按行均分（360dp 下 3+2 两行），点击高度仍 ≥40px 且标签完整；宽屏保持原单行左对齐外观。 */
+@media (max-width: 480px) {
+  .mobile-toolbar .button { flex: 1 1 auto; }
+}
+.mobile-body { flex: 1; min-height: 0; min-width: 0; }
+.mobile-shell > .inline-error { flex: none; margin: 8px 12px; }

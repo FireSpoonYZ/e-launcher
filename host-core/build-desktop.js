@@ -112,6 +112,62 @@ const CARGO_LICENSE_FALLBACKS = new Map([
     license: 'MIT',
     files: ['licenses/desktop/webview2-rs-MIT.txt'],
   }],
+  // Android Rust graph (M18): the jni-sys-macros 0.4.1 crate archive carries no
+  // license file. Both texts are vendored verbatim from the exact upstream commit
+  // proven by the crate's .cargo_vcs_info and its Cargo.toml declaration
+  // (jni-sys-macros/Cargo.toml at 64d77b7a5f119d7b55b4e2c169a4668067ff59e6).
+  ['jni-sys-macros@0.4.1', {
+    license: 'MIT OR Apache-2.0',
+    provenance:
+      'Provenance: jni-sys-macros 0.4.1, jni-rs/jni-sys commit ' +
+      '64d77b7a5f119d7b55b4e2c169a4668067ff59e6 (LICENSE-MIT, LICENSE-APACHE; ' +
+      'declared "MIT OR Apache-2.0"); texts vendored verbatim in licenses/android/.',
+    files: [
+      'licenses/android/jni-sys-macros-0.4.1-MIT.txt',
+      'licenses/android/jni-sys-macros-0.4.1-Apache-2.0.txt',
+    ],
+  }],
+  // Android Rust graph (M18): the ndk/ndk-sys/ndk-context crate archives carry no
+  // license file either. Every entry stays exact package@version + declared license;
+  // ndk and ndk-sys map explicitly to the shared rust-mobile/ndk root texts.
+  ['ndk-context@0.1.1', {
+    license: 'MIT OR Apache-2.0',
+    provenance:
+      'Provenance: ndk-context 0.1.1, rust-windowing/android-ndk-rs commit ' +
+      '10f2ba388fca20f7349996ebae26ccda7a6fda5c, crate path "ndk-context"; version and ' +
+      '"MIT OR Apache-2.0" declaration taken from the crate archive Cargo.toml.orig and ' +
+      '.cargo_vcs_info (remote manifest retrieval failed), texts vendored verbatim in ' +
+      'licenses/android/.',
+    files: [
+      'licenses/android/ndk-context-0.1.1-MIT.txt',
+      'licenses/android/ndk-context-0.1.1-Apache-2.0.txt',
+    ],
+  }],
+  ['ndk@0.9.0', {
+    license: 'MIT OR Apache-2.0',
+    provenance:
+      'Provenance: ndk 0.9.0, rust-mobile/ndk commit ' +
+      '49bbbba16c58ff63cb8a0ad0eca5a9fb7ecaec25, crate path "ndk"; repository root ' +
+      'LICENSE-MIT/LICENSE-APACHE at that commit, texts vendored verbatim in ' +
+      'licenses/android/.',
+    files: [
+      'licenses/android/ndk-49bbbba16c58-MIT.txt',
+      'licenses/android/ndk-49bbbba16c58-Apache-2.0.txt',
+    ],
+  }],
+  ['ndk-sys@0.6.0+11769913', {
+    license: 'MIT OR Apache-2.0',
+    provenance:
+      'Provenance: ndk-sys 0.6.0+11769913, rust-mobile/ndk commit ' +
+      '49bbbba16c58ff63cb8a0ad0eca5a9fb7ecaec25, crate path "ndk-sys"; this workspace ' +
+      'inherits the repository root declaration, so the entry maps explicitly to the same ' +
+      'verified root LICENSE-MIT/LICENSE-APACHE texts as ndk 0.9.0 (no sibling or ' +
+      'version-range fallback), texts vendored verbatim in licenses/android/.',
+    files: [
+      'licenses/android/ndk-49bbbba16c58-MIT.txt',
+      'licenses/android/ndk-49bbbba16c58-Apache-2.0.txt',
+    ],
+  }],
 ]);
 const DYNAMIC_ASSET_RE = /(?:require\s*\.\s*resolve|createRequire\s*\([^)]*\)\s*\.\s*resolve|new\s+URL)\s*\(\s*(['"])([^'"]+\.(?:wasm|node))\1/g;
 
@@ -721,27 +777,28 @@ async function collectUiNpmLicenseSections() {
   return sections;
 }
 
-async function collectCargoLicenseSections() {
-  if (!isRegularFile(CARGO_TOML)) {
-    throw fail('desktop/src-tauri/Cargo.toml is missing; native shell must be present before packaging');
+// Also used by host-core/build-mobile.js for the Android Tauri UI notices, so the
+// exact-version license fallbacks stay in one place.
+export async function collectCargoLicenseSections({
+  cargoToml = CARGO_TOML,
+  targetTriple = currentNodeTarget().triple,
+  metadataFile = path.join(METAFILE_DIR, 'cargo-metadata.json'),
+} = {}) {
+  if (!isRegularFile(cargoToml)) {
+    throw fail(`${path.relative(ROOT, cargoToml)} is missing; native shell must be present before packaging`);
   }
   // --filter-platform prunes the resolve graph to the current build target so
   // platform-only dependencies (e.g. macOS) never enter the notices.
-  const args = [
-    'metadata',
-    '--format-version',
-    '1',
-    '--manifest-path',
-    CARGO_TOML,
-    '--filter-platform',
-    currentNodeTarget().triple,
-  ];
-  if (isRegularFile(path.join(DESKTOP_DIR, 'src-tauri', 'Cargo.lock'))) {
+  const args = ['metadata', '--format-version', '1', '--manifest-path', cargoToml];
+  if (targetTriple) {
+    args.push('--filter-platform', targetTriple);
+  }
+  if (isRegularFile(path.join(path.dirname(cargoToml), 'Cargo.lock'))) {
     args.push('--locked');
   }
-  const { stdout } = await runExec('cargo', args, { cwd: path.dirname(CARGO_TOML) });
-  await mkdir(METAFILE_DIR, { recursive: true });
-  await writeFile(path.join(METAFILE_DIR, 'cargo-metadata.json'), stdout, 'utf8');
+  const { stdout } = await runExec('cargo', args, { cwd: path.dirname(cargoToml) });
+  await mkdir(path.dirname(metadataFile), { recursive: true });
+  await writeFile(metadataFile, stdout, 'utf8');
 
   let metadata;
   try {
@@ -790,6 +847,7 @@ async function collectCargoLicenseSections() {
     for (const file of discovered) {
       if (!licenseFiles.includes(file)) licenseFiles.push(file);
     }
+    let fallbackProvenance = null;
     if (licenseFiles.length === 0) {
       const fallback = CARGO_LICENSE_FALLBACKS.get(`${pkg.name}@${pkg.version}`);
       if (fallback && fallback.license === (pkg.license ?? null)) {
@@ -800,6 +858,7 @@ async function collectCargoLicenseSections() {
           }
           licenseFiles.push(file);
         }
+        fallbackProvenance = fallback.provenance ?? null;
       }
     }
     if (licenseFiles.length === 0) {
@@ -815,6 +874,7 @@ async function collectCargoLicenseSections() {
     } else if (typeof pkg.homepage === 'string' && pkg.homepage !== '') {
       headerLines.push(`Homepage: ${pkg.homepage}`);
     }
+    if (fallbackProvenance) headerLines.push(fallbackProvenance);
     sections.push(headerLines.join('\n'));
     for (const file of licenseFiles) {
       sections.push((await readFile(file, 'utf8')).trim());

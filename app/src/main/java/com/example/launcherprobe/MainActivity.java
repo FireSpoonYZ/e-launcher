@@ -25,6 +25,10 @@ public class MainActivity extends BridgeActivity {
     public static final String EXTRA_OPEN_ARCHIVED = "assistant_open_archived";
     public static final String EXTRA_OPEN_SCHEDULE = "assistant_open_schedule";
     public static final String EXTRA_OPEN_HOST = "assistant_open_host";
+    /** 旧设置的显式入口；只导航固定页面，不构成权限边界。 */
+    public static final String EXTRA_OPEN_SETTINGS = "assistant_open_settings";
+    /** 兼容入口标记（旧会话/设置/Host 页面）：显式旧启动抑制 Tauri 重定向。 */
+    public static final String EXTRA_LEGACY_UI = "assistant_legacy_ui";
     private static final String ROUTE_KEY = "web_route";
     private static final String ENTRY_CONSUMED_KEY = "assistant_entry_consumed";
     private static final String ARCHIVED_PROMPT_KEY = "assistant_archived_prompt";
@@ -79,15 +83,13 @@ public class MainActivity extends BridgeActivity {
         // Explicit entry extras win over a restored Host route; openHost keeps its consumeIntent precedence.
         String savedRoute = savedInstanceState == null ? null : savedInstanceState.getString(ROUTE_KEY);
         boolean intentHost = getIntent().getBooleanExtra(EXTRA_OPEN_HOST, false);
-        boolean intentLegacy = getIntent().hasExtra(EXTRA_NEW_CHAT)
-                || getIntent().hasExtra(EXTRA_OPEN_ARCHIVED)
-                || getIntent().hasExtra(EXTRA_OPEN_SCHEDULE)
-                || getIntent().hasExtra(TaskDetailActivity.EXTRA_OPEN_CHAT)
-                || getIntent().hasExtra(TaskDetailActivity.EXTRA_ARCHIVED_ID);
+        boolean intentLegacy = hasLegacyExtras(getIntent());
         boolean savedHost = isHostRoute(savedRoute);
         // An explicit legacy entry must never be swallowed by a saved Host route.
         boolean hostConflict = savedHost && intentLegacy;
-        hostOnly = intentHost || (savedHost && !intentLegacy);
+        // 普通启动（含系统重建的 launcher intent）与 Host 通知进入 Tauri UI；重定向只做 Host-only 初始化，不碰旧 ChatCoordinator/Pi。
+        boolean openTauri = opensTauriUi(getIntent());
+        hostOnly = openTauri || intentHost || (savedHost && !intentLegacy);
         if (hostOnly) {
             initialWebRoute = intentHost ? "/settings/host" : savedRoute;
             pendingRoute = initialWebRoute;
@@ -131,6 +133,12 @@ public class MainActivity extends BridgeActivity {
         });
         super.onCreate(savedInstanceState);
         creating = false;
+        if (openTauri) {
+            // 保留已建立的有效 Bridge 生命周期，再切到独立进程界面并结束本实例。
+            appearanceRevision = AppAppearance.revision(this);
+            openTauriUi();
+            return;
+        }
         AppAppearance appearance = AppAppearance.read(this);
         appearanceRevision = AppAppearance.revision(this);
         appearance.apply(this);
@@ -155,7 +163,9 @@ public class MainActivity extends BridgeActivity {
         super.onNewIntent(intent);
         setIntent(intent);
         // BridgeActivity.load() forwards the original intent during super.onCreate().
-        if (!creating) consumeIntent(intent);
+        if (creating) return;
+        if (opensTauriUi(intent)) { openTauriUi(); return; }
+        consumeIntent(intent);
     }
 
     private void consumeIntent(Intent intent) {
@@ -167,11 +177,16 @@ public class MainActivity extends BridgeActivity {
         String archivedId = intent.getStringExtra(TaskDetailActivity.EXTRA_ARCHIVED_ID);
         String taskId = intent.getStringExtra(EXTRA_OPEN_SCHEDULE);
         boolean openHost = intent.getBooleanExtra(EXTRA_OPEN_HOST, false);
+        boolean openSettings = intent.getBooleanExtra(EXTRA_OPEN_SETTINGS, false);
         clearEntryExtras(intent);
         if (openHost) {
             pendingArchivedId = null;
             archivePromptShown = false;
             launchWeb("/settings/host");
+        } else if (openSettings) {
+            pendingArchivedId = null;
+            archivePromptShown = false;
+            launchWeb("/settings");
         } else if (taskId != null) {
             pendingArchivedId = null;
             archivePromptShown = false;
@@ -199,8 +214,33 @@ public class MainActivity extends BridgeActivity {
         intent.removeExtra(EXTRA_OPEN_ARCHIVED);
         intent.removeExtra(EXTRA_OPEN_SCHEDULE);
         intent.removeExtra(EXTRA_OPEN_HOST);
+        intent.removeExtra(EXTRA_OPEN_SETTINGS);
         intent.removeExtra(TaskDetailActivity.EXTRA_OPEN_CHAT);
         intent.removeExtra(TaskDetailActivity.EXTRA_ARCHIVED_ID);
+    }
+
+    /** 普通启动与 Host 通知入口进入 Tauri UI；真实旧 extras 或显式兼容标记留在旧界面。 */
+    static boolean opensTauriUi(Intent intent) {
+        if (intent == null) return false;
+        if (intent.getBooleanExtra(EXTRA_LEGACY_UI, false)) return false;
+        if (hasLegacyExtras(intent)) return false;
+        if (intent.getBooleanExtra(EXTRA_OPEN_HOST, false)) return true;
+        return Intent.ACTION_MAIN.equals(intent.getAction())
+                && intent.hasCategory(Intent.CATEGORY_LAUNCHER);
+    }
+
+    private static boolean hasLegacyExtras(Intent intent) {
+        return intent.hasExtra(EXTRA_NEW_CHAT) || intent.hasExtra(EXTRA_OPEN_ARCHIVED)
+                || intent.hasExtra(EXTRA_OPEN_SCHEDULE) || intent.hasExtra(EXTRA_OPEN_SETTINGS)
+                || intent.hasExtra(TaskDetailActivity.EXTRA_OPEN_CHAT)
+                || intent.hasExtra(TaskDetailActivity.EXTRA_ARCHIVED_ID);
+    }
+
+    /** 独立进程界面入口；本实例随后 finish，由己方 Host-only 生命周期收尾。 */
+    private void openTauriUi() {
+        if (isFinishing()) return;
+        startActivity(new Intent(this, TauriMainActivity.class));
+        finish();
     }
 
     @Override public void onSaveInstanceState(Bundle outState) {
@@ -213,6 +253,8 @@ public class MainActivity extends BridgeActivity {
 
     @Override public void onResume() {
         super.onResume();
+        // 重定向/已结束的实例不得再被登记成可用助手或拉起前台能力。
+        if (isFinishing()) return;
         resumedActivity = new WeakReference<>(this);
         LegacyNavigationRecovery.recover(this);
         if (!hostOnly) {

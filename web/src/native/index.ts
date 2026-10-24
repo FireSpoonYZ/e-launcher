@@ -1,4 +1,5 @@
 import { registerPlugin, type PluginListenerHandle } from '@capacitor/core';
+import { createTauriBotHost } from './tauri-host';
 
 export type ToolCall = { id: string; name: string; arguments: string };
 export type Attachment = { id: string; name: string; mimeType: string; kind: 'image'|'file'; size: number; path: string };
@@ -271,4 +272,6 @@ export interface BotHostPlugin {
   legacyDraft(options: {sourceKey: string; requestId: string; textOffset?: number; attachmentOffset?: number}): Promise<LegacyDraftPage>;
   legacyDiscard(options: {sourceKey: string; snapshotId: string}): Promise<Record<string, never>>;
 }
-export const BotHost = registerPlugin<BotHostPlugin>('BotHost');
+// M18: Tauri Android UI 走私有 Binder 适配器；Capacitor WebView（旧入口）行为不变。
+const inTauriUi = () => (globalThis as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ !== undefined;
+export const BotHost: BotHostPlugin = inTauriUi() ? createTauriBotHost() : registerPlugin<BotHostPlugin>('BotHost');

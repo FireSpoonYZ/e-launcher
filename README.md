@@ -4,7 +4,7 @@
 
 ## 界面与数据
 
-`MainActivity` 是普通 Capacitor `BridgeActivity`，承载 `web/src/` 中的 React + TypeScript 聊天与设置。任务详情、语音会话和分享确认使用 Android Java Activity；Widget 使用 Java `AppWidgetProvider` + `RemoteViews`/XML，没有新增 UI 框架或数据库。应用目录查询与显式启动仍服务于助手和 Shower，不是桌面功能。`LauncherVoiceInteractionService` 等三个原系统语音组件名有意保留，以保持系统助手身份。
+普通桌面图标与 Host 入口现在默认启动 `TauriMainActivity`（独立 `:tauri_ui` 进程，`exported=false`），由 Tauri 承载 `mobile/web/` 与既有 `web/src/` 的 HostPage；`MainActivity` 仍是导出的 singleTask Capacitor `BridgeActivity`，只服务旧会话/设置/Host 显式入口（含 `assistant_legacy_ui=true`）与带旧 extras 的 Intent。任务详情、语音会话和分享确认使用 Android Java Activity；Widget 使用 Java `AppWidgetProvider` + `RemoteViews`/XML。应用目录查询与显式启动仍服务于助手和 Shower，不是桌面功能。`LauncherVoiceInteractionService` 等三个原系统语音组件名有意保留，以保持系统助手身份。界面架构、命令与构建见 [Tauri Android 界面](mobile/README.md)。
 
 覆盖安装保留 `applicationId=com.example.launcherprobe`、包名、原签名及数据路径：聊天仍在私有 `chat` SharedPreferences，附件在 `files/chat-attachments`，Pi 上下文在 `files/pi-contexts`，全局配置在 `files/node/.pi/agent`，会话工作区在 `files/pi-workspaces`。旧未发送草稿及附件保留；不要清除数据、卸载重装或换签名来完成迁移。
 
@@ -107,16 +107,16 @@ Shower 对存活的独立虚拟屏每约 4 秒报告显示活动，保留原有 
 
 ## Android Host（Bot/Host 核心）
 
-Android 应用内集成 Host 核心：在受监督的独立 Node Mobile 子进程中运行 Pi Durable/chord/pi-ai **1.3.0** 与内嵌 acp-kernel **0.0.101**，Capacitor 外壳保持不变。Host 提供 Bot 登记、持久消息账本、工具（含 grep/find）、工作上下文与长期记忆；旧数据迁移已交付（父限定范围验收，见 host-core 模块 16），Tauri 未引入。
+Android 应用内集成 Host 核心：在受监督的独立 Node Mobile 子进程中运行 Pi Durable/chord/pi-ai **1.3.0** 与内嵌 acp-kernel **0.0.101**，旧 Capacitor 入口保持不变。Host 提供 Bot 登记、持久消息账本、工具（含 grep/find）、工作上下文与长期记忆；旧数据迁移已交付（父限定范围验收，见 host-core 模块 16）；M18 的 Tauri 只提供独立 `:tauri_ui` 界面外壳（见 [mobile/README.md](mobile/README.md)），Host 仍在默认进程的 Node Mobile 子进程运行。
 
 - **使用入口**：用户在设置中开启/停止 Host；Host 仅在用户显式开启 `specialUse` 前台服务时运行，无开机自启/空闲自动关闭/粘性重启。
 - **旧聊天导入与新 Host 定时任务**：设置中的 Local Host / Legacy import 面板可列出旧会话，显式预览（单独选 role/cwd/model）后导入；导入的草稿仅手动追加到对应 Bot，不自动发送。新 Host 定时任务（schedule_task）只在 Host 运行时执行，离线错过不补发。详见 [host-core/README.md](host-core/README.md) 模块 16。
 - **配置与数据**：Host 运行数据位于独立 `files/bot-host`；模型凭据与语音偏好分别在 `bot_host_credentials`、`bot_host_voice`、`bot_host_voice_secrets` SharedPreferences（不在 files/bot-host 内），与旧聊天数据隔离；模型/语音由用户配置，系统语音入口仍走 Android 原生路径。
-- **构建与许可**：构建命令与前提（JDK/AGP/NDK/CMake/Node/Rust 目标及自动 prepare/bundle）见 [host-core/README.md](host-core/README.md) 模块 15；依赖与 NDK 搜索工具（rg/fd）许可见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+- **构建与许可**：构建命令与前提（JDK/AGP/NDK/CMake/Node/Rust 目标及自动 prepare/bundle）见 [host-core/README.md](host-core/README.md) 模块 15，M18 界面见 [mobile/README.md](mobile/README.md)；依赖与 NDK 搜索工具（rg/fd）许可见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
 ## 构建与检查（Windows PowerShell）
 
-JDK 21、Gradle 8.14.3（仓库内 `gradlew`）、SDK Platform 36、AGP 8.13.0，最低支持 Android 13（minSdk33）、targetSdk36；Android 10–12 不再支持。运行时网络使用 OkHttp 3.14.9。首次构建需下载 Gradle 发行包与构建依赖并接受 SDK 许可。先运行 `scripts/prepare-pi-runtime.ps1` 准备 Node Mobile、SDK 资源和锁定完整性的官方 npm 11.6.2 payload；JavaScript 改动后运行 `npm --prefix pi-runtime test` 重建并测试 bundle。Gradle 从 `shower-server/` 的固定来源构建精简 Binder-only APK，并以 `shower-server.jar` 生成到 App assets；不需要 Python、Lamda payload 或外部部署脚本。构建还会把真实 arm64 Node executable 以 `libnode_launcher.so` 打入 APK 的 native library 目录；npm 的完整目录保存在版本化 asset 中并仅在版本首次使用时原子展开。
+JDK 21、Gradle 8.14.3（仓库内 `gradlew`）、Node **≥ 22.19**、SDK Platform 36、AGP 8.13.0 / NDK 28.2.13676358，最低支持 Android 13（minSdk33）、targetSdk36；Android 10–12 不再支持。运行时网络使用 OkHttp 3.14.9。首次构建需下载 Gradle 发行包与构建依赖并接受 SDK 许可。先运行 `scripts/prepare-pi-runtime.ps1` 准备 Node Mobile、SDK 资源和锁定完整性的官方 npm 11.6.2 payload；JavaScript 改动后运行 `npm --prefix pi-runtime test` 重建并测试 bundle。Gradle 从 `shower-server/` 的固定来源构建精简 Binder-only APK，并以 `shower-server.jar` 生成到 App assets；不需要 Python、Lamda payload 或外部部署脚本。构建还会把真实 arm64 Node executable 以 `libnode_launcher.so` 打入 APK 的 native library 目录；npm 的完整目录保存在版本化 asset 中并仅在版本首次使用时原子展开。
 
 首次构建或修改前端后，先安装依赖、构建并同步 Web 资源：
 
@@ -125,6 +125,17 @@ npm ci
 npm run build
 npm run sync:android
 ```
+
+Tauri Android 界面（M18）在首次 Gradle 调用前需要本机 Rust：`settings.gradle` 的 SDK 引导只跑 `cargo metadata`（只需 Cargo，不需要 Android target/NDK），而 `buildMobileUi` 实际编译 Rust cdylib 时才需要两个 Android target 与 NDK。SDK include 片段 `mobile/build/tauri-sdk.gradle` 是生成物且被忽略，缺失时会在配置阶段用 `providers.exec` 同步执行 `node host-core/build-mobile.js --sdk-path` 后再 apply（plain Gradle、CI 与 `scripts/verify.ps1` 都走同一条引导）。因此首次构建前要准备好：
+
+```powershell
+rustup target add aarch64-linux-android x86_64-linux-android
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+```
+
+手动先跑 `node host-core/build-mobile.js --sdk-path` 仍可提前定位问题，但不是必需。若 `node`/`cargo` 本身无法启动，Gradle 会直接以 Exec 失败报错；只有 helper 跑完仍未生成片段时才报带退出码与修复指引的 missing 错误。两者都是真实构建失败，不会猜 cargo registry 路径或刷新 lock。
+
+界面前端单独构建用 `npm run mobile:web`；完整界面构建、单/双 ABI 命令与产物路径见 [mobile/README.md](mobile/README.md)。
 
 Windows PowerShell 下使用仓库内的 Gradle Wrapper 编译：
 
@@ -158,7 +169,7 @@ exit $LASTEXITCODE
 
 产生截图的检查必须传 `-e artifactDir <设备绝对可写目录>`；`workbench` 的 ready/stop/answer 文件也在此目录。示例设备目录为 `/sdcard/Android/data/com.example.launcherprobe/files/acceptance`。截图、日志及拉取后的证据均在仓库外；测试生成物只放已忽略的 `build/`。详情／通知检查需预先授予通知权限，避免首次授权弹窗遮挡；语音连续性检查需录音权限。Shower 检查需 Shizuku 已运行并授权。独立构建、ADB 注入与真实手指体验不是同一层验收；本迁移文档不宣称设备检查已通过。
 
-日常开发在 `develop`。每次 push 会构建 debug APK，在对应 GitHub Actions run 的 Artifacts 里下载，保留 7 天。合并或推到 `main` 时额外构建 release APK，并覆盖 GitHub Release [`latest`](https://github.com/FireSpoonYZ/e-launcher/releases/tag/latest)。CI 需要仓库 secret `DEBUG_KEYSTORE_BASE64`（项目根目录 `debug.keystore` 的 base64）。
+日常开发在 `develop`。每次 push 会构建 debug APK，在对应 GitHub Actions run 的 Artifacts 里下载，保留 7 天。合并或推到 `main` 时额外构建 release APK，并覆盖 GitHub Release [`latest`](https://github.com/FireSpoonYZ/e-launcher/releases/tag/latest)。CI 需要仓库 secret `DEBUG_KEYSTORE_BASE64`（项目根目录 `debug.keystore` 的 base64）。APK 工作流（`.github/workflows/apk.yml`）现在在 Gradle 之前用 runner 自带 `rustup` 安装 stable（minimal profile）与 `aarch64-linux-android`、`x86_64-linux-android` 两个 target；该步骤属于已实现的接线，**尚未在真实 GitHub runner 上执行验证**，不改本机工具链、不新增 action 依赖。
 
 纯 Java 检查的编译产物位于 `build/test-classes/`。思考强度浮窗的真机触摸回归脚本为 `scripts/check-thinking-slider.mjs`，设备连接和运行方式见文件开头的说明。
 
@@ -208,10 +219,12 @@ Kokoro 路径请求流式 PCM（24 kHz、单声道、16 位小端），使用 Au
 
 当前自部署服务使用 Kokoro v1.0 权重；音色固定不代表韵律和发音已经通过试听。验收时应测试中文夹英文、数字、长回复、连续打断和网络中断，区分 HTTP 响应头时间、首个音频块时间与手机实际出声时间。
 
-下一代多端 Bot 架构与实施进度见 [下一代架构与实施进度](docs/next-generation-architecture.md)。[Bot/Host 核心](host-core/README.md) 已独立实现本机登记、Durable 长期主私聊与内嵌 Billion Context，并已作为 Android Host（M15）在应用内运行；旧数据迁移（M16）与 Windows/Linux 桌面客户端（M17，[`desktop/`](desktop/README.md)）已交付并获父助手限定范围验收，当前 17/20。Tauri Android 外壳（M18）与 Windows/Linux TUI（M19）尚未开始，完整跨设备打包与真机验收归 M20；桌面客户端不替代本机 Android 应用，也不打包模型推理。
+下一代多端 Bot 架构与实施进度见 [下一代架构与实施进度](docs/next-generation-architecture.md)。[Bot/Host 核心](host-core/README.md) 已独立实现本机登记、Durable 长期主私聊与内嵌 Billion Context，并已作为 Android Host（M15）在应用内运行；旧数据迁移（M16）与 Windows/Linux 桌面客户端（M17，[`desktop/`](desktop/README.md)）已交付并获父助手限定范围验收；Tauri Android 界面（M18，[`mobile/`](mobile/README.md)）已交付并获父助手限定范围验收，运行在独立 `:tauri_ui` 进程、通过私有同 UID socket 桥接默认进程的本机 Host，当前 **18/20**。M19（Windows/Linux TUI）与 M20（跨设备集成、打包与真机验收）尚未开始，本轮到此停止；桌面客户端与本机 Android 应用都不打包模型推理。
 
 ## 源码与许可证
 
 本项目保留 AGPLv3 项目许可及 Ogesture 历史归属，当前已删除其导航手势派生实现；仍包含 Operit Shower 的 LGPL-3.0 派生源码。主项目完整许可证见 [LICENSE](LICENSE)，Operit 许可证副本见 [licenses/Operit-LGPL-3.0.txt](licenses/Operit-LGPL-3.0.txt)；固定上游版本、真实移植文件和修改见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。分发 APK 时须遵守对应源码与构建材料提供义务，仅给未修改上游链接不足以满足本修改版的义务。
+
+M18 还调整了打包阶段的法务资源接线：`android.packaging.resources` 只从 AGP 默认排除集合里移除 `/META-INF/LICENSE`、`/META-INF/LICENSE.txt`、`/META-INF/NOTICE`、`/META-INF/NOTICE.txt`、`/LICENSE`、`/LICENSE.txt`、`/NOTICE`、`/NOTICE.txt` 这 8 项，并用标准 `resources.merges` 合并同名文件（签名/MANIFEST 等其余排除不动，不使用 `pickFirst`）。已按限定范围验收：双 ABI `assembleDebug`+`assembleDebugAndroidTest` exit 0，新 APK 仅多出 `META-INF/LICENSE`、`META-INF/LICENSE.txt`、`META-INF/NOTICE` 三个条目，其余全部原条目按相同 ZIP 顺序单次解压 SHA256 完全一致，4 个 Jackson 2.15.3 依赖的 `LICENSE`/`NOTICE` 共 8 项均含于合并文本，zipalign `-P16` 与原签名通过；远端 CI 未验证。
 
 标准 Widget 不授予跨应用自动化权限；Shower 仍需用户明确授予的 Shizuku 权限。应用目录查询保留当前用户可启动应用，工作资料及多用户边界仍受 Android 平台约束。

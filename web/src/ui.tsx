@@ -4,9 +4,13 @@ import { ArrowLeft, ChevronRight, CircleAlert, LoaderCircle, Search } from 'luci
 import { Device, NativeSettings, type DeviceState, type NativeEvent, type QueryOperation } from './native';
 
 export const Environment = createContext<{device?: DeviceState; refresh(): Promise<void>}>({refresh: async () => {}});
+// M18 mobile UI 只有 language/appearance：窄语言覆盖，不伪造完整 DeviceState。
+export const LanguageOverride = createContext<DeviceState['language'] | undefined>(undefined);
 export function useText() {
   const { device } = useContext(Environment);
-  const en = device?.language === 'en' || (device?.language === 'system' && navigator.language.startsWith('en'));
+  const override = useContext(LanguageOverride);
+  const language = override ?? device?.language;
+  const en = language === 'en' || (language === 'system' && navigator.language.startsWith('en'));
   return (zh: string, english: string) => en ? english : zh;
 }
 export const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);

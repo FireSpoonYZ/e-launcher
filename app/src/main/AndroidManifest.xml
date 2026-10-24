@@ -54,6 +54,17 @@
             android:enabled="true"
             android:exported="true"
             android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
+        <!-- M18：只在 :tauri_ui 提前初始化框架 lifecycle（ProcessLifecycleInitializer），让 Wry 的
+             ON_CREATE 能通知 Rust 创建 UI；不拉起 Host/FGS/Node，默认进程 provider 不动。 -->
+        <provider
+            android:name=".TauriInitializationProvider"
+            android:authorities="${applicationId}.tauri-startup"
+            android:exported="false"
+            android:process=":tauri_ui">
+            <meta-data
+                android:name="androidx.lifecycle.ProcessLifecycleInitializer"
+                android:value="androidx.startup" />
+        </provider>
         <receiver android:name=".ScheduledTaskReceiver" android:exported="false">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
@@ -82,6 +93,10 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="Explicitly user-enabled on-device AI Host and remote link; runs only while a user-started AI session is active" />
         </service>
+        <!-- M18 UI 桥：默认进程、同 UID 私有 Binder；只转发既有 Host 数据操作，不启动 Host/模型。 -->
+        <service
+            android:name=".BotHostUiBridgeService"
+            android:exported="false" />
         <service
             android:name=".LauncherVoiceInteractionService"
             android:exported="true"
@@ -156,5 +171,14 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <!-- M18 Tauri 界面：独立进程，SDK 退出只影响本进程；仅由 MainActivity/通知入口内部启动。 -->
+        <activity
+            android:name=".TauriMainActivity"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode|navigation|density|fontScale"
+            android:exported="false"
+            android:launchMode="singleTask"
+            android:process=":tauri_ui"
+            android:theme="@style/WebAppTheme"
+            android:windowSoftInputMode="adjustResize" />
     </application>
 </manifest>

@@ -18,8 +18,6 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.CompletionException;
-import java.util.concurrent.ExecutionException;
 
 /** M15 Host UI 插件：只处理显式用户动作，不自动启动/重启 Host/Agent。 */
 @CapacitorPlugin(name = "BotHost", permissions = {@Permission(alias = BotHostPlugin.MICROPHONE,
@@ -437,7 +435,8 @@ public final class BotHostPlugin extends Plugin {
         main.post(() -> {
             try {
                 BotHostVoice voice = captureVoice;
-                if (voice != null) voice.finishInput();
+                // 只结束本插件冻结的捕获：迟到调用不得结束别的捕获。
+                if (voice != null) voice.finishInput(frozenBotId, frozenRequestId);
                 call.resolve(new JSObject());
             } catch (Exception exception) {
                 reject(call, exception);
@@ -533,7 +532,10 @@ public final class BotHostPlugin extends Plugin {
 
     private void cancelActiveCapture() {
         BotHostVoice voice = captureVoice;
-        if (voice != null) voice.cancelInput();
+        String botId = frozenBotId;
+        String requestId = frozenRequestId;
+        // 仅取消本次冻结捕获，避免过期回调取消其他持有者的输入。
+        if (voice != null) voice.cancelInput(botId, requestId);
         clearCaptureRefs();
     }
 
@@ -630,40 +632,20 @@ public final class BotHostPlugin extends Plugin {
     }
 
     private static String errorCode(Throwable failure) {
-        Throwable t = unwrap(failure);
-        if (t instanceof BotHostProcess.BridgeException bridge) return bridge.code;
-        return null;
+        return BotHostUiProtocol.errorCode(failure);
     }
 
     private static String errorOutcome(Throwable failure) {
-        Throwable t = unwrap(failure);
-        if (t instanceof BotHostProcess.BridgeException bridge) return bridge.outcome;
-        return null;
+        return BotHostUiProtocol.errorOutcome(failure);
     }
 
     private static String safeMessage(Throwable failure) {
-        Throwable t = unwrap(failure);
-        String message = t.getMessage();
-        if (message == null || message.trim().isEmpty()) return "操作失败";
-        // 仅透出有界 Bridge 消息与受控业务异常；其余保持通用，避免泄露内部细节/凭据。
-        if (t instanceof BotHostProcess.BridgeException) {
-            return message.length() > 512 ? message.substring(0, 512) : message;
-        }
-        if (t instanceof IllegalArgumentException || t instanceof IllegalStateException) {
-            return message;
-        }
-        return "操作失败";
+        return BotHostUiProtocol.safeMessage(failure);
     }
 
     /** 解包 CompletableFuture 包装（CompletionException/ExecutionException），保留内部 code/outcome。 */
     private static Throwable unwrap(Throwable failure) {
-        Throwable current = failure;
-        while (current instanceof CompletionException || current instanceof ExecutionException) {
-            Throwable cause = current.getCause();
-            if (cause == null || cause == current) break;
-            current = cause;
-        }
-        return current;
+        return BotHostUiProtocol.unwrap(failure);
     }
 
     private static JSObject errorObject(Throwable failure) {

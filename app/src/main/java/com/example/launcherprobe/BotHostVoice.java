@@ -106,8 +106,33 @@ final class BotHostVoice {
         });
     }
 
+    /** 仅当当前捕获仍属于预期 botId/requestId 时才结束输入：迟到的旧调用不得影响新捕获。 */
+    void finishInput(String botId, String requestId) {
+        main.post(() -> {
+            Capture current = capture;
+            if (current != null && !closed.get() && owns(current, botId, requestId)) current.input.finish();
+        });
+    }
+
     void cancelInput() {
         main.post(this::cancelCurrentSilently);
+    }
+
+    void cancelInput(String botId, String requestId) {
+        main.post(() -> cancelIfOwned(botId, requestId));
+    }
+
+    private void cancelIfOwned(String botId, String requestId) {
+        Capture current = capture;
+        if (current == null || !owns(current, botId, requestId)) return;
+        capture = null;
+        current.input.cancel();
+    }
+
+    /** 冻结捕获身份校验：id 缺失时一律不操作，避免误清新捕获。 */
+    private static boolean owns(Capture capture, String botId, String requestId) {
+        return botId != null && requestId != null
+                && botId.equals(capture.botId) && requestId.equals(capture.requestId);
     }
 
     JSONObject getSettings() {

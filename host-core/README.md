@@ -1094,7 +1094,7 @@ CLI 均要求 `--bot-id`。`memory-status` 可选 `--input`，其余命令必须
 
 模块 14 把模块 5 本机控制面、模块 8/9 认证中继与远程控制、模块 10–12 工作上下文/scope、模块 13 记忆整合为**统一本机服务**（`openHostService`），并新增本机设置持久化、远端协议 v2（35 方法）、受控远端实时预览与客户端待发送/对账。
 
-**状态**：模块 14 已完成交付并获父助手限定范围验收，总完成数 **14/20**；模块 15–17 后续已交付（见下节与末节），当前 M18–M20 共 3 个待交付。
+**状态**：模块 14 已完成交付并获父助手限定范围验收，总完成数 **14/20**；模块 15–18 后续已交付（见下节与末节），当前 M19–M20 共 2 个待交付。
 
 ### 验收覆盖
 
@@ -1237,7 +1237,7 @@ node host-core/pending-cli.js reconcile --data-root "$CLIENT_STATE" --device-id 
 
 ## 模块 15：Android 本机 Host 与原生能力桥
 
-**状态**：M15 已交付并获父助手验收，总完成数 **15/20**；模块 16 已交付（见下节），M17–M20 共 4 个待交付。M14 历史记录及其验收边界保留。
+**状态**：M15 已交付并获父助手验收，总完成数 **15/20**；模块 16–18 后续已交付（见下文），M19–M20 共 2 个待交付。M14 历史记录及其验收边界保留。
 
 ### 架构与生命周期
 
@@ -1315,7 +1315,7 @@ Android 搜索工具（rg/fd）固定 API 29，不改变 App minSdk33。NDK/16Ki
 
 ## 模块 16：旧数据迁移与 Android 兼容（已完成父助手限定范围验收）
 
-**状态**：模块 16 已完成交付并获父助手限定范围验收，总完成数 **16/20**；M17 后续已交付（见末节），M18–M20 共 3 个仍待交付。
+**状态**：模块 16 已完成交付并获父助手限定范围验收，总完成数 **16/20**；M17/M18 后续已交付（见末节），M19–M20 共 2 个仍待交付。
 
 ### 旧聊天迁移（用户显式）
 
@@ -1342,7 +1342,7 @@ Android 搜索工具（rg/fd）固定 API 29，不改变 App minSdk33。NDK/16Ki
 
 ### 限制与未实测边界
 
-无真机验收（按用户指令）；合成 provider/ASR，无付费/生产服务。不宣称全部 instrumentation 组、真实手指/桌面 Widget 视觉或进程死亡验收、ARM64 运行、32 active run 饱和或 100 次实际 create。公开 35 v2 方法不变，迁移保持私有本地桥；当前 Android 仍 Capacitor/原生 Durable Host，Tauri Android 是 M18。完整第三方声明检查仍缺可选 MCP SDK，无依赖变通。
+无真机验收（按用户指令）；合成 provider/ASR，无付费/生产服务。不宣称全部 instrumentation 组、真实手指/桌面 Widget 视觉或进程死亡验收、ARM64 运行、32 active run 饱和或 100 次实际 create。公开 35 v2 方法不变，迁移保持私有本地桥；本模块验收时 Android 仍是 Capacitor/原生 Durable Host，Tauri Android 界面由 M18 交付（见末节）。完整第三方声明检查仍缺可选 MCP SDK，无依赖变通。
 
 ### 清理
 
@@ -1350,7 +1350,7 @@ Android 搜索工具（rg/fd）固定 API 29，不改变 App minSdk33。NDK/16Ki
 
 ## 模块 17：Tauri Windows / Linux 客户端（已完成父助手限定范围验收）
 
-**状态**：模块 17 已完成交付并获父助手限定范围验收，总完成数 **17/20**；M18–M20 共 3 个仍待交付。本模块只增加桌面客户端侧文件，不新增 Host 方法（仍为固定 35 个 v2 方法）、不改 Android。
+**状态**：模块 17 已完成交付并获父助手限定范围验收，总完成数 **17/20**；M18 后续已交付（见末节），M19–M20 共 2 个仍待交付。本模块只增加桌面客户端侧文件，不新增 Host 方法（仍为固定 35 个 v2 方法）、不改 Android。
 
 ### 客户端组成
 
@@ -1373,4 +1373,29 @@ Android 搜索工具（rg/fd）固定 API 29，不改变 App minSdk33。NDK/16Ki
 
 ### 限制与未实测边界
 
-所有模型响应为 Mockoon 合成 SSE，无付费模型或真实用户配置；本模块未验证 Hindsight 服务，也未做中继 GUI 联调；GUI 运行验证主要为各自机器的本机 Host，跨设备 Relay/CA、目标切换与全链路压力/交错验收归 M20；未测 FUSE 挂载、MSI 安装/卸载与 RPM 安装；Tauri Android 是 M18、TUI 是 M19。本模块不扩大内存/加密作者身份/上传能力声明。
+所有模型响应为 Mockoon 合成 SSE，无付费模型或真实用户配置；本模块未验证 Hindsight 服务，也未做中继 GUI 联调；GUI 运行验证主要为各自机器的本机 Host，跨设备 Relay/CA、目标切换与全链路压力/交错验收归 M20；未测 FUSE 挂载、MSI 安装/卸载与 RPM 安装；Tauri Android 已由 M18 交付（见末节），TUI 是 M19。本模块不扩大内存/加密作者身份/上传能力声明。
+
+## 模块 18：Tauri Android 界面（已完成父助手限定范围验收）
+
+**状态**：模块 18 已完成交付并获父助手限定范围验收，总完成数 **18/20**；M19–M20 共 2 个仍待交付，本轮到此停止。本节只记录 Host 侧约束；界面组成、命令与构建/操作说明见 [mobile/README.md](../mobile/README.md)。
+
+### 与 Host 的关系
+
+- **Host 没搬家**：默认 Java 进程里仍是用户显式启动的 specialUse FGS，Host 本体在它拉起的受监督 Node Mobile 子进程里运行；`files/bot-host`、`bot_host_credentials`、`bot_host_voice(_secrets)` 路径与语义不变；公开 v2 方法仍 **35 个**，不新增 HTTP/中继线路。
+- **界面在独立进程**：`:tauri_ui`（Tauri 2.12.5 / wry 0.57 的 Android 退出路径会 `std::process::exit`，同进程会杀死 Host）。UI 经私有、非导出、同 UID 校验的 Binder 服务打开 socket FD，业务走 JSONL；可调操作限定为既有 Host 数据操作加 `uiSettings`/`pause`，`start`/`stop`/`openLegacy`/`reconnect`/`hide` 是 UI 本地动作，不是 Host 方法。
+- **有界协议**：2 MiB 行/请求、8 个在途普通请求、8 帧/4 MiB 事件预算、保留 pause/清理通道、25 s 请求与 5 s 绑定截止、按 generation 的投递身份、单一原生事件代理与最多一个等待 ACK 的事件帧。
+- **生命周期**：关闭界面/观察/EOF 只释放该会话的观察与语音捕获，不调用 manager 的 stop/suspend；Host 只在用户显式停止 FGS 或显式操作时结束，不自动重启、不重放已受理请求。
+- **语音**：沿用原冻结 botId/requestId 一次提交与事件形状；新增按 botId/requestId 限定作用域的 finish/cancel 重载，迟到回调不会取消他人捕获。
+
+### 构建接线
+
+- `host-core/build-mobile.js`：`--sdk-path` 只用 cargo metadata 解析 `tauri 2.12.5` 的 `mobile/android` 并写 `mobile/build/tauri-sdk.gradle`；该片段是生成物且被忽略，缺失时 `settings.gradle` 在配置阶段用 `providers.exec` 同步跑它后再 apply（plain Gradle / CI / `scripts/verify.ps1` 共用，手动先跑仍可用于排查；`cargo metadata` 只需 Cargo，编译 cdylib 的 ABI 构建才需 `rustup target` 与 NDK；node/cargo 无法启动时 Gradle 直接报 Exec 失败，否则跑完仍缺片段才报带退出码的 missing 错误；不猜 registry 路径、不刷新 lock）。默认模式构建 `mobile/build/web`、按 launcherAbis 用 NDK 显式参数交叉编译 `libe_launcher_mobile.so`（`CARGO_ENCODED_RUSTFLAGS` 传 target/sysroot/16 KiB 页对齐，并校验 ELF `PT_LOAD` 对齐）、把 wry/tauri 生成的 Kotlin 落到 `app/build/generated/source/tauri`，再按实际 ABI 的 cargo 图把完整 Rust 通知合并写入 Gradle assets 源根 `app/build/generated/assets/tauri/THIRD_PARTY_NOTICES.txt`（打进 APK 后的 asset 路径为根目录 `THIRD_PARTY_NOTICES.txt`，不在 `tauri/` 子目录）。
+- **依赖法务资源**：`app/build.gradle` 的 `android.packaging.resources` 仅从 AGP 默认排除集中移除 8 个路径（`/META-INF/LICENSE`、`/META-INF/LICENSE.txt`、`/META-INF/NOTICE`、`/META-INF/NOTICE.txt`、`/LICENSE`、`/LICENSE.txt`、`/NOTICE`、`/NOTICE.txt`），并用标准 `merges` 合并同名文件；签名/MANIFEST 等默认排除与 `jniLibs.useLegacyPackaging` 不变，不用 `pickFirst`、不手拼替代文本。已限定验收：删掉生成片段后双 ABI `assembleDebug`+`assembleDebugAndroidTest` exit 0、片段自动重建且字节一致；新 APK 相对上一验收包仅多 `META-INF/LICENSE`、`META-INF/LICENSE.txt`、`META-INF/NOTICE` 三个条目，全部原条目（DEX/.so/assets/res）按相同 ZIP 顺序单次解压 SHA256 完全一致；4 个 Jackson 2.15.3 依赖的 `META-INF/LICENSE`/`NOTICE` 共 8 项均含于合并文本；zipalign `-P16` 与原签名通过。APK 工作流已加 Rust stable + 双 target 准备，但**远端 GitHub Actions 仍未实际运行**。
+- `CARGO_LICENSE_FALLBACKS`（`build-desktop.js`，Android 同样复用）只对精确 `package@version` + 声明串生效：Android 图会命中既有的 `alloc-stdlib@0.3.0`、`selectors@0.38.0` 等桌面期映射，以及 M18 新增的 `jni-sys-macros@0.4.1`、`ndk-context@0.1.1`、`ndk@0.9.0`、`ndk-sys@0.6.0+11769913`（均 MIT OR Apache-2.0，文本见 `licenses/android/` 或 `licenses/desktop/`）。只有确实缺失且无精确映射的 license 才硬失败。
+
+### 验收范围（父限定）
+
+- 环境：保留 userdata 的 `emulator-5556`（Android 36 / x86_64），`-no-audio` 静音 + 自有可信 HTTPS 合成 ASR；完整 `assembleDebug`+`assembleDebugAndroidTest`（无排除）通过，原证书覆盖安装，安装前后 Host DB 哈希一致。
+- 实测：冷启动只起 `:tauri_ui` 与默认进程，不拉起 Host/Node；界面内创建/聊天/回执到 done（含 Unicode/emoji 与语音合成提交）；关闭或 SIGKILL 界面后已受理任务由同一 Host/Node 继续，冻结原 ID 可对账且无重放（模型计数仅 +1）；8 RPC 与第 9 个 `RPC_BUSY`、25 s `TIMEOUT`、超 2 MiB 与未知方法/非法 legacy 动作拒绝；8 观察与最多一个等待 ACK 的事件帧、溢出锁存与显式重连；空闲 EOF 只发一条私有 `streamError`；权限与 ASR 取消不串归属；8 份 DB 完整性/FK 通过（186 任务终态、47 submissions done，M16 为 180/41）。
+- 未实测：ARM64 运行时、真实模型/ASR/Hindsight、跨设备中继与目标切换（M20）、全部传输饱和/竞态与 5 s 绑定故障定时器。法务资源修改后未重跑设备 E2E：上列验收适用于字节一致的原有 APK 条目（Stage 12 逐条 SHA256 比对），新增的只有 `META-INF/LICENSE|NOTICE` 等法务条目与构建/CI 接线；远端 GitHub Actions 仍未实际运行。
+- 旧回归中 `notifications` 组仍在“立即删除是否清空通知”断言处失败 3 次（M16 起既有问题，产品/测试未改；调试器暂停下通过但不属普通通过，原因未确认），其余 10 组普通通过。
