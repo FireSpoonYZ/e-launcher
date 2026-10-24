@@ -219,9 +219,20 @@ M20 尚未整体完成，是本期的唯一剩余模块。已交付 **M20-01 手
 - **数据**：原签名覆盖安装后备份的 Host/client/prefs/配置逐项一致（`data-install-diff.txt`，备份 `app-data-before-exit-fix-repaired.tar`/`app-data-after-install.tar`）。
 - **边界**：无 native 符号化 abort 栈，`libhwui` 锁的具体归属与 C 全局析构归因仍是假设，只证明该退出路径的普通复现消失；模型为合成夹具，无真实 ASR/Hindsight/付费模型；不 push、不启动 CI。系统通知授权弹窗停留期间曾出现启动回执超时，刷新对账后确认 Host 运行；该过程另有记录。
 
+### 新 Host 一次性定时与停机过期（K80，未锁屏）
+
+产品提交/HEAD `e30a8b4`，本轮无产品与测试代码修改；证据在仓库外目录 basename `e-launcher-m20-schedules-1792862818326`（入口 `schedule-acceptance.json`）。走新 Host 的 `BotHostSchedules`/`AlarmManager` 与真实 `schedule_task` 工具，不用旧 `ScheduledTasks` 页面或旧引擎；模型回复与工具选择均为自有合成服务。设备充电、屏幕亮、**未锁屏**，因此不覆盖锁屏与长时待机。
+
+- **一次性在线**：01:55 任务在 UI 进程关闭期间实际触发，scheduled 输入在 01:55:00.061 进入原始历史（本次观测迟 61 ms），固定请求 ID 对应 submission 55 `done`，历史中仅 1 条 scheduled 输入（`created.json`/`final-run-observations.json`/`online-run-and-stop.json`）。
+- **停机过期不补发**：01:59 任务到期前显式 stop Host，到期时 Host 仍未启动；显式重开后 `latestRun=skipped_offline`、无 scheduled 输入，原请求 `getSubmission` 返回 `SUBMISSION_NOT_FOUND/responded`（`restart-and-readonly-check.json`）。
+- **清理**：两条自有任务按 id/revision 用真实工具删除，最终 `list` 为 `tasks[]`；旧任务库起始为空，未走旧引擎执行（`cleanup-tools.json`）。
+- **权限**：精确闹钟权限起始未授予，验收期间临时授权，结束恢复 UID appop `default` 且系统开关关闭；未改电池、自启、HOME、无障碍或锁屏配置。本轮开始时 Host 已在运行且通知权限已开启，结束时保留该起始运行态与 `USER_SET` 通知授权。
+- **配置与收尾**：配置内容恢复为 `providers=[]`、`defaultModel=null`、`relay=null`、`aliases={}`（CAS revision 7→8 测试→9 恢复）；临时模型服务、ADB 转发与 reverse 均已停止；调试终端被 operator 关闭后未重开，UI 回到 App。终端关闭前未另存完整最后 CDP 回执，`restore-terminal-receipt.json` 只保留该回执尾部；配置恢复见 `config-restored.json`；系统 FGS、Host PID 9476/默认进程 29670 与持久状态 `running` 的读回见 `restore-system-check.txt`。
+- **不覆盖**：真正锁屏、长时待机/未充电 Doze、周期与日历规则的设备组合、旧引擎真机执行、真实模型服务。
+
 ### 仍未验收（M20 不能记完成）
 
-真实模型/ASR/Hindsight 服务、远端 push 与 GitHub Actions 实际运行、长时锁屏/ROM 后台与定时执行、真实旧版迁移、完整传输饱和/竞态。16 KiB 页适配与专项运行验收按用户决定不在本期范围、不作为 M20 结项门槛（K80 为 4 KiB 页的历史事实、既有 ELF/zipalign 对齐设置与构建配置均保留不动）。M19 仍未取回、不计完成。故本期仍是 **18/19**，M20 进行中，不得记成全量验收完成。
+真实模型/ASR/Hindsight 服务、远端 push 与 GitHub Actions 实际运行、锁屏与长时待机/未充电 Doze 后台（新 Host 未锁屏一次性触发与停机过期已有证据，见上节）、真实旧版迁移、完整传输饱和/竞态。16 KiB 页适配与专项运行验收按用户决定不在本期范围、不作为 M20 结项门槛（K80 为 4 KiB 页的历史事实、既有 ELF/zipalign 对齐设置与构建配置均保留不动）。M19 仍未取回、不计完成。故本期仍是 **18/19**，M20 进行中，不得记成全量验收完成。
 
 ### 清理与保留
 
