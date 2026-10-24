@@ -129,11 +129,12 @@ function MessageRow({ msg }: { msg: StoredMessage }) {
   );
 }
 
-function MemberWorkPane({ api, scopeId, member, active }: {
+function MemberWorkPane({ api, scopeId, member, active, pageActive = true }: {
   api: DesktopViewApi;
   scopeId: string;
   member: MessageMember;
   active: boolean;
+  pageActive?: boolean;
 }) {
   const identity = api.identity;
   const sess = sessionKey(identity);
@@ -170,8 +171,8 @@ function MemberWorkPane({ api, scopeId, member, active }: {
   }, [member.botId, scopeId]);
 
   useEffect(() => {
-    // 离线不发起 observe：保留最后读取的数据，重连后被动重建。
-    if (!identity || !active || !isLocalMember || !api.transportConnected) return;
+    // 离线/页面不可见（远端页切回本机）不发 observe：保留最后读取的数据，重连后被动重建。
+    if (!identity || !active || !isLocalMember || !api.transportConnected || !pageActive) return;
     const localSess = sess;
     let disposed = false;
     let handle: { close(): Promise<void> } | null = null;
@@ -221,7 +222,8 @@ function MemberWorkPane({ api, scopeId, member, active }: {
       disposed = true;
       if (handle) void handle.close().catch(() => {});
     };
-  }, [api, sess, scopeId, member.botId, member.deviceId, active, isLocalMember, watchTick, online]);
+    // pageActive 必须在依赖里：组件保持挂载，只有依赖变化才会执行上面的 cleanup 关闭观察。
+  }, [api, sess, scopeId, member.botId, member.deviceId, active, isLocalMember, watchTick, online, pageActive]);
 
   /**
    * 只读刷新工作状态（不 sync/不建会话/不唤醒模型）。
@@ -253,12 +255,12 @@ function MemberWorkPane({ api, scopeId, member, active }: {
       activityInflightRef.current = false;
       if (seq === querySeqRef.current) setActivityLoading(false);
     }
-  }, [api, sess, identity, scopeId, member.botId, active, isLocalMember, online]);
+  }, [api, sess, identity, scopeId, member.botId, active, isLocalMember, online, pageActive]);
 
   // 仅 active && 本机成员 && 在线时存在的 1000ms 被动只读刷新（含初次即时读取）；
   // 清理时停止定时器并作废在途结果；离线/非 active/卸载不发新查询，不重建 observe。
   useEffect(() => {
-    if (!identity || !active || !isLocalMember || !api.transportConnected) return;
+    if (!identity || !active || !isLocalMember || !api.transportConnected || !pageActive) return;
     void refreshActivity();
     const timer = window.setInterval(() => { void refreshActivity(); }, 1000);
     return () => {
@@ -268,7 +270,7 @@ function MemberWorkPane({ api, scopeId, member, active }: {
       // in-flight 标记仍由旧请求自己释放，保持“最多一个未结束查询”。
       setActivityLoading(false);
     };
-  }, [refreshActivity, identity, active, isLocalMember, online]);
+  }, [refreshActivity, identity, active, isLocalMember, online, pageActive]);
 
   async function runWorkOp(op: 'stopWork' | 'resumeWork') {
     if (!identity || workBusyRef.current || !api.transportConnected) return;
@@ -774,11 +776,12 @@ function MemberEditor({ current, bots, onChange }: {
   );
 }
 
-function ScopeDetail({ api, scope, bots, onChanged }: {
+function ScopeDetail({ api, scope, bots, onChanged, pageActive = true }: {
   api: DesktopViewApi;
   scope: ScopeInfo;
   bots: BotRecord[];
   onChanged: (s: ScopeInfo) => void;
+  pageActive?: boolean;
 }) {
   const identity = api.identity;
   const sess = sessionKey(identity);
@@ -1028,6 +1031,7 @@ function ScopeDetail({ api, scope, bots, onChanged }: {
             scopeId={scope.scope.scopeId}
             member={m}
             active={workSelection === `${m.deviceId}:${m.botId}`}
+            pageActive={pageActive}
           />
         ))}
       </div>
@@ -1110,7 +1114,7 @@ function ScopeCreateForm({ api, bots, onCreated }: {
   );
 }
 
-export function Scopes({ api }: { api: DesktopViewApi }) {
+export function Scopes({ api, pageActive = true }: { api: DesktopViewApi; pageActive?: boolean }) {
   const identity = api.identity;
   const sess = sessionKey(identity);
   const online = api.transportConnected;
@@ -1284,6 +1288,7 @@ export function Scopes({ api }: { api: DesktopViewApi }) {
               setItems((prev) => prev.map((x) => (x.scope.scopeId === s.scope.scopeId ? s : x)));
               setSelected(s);
             }}
+            pageActive={pageActive}
           />
         ) : detailError ? (
           <div className="error-banner" role="alert">{detailError}</div>

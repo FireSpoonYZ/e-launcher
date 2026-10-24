@@ -1007,14 +1007,19 @@ export function openDesktopClient(options) {
     if (!isPlainObject(params)) {
       throw invalid(`${op} params must be a plain object`);
     }
+    // unobserve only aborts a local subscription synchronously (no network, no wait): it must
+    // never queue behind the 8 in-flight RPCs or a connect/disconnect switch (a switch already
+    // aborts every client observation before its first await), or a cancelled client
+    // observation would leak its broker slot. It cannot accumulate: opUnobserve returns at once.
+    const localCancel = op === 'unobserve';
     if (
-      switching &&
+      !localCancel && switching &&
       op !== 'status' && op !== 'ui_get' && op !== 'ui_set' &&
       op !== 'connect' && op !== 'disconnect'
     ) {
       throw brokerError('RPC_BUSY', 'not-sent', 'desktop client is switching connections');
     }
-    if (inflightRequests.size >= DESKTOP_MAX_IN_FLIGHT_REQUESTS) {
+    if (!localCancel && inflightRequests.size >= DESKTOP_MAX_IN_FLIGHT_REQUESTS) {
       throw brokerError('RPC_BUSY', 'not-sent', 'desktop client request capacity reached');
     }
 

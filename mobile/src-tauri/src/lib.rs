@@ -29,6 +29,8 @@ const MAIN_WEBVIEW_LABEL: &str = "main";
 const MAX_ERROR_MESSAGE_CHARS: usize = 512;
 /// 普通命令提前准入上限，超限立即拒绝，不排队。
 const MAX_ORDINARY_IN_FLIGHT: usize = 8;
+/// 客户端观察清理（clientUnobserve）独立额度：不占普通 8 槽，也不会无界并发。
+const MAX_CLIENT_CLEANUP_IN_FLIGHT: usize = 2;
 /// 单个 request 序列化负载上限（2MiB），在进入 SDK 队列前拦截。
 const MAX_REQUEST_BYTES: usize = 2 * 1024 * 1024;
 
@@ -63,10 +65,18 @@ const ALLOWED_METHODS: &[&str] = &[
   "cancelVoice",
   "uiSettings",
   "pause",
+  // M20 客户端（远端 Host）固定入口；内层 broker 操作由 Kotlin/Node 再校验 16 项白名单。
+  // 客户端子进程的释放只由 UI 会话 close/EOF 驱动，不提供显式关闭命令。
+  "clientRequest",
+  "clientObserve",
+  "clientUnobserve",
 ];
 
-/// 清理类动作：不占普通准入槽，普通槽满时仍可执行。
+/// 不占普通准入槽的本地 UI 动作：普通槽满时仍可执行，不产生 bridge 请求堆积。
 const CLEANUP_METHODS: &[&str] = &["hide", "reconnect"];
+
+/// 客户端观察清理：不占普通槽，改用独立小额度（与 Kotlin 侧同名额度一致），超限立即拒绝不排队。
+const CLIENT_CLEANUP_METHODS: &[&str] = &["clientUnobserve"];
 
 /// 归一化后的错误形状，前端按固定三态处理，不重试。
 #[derive(Debug, Clone, Serialize)]
@@ -177,37 +187,47 @@ async fn call_native(
     .map_err(MobileHostError::from_transport)
 }
 
-/// 普通命令准入（上限 8），try-acquire 不排队；guard 随命令完成/取消释放。
+/// 普通命令准入（上限 8）与客户端清理准入（上限 2）：try-acquire 不排队；guard 随命令完成/取消释放。
 #[derive(Default)]
 struct CommandSlots {
   in_flight: AtomicUsize,
+  client_cleanup_in_flight: AtomicUsize,
 }
 
-struct CommandSlot<'a>(&'a CommandSlots);
+/// 持住一个已占用的额度，析构时归还到对应计数器。
+struct CommandSlot<'a>(&'a AtomicUsize);
 
 impl CommandSlots {
   fn try_acquire(&self) -> Option<CommandSlot<'_>> {
-    let mut current = self.in_flight.load(Ordering::Acquire);
-    loop {
-      if current >= MAX_ORDINARY_IN_FLIGHT {
-        return None;
-      }
-      match self.in_flight.compare_exchange_weak(
-        current,
-        current + 1,
-        Ordering::AcqRel,
-        Ordering::Acquire,
-      ) {
-        Ok(_) => return Some(CommandSlot(self)),
-        Err(actual) => current = actual,
-      }
+    acquire_slot(&self.in_flight, MAX_ORDINARY_IN_FLIGHT)
+  }
+
+  fn try_acquire_client_cleanup(&self) -> Option<CommandSlot<'_>> {
+    acquire_slot(&self.client_cleanup_in_flight, MAX_CLIENT_CLEANUP_IN_FLIGHT)
+  }
+}
+
+fn acquire_slot(counter: &AtomicUsize, limit: usize) -> Option<CommandSlot<'_>> {
+  let mut current = counter.load(Ordering::Acquire);
+  loop {
+    if current >= limit {
+      return None;
+    }
+    match counter.compare_exchange_weak(
+      current,
+      current + 1,
+      Ordering::AcqRel,
+      Ordering::Acquire,
+    ) {
+      Ok(_) => return Some(CommandSlot(counter)),
+      Err(actual) => current = actual,
     }
   }
 }
 
 impl Drop for CommandSlot<'_> {
   fn drop(&mut self) {
-    self.0.in_flight.fetch_sub(1, Ordering::AcqRel);
+    self.0.fetch_sub(1, Ordering::AcqRel);
   }
 }
 
@@ -351,7 +371,8 @@ async fn mobile_host_request(
       ))
     }
   };
-  let is_cleanup = CLEANUP_METHODS.contains(&method.as_str());
+  let is_client_cleanup = CLIENT_CLEANUP_METHODS.contains(&method.as_str());
+  let is_cleanup = is_client_cleanup || CLEANUP_METHODS.contains(&method.as_str());
   let payload = json!({ "method": method, "params": params });
   let encoded_len = serde_json::to_string(&payload)
     .map_err(|_| MobileHostError::structural())?
@@ -366,7 +387,9 @@ async fn mobile_host_request(
 
   let hub = state.hub.clone();
   let plugin = state.plugin.clone();
-  let _slot = if is_cleanup {
+  let _slot = if is_client_cleanup {
+    Some(hub.slots.try_acquire_client_cleanup().ok_or_else(busy)?)
+  } else if is_cleanup {
     None
   } else {
     Some(hub.slots.try_acquire().ok_or_else(busy)?)

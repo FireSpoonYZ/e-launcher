@@ -55,13 +55,13 @@ export class SettingsPanel extends Component<Props, State> {
 
   componentDidUpdate(prev: Props): void {
     // 只按 props 旧值比较；连接/profile/目标变化才丢弃旧数据，断开（同一目标新代次）保留并标离线。
+    // 两侧都为空（null→null）不算变化，否则 setState 会再次进入本方法并无限循环。
     const a = prev.identity;
     const b = this.props.identity;
     const connectionChanged =
-      !b ||
-      a?.profileId !== b.profileId ||
-      a?.kind !== b.kind ||
-      a?.targetDeviceId !== b.targetDeviceId;
+      a?.profileId !== b?.profileId ||
+      a?.kind !== b?.kind ||
+      a?.targetDeviceId !== b?.targetDeviceId;
     if (connectionChanged) {
       this.setState({
         settings: null,

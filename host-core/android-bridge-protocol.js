@@ -62,10 +62,36 @@ export const ANDROID_NATIVE_CODES = new Set([
 // Private bridge legacy migration codes: the public remote control table must
 // stay untouched; these extra codes are allowed on this private JSONL IPC only.
 export const BRIDGE_LEGACY_CODES = new Set(['INVALID_SOURCE', 'BUSY', 'IO_ERROR', 'TOO_LARGE']);
+// Client-mode codes: the desktop broker reports these two stable codes on top of
+// CONTROL_ERROR_CODES; forwarding them verbatim keeps the original outcome.
+export const BRIDGE_CLIENT_CODES = new Set(['REPLACED', 'PENDING_BUSY']);
 export const BRIDGE_ERROR_CODES = new Set([
   ...CONTROL_ERROR_CODES,
   ...ANDROID_NATIVE_CODES,
   ...BRIDGE_LEGACY_CODES,
+  ...BRIDGE_CLIENT_CODES,
+]);
+
+// Client mode is a fixed broker surface: the 16 ordinary desktop-client
+// operations. observe/unobserve stay separate (observe frame + cancel), so no
+// arbitrary method, JS or HTTP ever crosses this IPC.
+export const BRIDGE_CLIENT_OPERATIONS = new Set([
+  'connect',
+  'disconnect',
+  'status',
+  'devices',
+  'call',
+  'settings_get',
+  'settings_set',
+  'service_status',
+  'pending_enqueue',
+  'pending_get',
+  'pending_list',
+  'pending_send',
+  'pending_reconcile',
+  'pending_cancel',
+  'ui_get',
+  'ui_set',
 ]);
 export const BRIDGE_OUTCOMES = CONTROL_OUTCOMES;
 
@@ -148,10 +174,10 @@ function normalizeCredentials(value) {
 /**
  * Validate the single init frame. Everything here is pure validation before
  * any resource is opened; any violation fails the connection. Host mode
- * carries dataRoot/token/optional credentials/initialSettings; settings mode
- * carries only dataRoot. initialSettings passes through normalizeHostSettings
- * (canonical config + 512KiB budget) so no malformed settings ever reach the
- * store.
+ * carries dataRoot/token/optional credentials/initialSettings; settings and
+ * client modes carry only dataRoot. initialSettings passes through
+ * normalizeHostSettings (canonical config + 512KiB budget) so no malformed
+ * settings ever reach the store.
  */
 export function normalizeInitFrame(parsed) {
   if (!isPlainObject(parsed)) throw invalid('INVALID_BODY', 'init frame must be an object');
@@ -159,13 +185,14 @@ export function normalizeInitFrame(parsed) {
   if (parsed.protocol !== BRIDGE_PROTOCOL_VERSION) {
     throw invalid('UNSUPPORTED_SCHEMA', 'unsupported bridge protocol version');
   }
-  if (parsed.mode !== 'host' && parsed.mode !== 'settings') {
-    throw invalid('INVALID_ARGUMENT', "init mode must be 'host' or 'settings'");
+  if (parsed.mode !== 'host' && parsed.mode !== 'settings' && parsed.mode !== 'client') {
+    throw invalid('INVALID_ARGUMENT', "init mode must be 'host', 'settings' or 'client'");
   }
   const dataRoot = assertDataRoot(parsed.dataRoot);
-  if (parsed.mode === 'settings') {
-    rejectUnknownFields(parsed, new Set(['type', 'protocol', 'mode', 'dataRoot']), 'settings init frame');
-    return { mode: 'settings', dataRoot };
+  if (parsed.mode !== 'host') {
+    // settings/client carry only dataRoot: no token, no credentials, no model.
+    rejectUnknownFields(parsed, new Set(['type', 'protocol', 'mode', 'dataRoot']), `${parsed.mode} init frame`);
+    return { mode: parsed.mode, dataRoot };
   }
   rejectUnknownFields(parsed, new Set(['type', 'protocol', 'mode', 'dataRoot', 'token', 'credentials', 'initialSettings']), 'host init frame');
   if (typeof parsed.token !== 'string' || !TOKEN_PATTERN.test(parsed.token)) {

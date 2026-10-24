@@ -302,7 +302,7 @@ function Composer({ text, onChangeText, files, onAddFile, onRemoveFile, canPick,
   );
 }
 
-function PrimaryChatPane({ api, bot }: { api: DesktopViewApi; bot: BotRecord }) {
+function PrimaryChatPane({ api, bot, pageActive = true }: { api: DesktopViewApi; bot: BotRecord; pageActive?: boolean }) {
   const identity = api.identity;
   const sess = sessionKey(identity);
   const online = api.transportConnected;
@@ -504,8 +504,8 @@ function PrimaryChatPane({ api, bot }: { api: DesktopViewApi; bot: BotRecord }) 
   const [stopping, setStopping] = useState(false);
 
   useEffect(() => {
-    // 离线不发起 observe：保留最后读取的 live 数据，重连后被动重建。
-    if (!identity || !api.transportConnected) return;
+    // 离线/页面不可见（远端页切回本机）不发 observe：保留最后读取的 live 数据，重连后被动重建。
+    if (!identity || !api.transportConnected || !pageActive) return;
     const localSess = sess;
     let disposed = false;
     let handle: { close(): Promise<void> } | null = null;
@@ -559,7 +559,7 @@ function PrimaryChatPane({ api, bot }: { api: DesktopViewApi; bot: BotRecord }) 
       disposed = true;
       if (handle) void handle.close().catch(() => {});
     };
-  }, [api, sess, bot.botId, watchTick, online]);
+  }, [api, sess, bot.botId, watchTick, online, pageActive]);
 
   async function stopTask() {
     if (!identity || stopping || !api.transportConnected) return;
@@ -718,7 +718,7 @@ function PrimaryChatPane({ api, bot }: { api: DesktopViewApi; bot: BotRecord }) 
   );
 }
 
-export function BotChats({ api }: { api: DesktopViewApi }) {
+export function BotChats({ api, pageActive = true }: { api: DesktopViewApi; pageActive?: boolean }) {
   const identity = api.identity;
   const sess = sessionKey(identity);
   const online = api.transportConnected;
@@ -837,7 +837,7 @@ export function BotChats({ api }: { api: DesktopViewApi }) {
       </aside>
       <section className="chat-pane">
         {identity && selectedBot ? (
-          <PrimaryChatPane key={`${selectedBot.botId}_${targetKey}`} api={api} bot={selectedBot} />
+          <PrimaryChatPane key={`${selectedBot.botId}_${targetKey}`} api={api} bot={selectedBot} pageActive={pageActive} />
         ) : (
           <div className="empty-state">选择左侧 Bot 查看聊天；如果没有 Bot，请先新建。</div>
         )}

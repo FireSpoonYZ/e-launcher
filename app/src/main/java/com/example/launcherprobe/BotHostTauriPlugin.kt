@@ -687,7 +687,9 @@ class BotHostTauriPlugin(private val hostActivity: Activity) : Plugin(hostActivi
             "snapshot", "status", "settingsGet", "settingsSet", "saveCredentials", "call",
             "legacyList", "legacyPreview", "legacyStatus", "legacyImport", "legacyDraft", "legacyDiscard",
             "observe", "cancelObservation", "voiceSettings", "saveVoiceSettings",
-            "startVoice", "finishVoice", "cancelVoice", "uiSettings", "pause"
+            "startVoice", "finishVoice", "cancelVoice", "uiSettings", "pause",
+            // M20 客户端（远端 Host）固定入口；内层 broker 操作另有 16 项白名单。
+            "clientRequest", "clientObserve", "clientUnobserve"
         )
     }
 }

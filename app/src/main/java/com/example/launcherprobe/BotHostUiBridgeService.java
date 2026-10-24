@@ -30,21 +30,28 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.regex.Pattern;
 
 /**
  * M18 私有 UI↔Host 桥服务：默认进程内 non-exported Binder，只把固定 Host 数据操作转给 BotHostManager。
  * 冷访问只读现有快照；绝不启动/停止 Host、不重放请求；saveCredentials 仅按旧插件语义把别名交给
  * BotHostManager 受控转发（本层无 getter、不落盘、不打印）。
  * 每个 UI 进程一个 socket 会话：EOF/关闭只释放本会话登记过的观察与语音捕获。
+ * M20 新增 client* 固定入口：只在显式 clientRequest 时才启动独立客户端子进程（BotHostClient），
+ * 与本机 Host/FGS 无关；客户端状态/凭据不经本层截取、不落盘、不打印。
  */
 public final class BotHostUiBridgeService extends Service {
     private static final int MAX_OBSERVATIONS = 8;
+    /** broker 强制 UUID 形式的 observationId（其事件也带同一 id），本层同样只接受该形式。 */
+    private static final Pattern OBSERVATION_ID = Pattern.compile(
+            "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}");
 
     private final List<Session> sessions = new ArrayList<>();
     private final Handler main = new Handler(Looper.getMainLooper());
@@ -129,6 +136,8 @@ public final class BotHostUiBridgeService extends Service {
         private final AtomicInteger inFlight = new AtomicInteger();
         private final Map<String, Observation> observations = new HashMap<>();
         private final AtomicBoolean closed = new AtomicBoolean();
+        /** 本 UI 会话在客户端子进程上的身份：单写者校验用，关闭/EOF 后不可再被复用。 */
+        private final String clientOwner = UUID.randomUUID().toString();
         private final BotHostUiProtocol.LineReader lines =
                 new BotHostUiProtocol.LineReader(BotHostUiProtocol.MAX_LINE_BYTES);
         private volatile OutputStream out;
@@ -257,6 +266,8 @@ public final class BotHostUiBridgeService extends Service {
             outputBytes.set(0);
             outputFrames.set(0);
             releaseOwnedResources(failure, false);
+            // 只回收本会话持有的客户端子进程（未持有则为空操作）；不触碰本机 Host。
+            client().release(clientOwner);
             out = null;
             ParcelFileDescriptor endpoint;
             synchronized (fdLock) {
@@ -283,8 +294,10 @@ public final class BotHostUiBridgeService extends Service {
                         new BridgeException("INVALID_ARGUMENT", "not-sent", "不支持的操作")));
                 return;
             }
-            // pause 为保留清理槽：不受 8 个普通 in-flight 限制，普通请求满载时仍能生效。
-            boolean reserved = BotHostUiProtocol.OP_PAUSE.equals(op);
+            // pause 与 clientUnobserve 为保留清理槽：不受 8 个普通 in-flight 限制，普通请求满载时
+            // 仍能生效；数量额度由 BotHostUiBridgeClient 的独立清理槽（pause 单合并槽 + 客户端
+            // 观察清理 ≤2）约束，不在本层无界堆积。
+            boolean reserved = BotHostUiProtocol.isCleanupOperation(op);
             if (!reserved && inFlight.incrementAndGet() > BotHostUiProtocol.MAX_IN_FLIGHT) {
                 inFlight.decrementAndGet();
                 send(BotHostUiProtocol.responseError(id,
@@ -371,6 +384,12 @@ public final class BotHostUiBridgeService extends Service {
                     return cancelVoice(params);
                 case "uiSettings":
                     return done(uiSettings());
+                case "clientRequest":
+                    return clientRequest(params);
+                case "clientObserve":
+                    return clientObserve(params);
+                case "clientUnobserve":
+                    return cancelObservation(params).thenApply(ignored -> new JSONObject());
                 case BotHostUiProtocol.OP_PAUSE:
                     return pause();
                 default:
@@ -382,20 +401,88 @@ public final class BotHostUiBridgeService extends Service {
             return CompletableFuture.completedFuture(value == null ? new JSONObject() : value);
         }
 
+        // ---------- 客户端（M20 远端 Host）：首次 clientRequest 才懒启动、单写者 ----------
+
+        /** 固定 broker 操作透传；返回 {value:<broker 结果>}，原 code/outcome 不改写。 */
+        private CompletableFuture<JSONObject> clientRequest(JSONObject params) throws IOException {
+            ensureOpen();
+            String op = required(params, "op");
+            JSONObject input = params.has("params") && !params.isNull("params")
+                    ? requiredObject(params, "params")
+                    : new JSONObject();
+            return client().request(clientOwner, () -> !closed.get(), op, input);
+        }
+
+        /** 先登记再派发：broker 首个 snapshot 早于客户端句柄也能路由回本会话。 */
+        private CompletableFuture<JSONObject> clientObserve(JSONObject params) throws IOException {
+            String observationId = required(params, "observationId");
+            String targetDeviceId = required(params, "targetDeviceId");
+            JSONObject target = requiredObject(params, "target");
+            // broker 以 UUID 作为观察 id，且事件带着它回来：要求同上，避免两套 id。
+            if (!OBSERVATION_ID.matcher(observationId).matches()) {
+                throw new BridgeException("INVALID_ARGUMENT", "not-sent", "observationId 须为 UUID");
+            }
+            Observation record = new Observation(observationId, true);
+            synchronized (resources) {
+                ensureOpen();
+                if (observations.size() >= MAX_OBSERVATIONS) throw new IllegalStateException("观察数已达上限");
+                if (observations.containsKey(observationId)) throw new IllegalArgumentException("observationId 已存在");
+                observations.put(observationId, record);
+            }
+            return client().observe(clientOwner, () -> !closed.get(), () -> observationActive(record),
+                            observationId,
+                            BotHostUiProtocol.object("targetDeviceId", targetDeviceId, "target", target),
+                            event -> onClientFrame(record, event),
+                            error -> onObservationError(record, error))
+                    .whenComplete((value, failure) -> {
+                        if (failure == null) return;
+                        // 派发前失败：移除本会话登记，并只回该请求错误（不伪造事件）。
+                        synchronized (resources) {
+                            record.closed = true;
+                            if (observations.get(observationId) == record) observations.remove(observationId);
+                        }
+                    });
+        }
+
+        /** 记录仍属本会话且未关闭：排队前/派发后复核，避免已撤销的观察被重新建立。 */
+        private boolean observationActive(Observation record) {
+            synchronized (resources) {
+                return !record.closed && observations.get(record.id) == record;
+            }
+        }
+
+        /** client 模式观察帧即 DesktopObservationEvent，原样作为 clientFrame 的 data。 */
+        private void onClientFrame(Observation record, JSONObject event) {
+            if (!"event".equals(event.optString("type"))) return;
+            boolean terminal;
+            synchronized (resources) {
+                if (record.closed || observations.get(record.id) != record) return;
+                JSONObject inner = event.optJSONObject("frame");
+                terminal = event.has("error") || (inner != null && "end".equals(inner.optString("type")));
+                if (terminal) {
+                    record.closed = true;
+                    observations.remove(record.id);
+                }
+            }
+            send(BotHostUiProtocol.event(BotHostUiProtocol.EVENT_CLIENT_FRAME, event));
+        }
+
         private void ensureOpen() throws IOException {
             if (closed.get()) throw new BridgeException("CLOSED", "not-sent", "UI 通道已关闭");
         }
 
         // ---------- 观察（本会话独占；断开/暂停只停自己） ----------
 
-        /** 先登记再 observe，避免初始帧早于句柄；容量上限 8。 */
+        /** 先登记再 observe，避免初始帧早于句柄；容量上限 8。client 记录无 manager 句柄，按 id 撤销。 */
         private final class Observation {
             final String id;
+            final boolean client;
             volatile boolean closed;
             volatile BotHostManager.Observation handle;
 
-            Observation(String id) {
+            Observation(String id, boolean client) {
                 this.id = id;
+                this.client = client;
             }
         }
 
@@ -410,7 +497,7 @@ public final class BotHostUiBridgeService extends Service {
             if ("work".equals(kind) && target.optString("scopeId").isEmpty()) {
                 throw new IllegalArgumentException("target.scopeId 无效");
             }
-            Observation record = new Observation(observationId);
+            Observation record = new Observation(observationId, false);
             synchronized (resources) {
                 ensureOpen(); // 与 close/pause 的释放串行：清理后不再创建资源
                 if (observations.size() >= MAX_OBSERVATIONS) throw new IllegalStateException("观察数已达上限");
@@ -444,13 +531,16 @@ public final class BotHostUiBridgeService extends Service {
         private CompletableFuture<JSONObject> cancelObservation(JSONObject params) {
             String observationId = required(params, "observationId");
             BotHostManager.Observation handle;
+            boolean clientObservation;
             synchronized (resources) {
                 Observation record = observations.remove(observationId);
                 if (record == null) return done(new JSONObject());
                 record.closed = true;
+                clientObservation = record.client;
                 handle = record.handle;
             }
-            closeObservation(handle);
+            if (clientObservation) client().cancel(clientOwner, observationId);
+            else closeObservation(handle);
             return done(new JSONObject());
         }
 
@@ -471,11 +561,19 @@ public final class BotHostUiBridgeService extends Service {
 
         private void onObservationError(Observation record, Throwable error) {
             BotHostManager.Observation handle;
+            boolean clientObservation;
             synchronized (resources) {
                 if (record.closed || observations.get(record.id) != record) return;
                 record.closed = true;
                 observations.remove(record.id);
+                clientObservation = record.client;
                 handle = record.handle;
+            }
+            if (clientObservation) {
+                // 客户端观察错误同样按 DesktopObservationEvent 形状回传（带 error 成员）。
+                send(BotHostUiProtocol.event(BotHostUiProtocol.EVENT_CLIENT_FRAME,
+                        BotHostUiProtocol.clientErrorEvent(record.id, BotHostUiProtocol.errorObject(error))));
+                return;
             }
             send(BotHostUiProtocol.event(BotHostUiProtocol.EVENT_HOST_FRAME,
                     BotHostUiProtocol.object("observationId", record.id,
@@ -501,6 +599,16 @@ public final class BotHostUiBridgeService extends Service {
                 voiceRequestId = null;
             }
             for (Observation record : records) {
+                if (record.client) {
+                    // pause 只撤销本会话的客户端观察（连接、待发账本与目标 Agent 不变）；
+                    // close 路径直接回收子进程，不再逐个发 unobserve。
+                    if (notify) {
+                        send(BotHostUiProtocol.event(BotHostUiProtocol.EVENT_CLIENT_FRAME,
+                                BotHostUiProtocol.clientErrorEvent(record.id, BotHostUiProtocol.errorObject(failure))));
+                        client().cancel(clientOwner, record.id);
+                    }
+                    continue;
+                }
                 if (notify) {
                     send(BotHostUiProtocol.event(BotHostUiProtocol.EVENT_HOST_FRAME,
                             BotHostUiProtocol.object("observationId", record.id,
@@ -694,6 +802,14 @@ public final class BotHostUiBridgeService extends Service {
     }
 
     // ---------- 共享工具 ----------
+
+    /**
+     * 默认进程内唯一的客户端管理器：Service 重建不重置上一代的 starting/closing 占有权，
+     * 冷状态只取实例（不启动 Node、不准备资产）。
+     */
+    private BotHostClient client() {
+        return BotHostClient.get(this);
+    }
 
     /** 仅复用旧 DevicePlugin/AppAppearance 的 "ui" 偏好键：language 与外观(theme)；不读 Pi 配置/凭据。 */
     private JSONObject uiSettings() {

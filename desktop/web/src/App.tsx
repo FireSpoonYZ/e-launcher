@@ -42,10 +42,21 @@ interface AppState {
 
 interface AppProps {
   api: DesktopPanelApi;
+  /** false = 页面不可见（手机切回本机页）：停止面板观察/只读轮询，不断连、不释放会话。 */
+  pageActive?: boolean;
 }
 
 function runId(): string {
   return `p-${Date.now().toString(36)}-${crypto.randomUUID().slice(0, 8)}`;
+}
+
+/** 实际连接状态统一口径：transport 已断开/身份已作废时，缓存的 connected 不得再当在线。
+ * connecting 仍是当前正在连接，failed 指上次连接失败；纯展示，不新增 broker 调用、不自动重连。 */
+function phaseText(status: DesktopClientStatus | null, transportConnected: boolean): string {
+  if (!status) return '未连接';
+  if (status.phase === 'connecting') return '连接中';
+  if (status.phase === 'failed') return '连接失败';
+  return status.phase === 'connected' && transportConnected ? '已连接' : '未连接';
 }
 
 interface DevicesSectionState {
@@ -405,15 +416,7 @@ export class App extends Component<AppProps, AppState> {
     const transportConnected = this.state.transportConnected;
     const status = this.state.status;
     const connection = status?.connection ?? null;
-    const phaseLabel = !status
-      ? '未连接'
-      : status.phase === 'connected'
-        ? '已连接'
-        : status.phase === 'connecting'
-          ? '连接中'
-          : status.phase === 'failed'
-            ? '连接失败'
-            : '未连接';
+    const phaseLabel = phaseText(status, transportConnected);
     return (
       <div className="desktop-shell">
         <aside className="app-sidebar">
@@ -605,7 +608,11 @@ export class App extends Component<AppProps, AppState> {
         )}
         {this.state.status && (
           <p className="status">
-            {`阶段：${this.state.status.phase} · 代次：${this.state.status.generation}`}
+            {`阶段：${phaseText(this.state.status, transportConnected)}`}
+            {this.state.status.phase === 'connected' && !transportConnected
+              ? `（最后观测 ${this.state.status.phase}）`
+              : ''}
+            {` · 代次：${this.state.status.generation}`}
           </p>
         )}
       </div>
@@ -617,12 +624,22 @@ export class App extends Component<AppProps, AppState> {
     const api = this.props.api;
     const identity = this.state.identity;
     const transportConnected = this.state.transportConnected;
+    const pageActive = this.props.pageActive !== false;
     const snapshot = api.snapshot;
     if (view === 'settings') {
       return <SettingsPanel api={api} identity={identity} transportConnected={transportConnected} />;
     }
     if (view === 'pending') {
       return <PendingPanel api={api} identity={identity} transportConnected={transportConnected} />;
+    }
+    // relay 已连接但未从设备目录选目标时，业务面板的空 target 请求只会得到错误；先要求选目标。
+    // 待发送（离线入队）与 Host 设置（自带未连接/relay 只读提示）保持原逻辑。
+    if (identity && identity.targetDeviceId === '') {
+      return (
+        <div className="workspace-body">
+          <p className="empty-state">请从设备目录选择目标Host</p>
+        </div>
+      );
     }
     if (view === 'scopes') {
       if (!identity || !snapshot) {
@@ -632,7 +649,7 @@ export class App extends Component<AppProps, AppState> {
           </div>
         );
       }
-      return <Scopes api={api} />;
+      return <Scopes api={api} pageActive={pageActive} />;
     }
     if (!identity || !snapshot) {
       return (
@@ -641,12 +658,12 @@ export class App extends Component<AppProps, AppState> {
         </div>
       );
     }
-    return <BotChats api={api} />;
+    return <BotChats api={api} pageActive={pageActive} />;
   }
 }
 
 /** 应用装配 ErrorBoundary：加载失败显示明确错误，提供只读重试。 */
-export class DesktopApp extends Component<{ api: DesktopPanelApi }, { failed: string | null }> {
+export class DesktopApp extends Component<{ api: DesktopPanelApi; pageActive?: boolean }, { failed: string | null }> {
   state = { failed: null as string | null };
 
   static getDerivedStateFromError(error: unknown): { failed: string } {
@@ -662,6 +679,6 @@ export class DesktopApp extends Component<{ api: DesktopPanelApi }, { failed: st
         </div>
       );
     }
-    return <App api={this.props.api} />;
+    return <App api={this.props.api} pageActive={this.props.pageActive} />;
   }
 }

@@ -63,14 +63,17 @@ public final class BotHostUiBridgeClient {
     private static final long MAX_WRITER_BYTES = 4L * 1024 * 1024;
     /** 预留给 pause 清理的字节容量：普通请求不得把它挤掉。 */
     private static final long RESERVED_CLEANUP_BYTES = 64L * 1024;
+    /** 客户端清理（clientUnobserve）独立额度：不占普通 8 槽，也不会无界排队/堆 future。 */
+    private static final int MAX_CLIENT_CLEANUP_IN_FLIGHT = 2;
 
     private enum State { IDLE, BINDING, OPEN, FAILED, CLOSED }
 
-    /** 请求条目：入队/写出开始/期限/字节配额同 state lock 保护；reserved 为 pause 清理保留槽。 */
+    /** 请求条目：入队/写出开始/期限/字节配额同 state lock 保护；reserved 为 pause 保留槽。 */
     private static final class Job {
         final String id;
         final byte[] line;
         final boolean reserved;
+        final boolean clientCleanup;
         final CompletableFuture<JSONObject> future;
         long bytes;
         boolean bytesHeld;
@@ -80,10 +83,11 @@ public final class BotHostUiBridgeClient {
         boolean wrote;
         Future<?> timer;
 
-        Job(String id, byte[] line, boolean reserved, CompletableFuture<JSONObject> future) {
+        Job(String id, byte[] line, boolean reserved, boolean clientCleanup, CompletableFuture<JSONObject> future) {
             this.id = id;
             this.line = line;
             this.reserved = reserved;
+            this.clientCleanup = clientCleanup;
             this.future = future;
         }
     }
@@ -133,6 +137,8 @@ public final class BotHostUiBridgeClient {
     private int failures;
     private long eventBytes;
     private long queuedBytes;
+    /** 客户端观察清理当前登记数（≤ MAX_CLIENT_CLEANUP_IN_FLIGHT）。 */
+    private int clientCleanupInFlight;
     private boolean draining;
 
     public BotHostUiBridgeClient(Context context, Listener listener) {
@@ -165,6 +171,8 @@ public final class BotHostUiBridgeClient {
             return failed(new BridgeException("INVALID_ARGUMENT", "not-sent", "不支持的操作"));
         }
         boolean reserved = BotHostUiProtocol.OP_PAUSE.equals(method);
+        boolean cleanup = BotHostUiProtocol.isCleanupOperation(method);
+        boolean clientCleanup = BotHostUiProtocol.isClientCleanupOperation(method);
         Job job;
         ServiceConnection bind = null;
         int session = 0;
@@ -172,7 +180,14 @@ public final class BotHostUiBridgeClient {
             if (state == State.CLOSED) return failed(new BridgeException("CLOSED", "not-sent", "连接已关闭"));
             if (state == State.FAILED) return failed(latchedNotSent());
             if (reserved && reservedPause != null) return reservedPause.future;
-            if (!reserved && pending.size() >= BotHostUiProtocol.MAX_IN_FLIGHT) {
+            if (clientCleanup) {
+                // 清理独立额度：超限立即拒绝（不排队、不建线程），也不挤占普通登记。
+                if (clientCleanupInFlight >= MAX_CLIENT_CLEANUP_IN_FLIGHT) {
+                    return failed(new BridgeException("BUSY", "not-sent", "清理请求并发已满"));
+                }
+            } else if (!reserved
+                    && pending.size() - clientCleanupInFlight >= BotHostUiProtocol.MAX_IN_FLIGHT) {
+                // 普通 8 槽不挤掉 pause 的独立合并槽（pause 不占普通额度，也不被普通满载拒绝）。
                 return failed(new BridgeException("BUSY", "not-sent", "请求并发已满"));
             }
             String id = UUID.randomUUID().toString();
@@ -183,17 +198,21 @@ public final class BotHostUiBridgeClient {
                 return failed(invalid);
             }
             long size = line.length + 1L;
-            long limit = reserved ? MAX_WRITER_BYTES : MAX_WRITER_BYTES - RESERVED_CLEANUP_BYTES;
+            long limit = cleanup ? MAX_WRITER_BYTES : MAX_WRITER_BYTES - RESERVED_CLEANUP_BYTES;
             if (queuedBytes + size > limit) {
                 return failed(new BridgeException("BUSY", "not-sent", "请求发送队列繁忙"));
             }
-            job = new Job(id, line, reserved, new CompletableFuture<>());
+            job = new Job(id, line, reserved, clientCleanup, new CompletableFuture<>());
             job.bytes = size;
             job.bytesHeld = true;
             job.deadline = SystemClock.elapsedRealtime() + REQUEST_DEADLINE_MS;
             queuedBytes += size;
-            if (reserved) reservedPause = job;
-            else pending.put(id, job);
+            if (reserved) {
+                reservedPause = job;
+            } else {
+                pending.put(id, job);
+                if (clientCleanup) clientCleanupInFlight++;
+            }
             outbox.add(job);
             try {
                 job.timer = clock.schedule(() -> expire(job), REQUEST_DEADLINE_MS, TimeUnit.MILLISECONDS);
@@ -626,8 +645,12 @@ public final class BotHostUiBridgeClient {
     /** 只摘除登记/计时/待写与字节配额，不完成 future（供响应路径自行交付）。 */
     private boolean releaseJobLocked(Job job) {
         if (!ownedLocked(job)) return false;
-        if (job.reserved) reservedPause = null;
-        else pending.remove(job.id);
+        if (job.reserved) {
+            reservedPause = null;
+        } else {
+            pending.remove(job.id);
+            if (job.clientCleanup) clientCleanupInFlight--;
+        }
         outbox.remove(job);
         releaseBytesLocked(job);
         if (job.timer != null) {
@@ -655,6 +678,7 @@ public final class BotHostUiBridgeClient {
         outbox.clear();
         for (Job job : jobs) {
             releaseBytesLocked(job);
+            if (job.clientCleanup) clientCleanupInFlight--;
             if (job.timer != null) {
                 job.timer.cancel(false);
                 job.timer = null;

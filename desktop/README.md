@@ -1,6 +1,6 @@
 # e-助手桌面客户端（Windows / Linux x64）
 
-> **状态说明**：模块 17（Tauri Windows / Linux 客户端）已交付并获父助手限定范围验收，总完成数 **17/20**；M18–M20 仍待交付。父已在本机真实运行 Windows/Linux 构建、Windows NSIS 安装版、Linux DEB 安装版与 AppImage 提取运行；完整跨设备 Relay/CA/目标切换、全格式安装与持续负载验收归模块 20。
+> **状态说明**：模块 17（Tauri Windows / Linux 客户端）已交付并获父助手限定范围验收，总完成数 **17/20**；M18（Tauri Android 界面）已交付，M19 由用户暂停（未验收代码只在 git stash `02f1396f`），M20 进行中（本轮交付 M20-01，总完成仍 18/20）。父已在本机真实运行 Windows/Linux 构建、Windows NSIS 安装版、Linux DEB 安装版与 AppImage 提取运行；Windows GUI 另已经真实 TLS relay 续聊手机创建的原 Bot。完整跨设备 Relay/CA 全矩阵、全格式安装与持续负载验收仍归模块 20。
 
 ## 架构与生命周期边界
 
@@ -130,4 +130,4 @@ node host-core/host-service-cli.js \
 - 已实际运行：Windows/Linux debug 与 no-bundle 构建、Windows Release（MSI + NSIS）、Linux Release（DEB + RPM + AppImage，未削减 targets）；Windows 用 NSIS 静默安装到私有测试目录后运行并完成合成 Host 任务，MSI 仅以 WiX `dark` 解包核实（Product Codepage 936、Language 2052），**未执行 MSI 安装**；Linux 实际安装 DEB 并运行，卸载后以 `AppImage --appimage-extract-and-run` 运行且 `clientId`/配置保留、冷态不自动连接，**未测 FUSE 挂载模式与 RPM 安装**。
 - 已实际运行：Windows/Linux 基础 GUI、Node 客户端冷启动/重开、Unicode 与含空格 cwd、发送/接收实时回复；900x600 主聊天与群聊布局，展开原始历史后发送区仍可见。Windows 实测关闭客户端时 Host 仍在 busy 的任务在窗口与 Node 子进程退出后继续完成；Linux 分别验证普通 debug 窗口与 AppImage 原生关闭后客户端/Node 子进程回收、Host 仍存活（未在 Linux 复现 busy 任务连续性）。
 - 已实际运行：本地文件选择返回绝对路径与大小（如 `desktop/icon.svg`，496 B），发送内容为 `[文件路径引用，未上传]`；草稿冲突码、pending 入队/取消/重连不重放、设置 CAS 冲突与未知结果锁；9 份客户端 SQLite 完整性/FK 检查；安装版 Windows/Linux 数据目录未检出精确合成 token（profile 名称阳性对照命中），输入框 token 清空，`localStorage`/`sessionStorage` 均 0 条。
-- 未覆盖：跨物理设备 Relay/CA 与目标切换、全链路压力与交错、FUSE 挂载、MSI 安装/卸载、RPM 安装、Android（M18）与 TUI（M19）。这些归模块 20 的整体验收，不能由本文的本机结果外推。
+- 未覆盖：跨物理设备 Relay/CA 全矩阵与目标切换（Windows GUI 经 relay 续聊手机创建的 Bot 已在 M20-01 实测，Linux GUI 跨机未跑）、全链路压力与交错、FUSE 挂载、MSI 安装/卸载、RPM 安装、ARM64 真机与原生功能；TUI（M19）因用户暂停未交付。这些属模块 20 的整体验收，不能由本文的本机结果外推。

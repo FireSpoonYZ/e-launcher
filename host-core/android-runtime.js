@@ -1,9 +1,11 @@
 // host-core/android-runtime.js
 // M15 Android Host child runtime: bounded private JSONL IPC with the Java
-// supervisor, host/settings process modes, and the native tool bridge.
+// supervisor, host/settings/client process modes, and the native tool bridge.
 // Reuses the M14 control/live/settings adapters (createLocalControlAdapter,
-// createControlClient, openHostService/openHostSettings); no duplicate
-// business router or Runtime. Nothing starts on import; runAndroidRuntime()
+// createControlClient, openHostService/openHostSettings) and, in client mode
+// only, the M17 desktop broker (openDesktopClient) as a client-only transport.
+// Client mode never opens a Host, never reads model credentials and never
+// dispatches native tool calls. Nothing starts on import; runAndroidRuntime()
 // (or the strict entrypoint guard) drives the process stdio loop.
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
@@ -13,6 +15,7 @@ import { createControlClient } from './control-client.js';
 import { openHostService } from './host-service.js';
 import { openHost } from './host.js';
 import { openHostSettings } from './host-settings.js';
+import { openDesktopClient } from './desktop-client.js';
 import { previewLegacyImport, getLegacyImportStatus, readLegacyDraft } from './legacy-import.js';
 import {
   BRIDGE_MAX_FRAME_BYTES,
@@ -21,6 +24,7 @@ import {
   BRIDGE_MAX_OBSERVERS,
   BRIDGE_MAX_NATIVE_CALLS,
   BRIDGE_NATIVE_TIMEOUT_MS,
+  BRIDGE_CLIENT_OPERATIONS,
   BRIDGE_ERROR_CODES,
   BRIDGE_OUTCOMES,
   normalizeInitFrame,
@@ -82,6 +86,12 @@ function boundDiag(text) {
 function errorWithOutcome(err, outcome) {
   err.outcome = outcome;
   return err;
+}
+
+function isPlainObject(value) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
 }
 
 function fire(promise) {
@@ -221,13 +231,14 @@ export function createAndroidBridge(options = {}) {
   const exitOnClose = options.exitOnClose ?? (input === process.stdin && output === process.stdout);
   const onExit = options.onExit ?? ((code) => process.exit(code));
 
-  let mode = null; // null | 'host' | 'settings'
+  let mode = null; // null | 'host' | 'settings' | 'client'
   let phase = 'starting'; // starting | ready | closing | closed
   let admitting = true;
   let terminated = false;
   let service = null;
   let settingsStore = null;
   let settingsHost = null; // offline settings-mode registry handle for legacy preview/status/draft
+  let broker = null; // client-mode desktop broker (never opens a Host/Runtime/model)
   let deviceId = null;
   let controlUrl = null;
   let token = null;
@@ -510,6 +521,16 @@ export function createAndroidBridge(options = {}) {
         }
         settingsHost = null;
       }
+      if (broker) {
+        // Client mode: close the broker (aborts client transports and
+        // observations only; never stops a Host or Agent).
+        try {
+          await broker.close();
+        } catch (err) {
+          errors.push(err);
+        }
+        broker = null;
+      }
       unapplyCredentials();
       phase = 'closed';
       // Only a successfully written closed frame can be called graceful; any
@@ -663,7 +684,8 @@ export function createAndroidBridge(options = {}) {
 
   function runCall(cmd) {
     assertFreshId(cmd.id);
-    if (calls.size >= BRIDGE_MAX_CONTROL_CALLS || !adapter) {
+    const clientCall = mode === 'client';
+    if (calls.size >= BRIDGE_MAX_CONTROL_CALLS || (clientCall ? !broker : !adapter)) {
       void busyError(cmd.id);
       return;
     }
@@ -672,9 +694,22 @@ export function createAndroidBridge(options = {}) {
     calls.set(cmd.id, rec);
     rec.op = (async () => {
       try {
-        const result = await adapter(deviceId, cmd.method, cmd.params, { signal: controller.signal });
+        let result;
+        if (clientCall) {
+          // The call frame's method is a fixed broker operation; results are
+          // wrapped once as {value} so null/array results survive IPC.
+          if (!BRIDGE_CLIENT_OPERATIONS.has(cmd.method)) {
+            throw messageError('INVALID_ARGUMENT', 'unsupported client operation');
+          }
+          const value = await broker.request(cmd.method, cmd.params);
+          if (controller.signal.aborted) return; // cancelled: never answer late
+          result = { value: value === undefined ? null : value };
+        } else {
+          result = await adapter(deviceId, cmd.method, cmd.params, { signal: controller.signal });
+        }
         await sendResultChecked(cmd.id, result);
       } catch (err) {
+        if (clientCall && controller.signal.aborted) return;
         await sendError(cmd.id, err);
       } finally {
         calls.delete(cmd.id);
@@ -777,14 +812,117 @@ export function createAndroidBridge(options = {}) {
   function runCancel(cmd) {
     const call = calls.get(cmd.id);
     if (call) {
-      call.controller.abort(); // only aborts the HTTP fetch; never the Agent
+      call.controller.abort(); // only aborts the fetch/broker wait; never the Agent
       return;
     }
     const observer = observers.get(cmd.id);
     if (observer) {
-      observer.controller.abort();
+      if (mode === 'client') detachClientObservation(cmd.id, observer);
+      else observer.controller.abort();
     }
     // Unknown ids are ignored (cancel is idempotent, fire-and-forget).
+  }
+
+  // ---- client mode: broker observations (reuses the observe/cancel frames) ----
+
+  // The observe frame's target in client mode is {targetDeviceId, target}.
+  function runClientObserve(cmd) {
+    const target = cmd.target;
+    const targetDeviceId = isPlainObject(target) ? target.targetDeviceId : null;
+    const liveTarget = isPlainObject(target) ? target.target : null;
+    if (typeof targetDeviceId !== 'string' || targetDeviceId === '' || !isPlainObject(liveTarget)) {
+      void fire(sendError(cmd.id, messageError('INVALID_ARGUMENT', 'client observe target must be {targetDeviceId, target}')));
+      return;
+    }
+    if (observers.size >= BRIDGE_MAX_OBSERVERS || !broker) {
+      void busyError(cmd.id);
+      return;
+    }
+    const controller = new AbortController();
+    const rec = { controller, done: false, op: null, terminal: null };
+    // Register before dispatch so an immediate snapshot cannot arrive unrouted.
+    observers.set(cmd.id, rec);
+    rec.op = (async () => {
+      try {
+        await broker.request('observe', { observationId: cmd.id, targetDeviceId, target: liveTarget });
+        if (rec.done || controller.signal.aborted) {
+          // cancel/close raced the dispatch: drop only this observation, no replay.
+          rec.done = true;
+          releaseClientObservation(cmd.id, rec);
+        }
+      } catch (err) {
+        finishObserver(cmd.id, err);
+        if (rec.terminal) {
+          try {
+            await rec.terminal;
+          } catch {
+            /* already failed */
+          }
+        }
+        dropObserver(cmd.id, rec);
+      }
+    })();
+    rec.op.catch(() => {});
+  }
+
+  // Broker events are DesktopObservationEvents; forward them unchanged and
+  // release the slot on a terminal (error or inner end) event. A local delivery
+  // failure still goes through the real unobserve path: the subscription must
+  // not keep running once the bridge record is gone.
+  function handleClientEvent(event) {
+    if (!isPlainObject(event) || event.type !== 'event' || typeof event.observationId !== 'string') return;
+    const id = event.observationId;
+    const rec = observers.get(id);
+    if (!rec || rec.done) return;
+    const terminal = event.error !== undefined
+      || (isPlainObject(event.frame) && event.frame.type === 'end');
+    fire(sendObserverFrame(id, event).then((ok) => {
+      if (!ok) {
+        finishObserver(id, messageError('BACKPRESSURE', 'client frame was not written'));
+        releaseClientObservation(id, rec);
+        return;
+      }
+      if (terminal) {
+        // 终态事件：broker 侧已自行结束该观察，只需丢本地记录。
+        rec.done = true;
+        dropObserver(id, rec);
+      }
+    }).catch((err) => {
+      finishObserver(id, err instanceof OversizeError
+        ? messageError('RESPONSE_TOO_LARGE', 'client frame exceeds 1MiB')
+        : messageError('INTERNAL', 'client frame was not written'));
+      releaseClientObservation(id, rec);
+    }));
+  }
+
+  // Remove only this record: a later observation may legitimately reuse the id.
+  function dropObserver(id, rec) {
+    if (observers.get(id) === rec) observers.delete(id);
+  }
+
+  // Drop the local record and run the broker's local unobserve directly (it is exempt from
+  // the in-flight and switching gates). A genuine failure closes the current client session:
+  // never swallow it, and never await our own close from inside a broker callback.
+  function releaseClientObservation(id, rec) {
+    dropObserver(id, rec);
+    if (!broker) return;
+    fire(broker.request('unobserve', { observationId: id }).catch((err) => {
+      failClientSession(err);
+    }));
+  }
+
+  function detachClientObservation(id, rec) {
+    if (!rec || rec.done) return;
+    rec.done = true;
+    releaseClientObservation(id, rec);
+  }
+
+  // Client-mode 会话收尾：只有真正失败才走这里（已在关闭流程中则不重入），交给 shutdown
+  // 流程异步完成，不在回调里同步等待自身关闭。
+  function failClientSession(err) {
+    diag(`android client observation cleanup failed: ${fixedCode(err)}`);
+    if (phase === 'closing' || phase === 'closed' || terminated) return;
+    void requestShutdown(1, null, false, { awaitStartup: false }).then((code) => terminate(code));
   }
 
   function runStatus(cmd) {
@@ -982,7 +1120,8 @@ export function createAndroidBridge(options = {}) {
         runCall(cmd);
         break;
       case 'observe':
-        runObserve(cmd);
+        if (mode === 'client') runClientObserve(cmd);
+        else runObserve(cmd);
         break;
       case 'cancel':
         runCancel(cmd);
@@ -1078,6 +1217,60 @@ export function createAndroidBridge(options = {}) {
       if (phase === 'closing' || phase === 'closed' || terminated) return;
       phase = 'ready';
       flushQueuedNative(); // ready has been written; only now may native_call fly
+      return;
+    }
+    if (init.mode === 'client') {
+      // client mode: broker only (ui store + pending ledger + fixed transports).
+      // Never opens a Host/Runtime, never reads model credentials, never emits
+      // native tool calls. The broker's clientId (not secret) is the ready id.
+      try {
+        broker = openDesktopClient({ dataRoot: init.dataRoot, onEvent: handleClientEvent });
+        const status = await broker.request('status', {});
+        deviceId = status && typeof status.clientId === 'string' && status.clientId !== '' ? status.clientId : null;
+        if (!deviceId) throw messageError('INTERNAL', 'client broker reported no clientId');
+      } catch (err) {
+        if (broker) {
+          try {
+            await broker.close();
+          } catch {
+            /* best effort */
+          }
+          broker = null;
+        }
+        await failStartup(err);
+        return;
+      }
+      if (phase === 'closing' || phase === 'closed' || terminated) {
+        try {
+          await broker.close();
+        } catch {
+          /* best effort */
+        }
+        broker = null;
+        return;
+      }
+      try {
+        const ok = await sendFrameObject(
+          encodeReadyFrame({
+            deviceId,
+            url: null,
+            nodeVersion: process.version,
+            platform: process.platform,
+            arch: process.arch,
+          }),
+          BRIDGE_MAX_CONTROL_BYTES,
+          READY_LABEL,
+        );
+        if (!ok) {
+          await failStartup(messageError('INTERNAL', 'ready frame was not written'));
+          return;
+        }
+      } catch (err) {
+        await failStartup(err);
+        return;
+      }
+      if (phase === 'closing' || phase === 'closed' || terminated) return;
+      phase = 'ready';
       return;
     }
     // settings mode: offline settings store + registry handle only; never opens

@@ -1,20 +1,24 @@
 // M18 mobile（Tauri 辅助进程）Host 传输：Tauri 命令 → android-host 插件的同进程私有 Binder 会话。
 // 4 个命令：mobile_host_request(method,params) / mobile_host_listen(onEvent) /
 // mobile_host_ack(deliveryId) / mobile_host_unlisten()；事件帧
-// {deliveryId, event:'hostFrame'|'voiceEvent', data:<既有 BotHost DTO>}；
+// {deliveryId, event:'hostFrame'|'voiceEvent'|'clientFrame', data:<DTO>}；
 // listen 结果必须为 {listening:true, streamId:'<uuid>:<generation>'}，deliveryId = streamId + ':' + sequence。
+// M20 远端页（其他设备）复用同一个 mobile_host_request，method 为 clientRequest/clientObserve/
+// clientUnobserve，事件为同一流上的 clientFrame（不是公开 listener 名）。
 // 只有 native/index.ts 在 __TAURI_INTERNALS__ 存在时装配本适配器，Capacitor 路径不变。
 // 本适配器不启动 Host/模型：start/stop 只是原生 UI-local 动作，cold 状态只读 snapshot。
 import { Channel, invoke } from '@tauri-apps/api/core';
 import type { PluginListenerHandle } from '@capacitor/core';
+import type { DesktopObservationEvent } from '../../../host-core/desktop-client.js';
+import type { LiveTarget } from '../../../host-core/index.js';
 import type {
   BotHostPlugin, DeviceState, FrozenInput, HostCallResult, HostFrameEvent, HostSettings,
   HostSettingsPayload, HostSnapshot, HostStatus, HostVoiceEvent, HostVoiceSaveInput,
   HostVoiceSettings, LegacyDraftPage, LegacyListResult, LegacyPreview, LegacyStatus,
 } from './index';
 
-// 公开 listener 名保持不变（hostFrame/voiceEvent）；streamError 只是私有传输信封。
-type HostEvent = 'hostFrame' | 'voiceEvent';
+// hostFrame/voiceEvent 是 Capacitor 公共 listener 名；clientFrame 只给手机远端页内部使用。
+type HostEvent = 'hostFrame' | 'voiceEvent' | 'clientFrame';
 type EnvelopeEvent = HostEvent | 'streamError';
 type Envelope = { deliveryId: string; event: EnvelopeEvent; data: unknown };
 type StreamFailure = (error: MobileHostError) => void;
@@ -108,7 +112,9 @@ async function request<T>(method: string, params: Record<string, unknown> = {}):
 
 class MobileBotHost implements BotHostPlugin {
   // 监听器注册在流失败后保留，直到各自的 remove 句柄运行；显式重连只为其修复传输。
-  private readonly listeners: Record<HostEvent, Set<(event: any) => void>> = { hostFrame: new Set(), voiceEvent: new Set() };
+  private readonly listeners: Record<HostEvent, Set<(event: any) => void>> = {
+    hostFrame: new Set(), voiceEvent: new Set(), clientFrame: new Set(),
+  };
   // 本 UI 预占/打开的观察 id：流失败时据此分发既有 hostFrame error DTO。
   private readonly observations = new Set<string>();
   private capture?: Capture;
@@ -206,6 +212,8 @@ class MobileBotHost implements BotHostPlugin {
 
   addListener(event: 'hostFrame', listener: (event: HostFrameEvent) => void): Promise<PluginListenerHandle>;
   addListener(event: 'voiceEvent', listener: (event: HostVoiceEvent) => void): Promise<PluginListenerHandle>;
+  /** 远端观察帧：与 hostFrame/voiceEvent 共用同一个原生事件流（内部，不扩公共插件接口）。 */
+  addListener(event: 'clientFrame', listener: (event: DesktopObservationEvent) => void): Promise<PluginListenerHandle>;
   addListener(event: HostEvent, listener: (event: any) => void): Promise<PluginListenerHandle> {
     // 失败 latch 期间不自动 listen；只有显式 reconnect 清 latch 并修复传输。
     if (this.failed) return Promise.reject(streamClosed());
@@ -234,7 +242,8 @@ class MobileBotHost implements BotHostPlugin {
     this.generation += 1;
     this.observations.clear();
     this.capture = undefined;
-    if (this.listeners.hostFrame.size === 0 && this.listeners.voiceEvent.size === 0) return;
+    if (this.listeners.hostFrame.size === 0 && this.listeners.voiceEvent.size === 0
+      && this.listeners.clientFrame.size === 0) return;
     // 在同一个串行转换里直接开新流：不 await 旧的 starting，也不把自己排回队列后面。
     await this.serialize(() => this.openStream());
   }
@@ -335,7 +344,8 @@ class MobileBotHost implements BotHostPlugin {
   /** 最后一个本地注册移除后的清理：执行时复查注册数，期间新增的注册不会被删掉。 */
   private unlistenIfUnused(): Promise<void> {
     return this.serialize(async () => {
-      if (this.listeners.hostFrame.size > 0 || this.listeners.voiceEvent.size > 0) return;
+      if (this.listeners.hostFrame.size > 0 || this.listeners.voiceEvent.size > 0
+        || this.listeners.clientFrame.size > 0) return;
       await this.closeLocked();
     });
   }
@@ -393,8 +403,10 @@ class MobileBotHost implements BotHostPlugin {
         this.failStream(streamErrorOf(envelope.data), stream.epoch);
         return;
       }
-      // 接下来的 event 只能是公开 listener 名（hostFrame/voiceEvent）；不加新 listener 名。
-      const set = envelope.event === 'hostFrame' ? this.listeners.hostFrame : this.listeners.voiceEvent;
+      // 接下来只能是已注册的事件名：hostFrame/voiceEvent 为本机公开 listener，clientFrame 只给远端页。
+      const set = envelope.event === 'hostFrame' ? this.listeners.hostFrame
+        : envelope.event === 'voiceEvent' ? this.listeners.voiceEvent
+          : this.listeners.clientFrame;
       for (const listener of set) {
         try { listener(envelope.data); } catch { /* 监听器自身错误不外溢成传输故障 */ }
       }
@@ -407,6 +419,8 @@ class MobileBotHost implements BotHostPlugin {
 
   /** 终态帧移除观察/语音簿记，避免把已结束的 id 当作仍在途。 */
   private forget(envelope: Envelope): void {
+    // 远端观察不参与本机观察/语音簿记。
+    if (envelope.event === 'clientFrame') return;
     if (envelope.event === 'hostFrame') {
       const frame = envelope.data as HostFrameEvent | undefined;
       if (typeof frame?.observationId === 'string' && (frame.error || frame.frame?.type === 'end')) {
@@ -462,4 +476,34 @@ export async function mobileReconnect(): Promise<{ connected: boolean }> {
   const result = await request<{ connected: boolean }>('reconnect');
   await active?.resetStream();
   return result;
+}
+
+/**
+ * 远端 broker 普通操作（broker 的 16 个普通 op，不含 observe/unobserve）；
+ * 原生把结果包在 {value} 里（可能是 null 或数组），这里只解包。
+ */
+export async function mobileClientRequest<T>(op: string, params: unknown): Promise<T> {
+  const reply = await request<{ value: T }>('clientRequest', { op, params });
+  return reply.value;
+}
+
+/** 远端观察用专有方法；事件从同一条流上的 clientFrame 到达。 */
+export function mobileClientObserve(input: {
+  observationId: string;
+  targetDeviceId: string;
+  target: LiveTarget;
+}): Promise<{ observationId: string }> {
+  return request('clientObserve', input);
+}
+
+export function mobileClientUnobserve(observationId: string): Promise<Record<string, never>> {
+  return request('clientUnobserve', { observationId });
+}
+
+/** 远端观察帧订阅：复用本 UI 唯一事件流，不另 listen 抢占本机帧；handle.remove 只减本地订阅。 */
+export function listenMobileClientFrames(
+  listener: (event: DesktopObservationEvent) => void,
+): Promise<PluginListenerHandle> {
+  if (!active) return Promise.reject(streamClosed());
+  return active.addListener('clientFrame', listener);
 }

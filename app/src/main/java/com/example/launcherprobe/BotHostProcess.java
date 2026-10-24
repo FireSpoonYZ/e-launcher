@@ -127,7 +127,7 @@ final class BotHostProcess {
             throw new BridgeException("LAUNCH_FAILED", "not-sent", "init 帧无效");
         }
         String mode = init.optString("mode");
-        if (!"host".equals(mode) && !"settings".equals(mode)) {
+        if (!"host".equals(mode) && !"settings".equals(mode) && !"client".equals(mode)) {
             throw new BridgeException("LAUNCH_FAILED", "not-sent", "init 帧无效");
         }
         initMode = mode;
@@ -510,23 +510,53 @@ final class BotHostProcess {
     }
 
     String observe(JSONObject target, Consumer<JSONObject> onFrame, Consumer<Throwable> onError) throws IOException {
+        return observe(UUID.randomUUID().toString(), target, onFrame, onError);
+    }
+
+    /**
+     * 显式观察 id：client 模式用 UI 会话给的 observationId 作为帧 id，使 broker 事件与
+     * 前端 id 一一对应。调用方保证同一连接内不复用；冲突按受控错误拒绝。
+     */
+    String observe(String observationId, JSONObject target, Consumer<JSONObject> onFrame,
+                   Consumer<Throwable> onError) throws IOException {
         if (ready == null) throw new IllegalStateException("Host 未就绪");
         if (onFrame == null || onError == null) throw new NullPointerException("观察回调缺失");
         if (target == null) throw new BridgeException("INVALID_FRAME", "not-sent", "观察目标无效");
-        String kind = target.optString("kind");
+        if (observationId == null || observationId.isEmpty() || observationId.length() > 128) {
+            throw new BridgeException("INVALID_FRAME", "not-sent", "观察 id 无效");
+        }
+        JSONObject frameTarget = target;
+        JSONObject live = target;
+        if ("client".equals(initMode)) {
+            // client 模式只放行固定形状 {targetDeviceId, target}，不转发任意字段。
+            Object targetDeviceId = target.opt("targetDeviceId");
+            JSONObject inner = target.optJSONObject("target");
+            if (!(targetDeviceId instanceof String) || ((String) targetDeviceId).isEmpty()
+                    || ((String) targetDeviceId).length() > 256) {
+                throw new BridgeException("INVALID_FRAME", "not-sent", "观察目标 deviceId 无效");
+            }
+            if (inner == null) throw new BridgeException("INVALID_FRAME", "not-sent", "观察目标无效");
+            try {
+                frameTarget = new JSONObject().put("targetDeviceId", targetDeviceId).put("target", inner);
+            } catch (JSONException e) {
+                throw new BridgeException("INVALID_FRAME", "not-sent", "观察帧构造失败");
+            }
+            live = inner;
+        }
+        String kind = live.optString("kind");
         if (!"primary".equals(kind) && !"work".equals(kind)) {
             throw new BridgeException("INVALID_FRAME", "not-sent", "观察目标类型无效");
         }
-        if (target.optString("botId").isEmpty()) {
+        if (live.optString("botId").isEmpty()) {
             throw new BridgeException("INVALID_FRAME", "not-sent", "观察目标缺 botId");
         }
-        if ("work".equals(kind) && target.optString("scopeId").isEmpty()) {
+        if ("work".equals(kind) && live.optString("scopeId").isEmpty()) {
             throw new BridgeException("INVALID_FRAME", "not-sent", "观察目标缺 scopeId");
         }
-        String id = UUID.randomUUID().toString();
+        String id = observationId;
         JSONObject command;
         try {
-            command = new JSONObject().put("type", "observe").put("id", id).put("target", target);
+            command = new JSONObject().put("type", "observe").put("id", id).put("target", frameTarget);
         } catch (JSONException e) {
             throw new BridgeException("INVALID_FRAME", "not-sent", "观察帧构造失败");
         }
@@ -538,6 +568,7 @@ final class BotHostProcess {
         synchronized (lock) {
             if (finished || closeRequested) throw new BridgeException("CLOSED", "not-sent", "Host 已关闭");
             if (activeObservers >= MAX_OBSERVERS) throw new BridgeException("BUSY", "not-sent", "观察并发已满");
+            if (pending.containsKey(id)) throw new BridgeException("INVALID_FRAME", "not-sent", "观察 id 冲突");
             activeObservers++;
             pending.put(id, entry);
         }
@@ -722,9 +753,9 @@ final class BotHostProcess {
             terminate(new BridgeException("INVALID_READY", "invalid", "ready 字段无效"));
             return;
         }
-        if ("settings".equals(initMode)) {
+        if ("settings".equals(initMode) || "client".equals(initMode)) {
             if (!message.isNull("url")) {
-                terminate(new BridgeException("INVALID_READY", "invalid", "settings 模式 url 须为 null"));
+                terminate(new BridgeException("INVALID_READY", "invalid", "settings/client 模式 url 须为 null"));
                 return;
             }
         } else if (!message.isNull("url") && message.optString("url").isEmpty()) {
@@ -795,7 +826,8 @@ final class BotHostProcess {
             terminate(new BridgeException("PROTOCOL", "invalid", "帧归属无效"));
             return;
         }
-        boolean terminal = "end".equals(frame.optString("type"));
+        boolean terminal = "end".equals(frame.optString("type"))
+                || ("client".equals(initMode) && isClientTerminal(frame));
         try {
             entry.callback.onFrame.accept(frame);
         } catch (Throwable t) {
@@ -812,6 +844,17 @@ final class BotHostProcess {
                 }
             }
         }
+    }
+
+    /**
+     * client 模式的观察帧是 DesktopObservationEvent {type:'event',observationId,frame|error}：
+     * 带 error 或内层 frame.type=end 即终态。
+     */
+    private static boolean isClientTerminal(JSONObject event) {
+        if (!"event".equals(event.optString("type"))) return false;
+        if (event.has("error") && !event.isNull("error")) return true;
+        JSONObject inner = event.optJSONObject("frame");
+        return inner != null && "end".equals(inner.optString("type"));
     }
 
     private void handleClosed(JSONObject message) {

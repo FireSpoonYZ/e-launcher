@@ -85,26 +85,6 @@ function sameDraftContent(a: DesktopDraftEntry, b: DesktopDraftEntry): boolean {
   return true;
 }
 
-/** 公共 broker 请求（observe/unobserve 除外；observe_ack 留在原生本地）。 */
-export async function request<K extends PublicBrokerOperation>(
-  op: K,
-  params: BrokerOpParams<K>,
-): Promise<BrokerOpResult<K>> {
-  try {
-    return (await invoke('desktop_request', { request: { op, params } })) as BrokerOpResult<K>;
-  } catch (e) {
-    throw toError(e);
-  }
-}
-
-export async function pickFile(): Promise<DesktopDraftFileRef | null> {
-  try {
-    return (await invoke('desktop_pick_file')) as DesktopDraftFileRef | null;
-  } catch (e) {
-    throw toError(e);
-  }
-}
-
 type WireEvent = DesktopObservationEvent & { deliveryId?: string };
 
 interface ObserveInvokeArgs {
@@ -114,15 +94,78 @@ interface ObserveInvokeArgs {
   onEvent: Channel<WireEvent>;
 }
 
-async function unobserveNative(observationId: string): Promise<void> {
-  try {
-    await invoke('desktop_unobserve', { observationId });
-  } catch (e) {
-    throw toError(e);
-  }
+/**
+ * 可注入的最小原生传输：默认是桌面 Tauri 的 4 个命令；手机远端页注入自己的 client* helper。
+ * observe 的 deliveryId 由实现侧回执（桌面走 observe_ack，手机走原生 ACK 路径）。
+ */
+export interface DesktopTransport {
+  request<K extends PublicBrokerOperation>(op: K, params: BrokerOpParams<K>): Promise<BrokerOpResult<K>>;
+  pickFile(): Promise<DesktopDraftFileRef | null>;
+  observe(
+    observationId: string,
+    targetDeviceId: string,
+    target: LiveTarget,
+    onEvent: (event: WireEvent) => void,
+  ): Promise<void>;
+  unobserve(observationId: string): Promise<void>;
+}
+
+/** 默认桌面传输：Tauri 命令 → M17 broker sidecar；失败只规范化，不重试、不重放。 */
+const tauriTransport: DesktopTransport = {
+  async request<K extends PublicBrokerOperation>(
+    op: K,
+    params: BrokerOpParams<K>,
+  ): Promise<BrokerOpResult<K>> {
+    try {
+      return (await invoke('desktop_request', { request: { op, params } })) as BrokerOpResult<K>;
+    } catch (e) {
+      throw toError(e);
+    }
+  },
+  async pickFile(): Promise<DesktopDraftFileRef | null> {
+    try {
+      return (await invoke('desktop_pick_file')) as DesktopDraftFileRef | null;
+    } catch (e) {
+      throw toError(e);
+    }
+  },
+  async observe(observationId, targetDeviceId, target, onEvent): Promise<void> {
+    const channel = new Channel<WireEvent>();
+    channel.onmessage = onEvent;
+    try {
+      // 直接用字面量：interface 无 index signature，先赋给变量再传 invoke 会 TS2345。
+      await invoke(
+        'desktop_observe',
+        { observationId, targetDeviceId, target, onEvent: channel } satisfies ObserveInvokeArgs,
+      );
+    } catch (e) {
+      throw toError(e);
+    }
+  },
+  async unobserve(observationId): Promise<void> {
+    try {
+      await invoke('desktop_unobserve', { observationId });
+    } catch (e) {
+      throw toError(e);
+    }
+  },
+};
+
+/** 公共 broker 请求（observe/unobserve 除外；observe_ack 留在原生本地）。 */
+export function request<K extends PublicBrokerOperation>(
+  op: K,
+  params: BrokerOpParams<K>,
+): Promise<BrokerOpResult<K>> {
+  return tauriTransport.request(op, params);
+}
+
+export function pickFile(): Promise<DesktopDraftFileRef | null> {
+  return tauriTransport.pickFile();
 }
 
 export class DesktopViewApiImpl implements DesktopPanelApi {
+  /** 传输按实例注入：默认桌面 Tauri；手机远端页注入自己的 client* 实现。 */
+  private readonly transport: DesktopTransport;
   private identityValue: DesktopIdentity | null = null;
   private snapshotValue: DesktopUiSnapshot | null = null;
   private generation = 0;
@@ -131,6 +174,10 @@ export class DesktopViewApiImpl implements DesktopPanelApi {
   private loadPromise: Promise<DesktopUiSnapshot> | null = null;
   private listeners = new Set<() => void>();
   private errorListeners = new Set<(message: string) => void>();
+
+  constructor(transport: DesktopTransport = tauriTransport) {
+    this.transport = transport;
+  }
 
   get identity(): DesktopIdentity | null {
     return this.identityValue;
@@ -200,7 +247,7 @@ export class DesktopViewApiImpl implements DesktopPanelApi {
 
   private ensureLoaded(): Promise<DesktopUiSnapshot> {
     if (!this.loadPromise) {
-      this.loadPromise = request('ui_get', {}).then(
+      this.loadPromise = this.transport.request('ui_get', {}).then(
         (snap) => {
           this.snapshotValue = snap;
           this.emit();
@@ -264,7 +311,7 @@ export class DesktopViewApiImpl implements DesktopPanelApi {
       // 不做“内容与缓存相同即成功”的短路：每个持久化写入都必须取得 ui_set 的 CAS 回执。
       const next = mutate(JSON.parse(JSON.stringify(snap.state)) as DesktopUiState);
       try {
-        const updated = await request('ui_set', { expectedRevision: snap.revision, state: next });
+        const updated = await this.transport.request('ui_set', { expectedRevision: snap.revision, state: next });
         this.snapshotValue = updated;
         this.emit();
         return updated;
@@ -272,7 +319,7 @@ export class DesktopViewApiImpl implements DesktopPanelApi {
         // CAS 冲突/不确定：只读 ui_get 对账并报错，不自动重试写入。
         let reconcileError: string | null = null;
         try {
-          this.snapshotValue = await request('ui_get', {});
+          this.snapshotValue = await this.transport.request('ui_get', {});
           this.emit();
         } catch (reconcileErr) {
           reconcileError = toError(reconcileErr).message;
@@ -307,7 +354,7 @@ export class DesktopViewApiImpl implements DesktopPanelApi {
     this.assertCurrent(identity);
     this.assertTransport();
     // Tauri 协议边界单点断言：request('call') 结果是宽 union，这里收窄到具体 M 的 result。
-    const result = await request('call', {
+    const result = await this.transport.request('call', {
       targetDeviceId: identity.targetDeviceId,
       method,
       params,
@@ -325,7 +372,7 @@ export class DesktopViewApiImpl implements DesktopPanelApi {
     if (op === 'pending_send' || op === 'pending_reconcile') {
       this.assertTransport();
     }
-    return request(op, params);
+    return this.transport.request(op, params);
   }
 
   async broker<K extends PublicBrokerOperation>(
@@ -340,7 +387,7 @@ export class DesktopViewApiImpl implements DesktopPanelApi {
     if (REMOTE_BROKER_OPS.has(op)) {
       this.assertTransport();
     }
-    return request(op, params);
+    return this.transport.request(op, params);
   }
 
   async mutateIntent<M extends DesktopIntentMethod>(
@@ -459,7 +506,7 @@ export class DesktopViewApiImpl implements DesktopPanelApi {
   }
 
   async pickFile(): Promise<DesktopDraftFileRef | null> {
-    return pickFile();
+    return this.transport.pickFile();
   }
 
   observe(
@@ -489,7 +536,7 @@ export class DesktopViewApiImpl implements DesktopPanelApi {
 
     const ack = (ev: WireEvent): void => {
       if (typeof ev.deliveryId === 'string') {
-        void request('observe_ack', { observationId, deliveryId: ev.deliveryId }).catch((e) => {
+        void this.transport.request('observe_ack', { observationId, deliveryId: ev.deliveryId }).catch((e) => {
           // ACK 失败收束观察并显示错误；绝不重放 ACK 或自动重订阅。
           if (!closed) {
             closed = true;
@@ -501,15 +548,14 @@ export class DesktopViewApiImpl implements DesktopPanelApi {
               }),
             );
             void ready
-              .then(() => unobserveNative(observationId), () => undefined)
+              .then(() => this.transport.unobserve(observationId), () => undefined)
               .catch(() => {});
           }
         });
       }
     };
 
-    const channel = new Channel<WireEvent>();
-    channel.onmessage = (ev: WireEvent) => {
+    const onWire = (ev: WireEvent): void => {
       const isErrorFrame = ev.type === 'event' && 'error' in ev;
       // 已关闭：忽略事件但仍确认迟到 deliveryId。
       if (closed) {
@@ -526,39 +572,36 @@ export class DesktopViewApiImpl implements DesktopPanelApi {
       if (isErrorFrame) {
         closed = true;
         void ready
-          .then(() => unobserveNative(observationId), () => undefined)
+          .then(() => this.transport.unobserve(observationId), () => undefined)
           .catch(() => {});
       }
     };
 
-    void invoke('desktop_observe', {
-      observationId,
-      targetDeviceId: identity.targetDeviceId,
-      target,
-      onEvent: channel,
-    } satisfies ObserveInvokeArgs).then(
-      () => {
-        if (closed) {
-          void unobserveNative(observationId).catch(() => {});
-        }
-        resolveReady();
-      },
-      (e) => {
-        const err = toError(e);
-        if (!closed) {
-          closed = true;
-          this.reportError(err);
-        }
-        rejectReady(err);
-      },
-    );
+    void this.transport
+      .observe(observationId, identity.targetDeviceId, target, onWire)
+      .then(
+        () => {
+          if (closed) {
+            void this.transport.unobserve(observationId).catch(() => {});
+          }
+          resolveReady();
+        },
+        (e) => {
+          const err = toError(e);
+          if (!closed) {
+            closed = true;
+            this.reportError(err);
+          }
+          rejectReady(err);
+        },
+      );
 
     // close 当下即 closed=true；admission settled 后再幂等 unobserve；ready 失败静默释放。
     const close = (): Promise<void> => {
       closed = true;
       return ready
         .then(
-          () => unobserveNative(observationId),
+          () => this.transport.unobserve(observationId),
           () => undefined,
         )
         .then(() => undefined)
@@ -569,6 +612,6 @@ export class DesktopViewApiImpl implements DesktopPanelApi {
   }
 }
 
-export function createDesktopClient(): DesktopViewApiImpl {
-  return new DesktopViewApiImpl();
+export function createDesktopClient(transport?: DesktopTransport): DesktopViewApiImpl {
+  return new DesktopViewApiImpl(transport);
 }

@@ -45,20 +45,42 @@ final class BotHostUiProtocol {
 
     static final String EVENT_HOST_FRAME = "hostFrame";
     static final String EVENT_VOICE = "voiceEvent";
+    /** M20 客户端模式观察事件：data 即 DesktopObservationEvent {type,observationId,frame|error}。 */
+    static final String EVENT_CLIENT_FRAME = "clientFrame";
 
     /** 只撤销本 UI 会话的观察/捕获，不关闭 Host。 */
     static final String OP_PAUSE = "pause";
 
     /**
+     * 保留清理操作：不受普通在途上限约束，普通请求满载时仍能生效（pause/clientUnobserve）。
+     * Rust 侧对应 CLIENT_CLEANUP_METHODS＝{clientUnobserve}；pause 只在 UI↔bridge 之间存在，
+     * 不进 Rust 命令。
+     */
+    static boolean isCleanupOperation(String op) {
+        return OP_PAUSE.equals(op) || "clientUnobserve".equals(op);
+    }
+
+    /**
+     * 客户端观察清理（clientUnobserve）：不占普通 8 槽，改用与 Rust
+     * {@code CLIENT_CLEANUP_METHODS} 对齐的独立小额度；额度满立即拒绝，不排队。
+     */
+    static boolean isClientCleanupOperation(String op) {
+        return "clientUnobserve".equals(op);
+    }
+
+    /**
      * 与 BotHostPlugin 的 Host 数据操作一一对应；start/stop/openLegacy/reconnect/hide
      * 属 UI 本地动作，不经服务派发。拒绝任何泛化转发。
+     * client* 为 M20 无参数化的客户端入口：内层 broker 操作另有 16 项白名单（Node 侧强制）。
+     * 客户端子进程的释放只由 UI 会话 close/EOF 驱动，不存在显式关闭入口。
      */
     private static final Set<String> OPERATIONS = Collections.unmodifiableSet(new HashSet<>(Arrays.asList(
             "snapshot", "status", "settingsGet", "settingsSet", "saveCredentials", "call",
             "legacyList", "legacyPreview", "legacyStatus", "legacyImport", "legacyDraft", "legacyDiscard",
             "observe", "cancelObservation",
             "voiceSettings", "saveVoiceSettings", "startVoice", "finishVoice", "cancelVoice",
-            "uiSettings", OP_PAUSE)));
+            "uiSettings", OP_PAUSE,
+            "clientRequest", "clientObserve", "clientUnobserve")));
 
     private BotHostUiProtocol() {
     }
@@ -89,6 +111,11 @@ final class BotHostUiProtocol {
 
     static JSONObject event(String event, JSONObject data) {
         return object("type", TYPE_EVENT, "event", event, "data", data == null ? new JSONObject() : data);
+    }
+
+    /** client 模式观察终态事件：data 与 DesktopObservationEvent 同形（data 即事件本身）。 */
+    static JSONObject clientErrorEvent(String observationId, JSONObject error) {
+        return object("type", "event", "observationId", observationId, "error", error);
     }
 
     /** 序列化为一行 JSON（不含换行）；超限按固定错误拒绝，不截断。 */

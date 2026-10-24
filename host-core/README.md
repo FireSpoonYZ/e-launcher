@@ -1094,7 +1094,7 @@ CLI 均要求 `--bot-id`。`memory-status` 可选 `--input`，其余命令必须
 
 模块 14 把模块 5 本机控制面、模块 8/9 认证中继与远程控制、模块 10–12 工作上下文/scope、模块 13 记忆整合为**统一本机服务**（`openHostService`），并新增本机设置持久化、远端协议 v2（35 方法）、受控远端实时预览与客户端待发送/对账。
 
-**状态**：模块 14 已完成交付并获父助手限定范围验收，总完成数 **14/20**；模块 15–18 后续已交付（见下节与末节），当前 M19–M20 共 2 个待交付。
+**状态**：模块 14 已完成交付并获父助手限定范围验收，总完成数 **14/20**；模块 15–18 后续已交付（见下节与末节），M19 用户暂停、M20 进行中（见末节模块 20-01）。
 
 ### 验收覆盖
 
@@ -1237,7 +1237,7 @@ node host-core/pending-cli.js reconcile --data-root "$CLIENT_STATE" --device-id 
 
 ## 模块 15：Android 本机 Host 与原生能力桥
 
-**状态**：M15 已交付并获父助手验收，总完成数 **15/20**；模块 16–18 后续已交付（见下文），M19–M20 共 2 个待交付。M14 历史记录及其验收边界保留。
+**状态**：M15 已交付并获父助手验收，总完成数 **15/20**；模块 16–18 后续已交付（见下文），M19 用户暂停、M20 进行中（见末节）。M14 历史记录及其验收边界保留。
 
 ### 架构与生命周期
 
@@ -1315,7 +1315,7 @@ Android 搜索工具（rg/fd）固定 API 29，不改变 App minSdk33。NDK/16Ki
 
 ## 模块 16：旧数据迁移与 Android 兼容（已完成父助手限定范围验收）
 
-**状态**：模块 16 已完成交付并获父助手限定范围验收，总完成数 **16/20**；M17/M18 后续已交付（见末节），M19–M20 共 2 个仍待交付。
+**状态**：模块 16 已完成交付并获父助手限定范围验收，总完成数 **16/20**；M17/M18 后续已交付（见末节），M19 用户暂停、M20 进行中（见末节模块 20-01）。
 
 ### 旧聊天迁移（用户显式）
 
@@ -1350,7 +1350,7 @@ Android 搜索工具（rg/fd）固定 API 29，不改变 App minSdk33。NDK/16Ki
 
 ## 模块 17：Tauri Windows / Linux 客户端（已完成父助手限定范围验收）
 
-**状态**：模块 17 已完成交付并获父助手限定范围验收，总完成数 **17/20**；M18 后续已交付（见末节），M19–M20 共 2 个仍待交付。本模块只增加桌面客户端侧文件，不新增 Host 方法（仍为固定 35 个 v2 方法）、不改 Android。
+**状态**：模块 17 已完成交付并获父助手限定范围验收，总完成数 **17/20**；M18 后续已交付（见末节）。当前 M19 由用户暂停、M20 进行中（见末节模块 20-01），此前各节“M19–M20 待交付”为当时记录。本模块只增加桌面客户端侧文件，不新增 Host 方法（仍为固定 35 个 v2 方法）、不改 Android。
 
 ### 客户端组成
 
@@ -1373,11 +1373,11 @@ Android 搜索工具（rg/fd）固定 API 29，不改变 App minSdk33。NDK/16Ki
 
 ### 限制与未实测边界
 
-所有模型响应为 Mockoon 合成 SSE，无付费模型或真实用户配置；本模块未验证 Hindsight 服务，也未做中继 GUI 联调；GUI 运行验证主要为各自机器的本机 Host，跨设备 Relay/CA、目标切换与全链路压力/交错验收归 M20；未测 FUSE 挂载、MSI 安装/卸载与 RPM 安装；Tauri Android 已由 M18 交付（见末节），TUI 是 M19。本模块不扩大内存/加密作者身份/上传能力声明。
+所有模型响应为 Mockoon 合成 SSE，无付费模型或真实用户配置；本模块未验证 Hindsight 服务，也未做中继 GUI 联调；GUI 运行验证主要为各自机器的本机 Host，跨设备 Relay/CA、目标切换与全链路压力/交错验收归 M20；未测 FUSE 挂载、MSI 安装/卸载与 RPM 安装；Tauri Android 已由 M18 交付（见末节），M19（TUI）已由用户暂停、未交付（代码只在 git stash `02f1396f`）。本模块不扩大内存/加密作者身份/上传能力声明。
 
 ## 模块 18：Tauri Android 界面（已完成父助手限定范围验收）
 
-**状态**：模块 18 已完成交付并获父助手限定范围验收，总完成数 **18/20**；M19–M20 共 2 个仍待交付，本轮到此停止。本节只记录 Host 侧约束；界面组成、命令与构建/操作说明见 [mobile/README.md](../mobile/README.md)。
+**状态**：模块 18 已完成交付并获父助手限定范围验收，总完成数 **18/20**；M19 已由用户暂停（未验收 TUI 代码只在 git stash `02f1396f`，不在交付树、不计完成），M20 进行中（见末节模块 20-01）。本节只记录 Host 侧约束；界面组成、命令与构建/操作说明见 [mobile/README.md](../mobile/README.md)。
 
 ### 与 Host 的关系
 
@@ -1399,3 +1399,23 @@ Android 搜索工具（rg/fd）固定 API 29，不改变 App minSdk33。NDK/16Ki
 - 实测：冷启动只起 `:tauri_ui` 与默认进程，不拉起 Host/Node；界面内创建/聊天/回执到 done（含 Unicode/emoji 与语音合成提交）；关闭或 SIGKILL 界面后已受理任务由同一 Host/Node 继续，冻结原 ID 可对账且无重放（模型计数仅 +1）；8 RPC 与第 9 个 `RPC_BUSY`、25 s `TIMEOUT`、超 2 MiB 与未知方法/非法 legacy 动作拒绝；8 观察与最多一个等待 ACK 的事件帧、溢出锁存与显式重连；空闲 EOF 只发一条私有 `streamError`；权限与 ASR 取消不串归属；8 份 DB 完整性/FK 通过（186 任务终态、47 submissions done，M16 为 180/41）。
 - 未实测：ARM64 运行时、真实模型/ASR/Hindsight、跨设备中继与目标切换（M20）、全部传输饱和/竞态与 5 s 绑定故障定时器。法务资源修改后未重跑设备 E2E：上列验收适用于字节一致的原有 APK 条目（Stage 12 逐条 SHA256 比对），新增的只有 `META-INF/LICENSE|NOTICE` 等法务条目与构建/CI 接线；远端 GitHub Actions 仍未实际运行。
 - 旧回归中 `notifications` 组仍在“立即删除是否清空通知”断言处失败 3 次（M16 起既有问题，产品/测试未改；调试器暂停下通过但不属普通通过，原因未确认），其余 10 组普通通过。
+
+## 模块 20-01：手机远端客户端（M20 进行中，总完成仍 18/20）
+
+**状态**：M20 未整体完成，本节只记录本轮交付的 M20-01（手机远端入口 + 限定范围跨设备联调）。M19 由用户暂停，未验收 TUI 代码只在 git stash `02f1396f`，不在交付内；手机→Windows TUI 续聊等场景仍待。
+
+### 进程与协议
+
+- `android-runtime.js` 新增 `mode === 'client'`：只 `openDesktopClient({dataRoot})`（ui store + pending 账本 + 固定传输），ready id 用 broker 的 `clientId`；**从不**打开 Host/Runtime、不读模型凭据、不发 native 工具调用。与 Host 共用 `BotHostProcess`（Node Mobile）单例生命周期，但由 `BotHostClient` 以独立 `files/bot-client` 懒启动，与 `files/bot-host` 隔离。
+- 桥的私有入口只新增 `clientRequest`/`clientObserve`/`clientUnobserve` 与观察事件 `clientFrame`（`data` 即 `DesktopObservationEvent`）；**没有** `clientClose`，公开仍是 4 个 Tauri 命令与 35 个 Host 方法。`clientUnobserve` 与 `pause` 为保留清理操作，不受普通 8 个在途上限约束；普通 RPC 仍 8 个、观察仍 8 路。
+- broker 侧 `unobserve` 是纯本地取消：不排到 8 个普通 RPC 或 connect/disconnect 切换后面，否则取消的观察会泄漏槽位；它同步返回、不会堆积。普通请求/观察的 8/8/25 s 上限与行为不变。
+- 生命周期：默认进程内单例管理器（冷态只构造）；一个 `clientRoot` 同时只允许一个 UI 会话持有，其余按 BUSY 拒绝；UI 关闭/EOF 只释放本会话观察与该 client child，不 stop/abort 远端 Agent，不自动重连、不重放变更。批量取消用 owned 8 槽与串行幂等清理。
+- 凭据：连接 token 与 relay CA 只在会话内存，不进 `desktop-ui.sqlite`/pending/localStorage，也不写日志。
+
+### 验收（父限定，合成模型不付费）
+
+- 环境：Windows x64 Node 26.12.1、Linux x64（Ubuntu 26.04.1）Node 22.19.0、`emulator-5556`（Android 36/x86_64）；隔离真实 TLS relay 在 Linux，Windows 与 Linux Host 上线。
+- 实测：手机 UI 经 CA 认证 relay 创建 Linux Bot（host cwd 校验，首次 `INVALID_CWD` 按明确失败修目录后显式重建）、Unicode/emoji/多行提交写入真实 Durable/BC 原始 history 并收到合成 SSE 回复；UI 进程 SIGKILL 后 clientNode 退出、Linux 已受理任务仍完成；Windows 真实 debug GUI 经同 relay 续聊手机创建的原 Bot 并收到回复；CLI 建立 Windows/Linux 共用 room 与 DM，元数据传播与 room 持久 ACK 通过（不宣称完整自然群聊智能行为或 DM 对话已测）；实际 8 路 primary LIVE 各取 snapshot、8 句柄并发 close 后又开 8 路再关闭通过（真实手机 API，不是纯 mock）。
+- 构建：`npm run mobile:web`、`npm run build`、`node host-core/build-desktop.js --web`、Windows `desktop:build -- --debug --no-bundle`、最终双 ABI `assembleDebug`+`assembleDebugAndroidTest`（40 s）、apksigner 与 `zipalign -P16` 通过；无新增测试。一次桌面重建因自有测试 exe 占用文件失败，关闭后成功，不是代码失败。
+- 未完成/不宣称：ARM64 运行时、真实 Hindsight/ASR/付费模型、Linux GUI 全矩阵、完整故障/BC 恢复与 DM 智能、全格式安装升级卸载、远端 GitHub Actions（本轮不 push、不启动 CI）；原 Host 及 schedule 6 库 + 新 client 3 库完整性/FK 通过、主 DB 文件与覆盖前一致（WAL/SHM 暂态文件不同），client 目录合成 token 零匹配（profile 名称阳性对照命中）。最终 APK sha256 `2b50fccfaef5b1da5f8f47777fe4aea30b91f90d57af9a123e78443be52bba39` 已原签名覆盖安装；同目标断开后重连并显式选回原设备面板自动收起、离线草稿只入 pending 且目标 `getSubmission` 返回 `SUBMISSION_NOT_FOUND` 不重放、用户式本地取消到 `CANCELLED`/`not-sent` 均实际通过。
+- 收尾（已完成）：最终窗口、client Node、自有 Windows/Linux Host、relay、Mockoon、SSH 转发、3 个自有终端与模拟器均已停止；userdata 与 fixture 记录保留，自有 adb 19220 forward 已删，物理设备未动；不外推其他 M20。

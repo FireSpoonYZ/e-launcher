@@ -1,12 +1,12 @@
 # Tauri Android 界面（`mobile/`，模块 18）
 
-M18（Tauri Android 外壳）已交付并获父助手限定范围验收，总完成数 **18/20**；M19（Windows/Linux TUI）与 M20（跨设备集成、打包与真机验收）尚未开始。本目录只提供 Android 手机本机 Host 的可见界面，不替代本机 Host，也不含桌面客户端（见 [`desktop/`](../desktop/README.md)）。
+M18（Tauri Android 外壳）已交付并获父助手限定范围验收，总完成数 **18/20**；M19（Windows/Linux TUI）已由用户暂停（未验收代码只在 git stash `02f1396fda08d1b666ca83597ebbcea805c74d28`，不在交付树、不计完成），M20（跨设备集成、打包与真机验收）进行中，本轮已交付 **M20-01 手机远端入口 + 限定范围跨设备联调**，但 M20 并未整体完成。本目录只提供 Android 手机侧可见界面：默认是本机 Host，“其他设备”页是同一份桌面客户端实现跑在手机原生桥上（见下节）；不替代本机 Host，也不含桌面 GUI 安装包（见 [`desktop/`](../desktop/README.md)）。
 
 ## 组成：现有 APK 内的一块界面，不是第二个应用
 
 - 沿用原 Gradle APK：`applicationId`/`namespace` 仍为 `com.example.launcherprobe`，原签名、原数据路径、原 Android 能力全部保留；没有生成第二个应用工程，也没有修改 vendored 的 Tauri Android SDK。
 - `mobile/src-tauri/`：Rust crate `e-launcher-mobile`（`[lib] name = "e_launcher_mobile"`，`cdylib`），固定 `tauri = 2.12.5`、`tauri-build = 2.7.4`，启用 `custom-protocol` 让前端资源编进库。
-- `mobile/web/`：Tauri 前端的唯一入口（`HashRouter` + 既有 `web/src/Host` 的 `HostPage`，`persistentPending`）；`mobile/web/src/mobile.css` 只补工具栏与滚动区，复用 `web/src/styles.css`。
+- `mobile/web/`：Tauri 前端的唯一入口（`HashRouter` + 既有 `web/src/Host` 的 `HostPage`，`persistentPending`），并新增“其他设备”远端页（见下节）；`mobile/web/src/mobile.css` 只补工具栏、滚动区与`.remote-client` 受限容器，复用 `web/src/styles.css` 与 `desktop/web/src/app.css`。
 - `vite.mobile.config.ts` 把 `mobile/web` 构建到 `mobile/build/web`（`tauri.conf.json` 的 `frontendDist` 是 `../build/web`）。
 - `app/build.gradle` 的 `buildMobileUi` 任务产出 Rust cdylib、wry/tauri 生成的 Kotlin，以及作为 Gradle assets 源根 `app/build/generated/assets/tauri/` 内的 Rust 通知（APK 内 asset 路径为根目录下的 `THIRD_PARTY_NOTICES.txt`）。
 
@@ -18,14 +18,31 @@ Tauri 的 Android 运行链路（App.run → tauri-runtime-wry.run → tao `Even
 
 - 普通 `ACTION_MAIN`+`CATEGORY_LAUNCHER`（无显式旧 extras）与 `assistant_open_host=true` 进入 Tauri 界面：`MainActivity` 先沿既有 Host-only 初始化建立有效 Bridge，再显式启动 `TauriMainActivity` 并 finish 自己。
 - `assistant_legacy_ui=true` 抑制重定向，是真实的旧入口兼容开关；带旧 extras（新会话、归档、定时任务、设置、聊天详情、归档 id）的 Intent 仍按原路由走 Capacitor/旧 Activity。
-- Tauri 工具栏只有 5 个固定控件：**隐藏**（仅把界面移到后台）、**旧会话**、**设置**、**旧 Host 待确认**、**重连**。`openLegacy` 只接受 `chat` / `settings` / `host` 三个枚举值，不存在任意 Intent、路径或 shell 转发。
+- Tauri 工具栏是固定控件：**隐藏**（仅把界面移到后台）、**旧会话**、**设置**、**旧 Host 待确认**、**重连**，以及本机/远端切换的 **本机 Host**、**其他设备**；远端页内是**连接**与**设备**面板的折叠按钮。`openLegacy` 只接受 `chat` / `settings` / `host` 三个枚举值，不存在任意 Intent、路径或 shell 转发。
 - 旧 Host 的 pending、草稿与 localStorage 仍通过「旧 Host 待确认」进入原 Capacitor 页面访问，不复制、不迁移、不自动重放。
 
 ## 命令与桥
 
 - JS 侧只有 4 个命令：`mobile_host_request`、`mobile_host_listen`、`mobile_host_ack`、`mobile_host_unlisten`；插件 id `android-host`，Kotlin 类 `BotHostTauriPlugin`，capability `main.json` 只给 `main` 窗口授予这 4 个权限；窗口使用 HTTPS 资源协议（`https://tauri.localhost`），CSP 只允许自身脚本与 `ipc:`/`https://ipc.localhost`。
+- 远端页不新增命令，只用 `mobile_host_request` 的固定 method：`clientRequest {op,params} → {value}`（broker 的 16 个普通操作）、`clientObserve {observationId,targetDeviceId,target}`、`clientUnobserve {observationId}`；观察事件走同一条 `mobile_host_listen` 流上的 `clientFrame`（`data` 为 `DesktopObservationEvent`），ACK 仍按 `deliveryId` 走 `mobile_host_ack`，不使用桌面的 `observe_ack`。没有显式关闭客户端子进程的命令：child 由原生会话在 UI 关闭/EOF 时释放。
 - 桥是私有、非导出、同 UID 校验的 Binder 服务：Binder 事务只返回 socket FD，业务走 UTF-8 JSONL（`request`/`response`/`event`）。上限：2 MiB 行、8 个在途普通请求、8 帧/4 MiB 事件预算、暂停/清理保留通道、25 s 请求截止与 5 s 绑定截止、按 generation/nonce 的投递身份、单一原生事件代理与最多一个等待 ACK 的事件帧。
 - 公开 Host 控制方法仍是 **35 个**；Kotlin 内的 `start`/`stop`/`openLegacy`/`reconnect`/`hide` 是 UI 本地动作（socket 内另有 `uiSettings`、`pause`），不是新增公开方法。`streamError` 是私有事件通道，不新增 JS 命令或 Host API。
+
+## 其他设备（手机远端页，M20-01 已交付）
+
+- 与本机 Host 页并列：首次点 **其他设备** 才挂载远端页；之后两侧都保持挂载，**本机 Host** / **其他设备** 只切换可见性（`hidden`），以保留各自草稿与已选目标。不可见的一侧由 `active`/`pageActive` 传给页面：立即取消该页观察（`clientUnobserve` / `cancelObservation`）、停只读轮询（回执刷新、Work activity 1s 刷新、生命周期轮询），**不** stop/abort Host、**不**断开 client、**不**关 client child，也不自动重连或重放变更；再切回时观察/轮询按只读方式重建（LIVE 需要它）。
+- 前端没有“退出远端”：断开网络用远端页内桌面 `App` 的显式 **断开**；关闭整个 UI 时由原生会话负责释放 client child（无 `clientClose` 命令）。`dispose()` 会逐个移除本页的 `clientFrame` 与流失败监听（不只 clear 表）；批量取消观察用 owned 8 槽（含 `opening`/`live`/`closing`）与串行 promise 确认取消，无丢弃队列。
+- 远端页直接复用 `desktop/web/src/App.tsx` 与 `BotChats`/`Scopes`/`PendingPanel`：连接档案（只持久非密字段）、设备目录、当前目标、创建 Bot、按原 ID 查询、聊天/历史/LIVE、scopes/pending 与桌面同一套代码，因此继承冻结 ID、草稿 CAS、未知结果只读对账与不自动重放。目标选定后连接面板收起、可手动展开，断连后自动复位（`autoCollapsedFor`）。
+- 已修：设置页 `null -> null` 状态更新造成的 React 循环；重连后 cached 状态与身份显示矛盾；空 relay 目标被拦下（不把未选设备当目标发请求）。
+- `desktop/web/src/api.ts` 的 `DesktopViewApiImpl` 只多了一个可注入 `DesktopTransport`（`request`/`pickFile`/`observe`/`unobserve`），`createDesktopClient()` 默认仍走原 4 个桌面 Tauri 命令，桌面 ACK/ready/close 语义不变；`mobile/web/src/remote-client.ts` 注入手机实现（`clientRequest`/`clientObserve`/`clientUnobserve` + `clientFrame` 监听，复用本 UI 唯一事件流）。host-core 只以 `import type` 引用，Node broker（`desktop-client.js`、`node:sqlite`、`ws`）**不进** Web bundle。
+- 冷启动不启动 client：只有首次显式点 **其他设备** 才 `createDesktopClient(transport)` 并由 `App` 的 `init()` 触发 `ui_get`。流失败/显式重连后旧身份立即失效（`setTransportConnected(false)` + `setIdentity(null)`），必须用户重新输入 token 并显式连接；不自动重连、不重发观察、不重放变更。
+- 手机不提供本机文件 picker：`pickFile()` 直接返回 `FILE_PICK_UNSUPPORTED` + `not-sent`，不假装路径引用可上传。
+- 凭据边界：连接 token 与 relay CA 只存在于远端页的输入态（连接尝试结束即清空），不进 localStorage/sessionStorage、不写日志；持久非密配置、草稿与 intents 由原生 broker 的 `desktop-ui.sqlite`、pending 由 `pending/<profileKey>/` 保存（`host-core/desktop-ui-store.js`、`pending-store.js`）。这些数据由独立 client child 使用自己的数据目录 `files/bot-client`，与本机 Host 的 `files/bot-host` 分开，互不覆盖。
+- 窄屏/横屏只在 `mobile.css` 的 `.remote-client` 容器内覆盖：桌面两栏折成上下两段，配置/设备目录限高内滚，聊天与发送区占满剩余高度；`.remote-client[hidden]` 显式 `display:none`（作者样式会盖掉 UA 的 `[hidden]`）。`desktop/web/src/app.css` 是全局样式且先于 `styles.css` 加载，所以 `mobile.css` 在本机页容器 `.mobile-body` 内恢复 `styles.css` 的字体/字号/行高/字重/段落下边距基线，避免桌面元素规则污染本机样式；两个样式文件本身未改。
+- 远端使用步骤（需先有可连的目标 Host）：① 在“连接配置”保存档案：local 只存 url（可带 expectedDeviceId）与非密名称，relay 只存 url、非密设备 ID 与名称，**档案不含 token/CA**；② 选档案后输入 token（relay 可贴 CA）并点 **连接**，token 与 CA 只在本会话内存；③ 等设备目录出结果，relay 连接成功后还要在目录里显式选目标设备；④ 在聊天/群聊与 Bot 私聊/待发送/Host设置里操作，发送前草稿先持久化。
+- 验收（M20-01，父限定，合成模型不付费）：隔离真实 TLS relay 在 Linux，Windows 与 Linux Host 上线；手机 UI 经 CA 认证 relay 创建 Linux Bot（host cwd 校验，首次 `INVALID_CWD` 按明确失败修目录后显式重建）、提交 Unicode/emoji/多行写入真实 Durable/BC 原始 history 并收到合成 SSE 回复；UI 进程 SIGKILL 后 clientNode 退出、Linux 已受理任务仍完成；Windows debug GUI 经同一 relay 续聊手机创建的原 Bot；实际 8 路 primary LIVE 各取 snapshot，8 句柄并发 close 后又开 8 路再关闭通过（真实手机 API，不是纯 mock）；设置页重连无 React 循环且 child 释放。布局在 412x684 验证：折叠后输入可见、聚焦+滚动发送可见；ADB 点输入使软键盘把 viewport 压到 412x400，输入与发送均可滚动触达（ADB 注入不算真实手指）。
+- 最终验收：APK sha256 `2b50fccfaef5b1da5f8f47777fe4aea30b91f90d57af9a123e78443be52bba39` 已原签名覆盖安装到模拟器；同目标断开后重连并显式选回原设备，面板自动收起（实际通过）；离线草稿发送只进入 pending，重连后仍为 pending，对目标 `getSubmission` 返回 `SUBMISSION_NOT_FOUND`，不自动重放，用户式本地取消到 `CANCELLED`/`not-sent`。原 Host 6 库 + 新 client 3 库完整性/FK 通过，client 目录合成 token 零匹配（profile 名称阳性对照命中）。
+- 未完成：ARM64 真机、手机 UI × Windows Host 的跨机聊天（本轮只用 CLI 建了共用 room/DM 并验元数据传播与 room 持久 ACK，不宣称完整自然群聊智能或 DM 对话）、多格式安装升级卸载、真实 Hindsight/ASR/付费模型；这些不被本轮的远端页结果外推。
 
 ## 数据、生命周期与凭据
 
@@ -68,6 +85,6 @@ exit $LASTEXITCODE
 
 - 环境：保留 userdata 的专用 `emulator-5556`（Android 36 / x86_64）；`-no-audio` 静音模拟器 + 自有可信 HTTPS 合成 ASR。**无真机、无付费模型、无真实 Hindsight/ASR**；ARM64 只构建（ELF 对齐、zipalign `-P16`）未运行。
 - 已实测：真实 Tauri React 资源/启动/桥；冷启动不拉起 Host/Node 且保留 deviceId 与初始 DB 哈希；Unicode/emoji 创建与聊天、文字与语音回执到 done；界面返回/SIGKILL 后已受理任务仍由同一 Host/Node 完成，冻结原 ID 在回执丢失与 UI 进程死亡后仍可对账且无重放；存储读/写失败阻止发送、owner 冲突、缺失重发与非法 modelRef、条件清理；8 个 RPC 准入与第 9 个 `RPC_BUSY`、已写出 25 s `TIMEOUT`/unconfirmed、超 2 MiB/未知方法/非法 legacy 动作拒绝；8 观察 + 最多一个等待 ACK 的事件帧、溢出锁存、显式重连恢复、旧/重复 ACK 无害；空闲 EOF 只发一条私有 `streamError` 并显示提示；首次授权/拒绝/权限期间 Home/显式取消后迟到授权不启动采集；竖/横屏工具栏、原生 systembar padding、键盘把视口从 684 压到 400 且输入可滚动；固定旧会话/设置/Host 路由与独立 WebView 存储隔离。
-- 未实测：ARM64 运行时、真实模型/ASR/Hindsight、完整跨设备中继与目标切换（M20）、全部传输字节饱和与竞态、5 s 绑定故障定时器、全部外观组合。
+- 未实测：ARM64 运行时、真实模型/ASR/Hindsight、手机 UI × Windows Host 的跨机聊天、全部传输字节饱和与竞态、5 s 绑定故障定时器、全部外观组合。手机远端页已在本轮用隔离真实 TLS relay + 合成模型完成限定验收，不等于完整跨设备中继/目标切换与真机全部通过。
 - 法务资源改动之后没有重跑设备 E2E：上述设备验收适用于字节一致的原有 APK 条目（Stage 12 已逐条 SHA256 比对），新增的只有 `META-INF/LICENSE|NOTICE` 等法务条目与构建/CI 接线；远端 GitHub Actions 仍未实际运行。
-- 旧回归的普通检查里 `notifications` 组仍在“立即删除是否清空通知”断言处失败 3 次（M16 起的既有问题；调试器暂停下通过但不属于普通通过，确切原因未确认），其余 10 组正常通过；不要据此宣称 11 组全部普通通过。
+- 旧回归的普通检查里 `notifications` 组仍在“立即删除是否清空通知”断言处失败（M16 起的既有问题；调试器暂停下通过但不属普通通过，确切原因未确认）；本轮普通检查基线通过一次、stage1 新 APK 仍失败，未改产品或断言，不宣称已修好；其余 10 组正常通过是 M18 的历史结果，本轮未复跑这 10 组，不要宣称 11 组全部普通通过。

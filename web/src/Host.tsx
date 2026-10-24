@@ -135,7 +135,8 @@ const remoteDetail = (remote: HostVoiceRemote, t: Home): string =>
   remote.baseUrl ? `${remote.model} · ${remote.baseUrl}${remote.hasApiKey ? ` · ${t('已保存 API Key','API key saved')}` : ''}` : t('未配置','Not configured');
 const rates = [0.75, 1, 1.25, 1.5, 2];
 
-export function HostPage({onBack, persistentPending = false, connectionEpoch = 0}: {onBack?(): void; persistentPending?: boolean; connectionEpoch?: number} = {}) {
+// active=false（本机页因远端页而保持挂载但不可见）：停止观察与只读轮询，但不停止 Host。
+export function HostPage({onBack, persistentPending = false, connectionEpoch = 0, active = true}: {onBack?(): void; persistentPending?: boolean; connectionEpoch?: number; active?: boolean} = {}) {
   const t = useText(); const action = useAction();
   const [host, setHost] = useState<HostSnapshot>();
   const [snapshotError, setSnapshotError] = useState('');
@@ -209,7 +210,7 @@ export function HostPage({onBack, persistentPending = false, connectionEpoch = 0
     } catch (error) { setSnapshotError(errorText(error)); }
   };
   useEffect(() => {
-    if (!lifecycle) return;
+    if (!lifecycle || !active) return;
     let alive = true;
     let attempts = 0;
     let timer = 0;
@@ -265,7 +266,7 @@ export function HostPage({onBack, persistentPending = false, connectionEpoch = 0
     document.addEventListener('visibilitychange', onVisible);
     void tick();
     return () => { alive = false; window.clearTimeout(timer); document.removeEventListener('visibilitychange', onVisible); };
-  }, [lifecycle]);
+  }, [lifecycle, active]);
   // On mount only read the cold snapshot; never start/read settings/model.
   useEffect(() => { void refreshSnapshot(); }, []);
   useEffect(() => { if (host?.workspace && !cwd) setCwd(host.workspace); }, [host?.workspace]);
@@ -291,7 +292,7 @@ export function HostPage({onBack, persistentPending = false, connectionEpoch = 0
   // 不新增 submit、不 resume、不并入 history。隐藏/传输故障/Host 未运行/卸载即停。
   useEffect(() => {
     if (!receipt || (receipt.status !== 'queued' && receipt.status !== 'placed')) return;
-    if (transportFailed || host?.phase !== 'running') return;
+    if (!active || transportFailed || host?.phase !== 'running') return;
     const owner = {botId: receipt.botId, requestId: receipt.requestId};
     let alive = true;
     let timer = 0;
@@ -331,7 +332,7 @@ export function HostPage({onBack, persistentPending = false, connectionEpoch = 0
       window.clearTimeout(timer);
       document.removeEventListener('visibilitychange', onVisible);
     };
-  }, [receipt?.botId, receipt?.requestId, receipt?.status, transportFailed, host?.phase]);
+  }, [receipt?.botId, receipt?.requestId, receipt?.status, transportFailed, host?.phase, active]);
 
   const clearObserveId = useCallback(() => { observeIdRef.current = undefined; setObserveId(undefined); }, []);
   const cancelObserve = useCallback(() => {
@@ -504,6 +505,12 @@ export function HostPage({onBack, persistentPending = false, connectionEpoch = 0
   // Cleanup immediately clears the UI capture state too, so no lingering
   // “recording” label survives navigation/hide.
   useEffect(() => () => { cancelObserve(); if (captureRef.current) cancelCaptureVoice(captureRef.current); }, [cancelObserve, cancelCaptureVoice]);
+  // 被远端页替换后（active=false）立刻取消本页观察与录音 UI；不停止 Host/Agent、不重发。
+  useEffect(() => {
+    if (active) return;
+    cancelObserve();
+    if (captureRef.current) cancelCaptureVoice(captureRef.current);
+  }, [active, cancelObserve, cancelCaptureVoice]);
   useEffect(() => {
     const onHidden = () => {
       if (!document.hidden) return;
