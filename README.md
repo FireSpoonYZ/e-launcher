@@ -219,7 +219,7 @@ Kokoro 路径请求流式 PCM（24 kHz、单声道、16 位小端），使用 Au
 
 当前自部署服务使用 Kokoro v1.0 权重；音色固定不代表韵律和发音已经通过试听。验收时应测试中文夹英文、数字、长回复、连续打断和网络中断，区分 HTTP 响应头时间、首个音频块时间与手机实际出声时间。
 
-下一代多端 Bot 架构与实施进度见 [下一代架构与实施进度](docs/next-generation-architecture.md)。[Bot/Host 核心](host-core/README.md) 已独立实现本机登记、Durable 长期主私聊与内嵌 Billion Context，并已作为 Android Host（M15）在应用内运行；旧数据迁移（M16）与 Windows/Linux 桌面客户端（M17，[`desktop/`](desktop/README.md)）已交付并获父助手限定范围验收；Tauri Android 界面（M18，[`mobile/`](mobile/README.md)）已交付，运行在独立 `:tauri_ui` 进程、通过私有同 UID socket 桥接默认进程的本机 Host。当前仍为 **18/20**：M19（Windows/Linux TUI）已由用户暂停，未验收代码只在 git stash `02f1396f`，不计完成；M20（跨设备集成、打包与真机验收）进行中，本轮已交付 M20-01 手机远端入口（手机界面“其他设备”页，复用桌面客户端与 35 个 Host 方法）及限定范围跨设备联调，M20 本身未完成。桌面客户端与本机 Android 应用都不打包模型推理。
+下一代多端 Bot 架构与实施进度见 [下一代架构与实施进度](docs/next-generation-architecture.md)。[Bot/Host 核心](host-core/README.md) 已独立实现本机登记、Durable 长期主私聊与内嵌 Billion Context，并已作为 Android Host（M15）在应用内运行；旧数据迁移（M16）与 Windows/Linux 桌面客户端（M17，[`desktop/`](desktop/README.md)）已交付并获父助手限定范围验收；Tauri Android 界面（M18，[`mobile/`](mobile/README.md)）已交付，运行在独立 `:tauri_ui` 进程、通过私有同 UID socket 桥接默认进程的本机 Host。当前本期为 **18/19**（原 20 模块中 M19 按用户决定移出本期、模块编号保留）：M19（Windows/Linux TUI）本期不交付，原规格保留为历史/后续计划，未验收代码只在 git stash `02f1396f`（仅未来草稿，本期不恢复，保留草稿），不计完成；M20（跨设备集成、打包与真机验收）进行中，已交付 M20-01 手机远端入口（手机界面“其他设备”页，复用桌面客户端与 35 个 Host 方法）及限定范围跨设备联调，M20 本身未完成（跨端创建续聊已按手机→Windows 桌面 GUI 有限验证）。桌面客户端与本机 Android 应用都不打包模型推理。
 
 ## 源码与许可证
 

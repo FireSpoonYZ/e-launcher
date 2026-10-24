@@ -1,10 +1,10 @@
 # 多端 Bot 重构路线图
 
-当前交付计划共 **20 个模块**：**1–18 已完成，共 18 个**；**19–20 待交付，共 2 个**（M17 桌面客户端与 M18 Tauri Android 界面均已交付并获父助手限定范围验收，见末节）。模块 12 已通过父助手限定范围的端到端验收（122/122 个检查点，见下文）；模块 13（长期事实记忆）已完成 Host 侧适配交付（验证环境与限制见下节）；模块 14（统一 Host 服务与设备接入）已完成父助手限定范围验收（139/139 个检查点，见下节）。模块按交付范围计数，工时另行评估。此前按依赖滚动细分，完整总数未预先锁定；本表是依据已确认剩余范围整理的交付计划，不是最初就约定 20 个模块。
+本期交付范围是原 **20 个模块**中的 **19 个**（M19 按用户决定移出本期，模块编号保留）：**1–18 已完成，共 18 个**；**M20 进行中，当前 18/19**（M17 桌面客户端与 M18 Tauri Android 界面均已交付并获父助手限定范围验收，见末节）。模块 12 已通过父助手限定范围的端到端验收（122/122 个检查点，见下文）；模块 13（长期事实记忆）已完成 Host 侧适配交付（验证环境与限制见下节）；模块 14（统一 Host 服务与设备接入）已完成父助手限定范围验收（139/139 个检查点，见下节）。模块按交付范围计数，工时另行评估。此前按依赖滚动细分，完整总数未预先锁定；本表是依据已确认剩余范围整理的交付计划，不是最初就约定 20 个模块。
 
-当前状态：**M19 已由用户暂停**，未验收的 TUI 代码只保存在 git stash `02f1396f`（`02f1396fda08d1b666ca83597ebbcea805c74d28`），未进入本轮交付、不计完成；**M20 进行中**，本轮只交付 M20-01（手机远端入口 + 限定范围跨设备联调），总完成仍 **18/20**，不得把 M20 或整体记成 20/20。M20 另有 REDMI K80 真机限定运行验证（本机 Host + remote client，见末节），不改变计数。
+当前状态：**M19 本期不交付**（按用户决定移出本期，模块编号保留；其原规格保留为历史/后续计划；未验收的 TUI 代码只保存在 git stash `02f1396f`（`02f1396fda08d1b666ca83597ebbcea805c74d28`），仅作未来草稿，**禁止取回或删除**，不计入交付与计数）；**M20 进行中**，已交付 M20-01（手机远端入口 + 限定范围跨设备联调），当前 **18/19**，不得把 M20 或整体记成 19/19。M19 的 TUI 界面/终端快捷键/TUI 续聊验收不再是本期或 M20 的完成条件。M20 另有 REDMI K80 真机限定运行验证（本机 Host + remote client，见末节），不改变计数。
 
-架构约束见 [下一代多端 Bot 架构设计](next-generation-architecture.md)，已交付能力与验收细节见 [Host 核心说明](../host-core/README.md)。保持 **B 架构、单人多设备、中心轻量**：Bot 在指定设备和 cwd 长期工作，中心只做设备注册、认证与业务中继，不保存聊天/模型凭证或运行模型决策。Android 是完整本机 Host，不是远程壳；原签名、旧数据、Widget、Shower 和既有定时能力必须兼容，不新增后台任务产品。M19/M20 的交接要点、建议首版范围、环境与已知差距见 [M19/M20 交接](m19-m20-handoff.md)；M19 暂停与 M20-01 的当前进度见本文末节。
+架构约束见 [下一代多端 Bot 架构设计](next-generation-architecture.md)，已交付能力与验收细节见 [Host 核心说明](../host-core/README.md)。保持 **B 架构、单人多设备、中心轻量**：Bot 在指定设备和 cwd 长期工作，中心只做设备注册、认证与业务中继，不保存聊天/模型凭证或运行模型决策。Android 是完整本机 Host，不是远程壳；原签名、旧数据、Widget、Shower 和既有定时能力必须兼容，不新增后台任务产品。M19/M20 的交接要点、建议首版范围、环境与已知差距见 [M19/M20 交接](m19-m20-handoff.md)；M19 移出本期与 M20-01 的当前进度见本文末节。
 
 ## 完成与剩余
 
@@ -30,8 +30,8 @@
 | 16 | 旧数据迁移与 Android 兼容 | 已完成 · 父助手限定范围验收 | 原签名覆盖更新、旧聊天/附件/草稿/SDK 历史映射；Widget、导航恢复、既有 schedule_task/AlarmManager 能力与旧数据兼容；用户显式导入与新 Host schedule_task。16/20。 |
 | 17 | Tauri Windows / Linux 客户端 | 已完成 · 父助手限定范围验收 | 以 Bot 为中心的设备目录、主私聊、群聊/DM、待发送与 Host 设置界面，复用固定 35 个 v2 方法与 4 个 Tauri 命令，不持有 Host 生命周期；Windows/Linux 构建与 NSIS/DEB/AppImage 实机运行、关闭客户端不停止 Host 通过，跨设备 Relay/CA 与全格式安装验收归 M20。17/20。 |
 | 18 | Tauri Android 外壳 | 已完成 · 父助手限定范围验收 | Tauri 界面运行在独立 `:tauri_ui` 进程（exported=false、WebView 后缀隔离），经私有同 UID Binder socket 桥接默认进程 Host；4 个移动命令与公开 35 方法不变；模拟器实测聊天与关闭 UI 后 Host 继续、无重放且设备数据保留，ARM64 仅构建（其后 M20 已在 K80 真机限定运行，见末节）。18/20。 |
-| 19 | Windows / Linux TUI | 用户暂停（不计完成） | 同一 Host 业务协议的终端客户端：Bot/设备选择、对话、实时观察及显式停止。未验收代码仅在 git stash `02f1396f`，不在交付树中。 |
-| 20 | 跨设备集成、打包与真机验收 | 进行中（M20-01 已交付） | 手机远端入口与限定跨设备联调已交付，K80 真机本机 Host 及 remote client 已限定运行验证；TUI 续聊、全矩阵 GUI、完整故障/BC/DM、全格式安装升级卸载、旧版本覆盖迁移与 16 KiB 设备、真实服务与远端 CI 仍待。完成条件见末节。 |
+| 19 | Windows / Linux TUI | 本期不交付（编号保留） | 同一 Host 业务协议的终端客户端：Bot/设备选择、对话、实时观察及显式停止。按用户决定移出本期：原规格保留为历史/后续计划，未验收代码仅在 git stash `02f1396f`（仅未来草稿，禁止取回或删除），不在交付树、不计完成；其终端界面验收不再是本期或 M20 的完成条件。 |
+| 20 | 跨设备集成、打包与真机验收 | 进行中（本期唯一剩余模块；M20-01 已交付） | 手机远端入口与限定跨设备联调已交付，K80 真机本机 Host 及 remote client 已限定运行验证，跨端创建续聊已按手机→Windows 桌面 GUI 有限验证；Linux GUI 全矩阵、完整故障/BC/DM、全格式安装升级卸载、旧版本覆盖迁移与 16 KiB 设备、真实服务与远端 CI 仍待。完成条件见末节。 |
 
 ## 模块 9 验收依据与限制
 
@@ -103,7 +103,7 @@
 
 剩余限制：未验证物理 WAN/Linux/Android/arm64/Tauri/TUI；M7–M11 为选定回归而非全量历史场景重跑；M12 高水位/反压分支未单独饱和测试（沿用 M8 共享路径）；未穷尽并发微观交错；原始作者端到端签名/加密**未实现**，当前信任模型是认证通道+TLS 认证 peer；Mockoon 夹具不代表付费/智能模型验收。
 
-模块 **13** 已完成 Host 侧适配交付。模块 **14**（统一服务与远程/live 接线、本机设置、客户端待发送/对账）已完成父助手限定范围验收（139/139 检查点，见下节），总完成数 **14/20**；模块 **15**（Android 本机 Host）已完成父助手验收（见下节），总完成数 **15/20**；模块 **16**（旧数据迁移与 Android 兼容）已完成父助手限定范围验收（见下节），总完成数 **16/20**；截至 M16 模块 **17–20 共 4 个**仍待交付（M17 后续已交付，见末节）：Tauri/TUI 与跨设备打包真机验收。
+模块 **13** 已完成 Host 侧适配交付。模块 **14**（统一服务与远程/live 接线、本机设置、客户端待发送/对账）已完成父助手限定范围验收（139/139 检查点，见下节），总完成数 **14/20**；模块 **15**（Android 本机 Host）已完成父助手验收（见下节），总完成数 **15/20**；模块 **16**（旧数据迁移与 Android 兼容）已完成父助手限定范围验收（见下节），总完成数 **16/20**；截至 M16 模块 **17–20 共 4 个**仍待交付（M17 后续已交付，见末节；M19 后经用户决定移出本期）：Tauri/TUI 与跨设备打包真机验收。
 
 ## 模块 13 当前状态与开发说明
 
@@ -119,7 +119,7 @@
 
 ## 模块 14 完成范围与验收限制
 
-模块 14（统一 Host 服务与设备接入）已完成父助手限定范围验收，总完成数 **14/20**；模块 15–18 后续已交付（见下文），M19 用户暂停、M20 进行中（当前见末节）。
+模块 14（统一 Host 服务与设备接入）已完成父助手限定范围验收，总完成数 **14/20**；模块 15–18 后续已交付（见下文），M19 已移出本期（本期不交付）、M20 进行中（当前见末节）。
 
 - **验收环境**：Windows x64 / Git Bash、Node 26.8.2/22.19.0、真实本地 HTTP/CLI/TLS/WSS、持久 SQLite、Pi Durable 1.3.0 + acp-kernel 0.0.101；模型与 Hindsight wire 响应来自隔离 Mockoon OpenAI-compatible SSE/Hindsight 协议夹具。无新增依赖、无仓库测试或临时脚本。
 - **结果**：139/139 检查点通过（失败 0）；53 份 SQLite 完整性/外键通过（含刻意构造的畸形 schema 夹具，一致性不代表被接受）；8 个 Native tasks 全部 terminal、0 active；30 个 tail readers 清理、夹具进程剩余 0。
@@ -129,7 +129,7 @@
 
 ## 模块 15 完成范围与验收限制
 
-模块 15（Android 本机 Host 与原生能力桥）已完成父助手验收，总完成数 **15/20**；模块 16 已完成父助手限定范围验收（见下节），总完成数 **16/20**；截至 M16，模块 17–20 共 4 个待交付（M17 后续已交付，见末节）。M14 历史记录及其验收边界保留。
+模块 15（Android 本机 Host 与原生能力桥）已完成父助手验收，总完成数 **15/20**；模块 16 已完成父助手限定范围验收（见下节），总完成数 **16/20**；截至 M16，模块 17–20 共 4 个待交付（M17 后续已交付，见末节；M19 后经用户决定移出本期）。M14 历史记录及其验收边界保留。
 
 模块 15 在受监督的独立 Node Mobile 子进程中运行 Pi Durable/BC，经专用 Capacitor 桥与原生工具（含 NDK 搜索工具）接入 Android Host，仅用户显式开启 specialUse FGS；独立数据/凭据/语音命名空间，覆盖安装保留旧路径/签名。
 
@@ -137,7 +137,7 @@
 
 ## 模块 16 完成范围与验收限制
 
-模块 16（旧数据迁移与 Android 兼容）已完成父助手限定范围验收，总完成数 **16/20**；M17/M18 后续已交付（见下文），M19 用户暂停、M20 进行中（见末节）。
+模块 16（旧数据迁移与 Android 兼容）已完成父助手限定范围验收，总完成数 **16/20**；M17/M18 后续已交付（见下文），M19 已移出本期（本期不交付）、M20 进行中（见末节）。
 
 用户可在设置的 Local Host / Legacy import 面板列出旧会话，分别选新 role/cwd/model 显式预览后导入；预览生成快照与请求 ID，确认导入后该定义被锁定，输入变更需重新预览。状态查询只读、不恢复写操作；prepared 只有用户显式继续原冻结请求才恢复，completed 则回到同一已导入 Bot。旧聊天经永久归档被动投影，草稿仅手动追加，不继承旧凭据/工具执行。
 
@@ -147,7 +147,7 @@
 
 ## 模块 17 完成范围与验收限制
 
-模块 17（Tauri Windows / Linux 客户端）已完成父助手限定范围验收，总完成数 **17/20**；M18 后续已交付（见末节），M19 用户暂停、M20 进行中（见末节）。本模块只交付 `desktop/` 桌面客户端（Tauri 2 Windows x64 / Linux x64）与 `host-core` 内的纯客户端 Node sidecar，不改 Android，也不新增 Host 方法：仍为 **35 个 v2 控制方法与 4 个 Tauri 命令**（`desktop_request`/`desktop_observe`/`desktop_unobserve`/`desktop_pick_file`，`observe_ack` 仅 Rust 本地流控）。
+模块 17（Tauri Windows / Linux 客户端）已完成父助手限定范围验收，总完成数 **17/20**；M18 后续已交付（见末节），M19 已移出本期、M20 进行中（见末节）。本模块只交付 `desktop/` 桌面客户端（Tauri 2 Windows x64 / Linux x64）与 `host-core` 内的纯客户端 Node sidecar，不改 Android，也不新增 Host 方法：仍为 **35 个 v2 控制方法与 4 个 Tauri 命令**（`desktop_request`/`desktop_observe`/`desktop_unobserve`/`desktop_pick_file`，`observe_ack` 仅 Rust 本地流控）。
 
 - **不持有 Host 生命周期**：客户端只管理自身传输、观察订阅与私有 sidecar，不启动/停止/`abort` 外部 Host 或其 Agent；只有用户显式 `abort` 或 `stopWork` 才向目标 Host 发停止请求。冷启动不自动连接，连接是显式动作。
 - **对话与状态分离**：主私聊 `LIVE` 预览与原始历史分页分开。工作范围有三种独立来源：work 的 `LIVE` 观察流（推送，不推理）、按需分页的原始历史，以及仅当该成员被选中且在线时对 `getWorkActivity` 的每 1000ms 只读刷新（最多 1 个在途读，显式 `stopWork`/`resumeWork` 期间不发新读，`inactive`/离线/卸载停止定时器，旧读不回退显式结果）。
@@ -155,11 +155,11 @@
 - **设置与草稿**：Host 设置按 `expectedRevision` CAS，冲突属已返回（responded）：保留编辑、读取远端新 revision，由用户显式采用新基线后再保存；仅 `not-sent` 可直接修正重试，写入/读回丢失回执（unconfirmed）保持锁直到只读对账并显式选基线。发送流程先冻结完整输入、所属目标与业务 ID，再入队；本地草稿 CAS 清空成功后才发送，清空失败不发送；发送后回执丢失保留冻结记录与原 ID 供对账（编辑框可能已清空），序列队列在暂停（含卸载 force save）时先检查。
 - **文件引用不是上传**：原生选择框只产生 `{name, path, size}` 本地路径引用，不存在跨设备上传协议。
 - **验收环境**：父在 Windows 与 Linux 本机分别实际运行 debug/no-bundle 构建、Windows Release（MSI + NSIS）与 Linux Release（DEB + RPM + AppImage，未削减 targets）；Windows NSIS 静默安装到私有测试目录后运行并完成合成 Host 任务，MSI 仅以 WiX `dark` 解包核实，未安装；Linux 实际安装 DEB 并运行，卸载后以 `AppImage --appimage-extract-and-run` 运行且配置保留、冷态不自动连接；Windows/Linux 基础 GUI、Unicode/含空格 cwd、900x600 聊天与群聊布局、展开原始历史后发送区可见；Windows 实测关闭窗口与 Node 子进程退出后 Host 仍完成 busy 任务，Linux 分别验证普通窗口与 AppImage 原生关闭后客户端子进程回收且 Host 仍存活（未在 Linux 复现 busy 任务连续性）；9 份客户端 SQLite 完整性/FK、安装版数据目录未检出精确合成 token（profile 名称阳性对照命中）、`localStorage`/`sessionStorage` 均 0 条。
-- **限制**：模型响应为 Mockoon 合成 SSE，无付费模型或真实用户配置；本模块未验证 Hindsight 服务（无本模块记忆联调），也未做中继 GUI 联调；GUI 运行验证是各自机器的本机 Host，完整跨设备 Relay/CA、目标切换与全链路压力/交错验收属模块 20；未测 FUSE 挂载、MSI 安装/卸载与 RPM 安装；M18（Tauri Android）已由后续模块交付（见末节），M19（TUI）已由用户暂停、未交付（代码只在 git stash `02f1396f`）。完整用法、数据路径、安装包输出与错误恢复见 [desktop/README.md](../desktop/README.md)，客户端 sidecar 与本地存储细节见 [host-core/README.md](../host-core/README.md) 模块 17。
+- **限制**：模型响应为 Mockoon 合成 SSE，无付费模型或真实用户配置；本模块未验证 Hindsight 服务（无本模块记忆联调），也未做中继 GUI 联调；GUI 运行验证是各自机器的本机 Host，完整跨设备 Relay/CA、目标切换与全链路压力/交错验收属模块 20；未测 FUSE 挂载、MSI 安装/卸载与 RPM 安装；M18（Tauri Android）已由后续模块交付（见末节），M19（TUI）已按用户决定移出本期、不交付（原规格保留为历史/后续计划，未验收代码只在 git stash `02f1396f`，仅未来草稿，禁止取回或删除）。完整用法、数据路径、安装包输出与错误恢复见 [desktop/README.md](../desktop/README.md)，客户端 sidecar 与本地存储细节见 [host-core/README.md](../host-core/README.md) 模块 17。
 
 ## 模块 18 完成范围与验收限制
 
-模块 18（Tauri Android 外壳）已完成父助手限定范围验收，总完成数 **18/20**；M19 用户暂停（不计完成）、M20 进行中（见末节），组成、命令与构建用法见 [mobile/README.md](../mobile/README.md)。
+模块 18（Tauri Android 外壳）已完成父助手限定范围验收，总完成数 **18/20**；M19 已移出本期（不计完成）、M20 进行中（见末节），组成、命令与构建用法见 [mobile/README.md](../mobile/README.md)。
 
 - **不是第二个应用，不搬数据**：沿用现有 APK、原签名/applicationId/数据路径与旧 Capacitor 入口；新增的只是独立进程 `:tauri_ui` 里的 Tauri 界面（`TauriMainActivity`，exported=false、`singleTask`、WebView 数据目录后缀 `tauri-ui`）。普通 `ACTION_MAIN`+`LAUNCHER` 与 `assistant_open_host` 重定向到 Tauri；`assistant_legacy_ui=true` 与带旧 extras 的 Intent 保留旧路由；固定栏只有隐藏/旧会话/设置/旧 Host 待确认/重连五个按钮，`openLegacy` 仅接受 chat/settings/host。
 - **为何独立进程**：Tauri Android 正常退出会走到 `std::process::exit`，同进程会杀死默认进程。故 Host/FGS 与旧组件仍由默认 Java 进程管理（其中 Host 在它拉起的独立 Node Mobile 子进程里运行），UI 另在 `:tauri_ui`；私有、非导出、同 UID 校验的 Binder 服务只返回 socket FD，业务走 UTF-8 JSONL，上限为 2 MiB 行、8 个在途普通请求、4 MiB 事件预算、保留 pause/清理通道、25 s 请求与 5 s 绑定截止、按 generation 的投递身份、单一原生事件代理与最多一个等待 ACK 的事件帧。公开 Host 方法仍 **35 个**，JS 侧只有 `mobile_host_request`/`listen`/`ack`/`unlisten` 四个命令。
@@ -168,16 +168,16 @@
 - **验收环境**：保留 userdata 的专用 `emulator-5556`（Android 36/x86_64），`-no-audio` 静音 + 自有可信 HTTPS 合成 ASR；完整 `assembleDebug`+`assembleDebugAndroidTest`（无排除、无 job 上限）exit 0，原证书覆盖安装，Tauri ELF LOAD 对齐 0x4000 与 zipalign `-P16` 通过。实测真实 Tauri 资源/启动/桥、冷启动不拉起 Host/Node 且保留 deviceId 与初始 DB 哈希、Unicode/emoji 聊天、文字与语音回执到 done、关闭/SIGKILL UI 后已受理任务继续且无重放、8 RPC 准入与第 9 个 `RPC_BUSY`、25 s `TIMEOUT`/unconfirmed、8 观察与最多一个等待 ACK 的事件帧、空闲 EOF 只发一条私有 `streamError`、权限与 ASR 取消不串归属、竖/横屏工具栏与键盘视口、固定旧路由与独立 WebView 存储隔离；8 份 DB 完整性/FK 通过（186 任务终态、47 submissions done，M16 为 180/41）、4 导入与 4 个停用定时任务及 6 条既有执行记录保留。
 - **限制**：无真机，无付费模型/真实 Hindsight/真实 ASR；ARM64 只构建未运行；未覆盖全部传输饱和/竞态、5 s 绑定故障定时器与全部外观组合。旧回归的 `notifications` 组仍在“立即删除是否清空通知”断言处失败 3 次（M16 起的既有问题，产品与测试未改；调试器暂停下通过但改变时序，不属于普通通过，确切原因未确认），其余 10 组正常通过，不要宣称 11 组全部普通通过。
 
-## 模块 20 当前进度：M20-01 已交付（M20 进行中，总完成仍 18/20）
+## 模块 20 当前进度：M20-01 已交付（M20 进行中，当前 18/19）
 
-M20 尚未整体完成。本轮只交付 **M20-01 手机远端入口 + 限定范围跨设备联调**；M19 由用户暂停，未验收 TUI 代码只在 git stash `02f1396f`，不在本交付内。
+M20 尚未整体完成，是本期的唯一剩余模块。已交付 **M20-01 手机远端入口 + 限定范围跨设备联调**；M19 已按用户决定移出本期（编号保留），未验收 TUI 代码只在 git stash `02f1396f`（仅未来草稿，禁止取回或删除），不在本交付内，也不作为 M20 完成条件。
 
 - **功能**：手机 Tauri 界面并列“本机 Host / 其他设备”；远端页复用桌面 `App`/`BotChats`/`Scopes`/`PendingPanel`，含连接档案（local/relay，只持久非密字段）、设备目录、明确目标、创建 Bot 与按原 ID 查询、主私聊/room/DM 的聊天与历史、pending；token 与 relay CA 只在会话内存。
 - **进程与命令**：远端页走独立 Node Mobile client 模式的 `files/bot-client`（独立 SQLite，与本机 `files/bot-host` 隔离），不启动本机 Host/FGS；私有入口只新增 `clientRequest`/`clientObserve`/`clientUnobserve` 与观察帧 `clientFrame`，已删除 `clientClose`；公开仍是 4 个 Tauri 命令与 35 个 Host 方法。
 - **生命周期**：进程单例、UI 关闭/EOF 只释放 child，不停止远端 Agent；本机页与远端页保持挂载、不可见时取消观察与轮询；主动重连清旧 identity，不自动重连、不重放；批量取消用 owned 8 槽 + 串行幂等清理。
 - **验收（合成模型，不付费）**：Windows x64 Node 26.12.1、Linux x64（Ubuntu 26.04.1）Node 22.19.0、`emulator-5556`（Android 36/x86_64）。隔离真实 TLS relay 在 Linux，Windows 与 Linux Host 上线；手机 UI 经 CA 认证 relay 创建 Linux Bot、提交 Unicode/emoji/多行到真实 Durable/BC 原始 history 并收到合成 SSE 回复；UI 进程 SIGKILL 后 clientNode 退出且已受理任务仍完成；Windows debug GUI 经同一 relay 续聊手机创建的原 Bot；CLI 建立 Windows/Linux 共用 room 与 DM，元数据传播与 room 持久 ACK 通过（不宣称完整自然群聊智能行为或 DM 对话已测）。8 路 primary LIVE 各取 snapshot、8 句柄并发 close 后再开 8 路再关闭通过（真实手机桥，不是纯 mock）。
 - **构建**：`npm run mobile:web`、`npm run build`、`node host-core/build-desktop.js --web`、Windows `desktop:build -- --debug --no-bundle`、最终双 ABI `assembleDebug`+`assembleDebugAndroidTest`（40 s）、apksigner 与 `zipalign -P16` 通过；无新增测试。一次桌面重建因自有测试 exe 占用文件失败，关闭后成功，不是代码失败。
-- **未完成/不计通过**：手机→Windows TUI 续聊（因 M19 暂停）、Linux GUI 全矩阵、完整故障与 BC 恢复、DM 智能、多格式安装升级卸载、ARM64 旧版本覆盖迁移与 16 KiB 页设备（K80 已限定运行，见下条）、真实 Hindsight/ASR/付费模型、远端 GitHub Actions；本轮不 push、不启动 CI。`notifications` 普通检查本次基线通过一次，stage1 新 APK 仍在 historical deleting clears notification 断言失败，未改产品或断言，不宣称修好；K80 本轮未跑 `notifications` 组，也不宣称该回归已修。
-- **K80 真机限定运行（本轮新增，仍不计 20/20）**：REDMI K80 / 型号 24117RK2CC（Android 16、arm64-v8a、页 4096，旁置 K90 未操作）。同 APK（sha256 `2b50fccfaef5b1da5f8f47777fe4aea30b91f90d57af9a123e78443be52bba39`）先首次安装（安装前设备无此包，故不是旧版本真实用户数据迁移验收），再覆盖重装 `-r`；冷启动无 Host Node/FGS，显式启动后真实 ARM64 Node + specialUse FGS 运行，本机 Bot 中文/emoji/多行写入真实 Durable/BC 历史并取回合成 SSE 回复；UI 进程被 kill 后默认进程与 Host Node 同 PID 保持、重开读到持久回复（关闭前受理回执未捕获，不写精确 busy 接纳时序）；打开“其他设备”后 Host/client 两个 ARM64 Node 并存且 client 用独立数据目录；经真实 CA TLS relay 连 Linux Host，提交唯一 K80 marker 多行消息并在 Linux 原始历史读到输入与回复；8 路 LIVE 各 snapshot、批量 close 后再开 8 路再关闭通过；设置页显式重连后 client Node 退出、本机 Host 同 PID 继续且 UI 无循环；清空合成配置/alias 并停 Host 后覆盖重装，Host state + client store + shared_prefs 字节一致、7 份 SQLite integrity/FK 通过，重开冷态无 Node；无崩溃 buffer 条目。页为 4 KiB，不宣称 16 KiB 设备实测；手机 UI × Windows Host 仍未测（本轮是手机 UI → Linux Host + K80 本机 Host）。证据：仓外目录 basename `e-launcher-k80-1792825796727` 的 `k80-verification.json`。
+- **未完成/不计通过**：Linux GUI 全矩阵、完整故障与 BC 恢复、DM 智能、多格式安装升级卸载、ARM64 旧版本覆盖迁移与 16 KiB 页设备（K80 已限定运行，见下条）、真实 Hindsight/ASR/付费模型、远端 GitHub Actions；本轮不 push、不启动 CI。跨端创建续聊已按 手机创建 Bot → Windows 桌面 GUI 经 relay 续聊验证（有限范围，TUI 客户端已移出本期，不计待办）。`notifications` 普通检查本次基线通过一次，stage1 新 APK 仍在 historical deleting clears notification 断言失败，未改产品或断言，不宣称修好；K80 本轮未跑 `notifications` 组，也不宣称该回归已修。
+- **K80 真机限定运行（本轮新增，仍不计 19/19）**：REDMI K80 / 型号 24117RK2CC（Android 16、arm64-v8a、页 4096，旁置 K90 未操作）。同 APK（sha256 `2b50fccfaef5b1da5f8f47777fe4aea30b91f90d57af9a123e78443be52bba39`）先首次安装（安装前设备无此包，故不是旧版本真实用户数据迁移验收），再覆盖重装 `-r`；冷启动无 Host Node/FGS，显式启动后真实 ARM64 Node + specialUse FGS 运行，本机 Bot 中文/emoji/多行写入真实 Durable/BC 历史并取回合成 SSE 回复；UI 进程被 kill 后默认进程与 Host Node 同 PID 保持、重开读到持久回复（关闭前受理回执未捕获，不写精确 busy 接纳时序）；打开“其他设备”后 Host/client 两个 ARM64 Node 并存且 client 用独立数据目录；经真实 CA TLS relay 连 Linux Host，提交唯一 K80 marker 多行消息并在 Linux 原始历史读到输入与回复；8 路 LIVE 各 snapshot、批量 close 后再开 8 路再关闭通过；设置页显式重连后 client Node 退出、本机 Host 同 PID 继续且 UI 无循环；清空合成配置/alias 并停 Host 后覆盖重装，Host state + client store + shared_prefs 字节一致、7 份 SQLite integrity/FK 通过，重开冷态无 Node；无崩溃 buffer 条目。页为 4 KiB，不宣称 16 KiB 设备实测；手机 UI × Windows Host 仍未测（本轮是手机 UI → Linux Host + K80 本机 Host）。证据：仓外目录 basename `e-launcher-k80-1792825796727` 的 `k80-verification.json`。
 - **K80 收尾**：App 与测试会话保留在 K80 供查看；本机 Host 已停，`runtime.providers=[]`、`defaultModel=null`、`relay=null`（revision 3）、`credential_aliases={}`；`POST_NOTIFICATIONS` 临时授权后已恢复 false；adb forward 19230 / reverse 18929 已删；自有 Linux Host/relay/Mockoon/SSH 转发/CDP 终端已停；未改电池/自启/无障碍/HOME；未涉及付费模型/真实 ASR/Hindsight。
 - **首轮模拟器/桌面收尾（已完成）**：最终窗口、client Node、自有 Windows/Linux Host、relay、Mockoon、SSH 转发、3 个自有终端与模拟器均已停止；userdata 与 fixture 记录保留，自有 adb 19220 forward 已删；该阶段未操作物理设备。不外推其他 M20 项。
