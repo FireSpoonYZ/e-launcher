@@ -31,7 +31,7 @@
 | 17 | Tauri Windows / Linux 客户端 | 已完成 · 父助手限定范围验收 | 以 Bot 为中心的设备目录、主私聊、群聊/DM、待发送与 Host 设置界面，复用固定 35 个 v2 方法与 4 个 Tauri 命令，不持有 Host 生命周期；Windows/Linux 构建与 NSIS/DEB/AppImage 实机运行、关闭客户端不停止 Host 通过，跨设备 Relay/CA 与全格式安装验收归 M20。17/20。 |
 | 18 | Tauri Android 外壳 | 已完成 · 父助手限定范围验收 | Tauri 界面运行在独立 `:tauri_ui` 进程（exported=false、WebView 后缀隔离），经私有同 UID Binder socket 桥接默认进程 Host；4 个移动命令与公开 35 方法不变；模拟器实测聊天与关闭 UI 后 Host 继续、无重放且设备数据保留，ARM64 仅构建（其后 M20 已在 K80 真机限定运行，见末节）。18/20。 |
 | 19 | Windows / Linux TUI | 本期不交付（编号保留） | 同一 Host 业务协议的终端客户端：Bot/设备选择、对话、实时观察及显式停止。按用户决定移出本期：原规格保留为历史/后续计划，未验收代码仅在 git stash `02f1396f`（仅未来草稿，禁止取回或删除），不在交付树、不计完成；其终端界面验收不再是本期或 M20 的完成条件。 |
-| 20 | 跨设备集成、打包与真机验收 | 进行中（本期唯一剩余模块；M20-01 已交付） | 手机远端入口与限定跨设备联调已交付，K80 真机本机 Host 及 remote client 已限定运行验证，跨端创建续聊已按手机→Windows 桌面 GUI 有限验证；本轮补充验收已覆盖 9 组 GUI→Host 矩阵、Windows MSI/NSIS 与 Linux DEB/RPM 的安装相关检查及 AppImage 两种运行模式、K80 真机 Shower/Widget/通知删除、Host/回执故障、群/DM、BC 与认证撤销（见末节）；已复现的 `:tauri_ui` 退出 FORTIFY 已修复并完成限定回归（见末节）；16 KiB 适配与专项运行验收已明确为本期排除（保留技术对齐设置），真实旧版本迁移与真实服务、远端 CI 仍待。完成条件见末节。 |
+| 20 | 跨设备集成、打包与真机验收 | 进行中（本期唯一剩余模块；M20-01 已交付） | 手机远端入口与限定跨设备联调已交付，K80 真机本机 Host 及 remote client 已限定运行验证，跨端创建续聊已按手机→Windows 桌面 GUI 有限验证；本轮补充验收已覆盖 9 组 GUI→Host 矩阵、Windows MSI/NSIS 与 Linux DEB/RPM 的安装相关检查及 AppImage 两种运行模式、K80 真机 Shower/Widget/通知删除、Host/回执故障、群/DM、BC 与认证撤销（见末节）；已复现的 `:tauri_ui` 退出 FORTIFY 已修复并完成限定回归（见末节）；16 KiB 适配与专项运行验收已明确为本期排除（保留技术对齐设置），真实旧版本迁移与真实服务、远端 CI 仍待，锁屏 exact 模式按时执行已测未通过、待处置（见末节）。完成条件见末节。 |
 
 ## 模块 9 验收依据与限制
 
@@ -228,11 +228,24 @@ M20 尚未整体完成，是本期的唯一剩余模块。已交付 **M20-01 手
 - **清理**：两条自有任务按 id/revision 用真实工具删除，最终 `list` 为 `tasks[]`；旧任务库起始为空，未走旧引擎执行（`cleanup-tools.json`）。
 - **权限**：精确闹钟权限起始未授予，验收期间临时授权，结束恢复 UID appop `default` 且系统开关关闭；未改电池、自启、HOME、无障碍或锁屏配置。本轮开始时 Host 已在运行且通知权限已开启，结束时保留该起始运行态与 `USER_SET` 通知授权。
 - **配置与收尾**：配置内容恢复为 `providers=[]`、`defaultModel=null`、`relay=null`、`aliases={}`（CAS revision 7→8 测试→9 恢复）；临时模型服务、ADB 转发与 reverse 均已停止；调试终端被 operator 关闭后未重开，UI 回到 App。终端关闭前未另存完整最后 CDP 回执，`restore-terminal-receipt.json` 只保留该回执尾部；配置恢复见 `config-restored.json`；系统 FGS、Host PID 9476/默认进程 29670 与持久状态 `running` 的读回见 `restore-system-check.txt`。
-- **不覆盖**：真正锁屏、长时待机/未充电 Doze、周期与日历规则的设备组合、旧引擎真机执行、真实模型服务。
+- **不覆盖**：真正锁屏、长时待机/未充电 Doze、周期与日历规则的设备组合、旧引擎真机执行、真实模型服务（真正锁屏已另行测试，结论见下节）。
+
+### 锁屏定时验收（K80，exact 模式：Host 存活通过、按时执行未通过）
+
+产品仍 `e30a8b4`，文档基 `dce956d`，本轮无产品与测试代码修改；证据在仓库外目录 basename `e-launcher-m20-lockscreen-1792893191893`（入口 `lockscreen-result.json`、`timing-failure.json`）。用户授权 10 分钟安全锁屏，设备全程充电；10:00:10 熄屏、10:00:10.725 锁屏显示，用户 10:12:09.377 解锁。本轮父助手显式选择 `alarmMode=exact`（`setExactAndAllowWhileIdle`）；产品默认 `alarmClock` 本轮未测。
+
+- **Host 锁屏存活通过**：4/8/10 分钟检查时 Host 与默认进程仍为同一 PID 9468/29670、FGS 在、UI 不存在，`mWakefulness=Dozing`、`mIsPowered=true`、`mState=ACTIVE`（`locked-initial.txt`/`locked-4min.txt`/`locked-8min.txt`/`locked-10min.txt`）。本轮条件为充电锁屏，设备未进入深度 Doze。
+- **exact 模式锁屏按时执行未通过**：A 应 10:02，实际 scheduled 输入 10:12:14.596（迟 614596 ms）；B 应 10:07，实际 10:12:09.533（迟 309533 ms）；对应 submission 95/91，最终 `done`，各 1 条 scheduled 输入（`timing-failure.json`/`native-runs.json`/`task-readback.json`）。系统日志 10:12:09.471 才出现该应用 `R(alarm start)`，两条 native run 均 10:12:09.484 才创建（`schedule-system-log.txt`/`lock-events.txt`）。最终 `done` 只说明解锁后执行成功，不构成锁屏定时通过。
+- **归因边界**：系统闹钟相关处理与 native run 创建均延后到解锁之后，具体 OEM 策略仍需对照核实；默认 `alarmClock` 尚未测试。未改电池优化、自启、HOME、无障碍，未加保活或生产代码补丁。
+- **清理**：两条自有任务按真实工具 id/revision 删除并 `list tasks[]`；配置恢复 `providers=[]`/`defaultModel=null`/`relay=null`（revision 9→10 测试→11 恢复），`aliases={}`；临时精确闹钟权限恢复未授予、UID appop `default`，保留起始通知 `USER_SET` 授权与 Host 运行态（Host 16131/默认 9256/UI 9258）；自有模型服务、ADB 端口与终端均已关闭（`cleanup-tools.json`/`restored-state.json`）。
+
+### 后续独立 UI 重设计（用户提出，本轮不实施）
+
+用户评价当前界面太乱，明确要求之后单独重新设计。记录到的具体问题：顶栏把隐藏、旧会话、设置、旧 Host 状态与重连、设备导航混排；默认页偏 Host 调试管理（状态/UUID/角色/目录）而非日常聊天（`ui-redesign-note.json`，截图 `ui-after-unlock.png`）。这是独立后续 UI 工作，本轮未实施，也不作为 M20 新增结项条件。
 
 ### 仍未验收（M20 不能记完成）
 
-真实模型/ASR/Hindsight 服务、远端 push 与 GitHub Actions 实际运行、锁屏与长时待机/未充电 Doze 后台（新 Host 未锁屏一次性触发与停机过期已有证据，见上节）、真实旧版迁移、完整传输饱和/竞态。16 KiB 页适配与专项运行验收按用户决定不在本期范围、不作为 M20 结项门槛（K80 为 4 KiB 页的历史事实、既有 ELF/zipalign 对齐设置与构建配置均保留不动）。M19 仍未取回、不计完成。故本期仍是 **18/19**，M20 进行中，不得记成全量验收完成。
+真实模型/ASR/Hindsight 服务、远端 push 与 GitHub Actions 实际运行、锁屏与长时待机/未充电 Doze 后台（新 Host 未锁屏一次性触发与停机过期已有证据；exact 模式锁屏按时执行已测失败、待处置，默认 `alarmClock` 待独立对照，见上节）、真实旧版迁移、完整传输饱和/竞态。16 KiB 页适配与专项运行验收按用户决定不在本期范围、不作为 M20 结项门槛（K80 为 4 KiB 页的历史事实、既有 ELF/zipalign 对齐设置与构建配置均保留不动）。M19 仍未取回、不计完成。故本期仍是 **18/19**，M20 进行中，不得记成全量验收完成。
 
 ### 清理与保留
 
