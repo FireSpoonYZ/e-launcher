@@ -2,6 +2,7 @@ import path from 'node:path';
 import { createModels, createProvider } from '@earendil-works/pi-ai/models';
 import { openAICompletionsApi } from '@earendil-works/pi-ai/api/openai-completions.lazy';
 import { normalizeHindsightConfig, parseHindsightOptions } from './hindsight-client.js';
+import { normalizeRuntimeExtensions, resolveRuntimeExtensions } from './extension-manager.js';
 import { readInputObject } from './cli-input.js';
 
 const DEFAULT_CONTEXT_WINDOW = 32768;
@@ -113,10 +114,17 @@ export function parseModelRef(value) {
   return { provider, modelId };
 }
 
-/** 纯运行时配置校验：不读 env/文件/网络；拒未知字段，不悄悄存 apiKey/headers。 */
+/**
+ * 纯运行时配置校验：不读 env/文件/网络；拒未知字段，不悄悄存 apiKey/headers。
+ * 扩展配置为 runtime.extensions；legacy runtime.hindsight 仍原样保留在规范化结果里，
+ * 两者同时出现属边界歧义，直接拒绝。
+ */
 export function normalizeRuntimeConfig(raw) {
   if (!isPlainObject(raw)) throw invalidArgument('runtime config must be a JSON object');
-  rejectUnknownFields(raw, new Set(['providers', 'defaultModel', 'hindsight', 'bashPath', 'toolPaths']), 'runtime config');
+  rejectUnknownFields(raw, new Set(['providers', 'defaultModel', 'hindsight', 'extensions', 'bashPath', 'toolPaths']), 'runtime config');
+  if (raw.hindsight !== undefined && raw.extensions !== undefined) {
+    throw invalidArgument('runtime config must not set both hindsight and extensions');
+  }
   const providers = validateProviders(raw.providers);
   let defaultModel = null;
   if (raw.defaultModel !== undefined && raw.defaultModel !== null) {
@@ -130,26 +138,34 @@ export function normalizeRuntimeConfig(raw) {
   const execution = parseExecutionOptions(raw);
   const normalized = { providers, defaultModel };
   const hindsight = normalizeHindsightConfig(raw.hindsight);
+  const extensions = normalizeRuntimeExtensions(raw.extensions);
   if (hindsight !== undefined) normalized.hindsight = hindsight;
+  if (extensions !== undefined) normalized.extensions = extensions;
   if (execution.bashPath !== undefined) normalized.bashPath = execution.bashPath;
   if (execution.toolPaths !== undefined) normalized.toolPaths = execution.toolPaths;
   return normalized;
 }
 
-/** 解析运行时配置并构建 pi-ai Models；hindsight 返回原始配置，凭证解析结果不外泄。 */
+/**
+ * 解析运行时配置并构建 pi-ai Models；hindsight 只返回生效启用的配置，凭证也仅此时解析，
+ * 另附生效的规范扩展映射供 runtime/控制面使用。
+ */
 export function parseRuntimeConfig(raw) {
   const normalized = normalizeRuntimeConfig(raw);
   const models = createModels();
   for (const provider of normalized.providers) {
     models.setProvider(buildProvider(provider));
   }
-  parseHindsightOptions(normalized.hindsight);
+  const extensions = resolveRuntimeExtensions(normalized);
+  const hindsight = extensions.hindsight?.enabled ? extensions.hindsight.config : undefined;
+  parseHindsightOptions(hindsight);
   return {
     models,
     defaultModel: normalized.defaultModel,
     bashPath: normalized.bashPath,
     toolPaths: normalized.toolPaths,
-    hindsight: normalized.hindsight,
+    hindsight,
+    extensions,
   };
 }
 

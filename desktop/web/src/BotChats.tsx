@@ -11,6 +11,7 @@ import type {
 } from '../../../host-core/index.js';
 import { useDrafts } from './drafts';
 import type { DraftSnapshot } from './drafts';
+import { BotSettings } from './BotSettings';
 
 type AnyRawEntry = { id: unknown; kind: string; model?: unknown; data?: unknown };
 
@@ -640,6 +641,8 @@ function PrimaryChatPane({ api, bot, pageActive = true }: { api: DesktopViewApi;
             </span>
           ) : <span>正在建立观察…</span>}
       </div>
+
+      <BotSettings api={api} botId={bot.botId} />
 
       <div className="live-pane">
         {live ? (

@@ -30,6 +30,19 @@ const MAX_OBSERVERS: usize = 8;
 const WRITER_QUEUE_CAP: usize = 16;
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
+/// Nested memory calls wait for the Hindsight backend (reflect up to 120s).
+const MEMORY_RESPONSE_TIMEOUT: Duration = Duration::from_secs(150);
+/// Exact Hindsight control methods carried inside the generic `call` broker op.
+const MEMORY_METHODS: &[&str] = &[
+  "memoryStatus",
+  "recallMemory",
+  "reflectMemory",
+  "retainMemory",
+  "getMemory",
+  "getMemorySource",
+  "correctMemory",
+  "retryMemory",
+];
 const MAX_OBSERVER_FRAME_FIFO: usize = 8;
 const MAX_OBSERVER_FIFO_BYTES: usize = 4 * 1024 * 1024;
 const OBSERVE_ACK_OP: &str = "observe_ack";
@@ -570,6 +583,7 @@ impl DesktopBridge {
       guard.generation
     };
     let request_id = format!("req-{generation}-{req_seq}");
+    let deadline = response_timeout(op, &params);
 
     let payload = json!({
       "type": "request",
@@ -673,7 +687,7 @@ impl DesktopBridge {
       }
     }
 
-    match tokio::time::timeout(RESPONSE_TIMEOUT, resp_rx).await {
+    match tokio::time::timeout(deadline, resp_rx).await {
       Ok(Ok(result)) => result,
       Ok(Err(_)) => {
         let outcome = if written.load(Ordering::SeqCst) {
@@ -702,6 +716,20 @@ impl DesktopBridge {
 
 fn is_public_operation(op: &str) -> bool {
   PUBLIC_OPERATIONS.contains(&op)
+}
+
+/// Only the eight Hindsight methods get the long deadline; every other op keeps
+/// RESPONSE_TIMEOUT (no broad relaxation). The broker carries them as op=call
+/// with params.method = control method.
+fn response_timeout(op: &str, params: &Value) -> Duration {
+  if op == "call" {
+    if let Some(method) = params.get("method").and_then(Value::as_str) {
+      if MEMORY_METHODS.contains(&method) {
+        return MEMORY_RESPONSE_TIMEOUT;
+      }
+    }
+  }
+  RESPONSE_TIMEOUT
 }
 
 fn validate_non_empty_id(value: &str, name: &str) -> Result<(), BridgeError> {

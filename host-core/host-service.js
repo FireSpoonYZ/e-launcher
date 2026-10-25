@@ -88,7 +88,7 @@ export async function openHostService(options) {
     const snapshot = settingsStore.get();
     activeRevision = snapshot.revision;
     lastRevision = activeRevision;
-    // parse 在打开 runtime/listener 前校验/解析 Hindsight 凭证；模型 key 在实际请求懒读。
+    // parse 在打开 runtime/listener 前校验/解析生效启用的 Hindsight 凭证；模型 key 在实际请求懒读。
     const runtimeConfig = parseRuntimeConfig(snapshot.settings.runtime);
 
     let relayToken = null;
@@ -125,6 +125,7 @@ export async function openHostService(options) {
       bashPath: runtimeConfig.bashPath,
       toolPaths: runtimeConfig.toolPaths,
       hindsight: runtimeConfig.hindsight,
+      extensions: runtimeConfig.extensions,
       settings: { store: settingsStore, activeRevision },
       getServiceStatus: () => getStatus(),
       nativeBridge,

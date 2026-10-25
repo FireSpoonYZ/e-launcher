@@ -319,6 +319,10 @@ export interface HindsightOptions {
   apiKeyEnv?: string;
   /** Opt-in shared bank; accepts explicit notes only, never automatic transcripts. */
   sharedMemory?: boolean;
+  /** Ordinary operation deadline in ms (default 30000, max 120000). */
+  timeoutMs?: number;
+  /** Reflect deadline in ms (default 120000, max 120000). */
+  reflectTimeoutMs?: number;
 }
 
 export type MemoryJobState = 'pending' | 'accepted' | 'completed' | 'failed';
@@ -482,6 +486,8 @@ export interface RuntimeConfig {
   providers: ProviderConfig[];
   defaultModel?: string | null;
   hindsight?: HindsightOptions;
+  /** Canonical Host extension config; ambiguous with legacy hindsight, never both. */
+  extensions?: RuntimeExtensionsConfig;
   bashPath?: string;
   toolPaths?: { rg?: string; fd?: string };
 }
@@ -543,6 +549,8 @@ export interface OpenRuntimeOptions {
   toolPaths?: { rg?: string; fd?: string };
   /** Optional Hindsight memory config; absent leaves memory disabled. */
   hindsight?: HindsightOptions;
+  /** Effective managed-extension config forwarded from parseRuntimeConfig; absent means legacy/unconfigured. */
+  extensions?: RuntimeExtensionsConfig;
   /** Optional trusted JS native bridge for Android tools; never persisted as a settings field. */
   nativeBridge?: NativeBridge;
 }
@@ -598,6 +606,16 @@ export interface Runtime {
   getScopeMessageDelivery(scopeId: string, messageId: string): Promise<MessageDeliveryStatus>;
   /** Read-only chat model whitelist; no credentials/base URLs/env names. */
   getModelCatalog(): Promise<ModelCatalog>;
+  /* Managed extensions and per-Bot SOUL. */
+  /** Idempotent Bot initialization (extension defaults once + SOUL.md); retried by create/startup. */
+  initializeBot(botId: string): Promise<void>;
+  getExtensionCatalog(): Promise<ExtensionCatalog>;
+  getBotExtensions(botId: string): Promise<BotExtensionSnapshot>;
+  /** CAS on expectedRevision; busy Bot rejects RUNTIME_BUSY before the settings change. */
+  setBotExtensions(botId: string, input: BotExtensionsUpdate): Promise<BotExtensionSnapshot>;
+  getBotSoul(botId: string): Promise<BotSoul>;
+  /** CAS on the file SHA-256; conflict rejects REQUEST_CONFLICT without overwriting. */
+  setBotSoul(botId: string, input: BotSoulUpdate): Promise<BotSoul>;
   /** Idempotently resume native tasks AND activate automatic room/DM processing; may submit new work. */
   resume(): void;
   close(): Promise<void>;
@@ -860,12 +878,147 @@ export interface ParsedRuntimeConfig {
   bashPath?: string;
   toolPaths?: { rg?: string; fd?: string };
   hindsight?: HindsightOptions;
+  /** Effective extension config; hindsight above carries only an effectively enabled config. */
+  extensions?: RuntimeExtensionsConfig;
 }
 
 export function normalizeRuntimeConfig(raw: unknown): RuntimeConfig;
 export function parseRuntimeConfig(raw: unknown): ParsedRuntimeConfig;
 export function describeModelCatalog(models: Models, defaultModel?: string | null): ModelCatalog;
 export function loadRuntimeConfig(file: string): Promise<ParsedRuntimeConfig>;
+
+/**
+ * Managed Bot extensions (Pi Durable native registry/configure/AgentDoc) and
+ * the per-Bot SOUL.md persona. The Host owns the catalog, availability and the
+ * common connection/secret reference; each Bot persists explicit settings that
+ * are copied once from the defaults (never inherited dynamically).
+ */
+
+export type BotExtensionMode = 'read-write' | 'read-only';
+
+/** Per-Bot extension settings; hindsight is the only managed extension. */
+export interface BotExtensions {
+  hindsight: { enabled: boolean; mode: BotExtensionMode };
+}
+
+/** CAS input for setBotExtensions and PUT /v1/bots/:botId/extensions. */
+export interface BotExtensionsUpdate {
+  expectedRevision: number;
+  extensions: BotExtensions;
+}
+
+/** Explicit Bot settings plus the effective state and why it differs. */
+export interface BotExtensionSnapshot {
+  botId: string;
+  revision: number;
+  extensions: BotExtensions;
+  effective: {
+    hindsight: {
+      enabled: boolean;
+      mode: BotExtensionMode;
+      reason: null | 'bot-disabled' | 'host-disabled' | 'not-configured';
+    };
+  };
+}
+
+/** Catalog entry; installed/availability/default state only, never a secret value. */
+export interface ExtensionCatalogEntry {
+  id: 'hindsight';
+  name: 'Hindsight';
+  version: '1';
+  scope: 'bot';
+  enabled: boolean;
+  available: boolean;
+  defaultEnabled: boolean;
+  reason: null | 'host-disabled' | 'not-configured';
+}
+
+export interface ExtensionCatalog {
+  extensions: ExtensionCatalogEntry[];
+}
+
+/** Real UTF-8 SOUL.md at dataRoot/bots/<botId>/SOUL.md; path is relative, revision its SHA-256. */
+export interface BotSoul {
+  botId: string;
+  path: string;
+  revision: string;
+  text: string;
+}
+
+/** CAS input for setBotSoul and PUT /v1/bots/:botId/soul; text is at most 64 KiB. */
+export interface BotSoulUpdate {
+  expectedRevision: string;
+  text: string;
+}
+
+/** Canonical Host config `runtime.extensions`; legacy `runtime.hindsight` is still accepted. */
+export interface HindsightExtensionConfig {
+  enabled: boolean;
+  /** Copied to a Bot only on its first initialization. */
+  defaultEnabled: boolean;
+  /** Required when enabled; may be retained while disabled. */
+  config?: HindsightOptions;
+}
+
+export interface RuntimeExtensionsConfig {
+  hindsight?: HindsightExtensionConfig;
+}
+
+export function normalizeBotExtensions(value: unknown): BotExtensions;
+/** Strict canonical map; undefined input stays undefined (unconfigured). */
+export function normalizeRuntimeExtensions(value: unknown): RuntimeExtensionsConfig | undefined;
+/** Effective map: explicit extensions win; legacy runtime.hindsight falls back to enabled+default. */
+export function resolveRuntimeExtensions(input: {
+  extensions?: RuntimeExtensionsConfig;
+  hindsight?: HindsightOptions;
+}): RuntimeExtensionsConfig;
+
+/** Internal Bot extension row snapshot; retentionFloor is never public. */
+export interface BotExtensionState {
+  botId: string;
+  revision: number;
+  extensions: BotExtensions;
+  retentionFloor: number;
+}
+
+/** Effective per-Bot policy enforced by the runtime/tool layer. */
+export interface BotExtensionPolicy {
+  enabled: boolean;
+  mode: BotExtensionMode;
+  canRead: boolean;
+  canWrite: boolean;
+  retentionFloor: number;
+}
+
+/** Host-owned catalog, persistence and resource lifecycle for managed extensions. */
+export interface HostExtensionManager {
+  /** Raw Hindsight options only when the Host extension is available and enabled. */
+  readonly hindsightConfig: HindsightOptions | undefined;
+  /** Ensure the Bot row and its SOUL exist; BOT_NOT_FOUND for an unknown Bot. */
+  ensureBot(botId: string): BotExtensionState;
+  getBotExtensions(botId: string): BotExtensionSnapshot;
+  /** CAS; options.retentionFloor is internal to the runtime, never a public input. */
+  setBotExtensions(
+    botId: string,
+    input: BotExtensionsUpdate,
+    options?: { retentionFloor?: number },
+  ): BotExtensionSnapshot;
+  getPolicy(botId: string): BotExtensionPolicy;
+  listExtensions(): ExtensionCatalog;
+  /** Native extension definition kept in the durable registry even while disabled. */
+  registerRuntime(id: 'hindsight', resources: { extension: unknown; quiesce: () => unknown; close: () => unknown }): void;
+  install(registry: unknown): void;
+  /** Tool names removed from the Bot's callable set; all eight when off, three writes when read-only. */
+  disabledToolNames(botId: string): string[];
+  quiesce(): Promise<void>;
+  close(): Promise<void>;
+}
+
+export function createHostExtensionManager(options: {
+  host: Host;
+  extensions?: RuntimeExtensionsConfig;
+  hindsight?: HindsightOptions;
+}): HostExtensionManager;
 
 /**
  * Module 7 types: host-owned persistent message ledger (messages.sqlite) on
@@ -1411,12 +1564,13 @@ export function openDeviceLink(options: OpenDeviceLinkOptions): Promise<DeviceLi
  * relay. The Node client opens an explicit 'client' role connection; the
  * target Host remains the sole authority for Bot cwd/create, inference,
  * tools and history. Module 14 extends the fixed v1 ten with 25 v2 methods
- * (work-context, scope, memory, model catalog).
+ * (work-context, scope, memory, model catalog); the managed-extension/SOUL
+ * methods are additive v2 on the same table.
  */
 
 export type RemoteControlOutcome = 'not-sent' | 'unconfirmed' | 'responded';
 
-/** Fixed 35 JSON methods (10 legacy v1 + 25 v2 additions); params/results reuse the existing DTOs above. */
+/** Fixed 40 JSON methods (10 legacy v1 + 30 v2 additions); params/results reuse the existing DTOs above. */
 export interface RemoteControlMethodMap {
   getHostInfo: { params: Record<string, never>; result: ControlHostInfo };
   listBots: { params: Record<string, never>; result: BotRecord[] };
@@ -1454,6 +1608,12 @@ export interface RemoteControlMethodMap {
   getMemorySource: { params: { botId: string; input: MemorySourceInput }; result: MemorySourceResult };
   correctMemory: { params: { botId: string; input: MemoryCorrectionInput }; result: MemoryCorrectionReceipt };
   retryMemory: { params: { botId: string; input: MemoryRetryInput }; result: MemoryReceipt };
+  /* Managed extension/SOUL additions; setters are CAS and never replayed. */
+  getExtensionCatalog: { params: Record<string, never>; result: ExtensionCatalog };
+  getBotExtensions: { params: { botId: string }; result: BotExtensionSnapshot };
+  setBotExtensions: { params: { botId: string; input: BotExtensionsUpdate }; result: BotExtensionSnapshot };
+  getBotSoul: { params: { botId: string }; result: BotSoul };
+  setBotSoul: { params: { botId: string; input: BotSoulUpdate }; result: BotSoul };
 }
 
 export interface OpenRemoteControlOptions {

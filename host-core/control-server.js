@@ -12,10 +12,13 @@ import {
   writeControlError,
 } from './control-http.js';
 import { serveBotLive, serveWorkLive } from './control-live.js';
+import { normalizeRuntimeExtensions } from './extension-manager.js';
+import { MEMORY_HTTP_INACTIVITY_MS } from './remote-control-protocol.js';
 
 const BIND_HOST = '127.0.0.1';
 const DEFAULT_PORT = 8787;
 const PROTOCOL_VERSION = 1;
+const HTTP_IDLE_TIMEOUT_MS = 30000;
 const JOB_STATE_RE = /^(pending|accepted|completed|failed)$/;
 const MAX_STATUS_LIMIT = 200;
 
@@ -55,12 +58,30 @@ const routes = [
   { method: 'GET', key: '/v1/scopes/:scopeKey/messages/:messageKey/delivery', pattern: /^\/v1\/scopes\/([^/]+)\/messages\/([^/]+)\/delivery\/?$/, params: ['scopeKey', 'messageKey'], hasBody: false, handler: scopeMessageDelivery },
   { method: 'GET', key: '/v1/settings', pattern: /^\/v1\/settings\/?$/, params: [], hasBody: false, handler: getSettings },
   { method: 'PUT', key: '/v1/settings', pattern: /^\/v1\/settings\/?$/, params: [], hasBody: true, handler: putSettings },
+  { method: 'GET', key: '/v1/extensions', pattern: /^\/v1\/extensions\/?$/, params: [], hasBody: false, handler: getExtensionCatalog },
+  { method: 'GET', key: '/v1/bots/:botId/extensions', pattern: /^\/v1\/bots\/([^/]+)\/extensions\/?$/, params: ['botId'], hasBody: false, handler: getBotExtensions },
+  { method: 'PUT', key: '/v1/bots/:botId/extensions', pattern: /^\/v1\/bots\/([^/]+)\/extensions\/?$/, params: ['botId'], hasBody: true, handler: setBotExtensions },
+  { method: 'GET', key: '/v1/bots/:botId/soul', pattern: /^\/v1\/bots\/([^/]+)\/soul\/?$/, params: ['botId'], hasBody: false, handler: getBotSoul },
+  { method: 'PUT', key: '/v1/bots/:botId/soul', pattern: /^\/v1\/bots\/([^/]+)\/soul\/?$/, params: ['botId'], hasBody: true, handler: setBotSoul },
   { method: 'GET', key: '/v1/service', pattern: /^\/v1\/service\/?$/, params: [], hasBody: false, handler: serviceStatus },
   { method: 'GET', key: '/v1/scopes/:scopeKey', pattern: /^\/v1\/scopes\/([^/]+)\/?$/, params: ['scopeKey'], hasBody: false, handler: getScopeState },
   { method: 'POST', key: '/v1/scopes/:scopeKey/members', pattern: /^\/v1\/scopes\/([^/]+)\/members\/?$/, params: ['scopeKey'], hasBody: true, handler: updateScopeMembers },
   { method: 'POST', key: '/v1/scopes/:scopeKey/messages', pattern: /^\/v1\/scopes\/([^/]+)\/messages\/?$/, params: ['scopeKey'], hasBody: true, handler: publishUserMessage },
   { method: 'GET', key: '/v1/scopes/:scopeKey/replicas', pattern: /^\/v1\/scopes\/([^/]+)\/replicas\/?$/, params: ['scopeKey'], hasBody: false, handler: listScopeReplicas },
 ];
+
+// The eight Hindsight routes may legitimately stay silent for up to the 120s
+// backend cap; only these responses extend the socket inactivity window.
+const MEMORY_ROUTE_KEYS = new Set([
+  '/v1/bots/:botId/memory',
+  '/v1/bots/:botId/memory/recall',
+  '/v1/bots/:botId/memory/reflect',
+  '/v1/bots/:botId/memory/retain',
+  '/v1/bots/:botId/memory/get',
+  '/v1/bots/:botId/memory/source',
+  '/v1/bots/:botId/memory/correct',
+  '/v1/bots/:botId/memory/retry',
+]);
 
 /**
  * 打开长期本机控制服务。token 与 port 在打开任何数据前校验；
@@ -100,6 +121,10 @@ export async function openControlServer(options) {
 
   // 先校验 Hindsight 配置（含 apiKeyEnv 解析），再打开本服务自己的 Host；
   // 仍把原始字段传给 openRuntime，绝不把归一化后的 apiKey 对象送回公共解析器。
+  // extensions 只在确实提供时校验；未启用扩展的凭证别名不在这一层解析。
+  if (runtimeOptions.extensions !== undefined) {
+    normalizeRuntimeExtensions(runtimeOptions.extensions);
+  }
   parseHindsightOptions(runtimeOptions.hindsight);
 
   // nativeBridge 只能注入函数；在打开本服务 Host 前拒绝，避免已开资源泄漏。
@@ -141,7 +166,7 @@ export async function openControlServer(options) {
   // 头部/请求体读取有界，慢请求不会让关闭无限等待。
   server.headersTimeout = 15000;
   server.requestTimeout = 60000;
-  server.timeout = 30000;
+  server.timeout = HTTP_IDLE_TIMEOUT_MS;
 
   await listen(server, port).catch(async (err) => {
     try { server.close(); } catch { /* 释放本次资源不掩盖原错误 */ }
@@ -229,7 +254,15 @@ async function dispatch(host, runtime, authorize, req, res, ctx) {
   } else {
     req.resume(); // 排空多余请求体，避免占用保活连接
   }
-  await match.route.handler(host, runtime, params, body, req, res, ctx);
+  // 只有 memory 路由放宽处理期间 socket 空闲上限；请求体/头/其他路由不变，
+  // 响应结束后恢复默认值，keep-alive 复用连接不继承 130s。
+  const extendedIdle = MEMORY_ROUTE_KEYS.has(match.route.key);
+  if (extendedIdle) res.setTimeout(MEMORY_HTTP_INACTIVITY_MS);
+  try {
+    await match.route.handler(host, runtime, params, body, req, res, ctx);
+  } finally {
+    if (extendedIdle) res.setTimeout(HTTP_IDLE_TIMEOUT_MS);
+  }
 }
 
 async function getHostInfo(host, runtime, params, body, req, res) {
@@ -246,7 +279,10 @@ async function listBots(host, runtime, params, body, req, res) {
 }
 
 async function createBot(host, runtime, params, body, req, res) {
-  writeControlJson(res, 201, host.createBot(body));
+  const bot = host.createBot(body);
+  // 去重重试也重跑幂等初始化：登记记录先落地，初始化失败可重试完成。
+  await runtime.initializeBot(bot.botId);
+  writeControlJson(res, 201, bot);
 }
 
 async function getBot(host, runtime, params, body, req, res) {
@@ -461,6 +497,40 @@ function validateSettingsUpdate(body) {
     throw new ControlHttpError(400, 'INVALID_ARGUMENT', 'settings must be a JSON object');
   }
   return { expectedRevision: body.expectedRevision, settings: body.settings };
+}
+
+// Bot 扩展/SOUL 路由：未知 Bot 与设置/内存路由一致直接 404，输入校验交给 runtime CAS。
+function requireBot(host, botId) {
+  if (!host.getBot(botId)) throw new ControlHttpError(404, 'BOT_NOT_FOUND', 'bot not found');
+}
+
+async function getExtensionCatalog(host, runtime, params, body, req, res) {
+  assertNoQuery(req);
+  writeControlJson(res, 200, await runtime.getExtensionCatalog());
+}
+
+async function getBotExtensions(host, runtime, params, body, req, res) {
+  assertNoQuery(req);
+  requireBot(host, params.botId);
+  writeControlJson(res, 200, await runtime.getBotExtensions(params.botId));
+}
+
+async function setBotExtensions(host, runtime, params, body, req, res) {
+  assertNoQuery(req);
+  requireBot(host, params.botId);
+  writeControlJson(res, 200, await runtime.setBotExtensions(params.botId, body));
+}
+
+async function getBotSoul(host, runtime, params, body, req, res) {
+  assertNoQuery(req);
+  requireBot(host, params.botId);
+  writeControlJson(res, 200, await runtime.getBotSoul(params.botId));
+}
+
+async function setBotSoul(host, runtime, params, body, req, res) {
+  assertNoQuery(req);
+  requireBot(host, params.botId);
+  writeControlJson(res, 200, await runtime.setBotSoul(params.botId, body));
 }
 
 async function serviceStatus(host, runtime, params, body, req, res, ctx) {

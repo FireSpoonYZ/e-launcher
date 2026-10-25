@@ -1,14 +1,22 @@
 // host-core/hindsight-client.js
-// Hindsight REST client adapter for Pi Durable. Frozen upstream protocol from
-// @vectorize-io/hindsight-client 0.9.2 generated SDK (bank GET updated to /config,
-// PUT bank, POST memories, GET/PATCH memory, POST recall/reflect, GET
-// operation/document, POST operation retry). Built-in fetch only; no new
-// dependencies.
+// Official @vectorize-io/hindsight-client 0.9.2 adapter for Pi Durable.
+// The generated SDK (createClient/createConfig/sdk) issues exactly one fetch per
+// call and its generated client defaults to redirect:follow; this adapter owns
+// the per-instance fetch that restores redirect:error, the 2MiB request/response
+// bound, per-operation timeouts and the draining close(), while keeping the
+// existing method signatures, DTO checks and stable error codes. No global fetch
+// patch, no automatic retries, no mutation replay.
+import { createClient, createConfig, sdk } from '@vectorize-io/hindsight-client';
 
 const MAX_BODY_BYTES = 2 * 1024 * 1024; // request/response UTF-8 bound, 2MiB
-const TIMEOUT_MS = 30_000;
-
-const BANK_PATH = '/v1/default/banks';
+const DEFAULT_TIMEOUT_MS = 30_000;
+const DEFAULT_REFLECT_TIMEOUT_MS = 120_000;
+// Upper bound the control transports align their Hindsight deadlines with.
+export const HINDSIGHT_MAX_TIMEOUT_MS = 120_000;
+// Exact bank-id existence goes through listBanks (q is a substring filter), so
+// pagination stays bounded instead of scanning an unbounded bank list.
+const BANK_PAGE_LIMIT = 100;
+const BANK_MAX_PAGES = 10;
 
 const OPERATION_STATUSES = new Set([
   'pending',
@@ -93,17 +101,39 @@ function normalizeBaseUrl(raw) {
   return url.href.replace(/\/+$/, '');
 }
 
+function normalizeTimeout(value, name) {
+  if (
+    typeof value !== 'number' ||
+    !Number.isSafeInteger(value) ||
+    value <= 0 ||
+    value > HINDSIGHT_MAX_TIMEOUT_MS
+  ) {
+    throw clientError(
+      'INVALID_ARGUMENT',
+      `${name} must be a positive safe integer <= ${HINDSIGHT_MAX_TIMEOUT_MS}`,
+    );
+  }
+  return value;
+}
+
 /**
  * 纯 Hindsight 配置校验：不读环境变量/文件/网络。
  * undefined -> undefined；拒 null/非 plain/未知 key；baseUrl 沿用原规则；
  * apiKeyEnv 只校验名称，sharedMemory 默认 false。
+ * 超时只在显式提供时进入归一化结果，避免把默认值写进既有 seed/CAS 形状。
  */
 export function normalizeHindsightConfig(value) {
   if (value === undefined) return undefined;
   if (!isPlainObject(value)) {
     throw clientError('INVALID_ARGUMENT', 'hindsight options must be a plain object');
   }
-  const allowed = new Set(['baseUrl', 'apiKeyEnv', 'sharedMemory']);
+  const allowed = new Set([
+    'baseUrl',
+    'apiKeyEnv',
+    'sharedMemory',
+    'timeoutMs',
+    'reflectTimeoutMs',
+  ]);
   for (const key of Object.keys(value)) {
     if (!allowed.has(key)) {
       throw clientError('INVALID_ARGUMENT', `unknown hindsight option key: ${key}`);
@@ -129,6 +159,12 @@ export function normalizeHindsightConfig(value) {
   }
   const normalized = { baseUrl, sharedMemory };
   if (apiKeyEnv !== undefined) normalized.apiKeyEnv = apiKeyEnv;
+  if (value.timeoutMs !== undefined) {
+    normalized.timeoutMs = normalizeTimeout(value.timeoutMs, 'timeoutMs');
+  }
+  if (value.reflectTimeoutMs !== undefined) {
+    normalized.reflectTimeoutMs = normalizeTimeout(value.reflectTimeoutMs, 'reflectTimeoutMs');
+  }
   return normalized;
 }
 
@@ -137,7 +173,7 @@ export function normalizeHindsightConfig(value) {
  * Returns null when undefined; rejects null/non-plain/unknown keys.
  * 复用 normalizeHindsightConfig 纯校验后，再在此解析环境变量：
  * 显式 apiKeyEnv 必须是标准环境名且解析为 nonempty header-safe ASCII token；
- * 省略 apiKeyEnv 是受支持的无鉴权本地服务场景。
+ * 省略 apiKeyEnv 是受支持的无鉴权本地服务场景。超时在此填默认值。
  */
 export function parseHindsightOptions(value) {
   if (value === undefined) return null;
@@ -153,7 +189,13 @@ export function parseHindsightOptions(value) {
     }
     apiKey = resolved;
   }
-  return { baseUrl: normalized.baseUrl, apiKey, sharedMemory: normalized.sharedMemory };
+  return {
+    baseUrl: normalized.baseUrl,
+    apiKey,
+    sharedMemory: normalized.sharedMemory,
+    timeoutMs: normalized.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+    reflectTimeoutMs: normalized.reflectTimeoutMs ?? DEFAULT_REFLECT_TIMEOUT_MS,
+  };
 }
 
 /**
@@ -161,18 +203,18 @@ export function parseHindsightOptions(value) {
  */
 export function createHindsightClient(config) {
   // config is the normalized output of parseHindsightOptions ({baseUrl, apiKey,
-  // sharedMemory}); URL/env/header/sharedMemory validation already happened there.
-  // Only a minimal structural guard remains so a broken internal config fails early.
+  // sharedMemory, timeoutMs, reflectTimeoutMs}); URL/env/header/sharedMemory
+  // validation already happened there. Only a minimal structural guard remains
+  // so a broken internal config fails early.
   if (!isPlainObject(config) || typeof config.baseUrl !== 'string' || config.baseUrl.length === 0) {
     throw clientError('INVALID_ARGUMENT', 'hindsight client config must be a normalized plain object with baseUrl');
   }
   const baseUrl = config.baseUrl;
   const apiKey = config.apiKey; // already header-safe or undefined
+  const timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const reflectTimeoutMs = config.reflectTimeoutMs ?? DEFAULT_REFLECT_TIMEOUT_MS;
   let closed = false;
   const pending = new Set(); // {cancel, promise} per in-flight request
-
-  const seg = (id) => encodeURIComponent(id);
-  const bankPath = (bankId) => `${BANK_PATH}/${seg(mustResourceId(bankId, 'bankId'))}`;
 
   function mustString(value, name) {
     if (typeof value !== 'string' || value.length === 0) {
@@ -235,127 +277,92 @@ export function createHindsightClient(config) {
     return response;
   }
 
-  async function readTextLimited(response) {
+  /**
+   * Re-read the response through the 2MiB bound and hand the SDK an equivalent
+   * Response: the generated client parses whatever body it receives unbounded.
+   */
+  async function limitResponse(response) {
+    const tooLarge = 'hindsight response body exceeds 2MiB limit';
     const contentLength = Number(response.headers.get('content-length'));
     if (Number.isFinite(contentLength) && contentLength > MAX_BODY_BYTES) {
       if (response.body) await response.body.cancel().catch(() => {});
-      throw protocolError();
+      throw protocolError(tooLarge);
     }
-    if (!response.body) {
-      const buffer = await response.arrayBuffer();
-      if (buffer.byteLength > MAX_BODY_BYTES) throw protocolError();
-      return decodeUtf8(buffer);
-    }
-    const reader = response.body.getReader();
-    let cancelled = false;
-    const cancelOnce = async () => {
-      if (cancelled) return;
-      cancelled = true;
-      await reader.cancel().catch(() => {});
-    };
     const chunks = [];
     let total = 0;
-    try {
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        total += value.byteLength;
-        if (total > MAX_BODY_BYTES) {
-          await cancelOnce();
-          throw protocolError();
-        }
-        chunks.push(value);
-      }
-    } catch (error) {
-      await cancelOnce();
-      throw error;
-    } finally {
-      reader.releaseLock();
-    }
-    return decodeUtf8(Buffer.concat(chunks));
-  }
-
-  function decodeUtf8(buffer) {
-    try {
-      return new TextDecoder('utf-8', { fatal: true }).decode(buffer);
-    } catch {
-      throw protocolError();
-    }
-  }
-
-  async function handleResponse(response) {
-    if (response.status >= 200 && response.status < 300) {
-      const text = await readTextLimited(response);
-      let data;
+    if (response.body) {
+      const reader = response.body.getReader();
       try {
-        data = JSON.parse(text);
-      } catch {
-        throw protocolError();
-      }
-      return data;
-    }
-    if (response.body) await response.body.cancel().catch(() => {});
-    switch (response.status) {
-      case 401:
-      case 403:
-        throw statusError('HINDSIGHT_AUTH_FAILED', response.status);
-      case 404:
-        throw statusError('HINDSIGHT_NOT_FOUND', response.status);
-      case 409:
-        throw statusError('HINDSIGHT_CONFLICT', response.status);
-      default:
-        if (response.status >= 500) {
-          throw statusError('HINDSIGHT_UNAVAILABLE', response.status);
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          total += value.byteLength;
+          if (total > MAX_BODY_BYTES) throw protocolError(tooLarge);
+          chunks.push(value);
         }
-        throw statusError('HINDSIGHT_INVALID_REQUEST', response.status);
+      } catch (error) {
+        await reader.cancel().catch(() => {});
+        throw error;
+      } finally {
+        reader.releaseLock();
+      }
     }
+    const bytes = Buffer.concat(chunks);
+    // 204/304 and empty bodies must stay bodyless for the Response constructor.
+    const body = response.status === 204 || response.status === 304 || bytes.byteLength === 0
+      ? null
+      : bytes;
+    return new Response(body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: response.headers,
+    });
   }
 
-  async function doRequest(method, path, options, ctrl, cancel, getCause) {
-    const signal = options?.signal;
-    let body;
-    const json = options?.json;
-    if (json !== undefined) {
-      body = JSON.stringify(json);
-      if (Buffer.byteLength(body, 'utf8') > MAX_BODY_BYTES) {
+  // Per-instance fetch: the SDK's generated client hardcodes redirect:follow, so
+  // the request is re-issued here with redirect:error; clones only to measure.
+  async function sdkFetch(request) {
+    if (request.body !== null) {
+      const text = await request.clone().text();
+      if (Buffer.byteLength(text, 'utf8') > MAX_BODY_BYTES) {
         throw clientError('INVALID_ARGUMENT', 'hindsight request body exceeds 2MiB limit');
       }
     }
-    const onAbort = () => cancel('caller');
-    if (signal) {
-      if (signal.aborted) throw abortError();
-      signal.addEventListener('abort', onAbort, { once: true });
-    }
-    const timer = setTimeout(() => cancel('timeout'), TIMEOUT_MS);
-    try {
-      const headers = { Accept: 'application/json' };
-      if (body !== undefined) headers['Content-Type'] = 'application/json';
-      if (apiKey !== undefined) headers.Authorization = `Bearer ${apiKey}`;
-      const response = await fetch(baseUrl + path, {
-        method,
-        headers,
-        body,
-        signal: ctrl.signal,
-        redirect: 'error',
-      });
-      return await handleResponse(response);
-    } catch (error) {
-      // First cancel cause wins: even if the body reader throws after cancellation,
-      // classify from the recorded cause rather than the thrown error type.
-      const cause = getCause();
-      if (cause === 'caller') throw abortError();
-      if (cause === 'close') throw closedError();
-      if (cause === 'timeout') throw unavailableError();
-      if (error instanceof HindsightClientError) throw error;
-      if (isAbortError(error)) throw abortError();
-      throw unavailableError();
-    } finally {
-      clearTimeout(timer);
-      if (signal) signal.removeEventListener('abort', onAbort);
+    return limitResponse(await fetch(request, { redirect: 'error' }));
+  }
+
+  const headers = { Accept: 'application/json' };
+  if (apiKey !== undefined) headers.Authorization = `Bearer ${apiKey}`;
+  const client = createClient(createConfig({ baseUrl, headers, fetch: sdkFetch }));
+
+  function statusFor(response) {
+    const status = response?.status;
+    if (!Number.isSafeInteger(status)) return unavailableError();
+    switch (status) {
+      case 401:
+      case 403:
+        return statusError('HINDSIGHT_AUTH_FAILED', status);
+      case 404:
+        return statusError('HINDSIGHT_NOT_FOUND', status);
+      case 409:
+        return statusError('HINDSIGHT_CONFLICT', status);
+      default:
+        if (status >= 500) return statusError('HINDSIGHT_UNAVAILABLE', status);
+        return statusError('HINDSIGHT_INVALID_REQUEST', status);
     }
   }
 
-  function request(method, path, options) {
+  // The SDK resolves failures instead of throwing ({error,request,response});
+  // fetch-layer rejections keep their code, 2xx parse failures stay protocol.
+  async function sdkCall(sdkFn, options, sdkSignal) {
+    const result = await sdkFn({ client, signal: sdkSignal, ...options });
+    if (result.error === undefined) return result.data;
+    if (result.error instanceof HindsightClientError) throw result.error;
+    if (result.response?.ok) throw protocolError();
+    throw statusFor(result.response);
+  }
+
+  function request(run, deadlineMs, signal) {
     if (closed) return Promise.reject(closedError());
     const ctrl = new AbortController();
     let cause = null;
@@ -365,9 +372,29 @@ export function createHindsightClient(config) {
       ctrl.abort();
     };
     const entry = { cancel };
-    const promise = doRequest(method, path, options, ctrl, cancel, () => cause).finally(() =>
-      pending.delete(entry),
-    );
+    const promise = (async () => {
+      const onAbort = () => cancel('caller');
+      if (signal) {
+        if (signal.aborted) throw abortError();
+        signal.addEventListener('abort', onAbort, { once: true });
+      }
+      const timer = setTimeout(() => cancel('timeout'), deadlineMs);
+      try {
+        return await run(ctrl.signal);
+      } catch (error) {
+        // First cancel cause wins: even if the body reader throws after cancellation,
+        // classify from the recorded cause rather than the thrown error type.
+        if (cause === 'caller') throw abortError();
+        if (cause === 'close') throw closedError();
+        if (cause === 'timeout') throw unavailableError();
+        if (error instanceof HindsightClientError) throw error;
+        if (isAbortError(error)) throw abortError();
+        throw unavailableError();
+      } finally {
+        clearTimeout(timer);
+        if (signal) signal.removeEventListener('abort', onAbort);
+      }
+    })().finally(() => pending.delete(entry));
     entry.promise = promise;
     pending.add(entry);
     return promise;
@@ -385,11 +412,33 @@ export function createHindsightClient(config) {
   }
 
   return {
+    // 存在性走 listBanks（q 为子串过滤）后按 bank_id 精确匹配；不依赖 /config。
     async getBank(bankId, signal) {
-      const response = await request('GET', `${bankPath(bankId)}/config`, { signal });
-      return validateBankResponse(response, bankId);
+      const id = mustResourceId(bankId, 'bankId');
+      return request(async (sdkSignal) => {
+        let offset = 0;
+        for (let page = 0; page < BANK_MAX_PAGES; page += 1) {
+          const list = plainObject(
+            await sdkCall(
+              sdk.listBanks,
+              { query: { q: id, limit: BANK_PAGE_LIMIT, offset } },
+              sdkSignal,
+            ),
+          );
+          const banks = list.banks;
+          protocolCheck(Array.isArray(banks), 'bank list banks must be an array');
+          const match = banks.find((bank) => isPlainObject(bank) && bank.bank_id === id);
+          if (match) return validateBankResponse(match, id);
+          const total = list.total;
+          protocolCheck(Number.isSafeInteger(total) && total >= 0, 'bank list total must be a nonnegative integer');
+          offset += banks.length;
+          if (banks.length === 0 || offset >= total) break;
+        }
+        throw statusError('HINDSIGHT_NOT_FOUND', 404);
+      }, timeoutMs, signal);
     },
     async createBank(bankId, options = {}, signal) {
+      const id = mustResourceId(bankId, 'bankId');
       const opts = mustPlain(options ?? {}, 'createBank options');
       const payload = {};
       if (opts.name !== undefined) payload.name = mustOptString(opts.name, 'name');
@@ -399,10 +448,17 @@ export function createHindsightClient(config) {
       if (opts.reflectMission !== undefined) {
         payload.reflect_mission = mustOptString(opts.reflectMission, 'reflectMission');
       }
-      const response = await request('PUT', bankPath(bankId), { json: payload, signal });
-      return validateBankResponse(response, bankId);
+      return request(async (sdkSignal) => {
+        const response = await sdkCall(
+          sdk.createOrUpdateBank,
+          { path: { bank_id: id }, body: payload },
+          sdkSignal,
+        );
+        return validateBankResponse(response, id);
+      }, timeoutMs, signal);
     },
     async retain(bankId, input, signal) {
+      const id = mustResourceId(bankId, 'bankId');
       const opts = mustPlain(input, 'retain input');
       const documentId = mustString(opts.documentId, 'documentId');
       const operationId = mustString(opts.operationId, 'operationId');
@@ -423,41 +479,53 @@ export function createHindsightClient(config) {
       }
       if (opts.tags !== undefined) item.tags = mustStringArray(opts.tags, 'tags');
       if (opts.timestamp !== undefined) item.timestamp = mustOptString(opts.timestamp, 'timestamp');
-      const response = await request('POST', `${bankPath(bankId)}/memories`, {
-        json: { items: [item], async: true, operation_id: operationId },
-        signal,
-      });
-      plainObject(response);
-      protocolCheck(response.success === true, 'retain response success must be true');
-      protocolCheck(response.bank_id === bankId, 'retain response bank_id mismatch');
-      protocolCheck(response.async === true, 'retain response async must be true');
-      protocolCheck(response.operation_id === operationId, 'retain response operation_id mismatch');
-      return response;
+      return request(async (sdkSignal) => {
+        const response = await sdkCall(
+          sdk.retainMemories,
+          { path: { bank_id: id }, body: { items: [item], async: true, operation_id: operationId } },
+          sdkSignal,
+        );
+        plainObject(response);
+        protocolCheck(response.success === true, 'retain response success must be true');
+        protocolCheck(response.bank_id === id, 'retain response bank_id mismatch');
+        protocolCheck(response.async === true, 'retain response async must be true');
+        protocolCheck(response.operation_id === operationId, 'retain response operation_id mismatch');
+        return response;
+      }, timeoutMs, signal);
     },
     async getOperation(bankId, operationId, signal) {
+      const id = mustResourceId(bankId, 'bankId');
       const opId = mustResourceId(operationId, 'operationId');
-      const response = await request('GET', `${bankPath(bankId)}/operations/${seg(opId)}`, {
-        signal,
-      });
-      plainObject(response);
-      protocolCheck(response.operation_id === opId, 'operation response operation_id mismatch');
-      protocolCheck(OPERATION_STATUSES.has(response.status), 'operation response status invalid');
-      return response;
+      return request(async (sdkSignal) => {
+        const response = await sdkCall(
+          sdk.getOperationStatus,
+          { path: { bank_id: id, operation_id: opId } },
+          sdkSignal,
+        );
+        plainObject(response);
+        protocolCheck(response.operation_id === opId, 'operation response operation_id mismatch');
+        protocolCheck(OPERATION_STATUSES.has(response.status), 'operation response status invalid');
+        return response;
+      }, timeoutMs, signal);
     },
     async retryOperation(bankId, operationId, signal) {
+      const id = mustResourceId(bankId, 'bankId');
       const opId = mustResourceId(operationId, 'operationId');
-      const response = await request(
-        'POST',
-        `${bankPath(bankId)}/operations/${seg(opId)}/retry`,
-        { signal },
-      );
-      plainObject(response);
-      protocolCheck(response.success === true, 'retry response success must be true');
-      protocolCheck(typeof response.message === 'string', 'retry response message must be a string');
-      protocolCheck(response.operation_id === opId, 'retry response operation_id mismatch');
-      return response;
+      return request(async (sdkSignal) => {
+        const response = await sdkCall(
+          sdk.retryOperation,
+          { path: { bank_id: id, operation_id: opId } },
+          sdkSignal,
+        );
+        plainObject(response);
+        protocolCheck(response.success === true, 'retry response success must be true');
+        protocolCheck(typeof response.message === 'string', 'retry response message must be a string');
+        protocolCheck(response.operation_id === opId, 'retry response operation_id mismatch');
+        return response;
+      }, timeoutMs, signal);
     },
     async recall(bankId, input, signal) {
+      const id = mustResourceId(bankId, 'bankId');
       const opts = mustPlain(input, 'recall input');
       const query = mustString(opts.query, 'query');
       const body = { query, budget: 'mid', include: { source_facts: {} } };
@@ -466,78 +534,91 @@ export function createHindsightClient(config) {
         body.max_tokens = maxTokens;
         body.include.source_facts.max_tokens = maxTokens;
       }
-      const response = await request('POST', `${bankPath(bankId)}/memories/recall`, {
-        json: body,
-        signal,
-      });
-      plainObject(response);
-      protocolCheck(Array.isArray(response.results), 'recall response results must be an array');
-      for (const item of response.results) {
-        plainObject(item);
-        protocolCheck(typeof item.id === 'string', 'recall result id must be a string');
-        protocolCheck(typeof item.text === 'string', 'recall result text must be a string');
-        if (item.type !== undefined && item.type !== null && typeof item.type !== 'string') {
-          throw protocolError('recall result type must be a string or null');
-        }
-        if (
-          item.document_id !== undefined &&
-          item.document_id !== null &&
-          typeof item.document_id !== 'string'
-        ) {
-          throw protocolError('recall result document_id must be a string or null');
-        }
-        if (item.source_fact_ids !== undefined && item.source_fact_ids !== null) {
+      return request(async (sdkSignal) => {
+        const response = await sdkCall(
+          sdk.recallMemories,
+          { path: { bank_id: id }, body },
+          sdkSignal,
+        );
+        plainObject(response);
+        protocolCheck(Array.isArray(response.results), 'recall response results must be an array');
+        for (const item of response.results) {
+          plainObject(item);
+          protocolCheck(typeof item.id === 'string', 'recall result id must be a string');
+          protocolCheck(typeof item.text === 'string', 'recall result text must be a string');
+          if (item.type !== undefined && item.type !== null && typeof item.type !== 'string') {
+            throw protocolError('recall result type must be a string or null');
+          }
           if (
-            !Array.isArray(item.source_fact_ids) ||
-            !item.source_fact_ids.every((v) => typeof v === 'string')
+            item.document_id !== undefined &&
+            item.document_id !== null &&
+            typeof item.document_id !== 'string'
           ) {
-            throw protocolError('recall result source_fact_ids must be an array of strings or null');
+            throw protocolError('recall result document_id must be a string or null');
+          }
+          if (item.source_fact_ids !== undefined && item.source_fact_ids !== null) {
+            if (
+              !Array.isArray(item.source_fact_ids) ||
+              !item.source_fact_ids.every((v) => typeof v === 'string')
+            ) {
+              throw protocolError('recall result source_fact_ids must be an array of strings or null');
+            }
           }
         }
-      }
-      if (response.source_facts !== undefined && response.source_facts !== null) {
-        if (typeof response.source_facts !== 'object' || Array.isArray(response.source_facts)) {
-          throw protocolError('recall source_facts must be an object or null');
+        if (response.source_facts !== undefined && response.source_facts !== null) {
+          if (typeof response.source_facts !== 'object' || Array.isArray(response.source_facts)) {
+            throw protocolError('recall source_facts must be an object or null');
+          }
+          for (const entry of Object.values(response.source_facts)) {
+            plainObject(entry);
+            protocolCheck(typeof entry.id === 'string', 'recall source_fact id must be a string');
+            protocolCheck(typeof entry.text === 'string', 'recall source_fact text must be a string');
+          }
         }
-        for (const entry of Object.values(response.source_facts)) {
-          plainObject(entry);
-          protocolCheck(typeof entry.id === 'string', 'recall source_fact id must be a string');
-          protocolCheck(typeof entry.text === 'string', 'recall source_fact text must be a string');
+        if (
+          response.source_facts_truncated !== undefined &&
+          response.source_facts_truncated !== null &&
+          typeof response.source_facts_truncated !== 'boolean'
+        ) {
+          throw protocolError('recall source_facts_truncated must be a boolean or null');
         }
-      }
-      if (
-        response.source_facts_truncated !== undefined &&
-        response.source_facts_truncated !== null &&
-        typeof response.source_facts_truncated !== 'boolean'
-      ) {
-        throw protocolError('recall source_facts_truncated must be a boolean or null');
-      }
-      return response;
+        return response;
+      }, timeoutMs, signal);
     },
     async reflect(bankId, input, signal) {
+      const id = mustResourceId(bankId, 'bankId');
       const opts = mustPlain(input, 'reflect input');
       const query = mustString(opts.query, 'query');
       const body = { query, budget: 'mid', include: { facts: {} } };
       if (opts.maxTokens !== undefined) {
         body.max_tokens = mustSafePositiveInt(opts.maxTokens, 'maxTokens');
       }
-      const response = await request('POST', `${bankPath(bankId)}/reflect`, {
-        json: body,
-        signal,
-      });
-      plainObject(response);
-      protocolCheck(typeof response.text === 'string', 'reflect response text must be a string');
-      return response;
+      return request(async (sdkSignal) => {
+        const response = await sdkCall(
+          sdk.reflect,
+          { path: { bank_id: id }, body },
+          sdkSignal,
+        );
+        plainObject(response);
+        protocolCheck(typeof response.text === 'string', 'reflect response text must be a string');
+        return response;
+      }, reflectTimeoutMs, signal);
     },
     async getMemory(bankId, memoryId, signal) {
-      const response = await request(
-        'GET',
-        `${bankPath(bankId)}/memories/${seg(mustResourceId(memoryId, 'memoryId'))}`,
-        { signal },
-      );
-      return plainObject(response);
+      const id = mustResourceId(bankId, 'bankId');
+      const memId = mustResourceId(memoryId, 'memoryId');
+      return request(async (sdkSignal) => {
+        const response = await sdkCall(
+          sdk.getMemory,
+          { path: { bank_id: id, memory_id: memId } },
+          sdkSignal,
+        );
+        return plainObject(response);
+      }, timeoutMs, signal);
     },
     async updateMemory(bankId, memoryId, input, signal) {
+      const id = mustResourceId(bankId, 'bankId');
+      const memId = mustResourceId(memoryId, 'memoryId');
       const opts = mustPlain(input, 'updateMemory input');
       if (opts.text === undefined && opts.state === undefined) {
         throw clientError('INVALID_ARGUMENT', 'updateMemory requires text or state');
@@ -551,22 +632,29 @@ export function createHindsightClient(config) {
         payload.state = opts.state;
       }
       if (opts.reason !== undefined) payload.reason = mustOptString(opts.reason, 'reason');
-      const response = await request(
-        'PATCH',
-        `${bankPath(bankId)}/memories/${seg(mustResourceId(memoryId, 'memoryId'))}`,
-        { json: payload, signal },
-      );
-      return plainObject(response);
+      return request(async (sdkSignal) => {
+        const response = await sdkCall(
+          sdk.updateMemory,
+          { path: { bank_id: id, memory_id: memId }, body: payload },
+          sdkSignal,
+        );
+        return plainObject(response);
+      }, timeoutMs, signal);
     },
     async getDocument(bankId, documentId, signal) {
+      const id = mustResourceId(bankId, 'bankId');
       const docId = mustResourceId(documentId, 'documentId');
-      const response = await request('GET', `${bankPath(bankId)}/documents/${seg(docId)}`, {
-        signal,
-      });
-      plainObject(response);
-      protocolCheck(response.id === docId, 'document response id mismatch');
-      protocolCheck(response.bank_id === bankId, 'document response bank_id mismatch');
-      return response;
+      return request(async (sdkSignal) => {
+        const response = await sdkCall(
+          sdk.getDocument,
+          { path: { bank_id: id, document_id: docId } },
+          sdkSignal,
+        );
+        plainObject(response);
+        protocolCheck(response.id === docId, 'document response id mismatch');
+        protocolCheck(response.bank_id === id, 'document response bank_id mismatch');
+        return response;
+      }, timeoutMs, signal);
     },
     close,
   };

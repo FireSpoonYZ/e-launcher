@@ -1,4 +1,13 @@
 import { registerPlugin, type PluginListenerHandle } from '@capacitor/core';
+// Shared Host DTOs stay single-sourced in host-core; type-only, erased at build.
+import type {
+  BotExtensionSnapshot,
+  BotExtensions,
+  BotSoul,
+  ExtensionCatalog,
+  HindsightOptions as SharedHindsightOptions,
+  RuntimeExtensionsConfig,
+} from '../../../host-core/index.js';
 import { createTauriBotHost } from './tauri-host';
 
 export type ToolCall = { id: string; name: string; arguments: string };
@@ -167,7 +176,21 @@ export type HostStatus = HostSnapshot;
 export type HostSettingsModel = { id: string; name?: string; reasoning?: boolean; contextWindow?: number; maxTokens?: number };
 export type HostProviderConfig = { id: string; baseUrl: string; apiKeyEnv?: string; models: HostSettingsModel[] };
 export type HostRelayConfig = { url: string; tokenEnv: string; caFile?: string };
-export type HostSettings = { runtime: { providers: HostProviderConfig[]; defaultModel?: string|null; hindsight?: {baseUrl:string; apiKeyEnv?:string; sharedMemory?:boolean}; bashPath?: string; toolPaths?: {rg?:string; fd?:string} }; relay: HostRelayConfig|null };
+// Canonical extension/SOUL DTOs are declared once in host-core/index.d.ts and
+// re-exported here for the local Host UI (types only, no runtime import).
+export type { BotExtensionSnapshot, BotExtensions, BotSoul, ExtensionCatalog, RuntimeExtensionsConfig };
+/** Connection config; unset timeouts keep the Host defaults (30s / reflect 120s). */
+export type HostHindsightConfig = SharedHindsightOptions & { timeoutMs?: number; reflectTimeoutMs?: number };
+export type HostRuntimeSettings = {
+  providers: HostProviderConfig[];
+  defaultModel?: string | null;
+  /** Canonical extension config; legacy `hindsight` may still appear on readback. */
+  extensions?: RuntimeExtensionsConfig;
+  hindsight?: HostHindsightConfig;
+  bashPath?: string;
+  toolPaths?: {rg?: string; fd?: string};
+};
+export type HostSettings = { runtime: HostRuntimeSettings; relay: HostRelayConfig|null };
 export type HostSettingsPayload = { deviceId: string; revision: number; settings: HostSettings; activeRevision?: number; restartRequired?: boolean };
 export type HostBot = { botId: string; deviceId: string; role: string; cwd: string; modelRef: string|null; primaryConversationId: string; createdAt: string };
 export type HostSubmission = { botId: string; conversationId: string; requestId: string; submissionId: number; status: 'queued'|'placed'|'done'|'unanswered'; answerText: string|null; reason: string|null };

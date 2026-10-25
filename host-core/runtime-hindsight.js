@@ -54,10 +54,21 @@ function endpointHashOf(baseUrl) {
 /**
  * 创建 Hindsight 记忆控制器。config 为 parseHindsightOptions 的归一化结果（或 null）。
  * Disabled 时不创建 client、不打开 store、不注册任何后台状态。
+ * getBotPolicy(botId) 返回每 Bot 策略 {enabled,mode,canRead,canWrite,retentionFloor}；未提供时全部放行。
  */
-export function createRuntimeHindsight({ host, getHarness, getWorkContexts, getWorkActivity, config, context }) {
+export function createRuntimeHindsight({ host, getHarness, getWorkContexts, getWorkActivity, config, context, getBotPolicy }) {
   const client = config ? createHindsightClient(config) : null;
-  const sources = createHindsightSources({ host, getHarness, context });
+  const sources = createHindsightSources({ host, getHarness, context, getBotPolicy });
+
+  function policyFor(botId) {
+    return getBotPolicy ? (getBotPolicy(botId) ?? null) : null;
+  }
+
+  // 关闭/只读 Bot 的自动写入（outbox 抽取、run 收集）暂停，但不删除已冻结的 job/run。
+  function canWriteFor(botId) {
+    const policy = policyFor(botId);
+    return policy === null || (policy.enabled === true && policy.canWrite === true);
+  }
 
   let store = null;
   let fatalError = null;
@@ -255,7 +266,9 @@ export function createRuntimeHindsight({ host, getHarness, getWorkContexts, getW
   }
 
   async function processJobs(store) {
-    const jobs = store.dueJobs(Date.now(), JOBS_PER_PUMP);
+    // shortcut: 暂停 Bot 的到期 job 仍占用查询窗口，大量暂停 Bot 可能延迟其他 Bot；升级时按 bot 过滤查询。
+    const due = store.dueJobs(Date.now(), JOBS_PER_PUMP * 5);
+    const jobs = due.filter((job) => canWriteFor(job.botId)).slice(0, JOBS_PER_PUMP);
     for (const job of jobs) {
       if (closing) return;
       try {
@@ -286,8 +299,10 @@ export function createRuntimeHindsight({ host, getHarness, getWorkContexts, getW
     const page = store.pendingRuns(runCursor, RUNS_PAGE_SIZE);
     for (const run of page.items) {
       if (closing) return;
+      // 关闭/只读 Bot 暂停收集（本地 job 写入）；退回读写后同一批 pending run 仍可继续。
+      if (!canWriteFor(run.botId)) continue;
       const ctx = store.getContext(run.contextKey);
-      const afterEntryId = ctx?.lastEntryId ?? 0;
+      const afterEntryId = Math.max(ctx?.lastEntryId ?? 0, run.floorEntryId ?? 0);
       const result = await sources.collectRun(run, afterEntryId, context);
       if (result.status === 'pending') continue;
       const unanswered = result.status === 'unanswered';
@@ -437,22 +452,25 @@ export function createRuntimeHindsight({ host, getHarness, getWorkContexts, getW
         return undefined;
       }
 
-      // 即使查询为空也先持久化输入跟踪，确保 provider 运行前本地已记录。
-      let store;
-      try {
-        store = getStore();
-      } catch (err) {
-        failAdapter(err);
-        throw err;
-      }
+      // 关闭/只读 Bot 不记录 run、不启动 pump；只读仍允许临时 recall，关闭则已在上游返回 null。
       const contextRow = buildContext(capture.identity, capture.target);
-      try {
-        store.recordRuns(contextRow, capture.runs);
-      } catch (err) {
-        failAdapter(err);
-        throw err;
+      if (capture.canWrite) {
+        // 即使查询为空也先持久化输入跟踪，确保 provider 运行前本地已记录。
+        let store;
+        try {
+          store = getStore();
+        } catch (err) {
+          failAdapter(err);
+          throw err;
+        }
+        try {
+          store.recordRuns(contextRow, capture.runs);
+        } catch (err) {
+          failAdapter(err);
+          throw err;
+        }
+        activatePump();
       }
-      activatePump();
 
       assertOpen();
       callContext.abortSignal?.throwIfAborted();
@@ -551,6 +569,7 @@ export function createRuntimeHindsight({ host, getHarness, getWorkContexts, getW
     getHarness,
     getWorkContexts,
     getWorkActivity,
+    getBotPolicy,
     config,
     client,
     getStore,

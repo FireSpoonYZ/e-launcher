@@ -3,6 +3,8 @@
 // the exact client/host connection objects, callId/routeId/targetDeviceId and a
 // deadline — never the method/params/result/body of a call. All capacity and
 // timeout bounds live with the table so the server cannot drift from them.
+// The per-call timeout is supplied by the caller (memory methods get the
+// longer budget) and defaults to the shared control timeout.
 import { randomUUID } from 'node:crypto';
 import {
   CONTROL_TIMEOUT_MS,
@@ -22,14 +24,14 @@ export function openControlRoutes() {
   const byRouteId = new Map();
 
   return {
-    add(client, callId, host, targetDeviceId) {
+    add(client, callId, host, targetDeviceId, timeoutMs = CONTROL_TIMEOUT_MS) {
       const record = {
         client,
         callId,
         host,
         targetDeviceId,
         routeId: randomUUID(),
-        deadline: Date.now() + CONTROL_TIMEOUT_MS,
+        deadline: Date.now() + timeoutMs,
       };
       byRouteId.set(record.routeId, record);
       return record;

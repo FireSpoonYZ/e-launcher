@@ -10,3 +10,9 @@ export { openHostService } from './host-service.js';
 export { openPendingClient } from './pending-client.js';
 export { openHostSettings, normalizeHostSettings } from './host-settings.js';
 export { normalizeRuntimeConfig, parseRuntimeConfig, describeModelCatalog, loadRuntimeConfig } from './runtime-models.js';
+export {
+  normalizeBotExtensions,
+  normalizeRuntimeExtensions,
+  resolveRuntimeExtensions,
+  createHostExtensionManager,
+} from './extension-manager.js';

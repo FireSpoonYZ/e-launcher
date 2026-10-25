@@ -100,6 +100,7 @@ export function createHindsightService({
   getHarness,
   getWorkContexts,
   getWorkActivity,
+  getBotPolicy,
   config,
   client,
   getStore,
@@ -109,6 +110,24 @@ export function createHindsightService({
   context,
   sources,
 }) {
+  /** 每 Bot 策略（manager 提供）；未提供策略时不限制。 */
+  function policyFor(botId) {
+    return getBotPolicy ? (getBotPolicy(botId) ?? null) : null;
+  }
+
+  function assertEnabled(policy) {
+    if (policy && policy.enabled !== true) {
+      throw messageError('EXTENSION_DISABLED', 'hindsight is disabled for this bot');
+    }
+  }
+
+  function assertWritable(policy) {
+    assertEnabled(policy);
+    if (policy && policy.canWrite !== true) {
+      throw messageError('EXTENSION_READ_ONLY', 'hindsight is read-only for this bot');
+    }
+  }
+
   /**
    * 解析 Bot 归属与 bank 身份（不建存储、不建绑定）。
    * scope 仅复用 resolveWorkContext 读授权（当前成员或既有绑定/冻结收件）；shared 需配置开启。
@@ -118,6 +137,9 @@ export function createHindsightService({
     assertId(botId, 'botId');
     const bot = host.getBot(botId);
     if (!bot || bot.deviceId !== host.deviceId) throw botNotFound(botId);
+    // 每 Bot 策略在此拦下全部入口（含嵌套工具调用与 scope 上下文）。
+    const policy = policyFor(botId);
+    assertEnabled(policy);
     const normalizedTarget = normalizeMemoryTarget(target);
     if (normalizedTarget.kind === 'scope') {
       await getWorkContexts().resolveWorkContext(botId, normalizedTarget.scopeId);
@@ -129,6 +151,7 @@ export function createHindsightService({
       botId,
       target: normalizedTarget,
       bankId: hindsightBankId(host.deviceId, botId, normalizedTarget),
+      policy,
     };
   }
 
@@ -143,7 +166,9 @@ export function createHindsightService({
     const bot = host.getBot(botId);
     if (!bot || bot.deviceId !== host.deviceId) throw botNotFound(botId);
     const normalized = normalizeMemoryStatus(input);
-    if (!config) {
+    const policy = policyFor(botId);
+    // 未配置或本 Bot 关闭：返回正常 disabled 形状，不读写任何本地/远程数据。
+    if (!config || (policy && policy.enabled !== true)) {
       return {
         botId,
         target: normalized.target,
@@ -242,6 +267,8 @@ export function createHindsightService({
   async function doRetain(botId, input, actor, callContext) {
     const normalized = normalizeMemoryRetain(input);
     const ctx = await resolve(botId, normalized.target);
+    // 只读 Bot 拒绝所有写入口（含工具与嵌套调用）。
+    assertWritable(ctx.policy);
     const isTool = actor.kind === 'tool';
     const requestKey = isTool ? 'tool:' + actor.taskId : 'control:' + normalized.requestId;
     // 来源性质：控制注记/工具注记，携带实际 actor 身份与来源 target；shared 仅显式选择。
@@ -307,6 +334,7 @@ export function createHindsightService({
   async function doCorrect(botId, input, actor, callContext) {
     const normalized = normalizeMemoryCorrection(input);
     const ctx = await resolve(botId, normalized.target);
+    assertWritable(ctx.policy);
     const isTool = actor.kind === 'tool';
     const requestKey = isTool ? 'tool:' + actor.taskId : 'control:' + normalized.requestId;
     // 发送给后端的文本/原因先脱敏；冲突检测用原始意图哈希。
@@ -390,6 +418,7 @@ export function createHindsightService({
   async function doRetry(botId, input, callContext) {
     const normalized = normalizeMemoryRetry(input);
     const ctx = await resolve(botId, normalized.target);
+    assertWritable(ctx.policy);
     if (!hasStore()) {
       throw messageError('HINDSIGHT_NOT_FOUND', 'memory operation is not tracked locally');
     }

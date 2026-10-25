@@ -172,13 +172,15 @@ const CARGO_LICENSE_FALLBACKS = new Map([
 const DYNAMIC_ASSET_RE = /(?:require\s*\.\s*resolve|createRequire\s*\([^)]*\)\s*\.\s*resolve|new\s+URL)\s*\(\s*(['"])([^'"]+\.(?:wasm|node))\1/g;
 
 // npm archives for the pinned @earendil-works packages omit LICENSE files;
-// use the verified in-repo upstream MIT copy if any are ever bundled.
+// use the verified in-repo upstream MIT copies if any are ever bundled.
+// @vectorize-io/hindsight-client 0.9.2 publishes dist/src/generated only, so its
+// MIT text must also be kept in-repo (licenses/hindsight-client-0.9.2-MIT.txt).
 const UPSTREAM_MIT_ALLOWLIST = new Map([
-  ['@earendil-works/chord', '1.3.0'],
-  ['@earendil-works/pi-ai', '1.3.0'],
-  ['@earendil-works/pi-durable', '1.3.0'],
+  ['@earendil-works/chord', { version: '1.3.0', license: 'pi-v1.3.0-MIT.txt' }],
+  ['@earendil-works/pi-ai', { version: '1.3.0', license: 'pi-v1.3.0-MIT.txt' }],
+  ['@earendil-works/pi-durable', { version: '1.3.0', license: 'pi-v1.3.0-MIT.txt' }],
+  ['@vectorize-io/hindsight-client', { version: '0.9.2', license: 'hindsight-client-0.9.2-MIT.txt' }],
 ]);
-const PI_V1_3_0_MIT_LICENSE = path.join(ROOT, 'licenses', 'pi-v1.3.0-MIT.txt');
 
 // UI packages explicitly used by the desktop frontend; their full licenses are
 // collected from the installed root node_modules (they are not part of the
@@ -734,10 +736,12 @@ async function collectNpmLicenseSections(metafile) {
     const licenseFiles = await findLicenseFiles(pkg.root);
     sections.push(`## npm: ${pkg.name}@${pkg.version} (${pkg.license ?? 'unknown'})`);
     if (licenseFiles.length === 0) {
-      if (UPSTREAM_MIT_ALLOWLIST.get(pkg.name) === pkg.version && pkg.license === 'MIT') {
-        const upstream = await readIfPresent(PI_V1_3_0_MIT_LICENSE);
-        if (!upstream) throw fail('missing in-repo upstream MIT license for @earendil-works');
-        sections.push(upstream.toString('utf8').trim());
+      const upstream = UPSTREAM_MIT_ALLOWLIST.get(pkg.name);
+      if (upstream && upstream.version === pkg.version && pkg.license === 'MIT') {
+        const upstreamPath = path.join(ROOT, 'licenses', upstream.license);
+        const text = await readIfPresent(upstreamPath);
+        if (!text) throw fail(`in-repo upstream MIT license missing: ${upstreamPath}`);
+        sections.push(text.toString('utf8').trim());
       } else {
         throw fail(`bundled npm package ${pkg.name}@${pkg.version} has no license file`);
       }

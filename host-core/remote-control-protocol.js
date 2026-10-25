@@ -2,6 +2,8 @@
 // Module 9 pure boundary parsers for authenticated remote Host JSON control.
 // Module 14 adds v2 work/scope/memory methods and the v1/v2 negotiation
 // surface; frame readers stay directional with no ws/network/Runtime/storage.
+// The managed-extension/SOUL methods are additive v2 and share the fixed
+// per-hop memory timeout budgets exported below.
 
 import { messageError, assertId, normalizePageOptions } from './message-protocol.js';
 import {
@@ -22,6 +24,9 @@ import {
 } from './hindsight-protocol.js';
 
 const INVALID_ARGUMENT = 'INVALID_ARGUMENT';
+const SHA256_HEX_RE = /^[0-9a-f]{64}$/;
+const MAX_SOUL_BYTES = 65536; // 64 KiB public SOUL.md text limit
+const EXTENSION_MODES = new Set(['read-write', 'read-only']);
 
 export const MAX_CONTROL_JSON_BYTES = 1048576; // 1 MiB, params/result JSON UTF-8 bytes
 export const CONTROL_TIMEOUT_MS = 20000;
@@ -29,6 +34,47 @@ export const CONTROL_CLIENT_TIMEOUT_MS = 25000;
 export const CONTROL_MAX_CLIENT_CALLS = 8;
 export const CONTROL_MAX_HOST_CALLS = 8;
 export const CONTROL_MAX_PENDING = 128;
+
+// Hindsight memory calls are the only slow RPCs: the backend request cap is
+// 120s (HINDSIGHT_MAX_TIMEOUT_MS, reflect), so each hop gets a fixed budget that
+// strictly contains the inner one and the 150s native outer deadline: relay
+// execution -> 135s, remote/local client wait -> 140s, desktop broker wrapper
+// -> 145s, and the local control HTTP socket must stay idle >=130s.
+export const CONTROL_MEMORY_DEADLINE_MS = 135000;
+export const CONTROL_MEMORY_CLIENT_DEADLINE_MS = 140000;
+export const CONTROL_MEMORY_BROKER_DEADLINE_MS = 145000;
+export const MEMORY_HTTP_INACTIVITY_MS = 130000;
+
+const MEMORY_METHODS = new Set([
+  'memoryStatus',
+  'recallMemory',
+  'reflectMemory',
+  'retainMemory',
+  'getMemory',
+  'getMemorySource',
+  'correctMemory',
+  'retryMemory',
+]);
+
+/** True only for the eight Hindsight memory control methods. */
+export function isMemoryControlMethod(method) {
+  return MEMORY_METHODS.has(method);
+}
+
+/** Relay/target execution deadline for one control method. */
+export function controlMethodTimeoutMs(method) {
+  return isMemoryControlMethod(method) ? CONTROL_MEMORY_DEADLINE_MS : CONTROL_TIMEOUT_MS;
+}
+
+/** Remote/local control client call deadline for one control method. */
+export function controlClientTimeoutMs(method) {
+  return isMemoryControlMethod(method) ? CONTROL_MEMORY_CLIENT_DEADLINE_MS : CONTROL_CLIENT_TIMEOUT_MS;
+}
+
+/** Desktop broker wrapper deadline for one control method. */
+export function controlBrokerTimeoutMs(method) {
+  return isMemoryControlMethod(method) ? CONTROL_MEMORY_BROKER_DEADLINE_MS : CONTROL_CLIENT_TIMEOUT_MS;
+}
 
 // Legacy v1 method table (unchanged wire shape).
 export const CONTROL_V1_METHODS = Object.freeze([
@@ -44,7 +90,7 @@ export const CONTROL_V1_METHODS = Object.freeze([
   'contextStatus',
 ]);
 
-// Fixed v2 additions (module 14).
+// Fixed v2 additions (module 14, plus the managed-extension/SOUL additions).
 const CONTROL_V2_METHODS = Object.freeze([
   'getModelCatalog',
   'getWorkContext',
@@ -71,6 +117,11 @@ const CONTROL_V2_METHODS = Object.freeze([
   'getMemorySource',
   'correctMemory',
   'retryMemory',
+  'getExtensionCatalog',
+  'getBotExtensions',
+  'setBotExtensions',
+  'getBotSoul',
+  'setBotSoul',
 ]);
 
 export const CONTROL_METHODS = Object.freeze([...CONTROL_V1_METHODS, ...CONTROL_V2_METHODS]);
@@ -145,6 +196,8 @@ export const CONTROL_ERROR_CODES = new Set([
   'HINDSIGHT_PROTOCOL_ERROR',
   'HINDSIGHT_STORE_FAILED',
   'HINDSIGHT_BINDING_MISMATCH',
+  'EXTENSION_DISABLED',
+  'EXTENSION_READ_ONLY',
 ]);
 
 // Failure outcome semantics across the control protocol.
@@ -170,6 +223,22 @@ function assertNonEmptyString(value, name) {
   if (typeof value !== 'string' || !value.isWellFormed() || value.trim() === '') {
     throw invalid(`${name} must be a well-formed non-empty string`);
   }
+}
+
+// Strict BotExtensions wire shape. Kept local (instead of importing the manager's
+// normalizer) so this pure boundary module never pulls the Host/SDK graph into
+// the client bundles; the shape is frozen by the shared DTO contract.
+function normalizeBotExtensionsParams(value) {
+  if (!isPlainObject(value)) throw invalid('extensions must be a plain object');
+  rejectUnknownFields(value, new Set(['hindsight']), 'extensions');
+  const hindsight = value.hindsight;
+  if (!isPlainObject(hindsight)) throw invalid('extensions.hindsight must be a plain object');
+  rejectUnknownFields(hindsight, new Set(['enabled', 'mode']), 'extensions.hindsight');
+  if (typeof hindsight.enabled !== 'boolean') throw invalid('extensions.hindsight.enabled must be a boolean');
+  if (typeof hindsight.mode !== 'string' || !EXTENSION_MODES.has(hindsight.mode)) {
+    throw invalid('extensions.hindsight.mode must be read-write or read-only');
+  }
+  return { hindsight: { enabled: hindsight.enabled, mode: hindsight.mode } };
 }
 
 // Params normalize per method; unknown keys, missing required fields and
@@ -373,6 +442,51 @@ function normalizeControlParams(method, params) {
       rejectUnknownFields(params, new Set(['botId', 'input']), 'params');
       assertId(params.botId, 'botId');
       return { botId: params.botId, input: normalizeMemoryRetry(params.input) };
+    }
+    case 'getExtensionCatalog': {
+      rejectUnknownFields(params, new Set(), 'params');
+      return {};
+    }
+    case 'getBotExtensions':
+    case 'getBotSoul': {
+      rejectUnknownFields(params, new Set(['botId']), 'params');
+      assertId(params.botId, 'botId');
+      return { botId: params.botId };
+    }
+    case 'setBotExtensions': {
+      rejectUnknownFields(params, new Set(['botId', 'input']), 'params');
+      assertId(params.botId, 'botId');
+      if (!isPlainObject(params.input)) throw invalid('input must be an object');
+      rejectUnknownFields(params.input, new Set(['expectedRevision', 'extensions']), 'input');
+      if (!Number.isSafeInteger(params.input.expectedRevision) || params.input.expectedRevision < 0) {
+        throw invalid('expectedRevision must be a non-negative safe integer');
+      }
+      return {
+        botId: params.botId,
+        input: {
+          expectedRevision: params.input.expectedRevision,
+          extensions: normalizeBotExtensionsParams(params.input.extensions),
+        },
+      };
+    }
+    case 'setBotSoul': {
+      rejectUnknownFields(params, new Set(['botId', 'input']), 'params');
+      assertId(params.botId, 'botId');
+      if (!isPlainObject(params.input)) throw invalid('input must be an object');
+      rejectUnknownFields(params.input, new Set(['expectedRevision', 'text']), 'input');
+      if (typeof params.input.expectedRevision !== 'string' || !SHA256_HEX_RE.test(params.input.expectedRevision)) {
+        throw invalid('expectedRevision must be a lowercase 64-character hex SHA-256');
+      }
+      if (typeof params.input.text !== 'string' || !params.input.text.isWellFormed()) {
+        throw invalid('text must be well-formed UTF-8 text');
+      }
+      if (Buffer.byteLength(params.input.text, 'utf8') > MAX_SOUL_BYTES) {
+        throw invalid('text exceeds the 64 KiB SOUL limit');
+      }
+      return {
+        botId: params.botId,
+        input: { expectedRevision: params.input.expectedRevision, text: params.input.text },
+      };
     }
     default:
       throw invalid('unknown control method');

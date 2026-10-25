@@ -16,6 +16,7 @@ import {
   CONTROL_OUTCOMES,
   CONTROL_CLIENT_TIMEOUT_MS,
   CONTROL_MAX_CLIENT_CALLS,
+  controlBrokerTimeoutMs,
   normalizeControlCall,
 } from './remote-control-protocol.js';
 import {
@@ -31,7 +32,7 @@ import {
 
 export const DESKTOP_MAX_IN_FLIGHT_REQUESTS = CONTROL_MAX_CLIENT_CALLS; // 8
 export const DESKTOP_MAX_OBSERVATIONS = LIVE_MAX_CLIENT_SUBSCRIPTIONS; // 8
-export const DESKTOP_CALL_TIMEOUT_MS = CONTROL_CLIENT_TIMEOUT_MS; // 25000
+export const DESKTOP_CALL_TIMEOUT_MS = CONTROL_CLIENT_TIMEOUT_MS; // 25000 for ordinary calls
 const MAX_CA_PEM_BYTES = 65536; // 64 KiB
 const MAX_ERROR_MESSAGE_BYTES = 512;
 const STABLE_ERROR_CODES = new Set([...CONTROL_ERROR_CODES, 'REPLACED', 'PENDING_BUSY']);
@@ -324,7 +325,7 @@ export function openDesktopClient(options) {
     }
     const session = activeSession;
     const sessionGen = session.generation;
-    const timeout = withCallTimeout(callOpts.signal, DESKTOP_CALL_TIMEOUT_MS);
+    const timeout = withCallTimeout(callOpts.signal, controlBrokerTimeoutMs(method));
     try {
       let res;
       if (session.kind === 'local') {
@@ -655,7 +656,7 @@ export function openDesktopClient(options) {
     }
     const session = requireConnectedSession();
     const sessionGen = session.generation;
-    const timeout = withCallTimeout(reqSignal, DESKTOP_CALL_TIMEOUT_MS);
+    const timeout = withCallTimeout(reqSignal, controlBrokerTimeoutMs(normalized.method));
     try {
       let res;
       if (session.kind === 'local') {

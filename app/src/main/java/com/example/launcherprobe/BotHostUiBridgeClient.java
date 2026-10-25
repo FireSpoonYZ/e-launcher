@@ -59,6 +59,8 @@ public final class BotHostUiBridgeClient {
     private static final long CONNECT_TIMEOUT_MS = 5_000L;
     /** 单请求期限：单调时钟，从请求入队起算（含排队/发送/响应）。 */
     private static final long REQUEST_DEADLINE_MS = 25_000L;
+    /** 记忆方法外层等待：后端 reflect 最长 120s，留出协议/传输余量。 */
+    private static final long MEMORY_REQUEST_DEADLINE_MS = 150_000L;
     /** 发送队列（排队+在写）字节预算，与 8 个请求槽独立。 */
     private static final long MAX_WRITER_BYTES = 4L * 1024 * 1024;
     /** 预留给 pause 清理的字节容量：普通请求不得把它挤掉。 */
@@ -205,7 +207,8 @@ public final class BotHostUiBridgeClient {
             job = new Job(id, line, reserved, clientCleanup, new CompletableFuture<>());
             job.bytes = size;
             job.bytesHeld = true;
-            job.deadline = SystemClock.elapsedRealtime() + REQUEST_DEADLINE_MS;
+            long deadlineMs = memoryCall(method, params) ? MEMORY_REQUEST_DEADLINE_MS : REQUEST_DEADLINE_MS;
+            job.deadline = SystemClock.elapsedRealtime() + deadlineMs;
             queuedBytes += size;
             if (reserved) {
                 reservedPause = job;
@@ -215,7 +218,7 @@ public final class BotHostUiBridgeClient {
             }
             outbox.add(job);
             try {
-                job.timer = clock.schedule(() -> expire(job), REQUEST_DEADLINE_MS, TimeUnit.MILLISECONDS);
+                job.timer = clock.schedule(() -> expire(job), deadlineMs, TimeUnit.MILLISECONDS);
             } catch (RejectedExecutionException closedClock) {
                 releaseJobLocked(job);
                 return failed(new BridgeException("CLOSED", "not-sent", "连接已关闭"));
@@ -228,6 +231,17 @@ public final class BotHostUiBridgeClient {
         }
         if (bind != null) connect(bind, session);
         return job.future;
+    }
+
+    /**
+     * 是否为记忆方法调用：本机 call 带控制方法名，clientRequest 内层是 broker 的 call；
+     * 只按确切名字判断，其余操作（含 pause/观察）期限不变。
+     */
+    private static boolean memoryCall(String method, JSONObject params) {
+        if (params == null) return false;
+        if ("call".equals(method)) return BotHostProcess.isMemoryCall(params);
+        if (!"clientRequest".equals(method) || !"call".equals(params.optString("op", ""))) return false;
+        return BotHostProcess.isMemoryCall(params.optJSONObject("params"));
     }
 
     /** 撤销本 UI 会话的观察与语音捕获；可反复调用（重复为合并），不关闭 Host/Agent、不改动已有请求结果、不重放。 */

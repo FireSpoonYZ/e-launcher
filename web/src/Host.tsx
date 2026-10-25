@@ -3,6 +3,7 @@ import { BotHost, type HostBot, type HostCallResult, type HostFrameEvent, type H
 import { Dialog } from './components/ui/dialog';
 import { ErrorNotice, Header, Row, Section, useAction, useText, array, errorText, record } from './ui';
 import { HostLegacyImport } from './HostLegacyImport';
+import { HostBotSettings, HostExtensionCatalog } from './HostBotSettings';
 // 窄接口：只用于知道“事件传输已失败”，以便暂停只读轮询；不存在其它注入。
 import { onMobileStreamFailure } from './native/tauri-host';
 
@@ -855,6 +856,9 @@ export function HostPage({onBack, persistentPending = false, connectionEpoch = 0
         {history.items.map((item, index) => <p key={index} className="secondary">{historyEntry(item)}</p>)}
       </>}
     </Section>}
+    {selected && <Section title={t('Bot 扩展与 SOUL','Bot extensions & SOUL')}>
+      <HostBotSettings bot={selected} disabled={host?.phase !== 'running'}/>
+    </Section>}
     <Section title={t('配置','Configuration')}>
       <Row title={t('读取配置','Read configuration')} detail={settings ? `${t('修订号','Revision')} ${settings.revision}${settings.activeRevision !== undefined ? ` · active ${settings.activeRevision}` : ''}` : undefined} onClick={loadSettings}/>
       {settings && <>
@@ -868,6 +872,9 @@ export function HostPage({onBack, persistentPending = false, connectionEpoch = 0
           <button className="button" disabled={action.busy}>{t('保存凭据','Save credentials')}</button>
         </form>
       </>}
+    </Section>
+    <Section title={t('扩展','Extensions')}>
+      <HostExtensionCatalog disabled={host?.phase !== 'running'}/>
     </Section>
     <Section title={t('语音','Host voice')}>
       {!voice && <Row title={t('读取语音设置','Read voice settings')} onClick={() => action.run(async () => setVoice(await BotHost.voiceSettings()))}/>}

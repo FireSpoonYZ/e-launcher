@@ -1,4 +1,4 @@
-import { defineDoc, configure } from '@earendil-works/pi-durable';
+import { defineDoc, configure, AgentDoc } from '@earendil-works/pi-durable';
 import { parseModelRef } from './runtime-models.js';
 import { ContextState, BC_KERNEL_VERSION } from './context-state.js';
 
@@ -46,9 +46,10 @@ export async function createPrimaryInTransaction(tx, bot, options = {}) {
   const record = await tx.createConversation({ ownership: { kind: 'ownerless' } });
   await configure(tx, record.id, {
     model,
-    instructions: bot.role,
+    // 主会话人格来自真实 SOUL.md；未提供时保留旧 role 以兼容遗留导入路径。
+    instructions: options.instructions === undefined ? bot.role : options.instructions,
     cwd: bot.cwd,
-    tools: null,
+    tools: initialToolsChange(options.removeTools),
   });
   draft.byPrimary[primaryId] = record.id;
   return record.id;
@@ -76,6 +77,65 @@ export async function getPrimaryConversation(harness, bot, options, context) {
   // commit 回调里只允许通过 tx 读写；会话句柄在提交完成后解析。
   const conversationId = await harness.commit(async (tx) => createPrimaryInTransaction(tx, bot, options), context);
   return harness.conversation(conversationId, context);
+}
+
+/**
+ * 首次创建会话时的 tools 过滤器：仅有本模块管理的工具时才写成 {remove}，否则继承全部工具。
+ */
+export function initialToolsChange(removeTools) {
+  return removeTools && removeTools.length > 0 ? { remove: removeTools } : null;
+}
+
+/**
+ * 由当前 AgentState 计算人格/工具变更（无变化返回 undefined，避免无谓 system 变更）：
+ * - instructions：null/空串表示清空人格（空 SOUL 合法且有意为空）。
+ * - tools：只并入/移除本模块管理的工具名；旧版显式白名单（数组）不在改写范围。
+ *   未知名字按原样保留（SDK 的 configure 只读取注册项的 name）。
+ */
+export function agentProfileChange(state, profile) {
+  const change = {};
+  const instructions = profile?.instructions;
+  if (instructions !== undefined) {
+    const next = instructions === null || instructions === '' ? null : instructions;
+    const current = state?.instructions;
+    if (next === null) {
+      if (current !== undefined) change.instructions = null;
+    } else if (current !== next) {
+      change.instructions = next;
+    }
+  }
+
+  const managed = profile?.removeTools ?? [];
+  const current = state?.tools;
+  if (!Array.isArray(current)) {
+    const managedNames = new Set(managed.map((tool) => tool.name));
+    const byName = new Map(managed.map((tool) => [tool.name, tool]));
+    const previous = current?.remove ?? [];
+    const next = [...previous.filter((name) => !managedNames.has(name)), ...managedNames];
+    const unchanged = next.length === previous.length && next.every((name, index) => name === previous[index]);
+    if (!unchanged) {
+      change.tools = next.length === 0 ? null : { remove: next.map((name) => byName.get(name) ?? { name }) };
+    }
+  }
+  return Object.keys(change).length === 0 ? undefined : change;
+}
+
+/** 在调用方事务内比较并应用人格/工具，返回是否写入。 */
+export async function applyAgentProfileInTx(tx, conversationId, profile) {
+  const state = await tx.doc(AgentDoc, conversationId);
+  const change = agentProfileChange(state, profile);
+  if (!change) return false;
+  await configure(tx, conversationId, change);
+  return true;
+}
+
+/** 只在实际变化时提交一次 configure，保持 provider prompt cache 稳定。 */
+export async function applyAgentProfile(harness, conversationId, profile, context) {
+  const state = await harness.snapshot(AgentDoc, conversationId, context);
+  if (!state) return false;
+  if (!agentProfileChange(state, profile)) return false;
+  await harness.commit((tx) => applyAgentProfileInTx(tx, conversationId, profile), context);
+  return true;
 }
 
 /**

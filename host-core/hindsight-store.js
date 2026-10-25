@@ -1,14 +1,15 @@
 // 模块 13 Hindsight → Pi Durable 适配存储：hindsight.sqlite 只做适配状态跟踪/outbox/
-// 请求幂等/纠正审计，不是事实检索数据库。schema user_version=1，6 张表：
+// 请求幂等/纠正审计，不是事实检索数据库。schema user_version=2，6 张表：
 // identity/contexts/runs/outbox/requests/corrections。
 // 生命周期与身份检查沿用 message-store.js/store.js 模式：原子初始化、无 reset/drop、
-// 身份绑定（deviceId + endpointHash）校验。
+// 身份绑定（deviceId + endpointHash）校验。v1→v2 只追加 runs.floor_entry_id 默认 0 列，
+// 既有 run 保持原身份与原 0 下限（不回填、不重写）。
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 const DB_FILE = 'hindsight.sqlite';
 
 function storeError(code, message) {
@@ -29,10 +30,15 @@ const REQUIRED_TABLES = ['identity', 'contexts', 'runs', 'outbox', 'requests', '
 const REQUIRED_COLUMNS = {
   identity: ['id', 'device_id', 'endpoint_hash', 'epoch'],
   contexts: ['key', 'bot_id', 'target_json', 'bank_id', 'last_entry_id', 'cache', 'last_recall', 'last_error_code'],
-  runs: ['submission_id', 'context_key', 'native_id', 'request_id', 'entry_id', 'cutoff', 'state'],
+  runs: ['submission_id', 'context_key', 'native_id', 'request_id', 'entry_id', 'cutoff', 'state', 'floor_entry_id'],
   outbox: ['operation_id', 'document_id', 'context_key', 'fingerprint', 'payload_json', 'source_json', 'state', 'attempts', 'next_attempt_at', 'last_error_code', 'created_at', 'updated_at'],
   requests: ['request_key', 'kind', 'fingerprint', 'result_json'],
   corrections: ['request_key', 'context_key', 'receipt_json', 'before_json', 'patch_json', 'after_json'],
+};
+// v1 清单：迁移前先校验能识别的旧结构，缺少基础列则拒绝，不先改表。
+const V1_COLUMNS = {
+  ...REQUIRED_COLUMNS,
+  runs: ['submission_id', 'context_key', 'native_id', 'request_id', 'entry_id', 'cutoff', 'state'],
 };
 
 function parseJson(text) {
@@ -63,7 +69,8 @@ const SCHEMA_SQL = `
     request_id TEXT NOT NULL,
     entry_id INTEGER NOT NULL,
     cutoff INTEGER NOT NULL,
-    state TEXT NOT NULL CHECK (state IN ('pending', 'collected', 'unanswered'))
+    state TEXT NOT NULL CHECK (state IN ('pending', 'collected', 'unanswered')),
+    floor_entry_id INTEGER NOT NULL DEFAULT 0
   );
   CREATE TABLE outbox (
     operation_id TEXT PRIMARY KEY,
@@ -100,9 +107,9 @@ const SCHEMA_SQL = `
   CREATE INDEX idx_hindsight_corrections_context ON corrections(context_key);
 `;
 
-// 版本非 0/1（含负数）一律拒绝；v1 先校验表与关键列清单再做未确认纠正转换，
+// 版本非 0/1/2（含负数）一律拒绝；v1/v2 先校验表与关键列清单再做未确认纠正转换，
 // 避免先改审计后才发现缺列/缺表。
-function assertInventory(db) {
+function assertInventory(db, columns = REQUIRED_COLUMNS) {
   const tables = new Set(
     db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'").all().map((r) => r.name)
   );
@@ -114,9 +121,9 @@ function assertInventory(db) {
       throw storeError('UNSUPPORTED_SCHEMA', 'hindsight database is missing required table: ' + table);
     }
   }
-  for (const [table, columns] of Object.entries(REQUIRED_COLUMNS)) {
+  for (const [table, required] of Object.entries(columns)) {
     const actual = new Set(db.prepare('PRAGMA table_info(' + table + ')').all().map((r) => r.name));
-    for (const column of columns) {
+    for (const column of required) {
       if (!actual.has(column)) {
         throw storeError('UNSUPPORTED_SCHEMA', 'hindsight database is missing column: ' + table + '.' + column);
       }
@@ -129,7 +136,7 @@ function initSchema(db, deviceId, endpointHash) {
   let committed = false;
   try {
     const version = db.prepare('PRAGMA user_version').get().user_version;
-    if (version !== 0 && version !== SCHEMA_VERSION) {
+    if (version !== 0 && version !== 1 && version !== SCHEMA_VERSION) {
       throw storeError('UNSUPPORTED_SCHEMA', 'hindsight database schema version is not supported');
     }
     if (version === 0) {
@@ -146,7 +153,7 @@ function initSchema(db, deviceId, endpointHash) {
       );
       db.exec('PRAGMA user_version = ' + SCHEMA_VERSION);
     } else {
-      assertInventory(db);
+      assertInventory(db, version === 1 ? V1_COLUMNS : REQUIRED_COLUMNS);
       const row = db.prepare('SELECT device_id, endpoint_hash FROM identity WHERE id = 1').get();
       if (!row) {
         throw storeError('UNSUPPORTED_SCHEMA', 'hindsight database is missing identity row');
@@ -164,6 +171,11 @@ function initSchema(db, deviceId, endpointHash) {
             SET receipt_json = json_set(receipt_json, '$.state', 'unconfirmed', '$.outcome', 'unconfirmed', '$.updatedAt', ?)
           WHERE json_extract(receipt_json, '$.state') = 'pending'`
       ).run(now);
+      if (version === 1) {
+        // 只追加列，既有 run 保持原身份与 0 下限；不重写、不删除任何行。
+        db.exec('ALTER TABLE runs ADD COLUMN floor_entry_id INTEGER NOT NULL DEFAULT 0');
+        db.exec('PRAGMA user_version = ' + SCHEMA_VERSION);
+      }
     }
     db.exec('COMMIT');
     committed = true;
@@ -212,8 +224,8 @@ export function openHindsightStore({ dataRoot, deviceId, endpointHash }) {
     );
     const stmtGetRun = db.prepare('SELECT * FROM runs WHERE submission_id = ?');
     const stmtInsertRun = db.prepare(
-      `INSERT INTO runs (submission_id, context_key, native_id, request_id, entry_id, cutoff, state)
-       VALUES (?, ?, ?, ?, ?, ?, 'pending')`
+      `INSERT INTO runs (submission_id, context_key, native_id, request_id, entry_id, cutoff, state, floor_entry_id)
+       VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)`
     );
     const stmtUpdateRunCutoff = db.prepare('UPDATE runs SET cutoff = ? WHERE submission_id = ?');
     const stmtSetRunState = db.prepare('UPDATE runs SET state = ? WHERE submission_id = ?');
@@ -306,6 +318,7 @@ export function openHindsightStore({ dataRoot, deviceId, endpointHash }) {
         requestId: row.request_id,
         entryId: row.entry_id,
         cutoff: row.cutoff,
+        floorEntryId: row.floor_entry_id ?? 0,
         kind: target.kind === 'scope' ? 'scope' : 'primary',
         contextKey: row.context_key,
         state: row.state,
@@ -391,7 +404,8 @@ export function openHindsightStore({ dataRoot, deviceId, endpointHash }) {
             run.nativeId,
             run.requestId,
             run.entryId,
-            run.cutoff
+            run.cutoff,
+            Number.isSafeInteger(run.floorEntryId) && run.floorEntryId > 0 ? run.floorEntryId : 0
           );
         }
       });

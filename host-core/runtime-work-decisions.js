@@ -6,7 +6,7 @@ import { assertId, messageError } from './message-protocol.js';
 import { inboxQueryKey } from './message-queries.js';
 import { WorkIndex, WorkContextState, ensureWorkBinding, toWorkContextRecord } from './work-context-docs.js';
 import { WorkDecisionState, initialDecisionState, toWorkActivity } from './work-decision-state.js';
-import { createWorkInput, workDecisionInstructions } from './work-decision-codec.js';
+import { createWorkInput } from './work-decision-codec.js';
 import { ContextState, BC_KERNEL_VERSION } from './context-state.js';
 import { parseModelRef } from './runtime-models.js';
 
@@ -34,7 +34,7 @@ function generationError(reason) {
 }
 
 /** Inert until resume(); ledger import, policy consumption and the frozen model view have separate watermarks. */
-export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, models, defaultModel, context }) {
+export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, models, defaultModel, context, getProfile }) {
   let active = false;
   let closing = false;
   let timer = null;
@@ -143,8 +143,9 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
     assertId(scopeId, 'scopeId');
     return admit(async () => {
       const { bot, scope } = await getWorkContexts().resolveWorkContext(botId, scopeId);
+      const profile = getProfile(botId, { botId, scopeId, kind: scope.kind });
       const binding = await getHarness().commit(async (tx) => {
-        const bound = await ensureWorkBinding(tx, host.deviceId, bot, scope);
+        const bound = await ensureWorkBinding(tx, host.deviceId, bot, scope, profile);
         (await tx.doc(WorkDecisionState, bound.nativeId)).stopped = true;
         return bound;
       }, context);
@@ -161,7 +162,8 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
       if (!member(getLog().getScope(scopeId), botId)) {
         throw messageError('SCOPE_FORBIDDEN', 'work requires current scope membership');
       }
-      const binding = await getHarness().commit((tx) => ensureWorkBinding(tx, host.deviceId, bot, scope), context);
+      const profile = getProfile(botId, { botId, scopeId, kind: scope.kind });
+      const binding = await getHarness().commit((tx) => ensureWorkBinding(tx, host.deviceId, bot, scope, profile), context);
       const state = await getHarness().snapshot(WorkDecisionState, binding.nativeId, context);
       const requestId = state?.pending?.requestId;
       // Keep the persistent stop/error fence up until pre-resume native work is fully cancelled.
@@ -211,10 +213,8 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
       return false;
     }
     if (!agent.model) {
-      await configure(tx, nativeId, {
-        model: ref,
-        instructions: [agent.instructions, workDecisionInstructions(meta)].filter(Boolean).join('\n\n'),
-      });
+      // 人格/工具由 ensureWorkBinding 写入（SOUL + 工作政策），此处仅选择模型。
+      await configure(tx, nativeId, { model: ref });
     }
     return true;
   }

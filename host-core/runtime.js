@@ -14,7 +14,7 @@ import { parseExecutionOptions, parseModelRef, describeModelCatalog } from './ru
 import { createGrepTool } from './grep-tool.js';
 import { createFindTool } from './find-tool.js';
 import { createLsTool } from './ls-tool.js';
-import { getPrimaryConversation, RequestKeys, upgradeLegacyContextConversations } from './runtime-docs.js';
+import { getPrimaryConversation, RequestKeys, PrimaryIndex, upgradeLegacyContextConversations, applyAgentProfile } from './runtime-docs.js';
 import { formatPrimarySubmission, normalizeHistoryOptions, readPrimaryHistory } from './runtime-history.js';
 import { createContextManager } from './context-manager.js';
 import { createContextTools } from './context-tools.js';
@@ -22,6 +22,8 @@ import { BC_KERNEL_VERSION } from './context-state.js';
 import { createRuntimeLive } from './runtime-live.js';
 import { readScopeHistory, readScopeMessage, readScopeMessageDelivery } from './runtime-scope-queries.js';
 import { createWorkContextRuntime } from './runtime-work-contexts.js';
+import { WorkIndex, WorkContextState, workInstructions } from './work-context-docs.js';
+import { WorkDecisionState } from './work-decision-state.js';
 import { createWorkDecisionRuntime } from './runtime-work-decisions.js';
 import { normalizeUserMessage } from './scope-protocol.js';
 import { createCommunicationTools } from './communication-tools.js';
@@ -34,6 +36,7 @@ import {
 import { parseHindsightOptions } from './hindsight-client.js';
 import { createRuntimeHindsight } from './runtime-hindsight.js';
 import { createHindsightTools } from './hindsight-tools.js';
+import { createHostExtensionManager, normalizeBotExtensions } from './extension-manager.js';
 
 const CTX = BACKGROUND_CONTEXT;
 
@@ -61,9 +64,17 @@ export async function openRuntime(options) {
   if (nativeBridge !== undefined && typeof nativeBridge !== 'function') {
     throw errWithCode('nativeBridge must be a function', 'INVALID_ARGUMENT');
   }
-  // hindsight 配置在打开 host/任何写入前归一化；未配置返回 null，控制器仍创建为禁用态。
-  const hindsightOptions = parseHindsightOptions(options?.hindsight);
+  // 遗留 hindsight 选项在打开 host/任何写入前先归一化校验（类型/环境变量错误在写数据前拒绝）。
+  parseHindsightOptions(options?.hindsight);
   const host = openHost({ dataRoot: options?.dataRoot });
+  // 扩展管理归 Host extension manager（配置/目录/默认值/生命周期）；歧义输入由它拒绝。
+  const extensions = createHostExtensionManager({
+    host,
+    extensions: options?.extensions,
+    hindsight: options?.hindsight,
+  });
+  // manager 给出有效 hindsight 配置；未启用/未配置时为 null，控制器仍创建为禁用态。
+  const hindsightOptions = parseHindsightOptions(extensions.hindsightConfig);
   const models = options?.models ?? createModels();
   const defaultModel = options?.defaultModel ?? null;
   let releaseOwner = null;
@@ -106,15 +117,24 @@ export async function openRuntime(options) {
     models,
     defaultModel,
     context: CTX,
+    getProfile: (botId, workMeta) => botProfile(host, extensions, hindsightTools, botId, workMeta),
   });
-  // 始终创建禁用兼容控制器（config:null 不产生网络/存储/listener）；工具仅配置时注册。
+  // 始终创建禁用兼容控制器（config:null 不产生网络/存储/listener）；工具经 manager 注册。
   memory = createRuntimeHindsight({
     host,
     getHarness: () => harness,
     getWorkContexts: () => workContexts,
     getWorkActivity: decisions.getWorkActivity,
+    getBotPolicy: (botId) => extensions.getPolicy(botId),
     config: hindsightOptions,
     context: CTX,
+  });
+  // 原生 Hindsight 扩展即使关闭也注册：定义按名字持久，可见性/可调用性由每 Bot 策略过滤。
+  const hindsightTools = createHindsightTools(memory);
+  extensions.registerRuntime('hindsight', {
+    extension: defineExtension({ name: 'host.hindsight', tools: hindsightTools }),
+    quiesce: () => memory.quiesce(),
+    close: () => memory.close(),
   });
   const registry = createRegistry();
   registry.install(createCodingTools());
@@ -150,12 +170,8 @@ export async function openRuntime(options) {
       tools: createAndroidTools({ host, getHarness: () => harness, nativeBridge }),
     }));
   }
-  if (hindsightOptions) {
-    registry.install(defineExtension({
-      name: 'host.hindsight',
-      tools: createHindsightTools(memory),
-    }));
-  }
+  // 已注册扩展按原位置装入 registry：保持 core 扩展顺序与 BC-before-memory 链不变。
+  extensions.install(registry);
   registry.install(defineExtension({
     name: 'host.billion-context',
     tools: createContextTools(manager),
@@ -206,8 +222,8 @@ export async function openRuntime(options) {
       try { await storage.close(CTX); } catch { /* close 失败不掩盖原错误 */ }
     }
     if (memory) {
-      try { await memory.quiesce(); } catch { /* quiesce 失败不掩盖原错误 */ }
-      try { await memory.close(); } catch { /* close 失败不掩盖原错误 */ }
+      try { await extensions.quiesce(); } catch { /* quiesce 失败不掩盖原错误 */ }
+      try { await extensions.close(); } catch { /* close 失败不掩盖原错误 */ }
     }
     try { await cleanupEnvs(); } catch { /* open 失败清理不掩盖原错误 */ }
     try { releaseOwner?.(); } catch { /* release 失败不掩盖原错误 */ }
@@ -225,15 +241,58 @@ export async function openRuntime(options) {
     harness,
     manager,
     context: CTX,
+    getProfile: (botId, workMeta) => botProfile(host, extensions, hindsightTools, botId, workMeta),
     // sync 提交成功后附着等待中的 work watch（事务外，观察失败不影响导入）。
     onBound: (botId, scopeId, binding) => live.bindWork(botId, scopeId, binding),
   });
-  return createRuntime({ host, harness, models, defaultModel, releaseOwner, manager, cleanupEnvs, live, workContexts, decisions, memory });
+  const runtime = createRuntime({
+    host,
+    harness,
+    models,
+    defaultModel,
+    releaseOwner,
+    manager,
+    cleanupEnvs,
+    live,
+    workContexts,
+    decisions,
+    memory,
+    extensions,
+    hindsightTools,
+  });
+  try {
+    // 启动时初始化既有 Bot（扩展默认值 + SOUL + 已绑定会话的人格/工具）。
+    await runtime.initializeBots();
+  } catch (err) {
+    try { await runtime.close(); } catch { /* close 失败不掩盖启动错误 */ }
+    throw err;
+  }
+  return runtime;
 }
 
-function createRuntime({ host, harness, models, defaultModel, releaseOwner, manager, cleanupEnvs, live, workContexts, decisions, memory }) {
+/** 每 Bot 人格/工具视图：实际 SOUL 文本 + manager 管理的工具移除项。 */
+function botProfile(host, extensions, hindsightTools, botId, workMeta) {
+  const soul = host.getBotSoul(botId).text;
+  const byName = new Map(hindsightTools.map((tool) => [tool.name, tool]));
+  const removeTools = extensions.disabledToolNames(botId).map((name) => byName.get(name)).filter(Boolean);
+  const instructions = workMeta ? workInstructions(soul, workMeta) : (soul === '' ? null : soul);
+  return { instructions, removeTools };
+}
+
+function parseBindingKey(key) {
+  try {
+    const pair = JSON.parse(key);
+    return Array.isArray(pair) && pair.length === 2 && pair.every((id) => typeof id === 'string') ? pair : null;
+  } catch {
+    return null;
+  }
+}
+
+function createRuntime({ host, harness, models, defaultModel, releaseOwner, manager, cleanupEnvs, live, workContexts, decisions, memory, extensions, hindsightTools }) {
   let closePromise = null;
   let closing = false;
+  // 本运行时已初始化过人格/工具的 Bot；新 Bot 经 initializeBot 增量加入。
+  const initializedBots = new Set();
   // 已接纳的异步迁移操作（preview/status/import/draft）：closing 关准入，
   // close 在 harness/host 关闭前排空，避免半完成的导入或读取悬空。
   const legacyOps = new Set();
@@ -262,11 +321,11 @@ function createRuntime({ host, harness, models, defaultModel, releaseOwner, mana
       try { await live.close(); } catch (err) { errors.push(err); }
       // Seal Durable first so memory cancellation cannot turn shutdown into a persistent task abort.
       const nativeClose = harness.close(CTX);
-      const memoryQuiesce = memory.quiesce();
+      const memoryQuiesce = extensions.quiesce();
       for (const result of await Promise.allSettled([nativeClose, memoryQuiesce])) {
         if (result.status === 'rejected') errors.push(result.reason);
       }
-      try { await memory.close(); } catch (err) { errors.push(err); }
+      try { await extensions.close(); } catch (err) { errors.push(err); }
       try { await workContexts.close(); } catch (err) { errors.push(err); }
       try { await cleanupEnvs(); } catch (err) { errors.push(err); }
       try { host.close(); } catch (err) { errors.push(err); }
@@ -283,8 +342,134 @@ function createRuntime({ host, harness, models, defaultModel, releaseOwner, mana
     return workContexts.runMessageOperation(operation);
   };
 
+  const profileFor = (botId, workMeta) => botProfile(host, extensions, hindsightTools, botId, workMeta);
+
+  /** Bot 已映射的原生会话（primary + work）：只读快照，不创建会话。 */
+  async function botConversations(bot) {
+    const nativeIds = [];
+    const primaryIndex = await harness.snapshot(PrimaryIndex, CTX);
+    const primary = primaryIndex?.byPrimary?.[bot.primaryConversationId];
+    if (primary !== undefined) nativeIds.push(primary);
+    const workIndex = await harness.snapshot(WorkIndex, CTX);
+    for (const [key, binding] of Object.entries(workIndex?.byKey ?? {})) {
+      const pair = parseBindingKey(key);
+      if (pair !== null && pair[0] === bot.botId) nativeIds.push(binding.nativeId);
+    }
+    return nativeIds;
+  }
+
+  /** 按已绑定会话重新应用人格/工具；无变化不提交。 */
+  async function refreshBotProfiles(bot) {
+    const primary = await getPrimaryConversation(harness, bot, {}, CTX);
+    if (primary) await applyAgentProfile(harness, primary.id, profileFor(bot.botId, null), CTX);
+    const workIndex = await harness.snapshot(WorkIndex, CTX);
+    for (const [key, binding] of Object.entries(workIndex?.byKey ?? {})) {
+      const pair = parseBindingKey(key);
+      if (pair === null || pair[0] !== bot.botId) continue;
+      const meta = await harness.snapshot(WorkContextState, binding.nativeId, CTX);
+      if (!meta?.scopeId || !meta.kind) continue;
+      const profile = profileFor(bot.botId, { botId: bot.botId, scopeId: meta.scopeId, kind: meta.kind });
+      await applyAgentProfile(harness, binding.nativeId, profile, CTX);
+    }
+  }
+
+  /** 幂等初始化：扩展默认值 + SOUL 一次，再刷新已存在会话的人格/工具。 */
+  async function initializeBot(botId) {
+    assertNonBlank(botId, 'botId');
+    if (closing) throw errWithCode('host is closing', 'NOT_CONNECTED');
+    const bot = host.getBot(botId);
+    if (!bot) throw errWithCode(`bot not found: ${botId}`, 'BOT_NOT_FOUND');
+    await extensions.ensureBot(botId);
+    if (!initializedBots.has(botId)) {
+      await refreshBotProfiles(bot);
+      initializedBots.add(botId);
+    }
+    return extensions.getBotExtensions(botId);
+  }
+
+  /** 编辑准入：Bot 的任一已映射会话有 queued/placed 提交或挂起工作决策则忙。 */
+  async function assertBotIdle(bot) {
+    const nativeIds = await botConversations(bot);
+    if (nativeIds.length === 0) return;
+    const inspection = await harness.inspect(CTX);
+    const known = new Set(nativeIds);
+    if (inspection.submissions.some((submission) => known.has(submission.conversationId))) {
+      throw errWithCode('bot has active or queued work', 'RUNTIME_BUSY');
+    }
+    for (const nativeId of nativeIds) {
+      const state = await harness.snapshot(WorkDecisionState, nativeId, CTX);
+      if (state?.pending) throw errWithCode('bot has an active work decision', 'RUNTIME_BUSY');
+    }
+  }
+
+  /** Bot 全部上下文当前最大 native entry id（无会话为 0）。 */
+  async function botMaxEntryId(bot) {
+    let max = 0;
+    for (const nativeId of await botConversations(bot)) {
+      const conversation = await harness.conversation(nativeId, CTX);
+      if (!conversation) continue;
+      const page = await conversation.entries({ order: 'descending' }, 1, undefined, CTX);
+      const id = page?.items?.[0]?.id;
+      if (Number.isSafeInteger(id) && id > max) max = id;
+    }
+    return max;
+  }
+
+  async function requireBot(botId) {
+    assertNonBlank(botId, 'botId');
+    const bot = host.getBot(botId);
+    if (!bot) throw errWithCode(`bot not found: ${botId}`, 'BOT_NOT_FOUND');
+    return bot;
+  }
+
   // Hindsight 8 方法直接转发（read 方法直传，retain/correct 显式双参包装，内部 actor 不暴露）。
   return {
+    initializeBot,
+
+    async initializeBots() {
+      for (const bot of host.listBots()) await initializeBot(bot.botId);
+    },
+
+    async getExtensionCatalog() {
+      return extensions.listExtensions();
+    },
+
+    async getBotExtensions(botId) {
+      await requireBot(botId);
+      // 遗留 Bot 在首次读取前初始化（默认值 + SOUL），读取不创建会话。
+      await extensions.ensureBot(botId);
+      return extensions.getBotExtensions(botId);
+    },
+
+    async setBotExtensions(botId, input) {
+      const bot = await requireBot(botId);
+      const requested = normalizeBotExtensions(input?.extensions);
+      await assertBotIdle(bot);
+      await extensions.ensureBot(botId);
+      const previous = extensions.getBotExtensions(botId).extensions.hindsight;
+      const writeMode = requested.hindsight.enabled && requested.hindsight.mode === 'read-write';
+      const wasWrite = previous.enabled && previous.mode === 'read-write';
+      // 从关闭/只读转入读写才冻结下限：关闭期间的交换不回填。
+      const options = writeMode && !wasWrite ? { retentionFloor: await botMaxEntryId(bot) } : undefined;
+      const snapshot = await extensions.setBotExtensions(botId, input, options);
+      // 空闲编辑不重置/分叉会话，下一次请求即生效。
+      await refreshBotProfiles(bot);
+      return snapshot;
+    },
+
+    async getBotSoul(botId) {
+      await requireBot(botId);
+      return host.getBotSoul(botId);
+    },
+
+    async setBotSoul(botId, input) {
+      const bot = await requireBot(botId);
+      await assertBotIdle(bot);
+      const soul = host.setBotSoul(botId, input);
+      await refreshBotProfiles(bot);
+      return soul;
+    },
+
     async submit(botId, input) {
       assertNonBlank(botId, 'botId');
       const requestId = input?.requestId;
@@ -293,6 +478,9 @@ function createRuntime({ host, harness, models, defaultModel, releaseOwner, mana
       assertNonBlank(text, 'text');
       const bot = host.getBot(botId);
       if (!bot) throw errWithCode(`bot not found: ${botId}`, 'BOT_NOT_FOUND');
+      // 遗留 Bot 在首次运行使用前完成幂等初始化（扩展默认值 + SOUL 回填）。
+      await initializeBot(botId);
+      const profile = profileFor(botId, null);
 
       let conversation = await getPrimaryConversation(harness, bot, {}, CTX);
       if (!conversation) {
@@ -302,8 +490,15 @@ function createRuntime({ host, harness, models, defaultModel, releaseOwner, mana
         if (!models.getModel(ref.provider, ref.modelId)) {
           throw errWithCode(`model not found: ${modelRef}`, 'MODEL_NOT_FOUND');
         }
-        conversation = await getPrimaryConversation(harness, bot, { create: true, defaultModel }, CTX);
+        conversation = await getPrimaryConversation(harness, bot, {
+          create: true,
+          defaultModel,
+          instructions: profile.instructions,
+          removeTools: profile.removeTools,
+        }, CTX);
       }
+      // 新提交前刷新人格/工具（含空闲编辑后的下一次请求）；无变化不提交。
+      await applyAgentProfile(harness, conversation.id, profile, CTX);
 
       // 会话解析/创建后、输入提交前，绑定等待中的 live watch（不等待外部 listener）。
       await live.bind(botId, conversation);

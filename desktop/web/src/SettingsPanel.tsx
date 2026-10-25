@@ -4,9 +4,14 @@
 // + 显式采用远端基线后才能再次 mutation。
 import { Component } from 'react';
 import type { ReactNode } from 'react';
-import type { HostSettings, LocalSettingsSnapshot } from '../../../host-core/index.js';
+import type { ExtensionCatalog, HostSettings, LocalSettingsSnapshot } from '../../../host-core/index.js';
 import type { DesktopIdentity, DesktopPanelApi } from './types';
 import { toError } from './api';
+
+/** 扩展不可用原因（catalog.reason）的可读文本。 */
+function extensionReason(reason: 'host-disabled' | 'not-configured'): string {
+  return reason === 'host-disabled' ? 'Host 全局关闭' : 'Host 未配置 Hindsight';
+}
 
 interface Props {
   api: DesktopPanelApi;
@@ -25,6 +30,9 @@ interface State {
   /** 保存结果未知（无回执/读回失败）：持续锁保存，直到显式只读对账与显式选基线。 */
   unknownOutcome: boolean;
   conflict: { server: LocalSettingsSnapshot } | null;
+  /** 扩展目录（Host 级）：与设置读取分开，老 Host 不支持时不影响设置编辑。 */
+  catalog: ExtensionCatalog | null;
+  catalogError: string | null;
 }
 
 export class SettingsPanel extends Component<Props, State> {
@@ -38,6 +46,8 @@ export class SettingsPanel extends Component<Props, State> {
     reconciling: false,
     unknownOutcome: false,
     conflict: null,
+    catalog: null,
+    catalogError: null,
   };
 
   private mounted = false;
@@ -73,6 +83,8 @@ export class SettingsPanel extends Component<Props, State> {
         reconciling: false,
         unknownOutcome: false,
         conflict: null,
+        catalog: null,
+        catalogError: null,
       });
       void this.load();
       return;
@@ -85,6 +97,7 @@ export class SettingsPanel extends Component<Props, State> {
     const identity = this.props.identity;
     if (!identity || identity.kind !== 'local' || !this.props.transportConnected) return;
     const gen = identity.generation;
+    void this.loadCatalog();
     this.setState({ busy: true, loadError: null });
     try {
       const [settings, service] = await Promise.all([
@@ -96,6 +109,21 @@ export class SettingsPanel extends Component<Props, State> {
     } catch (e) {
       if (!this.mounted || this.props.identity?.generation !== gen) return;
       this.setState({ loadError: toError(e).message, busy: false });
+    }
+  }
+
+  /** 只读扩展目录：失败只标记目录错误，设置编辑保持可用；不自动重试。 */
+  private async loadCatalog(): Promise<void> {
+    const identity = this.props.identity;
+    if (!identity || identity.kind !== 'local' || !this.props.transportConnected) return;
+    const gen = identity.generation;
+    try {
+      const catalog = await this.props.api.call(identity, 'getExtensionCatalog', {});
+      if (!this.mounted || this.props.identity?.generation !== gen) return;
+      this.setState({ catalog, catalogError: null });
+    } catch (e) {
+      if (!this.mounted || this.props.identity?.generation !== gen) return;
+      this.setState({ catalogError: toError(e).message });
     }
   }
 
@@ -255,6 +283,34 @@ export class SettingsPanel extends Component<Props, State> {
               {`relay ${s.settings.relay.url}（tokenEnv: ${s.settings.relay.tokenEnv}）`}
             </div>
           )}
+          <details open>
+            <summary>扩展目录</summary>
+            {this.state.catalogError ? (
+              <div className="error-banner" role="alert">
+                {`扩展目录读取失败：${this.state.catalogError}`}
+                <button onClick={() => void this.loadCatalog()}>重试</button>
+              </div>
+            ) : !this.state.catalog ? (
+              <p className="status">扩展目录尚未读取</p>
+            ) : (
+              <ul className="data-list">
+                {this.state.catalog.extensions.map((ext) => (
+                  <li key={ext.id}>
+                    {`${ext.name}（${ext.id} · v${ext.version} · ${ext.scope}）`}
+                    <div className="metadata">
+                      {`${ext.enabled ? '已启用' : '未启用'} · ${ext.available ? '可用' : '不可用'} · 默认${ext.defaultEnabled ? '开启' : '关闭'}${ext.reason ? ` · ${extensionReason(ext.reason)}` : ''}`}
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
+            <p className="hint">
+              {'连接/全局开关与凭据引用在下方 JSON 编辑器的 runtime.extensions 中配置（例如 '
+                + 'runtime.extensions.hindsight = {"enabled":true,"defaultEnabled":true,"config":{...}}）；'
+                + 'defaultEnabled 只在 Bot 首次初始化时复制，已有 Bot 保持自己的设置。'
+                + '每个 Bot 的开关/只读策略与 SOUL 在“聊天”页选中 Bot 后的 Bot 设置里编辑。'}
+            </p>
+          </details>
           <details>
             <summary>模型环境变量</summary>
             <ul className="data-list">

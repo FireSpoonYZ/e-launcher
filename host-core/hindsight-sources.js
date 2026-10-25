@@ -134,8 +134,10 @@ function normalizeTarget(target) {
  * - captureRequest：在 provider 请求前把未完成输入提交固化为 runs（只读 SDK）。
  * - collectRun：按提交状态收集已完成交换的 SourceText。
  * - makeHindsightJobs：把 SourceText 加工为去重/确定性 PreparedJob。
+ * getBotPolicy(botId) 提供每 Bot 策略：关闭时 captureRequest 返回 null，
+ * 只读时保留 query 但 canWrite=false；retentionFloor 以下的历史条目不入 source/query。
  */
-export function createHindsightSources({ host, getHarness, context }) {
+export function createHindsightSources({ host, getHarness, context, getBotPolicy }) {
   if (!host || typeof getHarness !== 'function' || !context) {
     throw sourceError('INVALID_ARGUMENT', 'createHindsightSources requires host, getHarness and context');
   }
@@ -217,11 +219,12 @@ export function createHindsightSources({ host, getHarness, context }) {
     }];
   }
 
-  /** 冻结视图内真实工作来源输入：scope-message 贡献、非 selfEcho、非 Host 触发。 */
-  function scopeGenuineInputs(view, visible, scopeId) {
+  /** 冻结视图内真实工作来源输入：scope-message 贡献、非 selfEcho、非 Host 触发、不低于 retention floor。 */
+  function scopeGenuineInputs(view, visible, scopeId, floorEntryId) {
     const items = [];
     for (let i = 0; i < view.entries.length; i++) {
       const entry = view.entries[i];
+      if (entry.id <= floorEntryId) continue;
       if (entry.kind === WORK_TRIGGER_KIND) continue;
       if (entry.kind !== SCOPE_MESSAGE_KIND) continue;
       const data = entry.data;
@@ -249,6 +252,11 @@ export function createHindsightSources({ host, getHarness, context }) {
     if (!Number.isSafeInteger(cutoff)) return null;
     const identity = await resolveIdentity(api.conversationId, callContext);
     if (!identity) return null;
+    // 每 Bot 策略：关闭则完全跳过（不记录 run、不建 query）；只读保留 query 但冻结写入。
+    const policy = getBotPolicy ? (getBotPolicy(identity.botId) ?? null) : null;
+    if (policy && policy.enabled !== true) return null;
+    const canWrite = policy === null || policy.canWrite === true;
+    const floorEntryId = Number.isSafeInteger(policy?.retentionFloor) && policy.retentionFloor > 0 ? policy.retentionFloor : 0;
 
     const conversation = await h.conversation(api.conversationId, callContext);
     if (!conversation) return null;
@@ -267,7 +275,7 @@ export function createHindsightSources({ host, getHarness, context }) {
     if (meta?.scopeId) {
       target = { kind: 'scope', scopeId: meta.scopeId };
       runs = await workCapture(api, callContext, submissions, cutoff, view, meta);
-      verifiedInputs = scopeGenuineInputs(view, visible, meta.scopeId);
+      verifiedInputs = scopeGenuineInputs(view, visible, meta.scopeId, floorEntryId);
     } else {
       target = { kind: 'primary' };
       const captured = await primaryCapture(api, callContext, submissions, cutoff, view, visible);
@@ -281,9 +289,11 @@ export function createHindsightSources({ host, getHarness, context }) {
       identity,
       target,
       nativeId: api.conversationId,
-      runs,
+      // 新记录 run 冻结此刻的 retention floor；只读 Bot 不记录（canWrite=false），但仍用该 run 计算 recall。
+      runs: runs.map((run) => ({ ...run, floorEntryId })),
       query,
       queryKey,
+      canWrite,
     };
   }
 
@@ -430,7 +440,8 @@ export function createHindsightSources({ host, getHarness, context }) {
 
   async function collectRun(run, afterEntryId, callContext = context) {
     safeEntryId(run.nativeId, 'run.nativeId');
-    const startAfter = Number.isSafeInteger(afterEntryId) && afterEntryId >= 0 ? afterEntryId : 0;
+    const floorEntryId = Number.isSafeInteger(run.floorEntryId) && run.floorEntryId > 0 ? run.floorEntryId : 0;
+    const startAfter = Math.max(Number.isSafeInteger(afterEntryId) && afterEntryId >= 0 ? afterEntryId : 0, floorEntryId);
     const h = harness();
     const submission = await h.submission(run.submissionId, callContext);
     if (!submission) throw sourceError('HINDSIGHT_STORE_FAILED', 'tracked submission is missing');

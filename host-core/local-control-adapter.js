@@ -61,6 +61,8 @@ const LOCAL_DOMAIN_CODES = new Set([
   'HINDSIGHT_PROTOCOL_ERROR',
   'HINDSIGHT_STORE_FAILED',
   'HINDSIGHT_BINDING_MISMATCH',
+  'EXTENSION_DISABLED',
+  'EXTENSION_READ_ONLY',
 ]);
 
 function controlError(code, outcome) {
@@ -235,6 +237,12 @@ const METHOD_HANDLERS = new Map([
   ['getMemorySource', (control, params, signal) => control.getMemorySource(params.botId, params.input, { signal })],
   ['correctMemory', (control, params, signal) => control.correctMemory(params.botId, params.input, { signal })],
   ['retryMemory', (control, params, signal) => control.retryMemory(params.botId, params.input, { signal })],
+  ['getExtensionCatalog', (control, params, signal) => control.getExtensionCatalog({ signal })],
+  ['getBotExtensions', (control, params, signal) => control.getBotExtensions(params.botId, { signal })],
+  ['setBotExtensions', (control, params, signal) =>
+    control.setBotExtensions(params.botId, params.input, { signal })],
+  ['getBotSoul', (control, params, signal) => control.getBotSoul(params.botId, { signal })],
+  ['setBotSoul', (control, params, signal) => control.setBotSoul(params.botId, params.input, { signal })],
 ]);
 
 function requireValidId(value) {
@@ -275,7 +283,7 @@ function dispatchError(err, state, signal) {
 
 async function executeCall(config, expectedDeviceId, method, params, { signal } = {}) {
   requireValidId(expectedDeviceId);
-  // 先按协议表规范化（含 35 方法参数形状/未知键/1 MiB 限制）再映射。
+  // 先按协议表规范化（含 40 方法参数形状/未知键/1 MiB 限制）再映射。
   let normalized;
   try {
     normalized = normalizeControlCall(method, params);

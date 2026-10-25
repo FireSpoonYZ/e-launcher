@@ -77,6 +77,8 @@ final class BotHostProcess {
     private static final long WRITE_TIMEOUT_MS = 5_000;
     private static final long STARTUP_TIMEOUT_MS = 30_000;
     private static final long REQUEST_TIMEOUT_MS = 30_000;
+    /** 记忆方法外层等待：后端 reflect 最长 120s，留出协议/传输余量。 */
+    private static final long MEMORY_REQUEST_TIMEOUT_MS = 150_000;
     private static final long CLOSE_TIMEOUT_MS = 30_000;
     private static final long EXIT_AWAIT_MS = 5_000;
     private static final int QUEUE_CAPACITY = 4;
@@ -84,6 +86,10 @@ final class BotHostProcess {
     private static final List<String> REQUEST_TYPES =
             Arrays.asList("call", "status", "settings_get", "settings_set",
                     "legacy_preview", "legacy_status", "legacy_import", "legacy_draft");
+    /** 八个 Hindsight 记忆控制方法；其余方法沿用 REQUEST_TIMEOUT_MS。 */
+    private static final List<String> MEMORY_METHODS =
+            Arrays.asList("memoryStatus", "recallMemory", "reflectMemory", "retainMemory",
+                    "getMemory", "getMemorySource", "correctMemory", "retryMemory");
 
     private final Context context;
     private final JSONObject init;
@@ -428,6 +434,19 @@ final class BotHostProcess {
         }
     }
 
+    /**
+     * 是否为记忆方法调用：本机 Host 的 call 直接带控制方法名，client 模式 broker 的
+     * call 把真实方法嵌在 params.method；只按确切名字判断，不整体放宽期限。
+     */
+    static boolean isMemoryCall(JSONObject fields) {
+        if (fields == null) return false;
+        String method = fields.optString("method", "");
+        if (MEMORY_METHODS.contains(method)) return true;
+        if (!"call".equals(method)) return false;
+        JSONObject inner = fields.optJSONObject("params");
+        return inner != null && MEMORY_METHODS.contains(inner.optString("method", ""));
+    }
+
     CompletableFuture<JSONObject> request(String type, JSONObject fields) throws IOException {
         if (ready == null) throw new IllegalStateException("Host 未就绪");
         if (!REQUEST_TYPES.contains(type)) throw new IllegalArgumentException("不支持的请求类型：" + type);
@@ -452,6 +471,7 @@ final class BotHostProcess {
         if (bytes.length > MAX_CONTROL_FRAME) {
             throw new BridgeException("TOO_LARGE", "not-sent", "请求帧超限");
         }
+        long timeoutMs = isMemoryCall(fields) ? MEMORY_REQUEST_TIMEOUT_MS : REQUEST_TIMEOUT_MS;
         CompletableFuture<JSONObject> future = new CompletableFuture<>();
         Pending entry = new Pending(id, false, future, null);
         synchronized (lock) {
@@ -461,7 +481,7 @@ final class BotHostProcess {
             pending.put(id, entry);
         }
         try {
-            entry.timer = scheduler.schedule(() -> expireRequest(id, entry), REQUEST_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+            entry.timer = scheduler.schedule(() -> expireRequest(id, entry), timeoutMs, TimeUnit.MILLISECONDS);
         } catch (RejectedExecutionException e) {
             // 已进入收尾，出 finish 统一完成。
         }

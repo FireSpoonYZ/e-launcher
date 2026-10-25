@@ -38,7 +38,7 @@ import {
   LIVE_MAX_HOST_SUBSCRIPTIONS,
   LIVE_MAX_SUBSCRIPTIONS
 } from './relay-live.js';
-import { controlMethodVersion } from './remote-control-protocol.js';
+import { controlMethodTimeoutMs, controlMethodVersion } from './remote-control-protocol.js';
 
 const DEFAULT_PORT = 8790;
 const DEFAULT_LISTEN_HOST = '127.0.0.1';
@@ -473,7 +473,7 @@ export async function openRelayServer(options = {}) {
     if (controlRoutes.countHost(peer) >= CONTROL_MAX_HOST_CALLS) {
       return sendControlFailure(conn, frame.callId, frame.targetDeviceId, 'RPC_BUSY', 'not-sent');
     }
-    const record = controlRoutes.add(conn, frame.callId, peer, frame.targetDeviceId);
+    const record = controlRoutes.add(conn, frame.callId, peer, frame.targetDeviceId, controlMethodTimeoutMs(frame.method));
     if (!writeFrame(peer.ws, {
       type: 'control-request',
       routeId: record.routeId,

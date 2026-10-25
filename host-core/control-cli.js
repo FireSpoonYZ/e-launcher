@@ -4,7 +4,7 @@ import { once } from 'node:events';
 import { createControlClient } from './control-client.js';
 import { invalid, readInputObject } from './cli-input.js';
 
-const USAGE = `usage: node host-core/control-cli.js <host|create|list|get|find-request|send|status|history|abort|context|live|work-get|work-sync|work-history|work-context|work-activity|work-stop|work-resume|scope-list|scope-get|scope-create|scope-update|scope-send|scope-replicas|memory-status|memory-recall|memory-reflect|memory-retain|memory-get|memory-source|memory-correct|memory-retry> [options]
+const USAGE = `usage: node host-core/control-cli.js <host|create|list|get|find-request|send|status|history|abort|context|live|work-get|work-sync|work-history|work-context|work-activity|work-stop|work-resume|scope-list|scope-get|scope-create|scope-update|scope-send|scope-replicas|memory-status|memory-recall|memory-reflect|memory-retain|memory-get|memory-source|memory-correct|memory-retry|extensions|bot-extensions|bot-extensions-set|bot-soul|bot-soul-set> [options]
 
 commands:
   host             print host info
@@ -40,6 +40,11 @@ commands:
   memory-correct    correct/invalidate a memory fact (admission only); requires --bot-id --input
   memory-retry      retry an outbox operation (admission only); requires --bot-id --input
   models           print the chat model catalog (no backend request)
+  extensions       print the extension catalog (installed/enabled/available/default)
+  bot-extensions   print one bot's extension settings and effective state; requires --bot-id
+  bot-extensions-set  replace one bot's extension settings (CAS on expectedRevision; requires --bot-id --input {expectedRevision,extensions})
+  bot-soul         print one bot's SOUL.md text/path/revision; requires --bot-id
+  bot-soul-set     replace one bot's SOUL.md (CAS on expectedRevision; requires --bot-id --input {expectedRevision,text})
   service-status    print the unified host service status
   settings-get      print the local host settings snapshot
   settings-set      replace persisted local host settings (takes effect next startup); requires --input
@@ -59,7 +64,7 @@ options:
   --cwd <dir>
   --model-ref <value>
   --text <text>
-  --input <file>       input JSON file: max 1MiB, UTF-8, a single plain object (never stdin) (scope-create/scope-update/scope-send and memory-* commands)
+  --input <file>       input JSON file: max 1MiB, UTF-8, a single plain object (never stdin) (scope-create/scope-update/scope-send, memory-* and bot-*-set commands)
   --limit <int>       strict decimal positive integer (1..200 for scope-history; history, work-sync, work-history, scope-list, scope-replicas)
   --cursor <json>     JSON object cursor (history, work-history, scope-list, scope-replicas)
   -h, --help          show this help
@@ -116,6 +121,11 @@ const REQUIRED = {
   'scope-send': ['scope-id', 'input'],
   'scope-replicas': ['scope-id'],
   models: [],
+  extensions: [],
+  'bot-extensions': ['bot-id'],
+  'bot-extensions-set': ['bot-id', 'input'],
+  'bot-soul': ['bot-id'],
+  'bot-soul-set': ['bot-id', 'input'],
   'service-status': [],
   'settings-get': [],
   'settings-set': ['input'],
@@ -241,6 +251,18 @@ async function main() {
     if (command === 'memory-status') allowed.push('input');
     for (const key of RESOURCE_OPTIONS) {
       if (values[key] !== undefined && !allowed.includes(key)) {
+        throw invalid(`${command} does not take --${key}`);
+      }
+    }
+  } else if (command === 'extensions') {
+    for (const key of RESOURCE_OPTIONS) {
+      if (values[key] !== undefined) {
+        throw invalid(`${command} does not take --${key}`);
+      }
+    }
+  } else if (command === 'bot-extensions' || command === 'bot-extensions-set' || command === 'bot-soul' || command === 'bot-soul-set') {
+    for (const key of RESOURCE_OPTIONS) {
+      if (values[key] !== undefined && !REQUIRED[command].includes(key)) {
         throw invalid(`${command} does not take --${key}`);
       }
     }
@@ -370,6 +392,21 @@ async function main() {
       break;
     case 'models':
       result = await client.getModelCatalog();
+      break;
+    case 'extensions':
+      result = await client.getExtensionCatalog();
+      break;
+    case 'bot-extensions':
+      result = await client.getBotExtensions(values['bot-id']);
+      break;
+    case 'bot-extensions-set':
+      result = await client.setBotExtensions(values['bot-id'], input);
+      break;
+    case 'bot-soul':
+      result = await client.getBotSoul(values['bot-id']);
+      break;
+    case 'bot-soul-set':
+      result = await client.setBotSoul(values['bot-id'], input);
       break;
     case 'service-status':
       result = await client.getServiceStatus();

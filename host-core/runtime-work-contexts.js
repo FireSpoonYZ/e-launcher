@@ -13,7 +13,7 @@ function isPlainObject(value) {
 }
 
 /** 被动工作上下文：只读取定向账本、追加原文，不提交输入或启动生成。 */
-export function createWorkContextRuntime({ host, harness, manager, context, onBound }) {
+export function createWorkContextRuntime({ host, harness, manager, context, onBound, getProfile }) {
   let log = null;
   let closing = false;
   let closed = false;
@@ -83,9 +83,11 @@ export function createWorkContextRuntime({ host, harness, manager, context, onBo
       }
       const { limit } = normalizeHistoryOptions(options);
       const { bot, scope } = await authorize(botId, scopeId);
+      // 人格/工具在事务外计算（读取实际 SOUL 文件），再与绑定一起提交。
+      const profile = getProfile(bot.botId, { botId: bot.botId, scopeId: scope.scopeId, kind: scope.kind });
       let binding = null;
       const result = await harness.commit(async (tx) => {
-        binding = await ensureWorkBinding(tx, host.deviceId, bot, scope);
+        binding = await ensureWorkBinding(tx, host.deviceId, bot, scope, profile);
         const state = await tx.doc(WorkContextState, binding.nativeId);
         const pageOptions = { scopeId, limit };
         if (state.lastImportedLocalId > 0) {

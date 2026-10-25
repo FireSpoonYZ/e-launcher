@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 const DB_FILE = 'host.sqlite';
 const PRIMARY_KIND = 'primary';
 
@@ -42,6 +42,27 @@ function toBot(row) {
   };
 }
 
+// v3：每 Bot 扩展设置。revision 从 0 起，每次成功 CAS +1；retention_floor 由 Runtime
+// 在离开关闭/只读期时写入，默认 0 表示不裁剪既有条目。
+const BOT_EXTENSION_SETTINGS_DDL = `
+  CREATE TABLE bot_extension_settings (
+    bot_id TEXT PRIMARY KEY REFERENCES bots(bot_id),
+    revision INTEGER NOT NULL,
+    extensions_json TEXT NOT NULL,
+    retention_floor INTEGER NOT NULL DEFAULT 0
+  );
+`;
+
+function toBotExtensionSettings(row) {
+  if (!row) return null;
+  return {
+    botId: row.bot_id,
+    revision: row.revision,
+    extensions: JSON.parse(row.extensions_json),
+    retentionFloor: row.retention_floor,
+  };
+}
+
 function toLegacyImport(row) {
   if (!row) return null;
   return {
@@ -59,8 +80,8 @@ function initSchema(db) {
   let committed = false;
   try {
     const version = db.prepare('PRAGMA user_version').get().user_version;
-    // 仅接受 0/1/2；负数/未知版本一律拒绝，不迁移。
-    if (version !== 0 && version !== 1 && version !== SCHEMA_VERSION) {
+    // 仅接受 0/1/2/3；负数/未知版本一律拒绝，不迁移。
+    if (version !== 0 && version !== 1 && version !== 2 && version !== SCHEMA_VERSION) {
       throw errWithCode('database schema version is not supported', 'UNSUPPORTED_SCHEMA');
     }
     if (version === 0) {
@@ -91,6 +112,7 @@ function initSchema(db) {
           model_ref TEXT
         );
         ${LEGACY_IMPORTS_DDL}
+        ${BOT_EXTENSION_SETTINGS_DDL}
       `);
       db.prepare('INSERT INTO host_identity (id, device_id) VALUES (1, ?)').run(randomUUID());
       db.exec('PRAGMA user_version = ' + SCHEMA_VERSION);
@@ -103,10 +125,14 @@ function initSchema(db) {
       if (!db.prepare('SELECT 1 AS x FROM host_identity WHERE id = 1').get()) {
         throw new Error('host database is missing identity row');
       }
-      if (version < SCHEMA_VERSION) {
-        db.exec(LEGACY_IMPORTS_DDL);
-        db.exec('PRAGMA user_version = ' + SCHEMA_VERSION);
+      // 已是 v3 的库先验列，缺列/损坏在此报错回滚。
+      if (version >= 3) {
+        db.prepare('SELECT bot_id, revision, extensions_json, retention_floor FROM bot_extension_settings LIMIT 0').all();
       }
+      // 逐版本只追加本版本的表，不重建既有表、不删行。
+      if (version < 2) db.exec(LEGACY_IMPORTS_DDL);
+      if (version < 3) db.exec(BOT_EXTENSION_SETTINGS_DDL);
+      if (version < SCHEMA_VERSION) db.exec('PRAGMA user_version = ' + SCHEMA_VERSION);
     }
     db.exec('COMMIT');
     committed = true;
@@ -150,6 +176,13 @@ export function openStore(dataRoot) {
       'INSERT INTO legacy_imports (source_key, request_id, snapshot_id, phase, bot_id, device_id, role, cwd, model_ref, primary_conversation_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
     );
     const stmtSetLegacyPhase = db.prepare('UPDATE legacy_imports SET phase = ? WHERE source_key = ?');
+    const stmtGetBotExtensionSettings = db.prepare('SELECT * FROM bot_extension_settings WHERE bot_id = ?');
+    const stmtInsertBotExtensionSettings = db.prepare(
+      'INSERT INTO bot_extension_settings (bot_id, revision, extensions_json, retention_floor) VALUES (?, ?, ?, ?)'
+    );
+    const stmtUpdateBotExtensionSettings = db.prepare(
+      'UPDATE bot_extension_settings SET revision = ?, extensions_json = ?, retention_floor = ? WHERE bot_id = ? AND revision = ?'
+    );
 
     const getBot = (botId) => toBot(stmtGetBot.get(botId));
     const findByRequest = (requestId) => {
@@ -192,6 +225,34 @@ export function openStore(dataRoot) {
     };
 
     const getLegacyImport = (sourceKey) => toLegacyImport(stmtGetLegacyImport.get(sourceKey));
+
+    const getBotExtensionSettings = (botId) => toBotExtensionSettings(stmtGetBotExtensionSettings.get(botId));
+
+    // 首次初始化：事务内查重后写入缺省值；重复调用返回既有行，绝不覆写已持久化选择。
+    const ensureBotExtensionSettings = (botId, extensions, retentionFloor) => {
+      db.exec('BEGIN IMMEDIATE');
+      let committed = false;
+      try {
+        if (!stmtGetBotExtensionSettings.get(botId)) {
+          stmtInsertBotExtensionSettings.run(botId, 0, JSON.stringify(extensions), retentionFloor);
+        }
+        db.exec('COMMIT');
+        committed = true;
+      } finally {
+        if (!committed) {
+          try { db.exec('ROLLBACK'); } catch { /* rollback 失败不掩盖原错误 */ }
+        }
+      }
+      return getBotExtensionSettings(botId);
+    };
+
+    // CAS：仅当库内 revision 等于 expectedRevision 时写入并 +1；版本不符（含并发写入）返回 null。
+    const updateBotExtensionSettings = (botId, expectedRevision, extensions, retentionFloor) => {
+      const result = stmtUpdateBotExtensionSettings.run(
+        expectedRevision + 1, JSON.stringify(extensions), retentionFloor, botId, expectedRevision
+      );
+      return result.changes === 1 ? getBotExtensionSettings(botId) : null;
+    };
 
     const reserveLegacyImport = (input) => {
       const sourceKey = input.sourceKey;
@@ -264,7 +325,11 @@ export function openStore(dataRoot) {
       }
     };
 
-    return { deviceId, createBot, getBot, findByRequest, listBots, reserveLegacyImport, getLegacyImport, completeLegacyImport, close };
+    return {
+      deviceId, createBot, getBot, findByRequest, listBots,
+      ensureBotExtensionSettings, getBotExtensionSettings, updateBotExtensionSettings,
+      reserveLegacyImport, getLegacyImport, completeLegacyImport, close,
+    };
   } catch (err) {
     try { close(); } catch { /* close 失败不掩盖原错误 */ }
     throw err;

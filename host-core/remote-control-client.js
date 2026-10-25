@@ -21,6 +21,7 @@ import { messageError, assertId } from './message-protocol.js';
 import {
   CONTROL_MAX_CLIENT_CALLS,
   CONTROL_CLIENT_TIMEOUT_MS,
+  controlClientTimeoutMs,
   normalizeControlCall,
 } from './remote-control-protocol.js';
 import { installRemoteLive } from './remote-live-client.js';
@@ -247,7 +248,7 @@ export async function openRemoteControl(options) {
       return record.promise;
     }
     record.sent = true;
-    record.timer = setTimeout(() => handleCallTimeout(record), CONTROL_CLIENT_TIMEOUT_MS);
+    record.timer = setTimeout(() => handleCallTimeout(record), controlClientTimeoutMs(norm.method));
     return record.promise;
   }
 
