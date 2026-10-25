@@ -152,20 +152,27 @@ export function createRuntimeHindsight({ host, getHarness, getWorkContexts, getW
     }
   }
 
-  function ensureBank(bankId) {
-    return client.getBank(bankId).catch(async (err) => {
+  // 返回 boolean：true=银行可用（已存在/已创建/并发冲突）；false=等待 GET 期间 Bot 被暂停，未发送建 bank。
+  async function ensureBank(bankId, botId) {
+    try {
+      await client.getBank(bankId);
+      return true;
+    } catch (err) {
       if (err?.code !== 'HINDSIGHT_NOT_FOUND') throw err;
-      try {
-        await client.createBank(bankId, {
-          name: BANK_NAME,
-          retainMission: RETAIN_MISSION,
-          reflectMission: REFLECT_MISSION,
-        });
-      } catch (createErr) {
-        // 并发创建冲突视为已存在，继续沿用。
-        if (createErr?.code !== 'HINDSIGHT_CONFLICT') throw createErr;
-      }
-    });
+    }
+    // GET 也是网络等待：紧邻建 bank 前重读策略，暂停后不新建银行。
+    if (!canWriteFor(botId)) return false;
+    try {
+      await client.createBank(bankId, {
+        name: BANK_NAME,
+        retainMission: RETAIN_MISSION,
+        reflectMission: REFLECT_MISSION,
+      });
+    } catch (createErr) {
+      // 并发创建冲突视为已存在，继续沿用。
+      if (createErr?.code !== 'HINDSIGHT_CONFLICT') throw createErr;
+    }
+    return true;
   }
 
   function retainInput(job) {
@@ -210,7 +217,8 @@ export function createRuntimeHindsight({ host, getHarness, getWorkContexts, getW
       // 等待期间 Bot 可被关闭/切只读：尚未发送的建 bank/retain 不再发出，保留原 job 行与 ID。
       if (!canWriteFor(job.botId)) return;
       try {
-        await ensureBank(job.bankId);
+        // 建 bank 被暂停时立即返回：保留原 job 状态/ID，不随后直接 retain。
+        if (!await ensureBank(job.bankId, job.botId)) return;
         // 建 bank 也是网络等待：已发送的请求不回滚，但随后尚未发出的 retain 需重读策略。
         if (!canWriteFor(job.botId)) return;
         await client.retain(job.bankId, retainInput(job), undefined);
