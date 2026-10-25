@@ -1,6 +1,6 @@
 # M19 / M20 交接：Windows / Linux TUI 与跨设备验收
 
-> 状态（当前）：**M19 本期不交付**（按用户决定移出本期，模块编号保留；原规格保留为历史/后续计划；未验收的 TUI 代码只保存在 git stash `02f1396fda08d1b666ca83597ebbcea805c74d28`，仅作未来草稿，**禁止取回或删除**，不在交付树、不计完成）；**M20 进行中**，已交付 **M20-01 手机远端入口 + 限定范围跨设备联调**，另有 REDMI K80 真机限定运行验证（首次安装 + 覆盖重装、本机 Host 与 relay 到 Linux Host，见 §5.2/§8）；本期交付范围为原 20 个模块中的 19 个，当前 **18/19**。其后又完成一轮补充验收（9 组 GUI→Host 矩阵、Windows MSI/NSIS 与 Linux DEB/RPM 安装相关检查及 AppImage 两种运行模式、K80 真机 Shower/Widget/通知删除、Host/回执故障、群/DM、BC 与认证撤销，见 §5.6），并完成了 UI 退出 `FORTIFY` 已复现路径的修复与限定回归（7 次最终退出无新增 FORTIFY、Host/回执/客户端/数据保留均按预期，见 §5.7），另完成 K80 新 Host 未锁屏一次性定时与停机过期验收（见 §5.8），以及 K80 锁屏定时验收（Host 锁屏存活通过、exact 模式按时执行未通过，见 §5.9）；其后完成 exact 失败诊断（与厂商进程组冻结相符）与用户亲自改为“无限制”后的一轮锁屏样本通过且清理已完成（见 §5.10）；另完成 Windows 独立 Host 上的真实 DeepSeek/Hindsight 限定联调（见 §5.11）；用户同时要求之后单独重做 UI 设计（见 §5.9，本轮不实施，不作为 M20 结项条件）。按用户最新决定，真实旧版数据升级验收与远端 CI 本期不做（见 §9）。M20 仍未完成，不得记成 19/19 或全量验收完成。当前进度、已测范围与剩余项见 [重构路线图](refactor-roadmap.md) 末节与 [mobile/README.md](../mobile/README.md)。
+> 状态（当前）：**M19 本期不交付**（按用户决定移出本期，模块编号保留；原规格保留为历史/后续计划；未验收的 TUI 代码只保存在 git stash `02f1396fda08d1b666ca83597ebbcea805c74d28`，仅作未来草稿，**禁止取回或删除**，不在交付树、不计完成）；**M20 进行中**，已交付 **M20-01 手机远端入口 + 限定范围跨设备联调**，另有 REDMI K80 真机限定运行验证（首次安装 + 覆盖重装、本机 Host 与 relay 到 Linux Host，见 §5.2/§8）；本期交付范围为原 20 个模块中的 19 个，当前 **18/19**。其后又完成一轮补充验收（9 组 GUI→Host 矩阵、Windows MSI/NSIS 与 Linux DEB/RPM 安装相关检查及 AppImage 两种运行模式、K80 真机 Shower/Widget/通知删除、Host/回执故障、群/DM、BC 与认证撤销，见 §5.6），并完成了 UI 退出 `FORTIFY` 已复现路径的修复与限定回归（7 次最终退出无新增 FORTIFY、Host/回执/客户端/数据保留均按预期，见 §5.7），另完成 K80 新 Host 未锁屏一次性定时与停机过期验收（见 §5.8），以及 K80 锁屏定时验收（Host 锁屏存活通过、exact 模式按时执行未通过，见 §5.9）；其后完成 exact 失败诊断（与厂商进程组冻结相符）与用户亲自改为“无限制”后的一轮锁屏样本通过且清理已完成（见 §5.10）；另完成 Windows 独立 Host 上的真实 DeepSeek/Hindsight 限定联调（见 §5.11）与更新包、K80 真实服务收尾（见 §5.12）；用户同时要求之后单独重做 UI 设计（见 §5.9，本轮不实施，不作为 M20 结项条件）。按用户最新决定，真实旧版数据升级验收与远端 CI 本期不做（见 §9）。更新包与 K80 真实服务已完成限定范围，真人录音/识别与朗读听感暂缓（见 §5.12）。M20 主要验收已完成、按用户决定暂停，不得记成 19/19 或全量验收完成。当前进度、已测范围与剩余项见 [重构路线图](refactor-roadmap.md) 末节与 [mobile/README.md](../mobile/README.md)。
 > 本文其余部分是 M19/M20 开始前写下的交接计划与工程默认（建议、环境、差距记录保留）；正文中“完全未开始”“手机只有本机 Host”“缺远端入口”等描述只反映交接时点，**不代表现在的状态**。
 > 基线：分支 `refactor/bot-host-core`，交接时提交 `5466b428`（父助手已用 git 核实；撰写时未执行 git）。若接手时 HEAD 已前进，先读后续变更再动手，**绝不 `reset`/`clean` 回旧基线**。
 > 标记约定：**【事实】** 已在仓库或已验收记录中成立；**【建议】** 本文为后续实施给出的工程默认，接手者需按当次任务确认；**【待实现】** 现在不存在。
@@ -185,7 +185,7 @@ M20-11：远端 GitHub Actions 本期由用户决定不做（接线已存在，�
 - **通过**：9 组 GUI→Host 矩阵（Windows/Linux/Android 客户端 × Windows/Linux/Android Host，显式选择/发送/LIVE/历史读回）；Windows MSI/NSIS 与 Linux DEB/RPM 的安装、升级/重装、卸载与数据保留，以及 AppImage 的 FUSE 挂载与解包两种运行模式及配置保留（AppImage 未做安装/卸载）；K80 真机真实 Shower、实际桌面 Widget、通知删除；Linux Host 在 `LIVE busy=true` 且请求已 `placed` 时 SIGKILL 后原 submission 77 完成（不推断已开始模型 HTTP 派发）；客户端回执丢失后 `unconfirmed` → 只读对账回原 submission 73 `done`，对已接受记录再次 send 返回原回执、历史仍只有一条；群聊发布/更正与 DM 30.001 s 超时后迟到回复、原 request 只读读取、私有历史隔离；BC 两次压缩 2 块 9276 tokensCompressed 且重启后块/refs 与 13 条原历史不变；连接类 `not-sent`（错误 CA/旧 token/撤销 token/重连）与活动观察唯一 `REVOKED`（`unconfirmed`）终止。
 - **不是普通场景**：回执失败由调试器暂停后强杀注入；Host 重启结合了自有合成 relay 凭据轮换（原临时启动环境丢失，见证据 `host-restart-environment-note.json`），不是环境不变的纯重启。
 - **未通过/不计通过**：原 `notifications`/`widget`/`voice-continuity` instrumentation 失败状态不变（未改产品或断言）；手工 Widget/通知路径为 ADB 注入，不是手指验收；Windows GUI busy 后 WM_CLOSE 的最终进程退出时序未确认，不记 busy 任务完成证据；语音只验证拒绝麦克风后正常返回与草稿保留；K80 是首次安装+覆盖重装、4 KiB 页，不是旧版本迁移或 16 KiB 设备；较早的 `FORTIFY ... destroyed mutex` 日志（pid 30306，UI 退出阶段）与 `EXIT_SELF`/status 0、`trace=null` 并存，当时原因未定位；该现象其后已普通复现（K80 按返回，3 条 FORTIFY + UI 进程 `EXIT_SELF`，默认进程仍在），该已复现退出路径已完成修复与限定回归（见 §5.7）；无 native 符号化栈，C 全局析构归因仍为有依据假设。
-- **仍未验收**：Android 真实服务入口与真实 ASR/TTS（Windows Host 真实 deepseek-flash/Hindsight 限定联调其后已完成，reflect 仍有延迟限制，见 §5.11）、长时锁屏/ROM 后台与定时执行（该轮口径；新 Host 未锁屏一次性与停机过期其后已验收，见 §5.8）、传输饱和/竞态；真实旧版数据升级验收与远端 CI 按用户决定本期不做（见 §9）；16 KiB 页适配与专项运行验收本期不做（见 §9）。本期仍为 **18/19**。
+- **仍未验收**：真人录音/识别与朗读听感按用户决定暂缓（`android_speak` 已 `accepted=true`、系统有 TTS 日志，未确认听感；麦克风 false），仅用户重新要求时继续；Windows 与 K80 的真实 deepseek-flash/Hindsight 限定范围已完成（reflect 仍有延迟限制，见 §5.11/§5.12）；长时待机/深度 Doze/默认 `alarmClock` 与冷门/极端故障只作覆盖限制（§9）。本期仍为 **18/19**。
 
 ### 5.7 退出路径修复与回归（2026-10-25）
 
@@ -238,7 +238,16 @@ Windows 独立临时 Host 源码运行，复用 Pi 实际模型提供者与环�
 - **reflect 限制**：经真实 Host HTTP 接口一次 200、19.09 s、内容正确；CLI 2 次约 30 s 失败（第二次捕获 NETWORK，第一次只留 Error 未存 message），直连后端同 payload 一次 75 s 零响应超时；未改产品超时/重试，不将超时归因为已证实的客户端 bug，也不宣称 reflect 全面通过。
 - **凭据与环境**：初次 401 是只读了配置文件里的旧 `HINDSIGHT_API_KEY` 引用、漏了 Pi 环境变量覆盖（`HINDSIGHT_API_TOKEN`/`HINDSIGHT_BASE_URL`）；改用实际生效环境配置后解决，未让用户补凭据，也不是产品 bug。仓库只写设置字段与 basename，不含凭据值、完整地址或本机绝对路径。
 - **清理**：自有 Windows Host 全停；探查 bank 与测试 bank 均 DELETE 200，后者再读 `/config` 为 404；已有 Pi banks 未触及，凭据值未写入临时 settings 或仓库。
-- **未覆盖**：Android 真实服务入口与真实 ASR/TTS；本轮未重新打包/安装 APK 与桌面安装包（仅 Windows Host 源码真实运行）；长时稳定性。M20 仍 18/19。
+- **未覆盖**：Android 侧真实服务与 `android_speak` 已另行完成限定范围（§5.12）；真人录音/识别与朗读听感按用户决定暂缓；桌面安装包仅试启动与重打包，未重跑安装矩阵；真实 ASR/TTS 与长时稳定性未测。M20 仍 18/19。
+
+### 5.12 更新包与 K80 真实服务（收尾，语音暂缓）
+
+按用户决定暂停进一步测试并完成清理；证据在仓库外目录 basename `e-launcher-m20-final-device-1792908745212`（`packaging-result.json`、`package-sha256.txt`、`phone-real-readback.json`、`phone-real-final-summary.json`、`phone-tts-result.json`、`cleanup-complete.json`、`progress.json`）。产品提交 `3ddb797`。
+
+- **安装包**：APK sha256 `f56c8d57…`、签名仍 `6f6ff43d…`，K80 覆盖安装通过；停 Host 后 `files/bot-host`、`files/bot-client`、`shared_prefs` 重装前后一致（归档含 bin symlink，Windows 抽取排除该链接）。MSI/NSIS/DEB/RPM/AppImage 均已重打包，Linux 三包复制到 `desktop/build/linux-bundles`；AppImage 仅以自有 Xvfb+DBus 启动到主动 12 s 超时，不计交互/安装矩阵重跑。桌面安装包是客户端、不含独立 Host；上轮 Hindsight 修复在 Host 侧，未打进桌面 broker。
+- **K80 真实服务**：真实 DeepSeek 文本 submission 168 `done`，中文/emoji 回复正确；真实 retain 后 `recallMemory` 读到 violet/shelf three，submission 174 给出正确记忆答案；该轮历史没有 `hindsight_recall` 工具调用（Windows 前轮有），K80 走现有 API recall 与自动 recall 注入；memory 7 completed、0 failed、0 pending、0 accepted，`lastRecall=injected`。
+- **语音暂缓**：`android_speak` submission 178 返回 `accepted=true` 且系统有 TTS 执行日志，用户未确认听感；真人录音/识别未做、麦克风权限仍 false；按用户决定暂缓，仅在用户重新要求时继续，原 Instrumentation 失败状态保留。
+- **清理**：配置恢复空 `providers`/`defaultModel=null`/`relay=null`（revision 17）、`aliases={}`，原运行 Host 恢复 running；通知授权 true、麦克风 false、省电设置未改；专用 bank DELETE 200 且再读 `/config` 404，Pi 已有 banks 未动；自有 adb forward 19240 与终端已关闭；测试本地 Bot 历史与安装包保留。
 
 ## 6. 环境与授权
 
@@ -284,9 +293,9 @@ Relay、CA 与模型配置的完整参数见 [`host-core/README.md`](../host-cor
 | Android 远端入口 | 已由 M20-01 补齐（手机 UI 可经 relay 连接远端 Host，见 §5.1/§5.2）；手机 UI × Windows Host 的跨机聊天已在补充验收矩阵中通过（§5.6）；K80 真机另做本机 Host 与 Linux Host 限定验证 |
 | TUI | M19 已移出本期（编号保留）；原规格保留为历史/后续计划，未验收代码只在 git stash `02f1396f`，仅未来草稿、禁止取回或删除，不在交付树、不计完成；不作为本期或 M20 完成条件 |
 | M17 Relay GUI 联调 | Windows GUI 本轮已经真实 TLS relay 续聊手机创建的 Bot；其后补充验收已跑完 Linux GUI 跨机全矩阵（9 组 GUI→Host 均通过，见 §5.6） |
-| ARM64 运行时 | 已由 REDMI K80（Android 16/arm64-v8a，4 KiB 页）限定运行验证：本机 Host、remote client、CA TLS relay 到 Linux Host；真实旧版数据升级验收按用户决定本期不做（M16 迁移功能与历史事实保留）；16 KiB 设备未测且本期排除 |
-| 真实 deepseek-flash / Hindsight 联调 | Windows 独立临时 Host + 真实 Pi 模型提供者与环境生效的 Hindsight 配置、专用派生 bank，已完成限定范围（模型文本/ read→write 工具链、retain/recall/get/source/correct、自动 recall/retain）；reflect 经 Host HTTP 一次 200/19.09 s，CLI 2 次约 30 s 失败、直连后端 75 s 零响应，产品超时/重试未改；Android 真实服务与 ASR/朗读未测（§5.11） |
-| 锁屏 / 长时后台定时 | Host 锁屏存活已通过（同 PID、FGS 在、UI 不在）；exact 模式锁屏按时执行在普通省电策略下失败（§5.9，保留），与厂商进程组冻结相符；用户亲改“无限制”后一轮锁屏样本通过、冻结标记 0，submission 149 经 API 读回 `done`，清理已完成（§5.10）；未充电深度 Doze 与周期/日历规则仍待；默认 `alarmClock` 未测 |
+| ARM64 运行时 | 已由 REDMI K80（Android 16/arm64-v8a，4 KiB 页）限定运行验证：本机 Host、remote client、CA TLS relay 到 Linux Host；本轮 APK 已重建并在 K80 覆盖安装、签名一致，真实模型/Hindsight 文本与记忆完成限定验收（§5.12）；五种桌面安装包已重打包；真实旧版数据升级验收按用户决定本期不做（M16 迁移功能与历史事实保留）；16 KiB 设备未测且本期排除 |
+| 真实 deepseek-flash / Hindsight 联调 | Windows 独立临时 Host 已完成限定范围（§5.11）；K80 手机端真实服务亦完成限定范围：DeepSeek 文本、真实记忆与自动 recall 注入、`android_speak` 工具受理（§5.12）；语音听感与真人录音暂缓；reflect 经 Host HTTP 一次 200/19.09 s，CLI 2 次约 30 s 失败，产品超时/重试未改 |
+| 锁屏 / 长时后台定时 | 按已测范围收尾（不追加）：Host 锁屏存活通过；用户“无限制”策略下短时 exact 锁屏样本按时创建并完成，submission 149 读回 `done`（§5.10）；历史“智能限制”下失败与厂商进程组冻结相符并保留（§5.9）；长时待机/深度 Doze/默认 `alarmClock` 未测，仅作覆盖限制 |
 | Android UI 视觉与信息层级 | 用户要求之后单独重做（顶栏入口混排、默认页偏 Host 调试管理），本轮不实施，不作为 M20 结项条件（§5.9） |
 | 远端 GitHub Actions | 工作流接线已实现，**未实际运行**；按用户决定本期不做、不推送触发（接线保留） |
 | MSI 安装 / RPM 安装 / AppImage FUSE | 其后补充验收已实际安装/卸载 MSI、安装/重装/卸载 RPM，并以 FUSE 与解包两种模式运行 AppImage（详见 §5.4/§5.6） |
@@ -313,6 +322,7 @@ Relay、CA 与模型配置的完整参数见 [`host-core/README.md`](../host-cor
   - `e-launcher-exact-fix-1792897008485`：exact 失败诊断（`device-probe/freeze-proof.txt`、`greezer-own-events.txt`、`process-record-locked.txt`、`parent-plan.json`、`restored-state.json`）。
   - `e-launcher-exact-unrestricted-1792902712485`：用户改“无限制”后的锁屏 exact 样本（`battery-policy-user.xml`、`scope.json`、`setup.json`、`created.json`、`lock-start.json`、`locked-after-due.txt`、`locked-end.txt`、`native-run-while-locked.json`、`locked-result.json`、`original-request-readback.json`、`config-restored.json`、`restored-state.json`）。
   - `e-launcher-m20-real-services-1792905495824`：Windows 独立 Host 的真实 DeepSeek/Hindsight 限定联调（`deepseek-result.json`、`hindsight-result.json`、`bank-config-contract.json`、`combined-status.json`、`combined-memory-status.json`、`memory-correct-result.json`、`memory-correct-repeat.json`、`memory-bank-delete.json`）。只写 basename，不写凭据/完整地址。
+  - `e-launcher-m20-final-device-1792908745212`：更新包与 K80 真实服务收尾（`packaging-result.json`、`package-sha256.txt`、`phone-real-readback.json`、`phone-real-final-summary.json`、`phone-tts-result.json`、`cleanup-complete.json`、`progress.json`）。
   - 这些文件在原机器的系统临时目录，**不是仓库文件**；换机器需移交到可访问的仓外位置。没有原文件时，以仓内限定说明作为历史摘要，并重新建新夹具，不得声称复跑。
 - 首轮模拟器/桌面收尾已完成：最终窗口、client Node、自有 Windows/Linux Host、relay、Mockoon、SSH 转发、3 个自有终端与模拟器均已停止；userdata 与 fixture 记录保留，自有 adb 19220 forward 已删；该阶段未操作物理设备；不外推其他 M20 项。
 - 其后补充验收的收尾已完成（见证据 `cleanup-complete.json`）：K80 临时 models/settings 按原字节哈希恢复，临时授权（含 `POST_NOTIFICATIONS`）、自有 Shizuku、测试 APK、测试会话与 Widget、自有 ADB 转发、手动 UI dump 均已清理并归档；手工 Widget/通知检查的临时 fixtures 清理字段也已由 pending 改为 complete（`manual-widget-result.json`/`manual-notification-result.json`）；桌面自有 Host/relay/模型服务/SSH 隧道/Xvfb/driver/容器与三个验收终端已停止，原 M17 driver 保留；保留 APK、五种桌面安装包、合成数据集与仓外证据。M19 stash 未动。
@@ -322,7 +332,7 @@ Relay、CA 与模型配置的完整参数见 [`host-core/README.md`](../host-cor
 
 1. M19 已按用户决定移出本期（编号保留）：原规格作为历史/后续计划保留；未验收 TUI 代码只在 git stash `02f1396f`，仅作未来草稿，**禁止取回或删除**，不进入交付、不计完成；其终端界面/快捷键/TUI 续聊验收不再是本期或 M20 的完成条件。恢复 M19 需用户重新明确授权，并单独验收、提交。
 2. M20 仍进行中，本期交付范围为原 20 个模块中的 19 个（当前 18/19）；已交付 M20-01 不等于 M20 完成，不得把 M20 或本期记成已完成。
-3. M20 完成条件：每个 M20-xx 先具备所需功能/环境，再逐项给出证据；任一必需项未完成或未给出处置，就不能算通过。剩余验收项：Android 真实服务入口与真实 ASR/朗读（Windows 独立 Host 的真实 deepseek-flash/Hindsight 限定联调已完成，reflect 仅 Host HTTP 一次 200/19.09 s，CLI 与直连超时未归因，见 §5.11）、锁屏与长时待机/未充电 Doze 后台（新 Host 未锁屏一次性触发与停机过期处理已有证据，见 §5.8；exact 模式锁屏在普通省电策略下失败并保留，与厂商进程组冻结相符，默认 `alarmClock` 待独立对照；用户亲改“无限制”后一轮锁屏样本通过且清理完成（§5.10）；未充电深度 Doze 仍未覆盖）、完整传输饱和/竞态；真实旧版数据升级验收与远端 CI 按用户决定本期不做（M16 迁移功能与历史事实、CI 接线保留、不推送触发）；UI 重做为用户提出的独立后续工作，不进 M20 结项条件（§5.9）。16 KiB 页适配与专项运行验收按用户决定不在本期范围、不作为结项门槛（4 KiB 页历史事实与既有 ELF/zipalign 对齐设置保留，不改构建配置）。已通过的 Linux GUI 全矩阵、MSI/NSIS/DEB/RPM 安装相关检查与 AppImage 两种运行模式、Host/回执故障、群/DM、BC 与认证撤销，以及 UI 退出 FORTIFY 的已复现路径（§5.7）不再列入待跑（限制见 §5.6/§5.7）。
+3. M20 主要验收已完成、按用户决定暂停：更新包重打包与 K80 覆盖安装（签名一致、数据前后一致）、K80 真实 DeepSeek 与 Hindsight（文本、记忆、自动 recall、`android_speak` 受理）均已完成限定范围（§5.12），不重跑。真人录音/识别与朗读听感暂缓，仅在用户重新要求时继续，不催测、不因此新增门槛。后台定时、故障与冷门/极端场景沿用已收窄范围：未锁屏一次性、停机跳过、用户“无限制”下短时 exact 锁屏均有结果，历史“智能限制”冻结失败保留；长时待机/深度 Doze/默认 `alarmClock` 只作覆盖限制；传输饱和、极端并发、罕见缺序与文件副作用后回执丢失不在必跑清单。真实旧版数据升级验收与远端 CI 按用户决定本期不做（M16 迁移功能与历史事实、CI 接线保留、不推送触发）；UI 重做为独立后续工作（§5.9）；16 KiB 页适配与专项运行验收不在本期、不作为结项门槛。已通过的 Linux GUI 全矩阵、MSI/NSIS/DEB/RPM 安装相关检查与 AppImage 两种运行模式、Host/回执故障、群/DM、BC 与认证撤销，以及 UI 退出 FORTIFY 的已复现路径（§5.7）不再列入待跑（限制见 §5.6/§5.7）。
 
 ## 10. 交接任务模板（未来操作者直接用）
 
@@ -337,6 +347,6 @@ Relay、CA 与模型配置的完整参数见 [`host-core/README.md`](../host-cor
 ```text
 接手 M20：跨设备集成、打包与真机验收。先读本文 §5/§6 与架构 §9，并看 docs/refactor-roadmap.md 末节的当前进度。
 M20-01（手机远端入口 + 限定跨设备联调）已交付，不重复实现；补充验收（§5.6）已跑 9 组 GUI→Host 矩阵、MSI/NSIS/DEB/RPM 安装相关检查与 AppImage 两种运行模式、K80 原生能力、故障/群聊/DM/BC/认证，不重跑也不把它们当全量；下一步按剩余项推进：
-真实 deepseek-flash/Hindsight 联调（Windows 独立 Host + 专用派生 bank，已完成限定范围，reflect 仍有延迟限制，见 §5.11；Android 真实服务与 ASR/朗读未跑）、锁屏与长时后台（新 Host 未锁屏一次性与停机过期已验收，见 §5.8；锁屏 exact 模式按时执行在普通省电策略下失败并保留（与厂商进程组冻结相符；用户改“无限制”后一轮样本通过且清理完成，见 §5.9/§5.10）；未充电 Doze 仍待）；真实旧版数据升级验收与远端 CI 按用户决定本期不做（M16 迁移功能与历史事实、CI 接线保留）；传输饱和/竞态；16 KiB 页适配与专项运行验收本期不做，不作为结项门槛。
+真实 deepseek-flash/Hindsight 联调（Windows 独立 Host 已完成限定范围，§5.11，不重跑）；更新包与 K80 真实服务已完成限定范围（APK 重建/覆盖安装、真实文本与记忆，§5.12）；真人录音/识别与朗读听感按用户决定暂缓，仅用户重新要求时继续，不催测。后台定时与故障沿用已收窄范围（未锁屏一次性、停机跳过、用户“无限制”下短时 exact 锁屏；长时/深 Doze/默认 `alarmClock` 与传输饱和/极端并发/罕见缺序只作覆盖限制）。真实旧版数据升级验收与远端 CI 按用户决定本期不做（M16 迁移功能与历史事实、CI 接线保留）；16 KiB 页适配与专项运行验收本期不做，不作为结项门槛。
 跨端创建续聊已按手机→Windows 桌面 GUI 有限验证；TUI 客户端已移出本期，不作为待办。每项标注已跑/待跑/前置未实现/环境不可用；未完成不把 M20 或本期记成已完成；需要新物理设备/付费服务/推送 CI 时先向用户申请授权。
 ```
