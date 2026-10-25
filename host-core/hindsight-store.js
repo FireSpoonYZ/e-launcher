@@ -253,6 +253,22 @@ export function openHindsightStore({ dataRoot, deviceId, endpointHash }) {
     const stmtDueJobs = db.prepare(
       `SELECT * FROM outbox WHERE state <> 'completed' AND next_attempt_at <= ? ORDER BY next_attempt_at ASC, operation_id ASC LIMIT ?`
     );
+    // 按 Bot 过滤的同一查询：暂停 Bot 的到期行在 SQL 内就先排除，不再占用 LIMIT 窗口。
+    // 占位符数量随可写 Bot 数变化，按数量缓存 prepared statement。
+    const stmtDueJobsByBot = new Map();
+    const dueJobsStmtFor = (count) => {
+      let stmt = stmtDueJobsByBot.get(count);
+      if (!stmt) {
+        const placeholders = new Array(count).fill('?').join(', ');
+        stmt = db.prepare(
+          `SELECT o.* FROM outbox o JOIN contexts c ON c.key = o.context_key
+            WHERE o.state <> 'completed' AND o.next_attempt_at <= ? AND c.bot_id IN (${placeholders})
+            ORDER BY o.next_attempt_at ASC, o.operation_id ASC LIMIT ?`
+        );
+        stmtDueJobsByBot.set(count, stmt);
+      }
+      return stmt;
+    };
     const stmtGetRequest = db.prepare('SELECT * FROM requests WHERE request_key = ?');
     const stmtInsertRequest = db.prepare(
       'INSERT INTO requests (request_key, kind, fingerprint, result_json) VALUES (?, ?, ?, ?)'
@@ -525,8 +541,16 @@ export function openHindsightStore({ dataRoot, deviceId, endpointHash }) {
       });
     };
 
-    const dueJobs = (now, limit = 4) => {
-      return stmtDueJobs.all(now, limit).map((row) => rowToJob(row, contextRowFor(row.context_key)));
+    // eligibleBotIds 省略 = 旧内部语义（不过滤）；[] = 无可写 Bot，直接返回 []。
+    const dueJobs = (now, limit = 4, eligibleBotIds = undefined) => {
+      if (eligibleBotIds === undefined) {
+        return stmtDueJobs.all(now, limit).map((row) => rowToJob(row, contextRowFor(row.context_key)));
+      }
+      const botIds = [...new Set(eligibleBotIds)];
+      if (botIds.length === 0) return [];
+      return dueJobsStmtFor(botIds.length)
+        .all(now, ...botIds, limit)
+        .map((row) => rowToJob(row, contextRowFor(row.context_key)));
     };
 
     const setJob = (operationId, { state, attempts, nextAttemptAt, lastErrorCode }) => {

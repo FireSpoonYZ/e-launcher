@@ -95,9 +95,11 @@ node host-core/cli.js create   --data-root '/path/to/data-root'   --request-id r
 - `store.js`：openStore(dataRoot)，返回 {deviceId, createBot, getBot, findByRequest, listBots, close}。
 - `host.js`：openHost({dataRoot})，返回 {deviceId, dataRoot, createBot, getBot, findByRequest, listBots, close}。
 - `cli.js`：CLI 入口。
-- `index.js`：导出 `openHost`、`openRuntime`、`openControlServer`、`openMessageLog`、`openRelayRegistry`、`openRelayServer`、`openDeviceLink`、`openRemoteControl`、`RemoteControlError` 与控制 IO 辅助（`ControlHttpError`、`createControlAuthorizer`、`readControlBody`、`writeControlJson`、`writeControlError`）；模块 14 起另导出 `openHostService`、`openPendingClient`、`openHostSettings`/`normalizeHostSettings`、`normalizeRuntimeConfig`/`parseRuntimeConfig`/`describeModelCatalog`/`loadRuntimeConfig`（随父助手集成）。
+- `index.js`：导出 `openHost`、`openRuntime`、`openControlServer`、`openMessageLog`、`openRelayRegistry`、`openRelayServer`、`openDeviceLink`、`openRemoteControl`、`RemoteControlError` 与控制 IO 辅助（`ControlHttpError`、`createControlAuthorizer`、`readControlBody`、`writeControlJson`、`writeControlError`）；模块 14 起另导出 `openHostService`、`openPendingClient`、`openHostSettings`/`normalizeHostSettings`、`normalizeRuntimeConfig`/`parseRuntimeConfig`/`describeModelCatalog`/`loadRuntimeConfig`（随父助手集成）；扩展增量另导出 `normalizeBotExtensions`/`normalizeRuntimeExtensions`/`resolveRuntimeExtensions`/`createHostExtensionManager`（内部工具构造器，不属于公开 RPC）。
 - `index.d.ts`：登记接口，以及 `Runtime`、`PrimarySubmission`、`HistoryPage`、`OpenRuntimeOptions`（含可选 `bashPath`/`toolPaths`）、模块 6 直播预览类型（`LiveMessage`/`LiveHistoryItem`/`LiveTool`/`LiveGeneration`/`BotLiveState`/`BotLiveChanges`/`BotLiveSnapshot`/`BotLiveUpdate`/`BotLiveDataFrame`/`BotLiveEnd`/`BotLiveFrame`/`BotWatchEnd`/`BotWatch`）、模块 7 消息账本类型（`MessageMember`/`MessageAuthor`/`MessageScope`/`PublishMessageInput`/`MessageEnvelope`/`MessagePeer`/`MessageAck`/`StoredMessage`/`MessageCursor`/`MessagePageOptions`/`MessageOutboxOptions`/`MessageStreamStatus`/`MessageHistoryPage`/`MessageInboxPage`/`MessageOutboxPage`/`MessageDeliveryStatus`/`MessageLog`/`openMessageLog`）、模块 8 中继类型（`RelayDevice`/`RelayRegistry`/`RelayServerStatus`/`RelayServer`/`DeliveryPumpStatus`/`DeviceLinkStatus`/`DeviceLink`/`openRelayRegistry`/`openRelayServer`/`openDeviceLink`，`OpenDeviceLinkOptions.control` 可选）、模块 9 远程控制类型（`RemoteControlOutcome`/`RemoteControlMethodMap`/`OpenRemoteControlOptions`/`RemoteControl`/`RemoteControlError`/`openRemoteControl`）等类型。模块 12 的类型增量（`ScopeCreateInput`/`ScopeUpdateInput`/`ScopeRecord`/`ScopeInfo`/`ScopeAck`/`ScopeListOptions`/`ScopeListPage`/`ScopeOfferOptions`/`ScopeOfferPage`/`ReplicaStream`/`InventoryQuery`/`InventoryPage`/`ReplicaHistoryQuery`/`ReplicaHistoryPage`/`MissingRangeQuery`/`ReplicaListOptions`/`ReplicaListPage`/`UserMessageInput`、MessageLog 新增 17 个门面方法、Runtime 与 ControlClient 各六个方法、`DeviceLinkStatus.scopeDelivery`/`replicaSync`）由模块 12 类型 lane 在 `index.d.ts`/`control-client.d.ts` 补充，随父助手集成。
-- 模块 13 的 Hindsight 配置、target、游标、投递/纠正回执类型和八个 Runtime 记忆方法签名，见 `index.d.ts` 与 `control-client.d.ts`。- `index.d.ts` 的模块 10 增量：`MessageInboxOptions`、`WorkContextRecord`、`WorkSyncOptions`、`WorkSyncResult`、`WorkHistoryCursor`、`WorkHistoryPage`、`WorkContextStatus` 与 Runtime 的四个工作上下文方法；不新增根 JS 导出。
+- 模块 13 的 Hindsight 配置、target、游标、投递/纠正回执类型和八个 Runtime 记忆方法签名，见 `index.d.ts` 与 `control-client.d.ts`。
+- `index.d.ts` 的扩展增量：`BotExtensions`、`BotExtensionsUpdate`、`BotExtensionSnapshot`、`BotExtensionPolicy`、`BotExtensionState`、`BotSoul`、`BotSoulUpdate`、`ExtensionCatalog`/`ExtensionCatalogEntry`、`RuntimeExtensionsConfig`/`HindsightExtensionConfig`，以及 Runtime 的 `initializeBot`/`getExtensionCatalog`/`getBotExtensions`/`setBotExtensions`/`getBotSoul`/`setBotSoul`、`ControlMethodMap` 的五个新方法与 `normalizeBotExtensions`/`normalizeRuntimeExtensions`/`resolveRuntimeExtensions` 声明。
+- `index.d.ts` 的模块 10 增量：`MessageInboxOptions`、`WorkContextRecord`、`WorkSyncOptions`、`WorkSyncResult`、`WorkHistoryCursor`、`WorkHistoryPage`、`WorkContextStatus` 与 Runtime 的四个工作上下文方法；不新增根 JS 导出。
 - `work-context-docs.js` / `work-context-codec.js` / `runtime-work-contexts.js`：模块 10 的内部持久文档、来源事件编码与被动导入引擎，不作为根 API 导出。
 - `index.d.ts` 的模块 11 增量：`MessagePublishGuard`、`MessageInboxItem`、`MessageRepliesPage`、`WorkActivity`；`MessageLog.publish(input, guard?)`、`MessageLog.replies` 和 Runtime 的 `getWorkActivity`/`stopWork`/`resumeWork`。`control-client.d.ts` 为三个本机控制方法复用 `WorkActivity`；不扩展远端方法或根 JS 导出。
 - 模块 11 内部模块：`work-decision-state.js` / `work-decision-codec.js`（持久决策与 Host 处理信号）、`runtime-work-decisions.js`（自动处理）、`bot-identity.js` / `communication-tools.js`（权威身份与通信工具）；不作为根 API 导出。
@@ -115,9 +117,11 @@ node host-core/cli.js create   --data-root '/path/to/data-root'   --request-id r
 - `replica-sync.js`：模块 12 副本修复泵（`createReplicaSync`：服务并主动发起 inventory/history/缺口补齐与 `recordReplicaScan`）。
 - `host-environment.js`：HostExecutionEnv（NodeExecutionEnv 子类）；仅命令字符串经 Git Bash/bash 执行，argv 数组与文件操作直接透传。
 - `grep-tool.js` / `find-tool.js` / `ls-tool.js`：grep（rg）、find（fd）、ls 工具。
+- `extension-manager.js`：Host 扩展管理（`normalizeBotExtensions`/`normalizeRuntimeExtensions`/`resolveRuntimeExtensions` 与 `createHostExtensionManager({host,extensions,hindsight})`）：目录/可用性、每 Bot 策略、工具禁用名单、注册与反向拆解；不加载任意代码、不自带第二套扩展运行时。
+- `bot-soul.js`：每 Bot 真实 `SOUL.md` 文件（`ensureSoul`/`setSoulText`，同目录临时文件 + rename，`SOUL_MAX_BYTES` = 64 KiB）；路径只由内部 botId 生成，不接受调用方拼路径。
 - `search-bin.js`：rg/fd 固定版本、asset 规格与解析顺序；`prepare-tools.js`：显式下载并安装 rg/fd 的 CLI。
-- `control-client.js` / `control-client.d.ts`：控制客户端（`./control-client` 子路径导出），由协作任务提供；模块 12 增加 `listScopeStates`/`createScope`/`getScopeState`/`updateScope`/`publishUserMessage`/`listScopeReplicas` 六个方法（scope 段沿用 `'~'+encodeURIComponent(scopeId)`，无 Node 导入）；模块 14 增加 `getModelCatalog`/`workLive`/`scopeHistory`/`getScopeMessage`/`getScopeMessageDelivery`/`getLocalSettings`/`replaceLocalSettings`/`getServiceStatus`，仍为 web-standard fetch only。
-- `control-server-cli.js` / `control-cli.js`：模块 5 两个 CLI；`control-cli.js` 的 `live` 子命令在模块 6 增加，模块 10 增加 `work-get`/`work-sync`/`work-history`/`work-context`，模块 11 增加 `work-activity`/`work-stop`/`work-resume`，模块 12 增加 `scope-list`/`scope-get`/`scope-create`/`scope-update`/`scope-send`/`scope-replicas`（新增通用 `--input` 标志），模块 14 再增加 `models`/`service-status`/`settings-get`/`settings-set`/`work-live`/`scope-history`/`scope-message`/`scope-delivery`，仍经同一本机 HTTP 服务调用；新增命令拒绝无关 flag，重复歧义 flag 拒绝（parseArgs tokens）。
+- `control-client.js` / `control-client.d.ts`：控制客户端（`./control-client` 子路径导出），由协作任务提供；模块 12 增加 `listScopeStates`/`createScope`/`getScopeState`/`updateScope`/`publishUserMessage`/`listScopeReplicas` 六个方法（scope 段沿用 `'~'+encodeURIComponent(scopeId)`，无 Node 导入）；模块 14 增加 `getModelCatalog`/`workLive`/`scopeHistory`/`getScopeMessage`/`getScopeMessageDelivery`/`getLocalSettings`/`replaceLocalSettings`/`getServiceStatus`，扩展增量增加 `getExtensionCatalog`/`getBotExtensions`/`setBotExtensions`/`getBotSoul`/`setBotSoul`，仍为 web-standard fetch only。
+- `control-server-cli.js` / `control-cli.js`：模块 5 两个 CLI；`control-cli.js` 的 `live` 子命令在模块 6 增加，模块 10 增加 `work-get`/`work-sync`/`work-history`/`work-context`，模块 11 增加 `work-activity`/`work-stop`/`work-resume`，模块 12 增加 `scope-list`/`scope-get`/`scope-create`/`scope-update`/`scope-send`/`scope-replicas`（新增通用 `--input` 标志），模块 14 再增加 `models`/`service-status`/`settings-get`/`settings-set`/`work-live`/`scope-history`/`scope-message`/`scope-delivery`，扩展增量再增加 `extensions`/`bot-extensions`/`bot-extensions-set`/`bot-soul`/`bot-soul-set`，仍经同一本机 HTTP 服务调用；新增命令拒绝无关 flag，重复歧义 flag 拒绝（parseArgs tokens）。
 - `runtime-live-projection.js` / `runtime-live.js`：模块 6 直播预览投影与 `Runtime.watch`。
 - `control-live.js`：模块 6 SSE 路由 `GET /v1/bots/:botId/live`。
 - `control-live-client.js`：模块 6 SSE 流式解析与 `readControlLive`。
@@ -126,12 +130,12 @@ node host-core/cli.js create   --data-root '/path/to/data-root'   --request-id r
 - `relay-server.js` / `relay-server-cli.js`：认证中继服务（WebSocketServer noServer + TLS/loopback 规则）与其 CLI。
 - `message-delivery.js`：内部投递泵（不导出），在线扫描 outbox、退避与诊断。
 - `device-link.js` / `device-link-cli.js`：Host 链路（ws 客户端、Hello/ready、所有权锁、重连/blocked）与其 CLI；模块 9 起 `device-link-cli` 增加可选配对 `--control-url` 与 `--control-token-env`，配置控制适配器后 hello 带 `role:'host',controlProtocol:1`。模块 12 起 hello 恒带 `scopeProtocol:1`，ready 必须回显 `scopeProtocol:1` 否则以 `UNSUPPORTED_SCOPE_PROTOCOL` 永久阻塞；内部实例化 `scope-delivery.js`/`replica-sync.js` 两泵，`getStatus()` 新增 `scopeDelivery`/`replicaSync` 两节，公共 `wake()` 唤醒三泵。
-- `remote-control-protocol.js`：模块 9 协议常量与方向性帧校验（`CONTROL_METHODS`/`CONTROL_ERROR_CODES`/`MAX_CONTROL_JSON_BYTES`/`CONTROL_TIMEOUT_MS`/`CONTROL_CLIENT_TIMEOUT_MS`/`CONTROL_MAX_CLIENT_CALLS`/`CONTROL_MAX_HOST_CALLS`/`CONTROL_MAX_PENDING`/`normalizeControlCall`/`readControlClientFrame`/`readControlServerFrame`）；模块 14 起 `CONTROL_METHODS` 为旧十方法 + 固定 25 方法（共 35，`CONTROL_V1_METHODS`/`controlMethodVersion` 见同文件）。
+- `remote-control-protocol.js`：模块 9 协议常量与方向性帧校验（`CONTROL_METHODS`/`CONTROL_ERROR_CODES`/`MAX_CONTROL_JSON_BYTES`/`CONTROL_TIMEOUT_MS`/`CONTROL_CLIENT_TIMEOUT_MS`/`CONTROL_MAX_CLIENT_CALLS`/`CONTROL_MAX_HOST_CALLS`/`CONTROL_MAX_PENDING`/`normalizeControlCall`/`readControlClientFrame`/`readControlServerFrame`）；模块 14 起 `CONTROL_METHODS` 为旧十方法 + v2 方法表（现共 40：M14 的固定 25 个不变，另加扩展/SOUL 5 个；`CONTROL_V1_METHODS`/`controlMethodVersion` 见同文件）。Hindsight 超时链常量与辅助（`HINDSIGHT_MAX_TIMEOUT_MS` 由 `hindsight-client.js` 导出；本文件为 `CONTROL_MEMORY_DEADLINE_MS`/`CONTROL_MEMORY_CLIENT_DEADLINE_MS`/`CONTROL_MEMORY_BROKER_DEADLINE_MS`/`MEMORY_HTTP_INACTIVITY_MS`、`isMemoryControlMethod`/`controlMethodTimeoutMs`/`controlClientTimeoutMs`/`controlBrokerTimeoutMs`）只对八个 memory 方法放宽，其余 RPC 仍用原 `CONTROL_TIMEOUT_MS`/`CONTROL_CLIENT_TIMEOUT_MS`。
 - `relay-server.js`：模块 8/9 认证中继服务（WebSocketServer noServer + TLS/loopback 规则、control-* 有界路由与清理）。模块 12 增加 scope 业务帧路由：仅已协商 `scopeProtocol:1` 的 host 连接可发送；来源注入 `fromDeviceId`；离线/吊销回 `scope-unavailable`/`replica-unavailable` OFFLINE，目标无能力回 UNSUPPORTED，高水位/编码失败回 BACKPRESSURE；ack/reject/result 为临时帧，目标不可用时静默丢弃；不保存任何 scope/成员/历史状态。
 - `local-control-adapter.js`：`createLocalControlAdapter({url,token})`，目标本机回环 Control API 适配（仅字面 `http://127.0.0.1` 或 `http://[::1]`，路径 `/`）。
 - `host-control.js`：`createHostControlReceiver({deviceId,execute,send})`，Host 侧控制接收器（最多 8 个活动调用、无队列）。
 - `remote-control-client.js`：模块 9 Node 控制客户端（`openRemoteControl`/`RemoteControlError`）。
-- `remote-control-cli.js`：模块 9 一次性控制 CLI；模块 14 起支持 35 个固定方法（从 `CONTROL_METHODS` 动态列出）与保留命令 `listDevices`/`live`（非 Host JSON 方法），`--input` 经 `normalizeControlCall`/`normalizeDevicesOptions`/`normalizeLiveTarget` 校验；SIGINT/SIGTERM 退出 130/143，EPIPE 取消观察正常退 0，任何取消不发送 abort 控制方法。
+- `remote-control-cli.js`：模块 9 一次性控制 CLI；模块 14 起按 `CONTROL_METHODS` 动态列出现行方法表（现共 40 个），另有保留命令 `listDevices`/`live`（非 Host JSON 方法），`--input` 经 `normalizeControlCall`/`normalizeDevicesOptions`/`normalizeLiveTarget` 校验；SIGINT/SIGTERM 退出 130/143，EPIPE 取消观察正常退 0，任何取消不发送 abort 控制方法。
 
 ## 本次模块验收
 
@@ -659,7 +663,7 @@ node host-core/remote-control-cli.js listBots \
   [--input control-input.json] [--ca /path/to/ca.pem]
 ```
 
-- METHOD 必须精确等于上述 10 个方法名之一，无别名；`--input` 可选，缺省 `{}`，为 ≤1MiB 的普通 UTF-8 JSON 对象。（模块 14 起该方法表扩展为 35 个固定方法并新增保留命令 `listDevices`/`live`，见[模块 14](#模块-14统一-host-服务与设备接入已完成父助手限定范围验收)一节。）
+- METHOD 必须精确等于上述 10 个方法名之一，无别名；`--input` 可选，缺省 `{}`，为 ≤1MiB 的普通 UTF-8 JSON 对象。（模块 14 起该方法表扩展为固定 v2 方法，现共 40 个（含扩展/SOUL 5 个），并新增保留命令 `listDevices`/`live`，见[模块 14](#模块-14统一-host-服务与设备接入已完成父助手限定范围验收)与[Bot 级扩展与 SOUL.md](#bot-级扩展与-soulmdhost-契约增量)两节。）
 - 成功：stdout 输出一行原始 JSON 结果，exit 0。失败：stderr 输出 `{"error":{"code":...,"message":...,"outcome":...}}`；unconfirmed 结果 exit 2，其他错误 exit 1，`--help` exit 0。信号只关闭客户端，绝不发送 abort 方法；错误输出不含令牌/调用负载。
 
 ### JS API（`./host-core/index.js` 新增导出）
@@ -804,7 +808,7 @@ node host-core/control-cli.js work-context --url http://127.0.0.1:8787 \
 ### 后续边界与未实测
 
 - 上述模块 10 验收不覆盖模块 11 的自动收件调度、工作上下文推理/发言或沉默、Bot 通信工具；模块 11 已独立完成父助手验收，接口与实测范围见下节。模块 12 的成员同步/历史补齐已完成父助手限定范围验收（122/122 检查点，见下节）；模块 13 已完成 Host 侧适配及限定范围验收，不新增 Session 产品或 UI。
-- 模块 9 远程协议保持原 **10 个方法**，未增加远程工作上下文控制；版本化接线属于模块 14（截至 M9–M12；M14 v2 起已扩展为 35 个固定方法，见[模块 14](#模块-14统一-host-服务与设备接入已完成父助手限定范围验收)一节）。
+- 模块 9 远程协议保持原 **10 个方法**，未增加远程工作上下文控制；版本化接线属于模块 14（M9–M12；M14 v2 起已扩展为固定 v2 方法表，现共 40 个，见[模块 14](#模块-14统一-host-服务与设备接入已完成父助手限定范围验收)一节）。
 - 未实测：跨物理设备/WAN、Linux、Android、arm64、Tauri/TUI、浏览器 native-fetch 适配集成、真实外部付费模型。
 - 未实测直接 JS AbortSignal 与直接 `Runtime.close` 并发调用/关闭竞态；已实跑服务端 HTTP 断连继续导入和进程优雅关闭。全局 128 pending/256 连接负载、中继慢接收者压力测试及模块 9 原有未实测项继续保留。
 
@@ -1008,7 +1012,7 @@ node host-core/control-cli.js work-resume --url http://127.0.0.1:8787 \
 
 ### 版本与外接方式
 
-参考 Pi Hindsight **0.13.0** 的召回、投递和去重策略，以及 REST 客户端 **0.9.2** 的接口定义，独立实现适配器，接入 pi-durable **1.3.0** 与 acp-kernel **0.0.101**。这些是已核实的插件、客户端和 SDK 版本，服务端版本尚待真实后端联调确认。
+使用官方 `@vectorize-io/hindsight-client@0.9.2` 的公开 SDK 导出（`createClient`/`createConfig`/`sdk`）接入，而不是自己重写 REST 层；召回、投递和去重策略仍沿用 Pi Hindsight **0.13.0** 的语义，运行时接入 pi-durable **1.3.0** 与 acp-kernel **0.0.101**。SDK 已发布版本、gitHead、MIT 许可与逐字副本位置见[Bot 级扩展与 SOUL.md](#bot-级扩展与-soulmdhost-契约增量)一节；服务端版本尚待真实后端联调确认。
 
 ### 显式服务配置与数据归属
 
@@ -1024,7 +1028,7 @@ node host-core/control-cli.js work-resume --url http://127.0.0.1:8787 \
 }
 ```
 
-`apiKeyEnv` 是环境变量名。Runtime 打开前解析其值，凭证只用于后端请求认证，不写入数据库或通过本机控制 API 返回；修改凭证后需重新打开 Runtime。显式指定的变量必须存在且包含非空、可用于请求头的 ASCII token；省略该字段可使用无认证服务。远端地址要求 HTTPS，HTTP 仅允许回环地址，拒绝 URL 内的凭证、查询串和 fragment。
+`apiKeyEnv` 是环境变量名。Runtime 打开前解析其值，凭证只用于后端请求认证，不写入数据库或通过本机控制 API 返回；修改凭证后需重新打开 Runtime。显式指定的变量必须存在且包含非空、可用于请求头的 ASCII token；省略该字段可使用无认证服务。远端地址要求 HTTPS，HTTP 仅允许回环地址，拒绝 URL 内的凭证、查询串和 fragment。新配置推荐写在 `runtime.extensions.hindsight`（含每 Bot 启用/读写模式，见[Bot 级扩展与 SOUL.md](#bot-级扩展与-soulmdhost-契约增量)）；本节形状作为 legacy `runtime.hindsight` 仍被接受，两者不得同时出现。
 
 事实提取与检索由 Hindsight 执行。本机 `hindsight.sqlite` 保存输入关联、持久投递队列、有限的召回缓存、来源和纠正审计，不建立另一套事实检索系统。原始 Durable Entry 和 `messages.sqlite` 历史保持完整。适配器绑定服务 URL 的哈希，拒绝把已有队列改投其他端点。
 
@@ -1062,15 +1066,15 @@ node host-core/control-cli.js work-resume --url http://127.0.0.1:8787 \
 | `correctMemory(botId, input)` | `memory-correct` | `hindsight_correct` |
 | `retryMemory(botId, input)` | `memory-retry` | `hindsight_retry` |
 
-HTTP 状态入口为 GET `/v1/bots/:botId/memory`，其余七个操作为 POST `/v1/bots/:botId/memory/{recall,reflect,retain,get,source,correct,retry}`。retain/correct/retry 返回 202 回执，其他操作返回 200。原远端十方法白名单保持不变，远端记忆与实时接线留给模块 14（模块 14 v2 起已扩展为 35 方法并加入远端记忆/实时接线，见[模块 14](#模块-14统一-host-服务与设备接入已完成父助手限定范围验收)一节）。
+HTTP 状态入口为 GET `/v1/bots/:botId/memory`，其余七个操作为 POST `/v1/bots/:botId/memory/{recall,reflect,retain,get,source,correct,retry}`。retain/correct/retry 返回 202 回执，其他操作返回 200。原远端十方法白名单保持不变，远端记忆与实时接线留给模块 14（模块 14 v2 起已扩展为固定方法表，现共 40 个，并加入远端记忆/实时接线，见[模块 14](#模块-14统一-host-服务与设备接入已完成父助手限定范围验收)一节）。这八个方法也是唯一使用“后端 120s ≤ 本机 HTTP 130s ≤ 中继/目标 135s ≤ 客户端 140s ≤ 桌面 broker 145s ≤ 原生外层 150s”超时链的 RPC，其余方法超时不变（详见[Bot 级扩展与 SOUL.md](#bot-级扩展与-soulmdhost-契约增量)一节）。
 
 `memoryStatus` 输入为 `{target?,state?,limit?,cursor?}`，state 为 pending/accepted/completed/failed，limit 为 1–200（默认 20）。游标 `{bankId,state,afterOperationId}` 绑定派生记忆库与过滤条件，不赋予跨库权限。计数覆盖整个上下文，state 只过滤分页 jobs；返回 `jobs/nextCursor` 可发现自动投递失败的 operation ID。状态查询不创建记忆库、不发起后端请求，可读取已有库。禁用时计数与 jobs 为 null；配置但未建库时计数为 0、jobs 为 []。
 
-CLI 均要求 `--bot-id`。`memory-status` 可选 `--input`，其余命令必须提供输入 JSON 文件。
+CLI 均要求 `--bot-id`。`memory-status` 可选 `--input`，其余命令必须提供输入 JSON 文件。这八个模型工具与八个 RPC 都受每 Bot 扩展策略约束：关闭时工具全部隐藏且自动任务暂停，只读时 `retain`/`correct`/`retry` 被拒（`EXTENSION_READ_ONLY`）且暂停自动写入；`memoryStatus` 的 `enabled:false` 仍是正常状态（见[Bot 级扩展与 SOUL.md](#bot-级扩展与-soulmdhost-契约增量)）。
 
 ### 内部文件与关闭
 
-`hindsight-client.js`、`hindsight-format.js`、`hindsight-protocol.js` 分别负责固定 REST 接口、脱敏/渲染和参数规范化；`hindsight-store.js`、`hindsight-sources.js` 负责持久状态与来源；`hindsight-service.js`、`runtime-hindsight.js`、`hindsight-tools.js` 负责服务、生命周期和模型工具。
+`hindsight-client.js`、`hindsight-format.js`、`hindsight-protocol.js` 分别负责官方 SDK 适配（每实例 fetch、`redirect:error`、超时、2 MiB 边界）、脱敏/渲染和参数规范化；`hindsight-store.js`、`hindsight-sources.js` 负责持久状态与来源；`hindsight-service.js`、`runtime-hindsight.js`、`hindsight-tools.js` 负责服务、生命周期和模型工具。
 
 关闭时先启动 Durable 的 close，再取消网络请求并等待记忆调用结束，最后关闭记忆库，避免把普通关闭写成持久任务中止。
 
@@ -1092,7 +1096,7 @@ CLI 均要求 `--bot-id`。`memory-status` 可选 `--input`，其余命令必须
 
 ## 模块 14：统一 Host 服务与设备接入（已完成父助手限定范围验收）
 
-模块 14 把模块 5 本机控制面、模块 8/9 认证中继与远程控制、模块 10–12 工作上下文/scope、模块 13 记忆整合为**统一本机服务**（`openHostService`），并新增本机设置持久化、远端协议 v2（35 方法）、受控远端实时预览与客户端待发送/对账。
+模块 14 把模块 5 本机控制面、模块 8/9 认证中继与远程控制、模块 10–12 工作上下文/scope、模块 13 记忆整合为**统一本机服务**（`openHostService`），并新增本机设置持久化、远端协议 v2（M14 交付时 35 个方法；含后续扩展/SOUL 增量现为 40 个）、受控远端实时预览与客户端待发送/对账。
 
 **状态**：模块 14 已完成交付并获父助手限定范围验收，总完成数 **14/20**；模块 15–18 后续已交付（见下节与末节），M19 已移出本期（本期不交付）、M20 进行中（见末节模块 20-01）。
 
@@ -1134,12 +1138,12 @@ CLI 均要求 `--bot-id`。`memory-status` 可选 `--input`，其余命令必须
 
 scopeKey/messageKey 固定 `~` 前缀再逐段编码，保护 `.`/`..`/Unicode/斜杠；新路径拒绝无关 query；history 严格 limit(1..200)/cursor 对象，拒未知/重复键。
 
-### 远程协议与握手（35 方法）
+### 远程协议与握手（40 方法）
 
 - relay 协议不变：protocolVersion 1；scopeProtocol 仅 host 侧 1。Host hello controlProtocol 可为 1 或 2，client hello 可省略（legacy）或声明 2（client 声明 1 无效）。ready 可带 controlProtocol:2，省略即 legacy。**v2 client/link 必须要求 ready 回显 2**；旧 client/host 经 v1 方法兼容。
-- 控制方法表 `CONTROL_METHODS` 共 35 个：旧 v1 十方法（getHostInfo/listBots/createBot/getBot/findByRequest/submit/getSubmission/history/abort/contextStatus）+ v2 新增 25 个（getModelCatalog/getWorkContext/syncWorkContext/workHistory/workContextStatus/getWorkActivity/stopWork/resumeWork/listScopeStates/createScope/getScopeState/updateScope/publishUserMessage/listScopeReplicas/scopeHistory/getScopeMessage/getScopeMessageDelivery/memoryStatus/recallMemory/reflectMemory/retainMemory/getMemory/getMemorySource/correctMemory/retryMemory）。memory 方法 wire params 均为 `{botId,input}`；分页/scope 参数提取 limit/cursor。
+- 控制方法表 `CONTROL_METHODS` 共 40 个：旧 v1 十方法（getHostInfo/listBots/createBot/getBot/findByRequest/submit/getSubmission/history/abort/contextStatus）+ v2 30 个 = M14 原 25 个（getModelCatalog/getWorkContext/syncWorkContext/workHistory/workContextStatus/getWorkActivity/stopWork/resumeWork/listScopeStates/createScope/getScopeState/updateScope/publishUserMessage/listScopeReplicas/scopeHistory/getScopeMessage/getScopeMessageDelivery/memoryStatus/recallMemory/reflectMemory/retainMemory/getMemory/getMemorySource/correctMemory/retryMemory）不变 + 扩展/SOUL 5 个（getExtensionCatalog/getBotExtensions/setBotExtensions/getBotSoul/setBotSoul）。memory 方法 wire params 均为 `{botId,input}`；分页/scope 参数提取 limit/cursor；扩展 setter 也是 `{botId,input}`，input 分别带 `expectedRevision` 数字/`expectedRevision` SHA-256/`extensions`/`text`。
 - 能力门控：legacy client（省略 controlProtocol）只能 v1 方法；v2 client 可用 v1/v2，但目标 host.controlProtocol 必须 ≥ controlMethodVersion。无 capability 回 CONTROL_UNAVAILABLE/not-sent；离线 OFFLINE/not-sent；不转发不支持的方法、不创建中央邮箱。settings/status 不加入远端表，无通用代理。结果三态（not-sent/unconfirmed/responded）沿用。
-- 阶段澄清：M10–M13 历史验收记录的“远端仅十方法/远程 work 不可用”在该时间点成立；M14 v2 起远端已是固定 35 方法，支持固定 work/memory RPC。relay 仅有界瞬时转发业务，不持久保存业务正文/工作上下文/模型与 Hindsight API 凭证，也不运行推理；中心仅持久保存设备登记与认证校验信息（设备 token 哈希/credentialVersion），设备认证校验数据不与模型/Hindsight 业务凭证混同。无通用代理、中心变更邮箱、自动重放或 E2E 作者签名/加密声明。
+- 阶段澄清：M10–M13 历史验收记录的“远端仅十方法/远程 work 不可用”在该时间点成立；M14 v2 起远端已是固定方法表（M14 交付时 35 个，含扩展/SOUL 增量现为 40 个），支持固定 work/memory RPC；各模块历史验收文字中的“35 方法”是该次验收时的方法数，不是当前契约。relay 仅有界瞬时转发业务，不持久保存业务正文/工作上下文/模型与 Hindsight API 凭证，也不运行推理；中心仅持久保存设备登记与认证校验信息（设备 token 哈希/credentialVersion），设备认证校验数据不与模型/Hindsight 业务凭证混同。无通用代理、中心变更邮箱、自动重放或 E2E 作者签名/加密声明。
 - 设备目录：`devices-list` 是中继自有帧，绝不作为 Host 方法转发；registry 内部 `listActive` 只返回既有 RelayDevice DTO。remote `listDevices`/`devices-list` wire 投影仅四字段白名单 `{deviceId, online, controlProtocol:0|1|2, scopeProtocol:0|1}`（最多 200 条升序，keyset cursor `{afterDeviceId}`），online 仅有效 Host 连接，离线能力全 0，client socket 不算 Host online；无 token/hash/credentialVersion/时间戳。注册/轮换/撤销仍是本地 `relay-registry-cli` 特权动作，中心不新增自助注册端点。
 
 ### 远端实时预览（remote live）
@@ -1197,7 +1201,7 @@ node host-core/control-cli.js scope-history --url http://127.0.0.1:8787 --token-
 node host-core/control-cli.js scope-message --url http://127.0.0.1:8787 --token-env CONTROL_TOKEN --scope-id "$SCOPE_ID" --message-id m-1
 node host-core/control-cli.js scope-delivery --url http://127.0.0.1:8787 --token-env CONTROL_TOKEN --scope-id "$SCOPE_ID" --message-id m-1
 
-# 远端控制（35 方法 + listDevices/live）——--input 一律指向文件，不用 inline JSON
+# 远端控制（40 方法 + listDevices/live）——--input 一律指向文件，不用 inline JSON
 node host-core/remote-control-cli.js listBots --device-id "$SOURCE_DEVICE_ID" --target-device-id "$TARGET_DEVICE_ID" \
   --url "$RELAY_URL" --token-env REMOTE_CONTROL_TOKEN [--input control-input.json] [--ca /path/to/ca.pem]
 node host-core/remote-control-cli.js listDevices --device-id "$SOURCE_DEVICE_ID" \
@@ -1407,7 +1411,7 @@ Android 搜索工具（rg/fd）固定 API 29，不改变 App minSdk33。NDK/16Ki
 ### 进程与协议
 
 - `android-runtime.js` 新增 `mode === 'client'`：只 `openDesktopClient({dataRoot})`（ui store + pending 账本 + 固定传输），ready id 用 broker 的 `clientId`；**从不**打开 Host/Runtime、不读模型凭据、不发 native 工具调用。与 Host 共用 `BotHostProcess`（Node Mobile）单例生命周期，但由 `BotHostClient` 以独立 `files/bot-client` 懒启动，与 `files/bot-host` 隔离。
-- 桥的私有入口只新增 `clientRequest`/`clientObserve`/`clientUnobserve` 与观察事件 `clientFrame`（`data` 即 `DesktopObservationEvent`）；**没有** `clientClose`，公开仍是 4 个 Tauri 命令与 35 个 Host 方法。`clientUnobserve` 与 `pause` 为保留清理操作，不受普通 8 个在途上限约束；普通 RPC 仍 8 个、观察仍 8 路。
+- 桥的私有入口只新增 `clientRequest`/`clientObserve`/`clientUnobserve` 与观察事件 `clientFrame`（`data` 即 `DesktopObservationEvent`）；**没有** `clientClose`，公开仍是 4 个 Tauri 命令与 Host 方法表（M20-01 交付时 35 个，含后续扩展/SOUL 增量现为 40 个）。`clientUnobserve` 与 `pause` 为保留清理操作，不受普通 8 个在途上限约束；普通 RPC 仍 8 个、观察仍 8 路。
 - broker 侧 `unobserve` 是纯本地取消：不排到 8 个普通 RPC 或 connect/disconnect 切换后面，否则取消的观察会泄漏槽位；它同步返回、不会堆积。普通请求/观察的 8/8/25 s 上限与行为不变。
 - 生命周期：默认进程内单例管理器（冷态只构造）；一个 `clientRoot` 同时只允许一个 UI 会话持有，其余按 BUSY 拒绝；UI 关闭/EOF 只释放本会话观察与该 client child，不 stop/abort 远端 Agent，不自动重连、不重放变更。批量取消用 owned 8 槽与串行幂等清理。
 - 凭据：连接 token 与 relay CA 只在会话内存，不进 `desktop-ui.sqlite`/pending/localStorage，也不写日志。
@@ -1421,3 +1425,67 @@ Android 搜索工具（rg/fd）固定 API 29，不改变 App minSdk33。NDK/16Ki
 - 真机限定运行（REDMI K80 / 型号 24117RK2CC，Android 16、arm64-v8a、页 4096；旁置 K90 未操作）：同 APK（sha256 `2b50fccfaef5b1da5f8f47777fe4aea30b91f90d57af9a123e78443be52bba39`）先首次安装（安装前设备无该包，故**不是**旧版本真实用户数据迁移验收），再覆盖重装 `-r`（原签名保留）；冷启动无 Host Node/FGS，显式启动后真实 ARM64 Node 以 specialUse FGS（3150）运行；本机 Bot 中文/emoji/多行写入真实 Durable/BC 原始历史并取回合成 SSE 回复；UI 进程被 kill 后默认进程与该 Host Node 同 PID 保持，重开读取持久回复（关闭前受理回执未捕获，故不写精确 busy 接纳时序）；打开“其他设备”后 Host/client 两个 ARM64 Node 并存，client 使用独立数据目录 `files/bot-client`；经真实 CA TLS relay 连接 Linux Host，提交唯一 K80 marker 多行消息并在 Linux 原始历史读到输入与回复；8 路 LIVE 各自 snapshot，批量 close 后再开 8 路各 snapshot 再关闭通过；设置页显式重连后 client Node 退出、本机 Host 同 PID 继续且 UI 稳定无循环；清空合成配置/alias 并显式停 Host 后同 APK 覆盖重装，Host state + client store + shared_prefs 捕获文件字节一致、7 份 SQLite integrity/FK 通过，重开冷态无 Node；检查期间无崩溃 buffer 条目。页为 4 KiB，不宣称 16 KiB 设备运行实测；手机 UI × Windows Host 仍未测（本轮是手机 UI → Linux Host + K80 本机 Host），也未跑 `notifications` 组。
 - 首轮模拟器/桌面收尾（已完成）：最终窗口、client Node、自有 Windows/Linux Host、relay、Mockoon、SSH 转发、3 个自有终端与模拟器均已停止；userdata 与 fixture 记录保留，自有 adb 19220 forward 已删；该阶段未操作物理设备；不外推其他 M20。
 - 收尾（K80 本轮）：App 与该测试会话保留在 K80 供查看；本机 Host 已显式停止，`runtime.providers=[]`、`defaultModel=null`、`relay=null`（revision 3）、`credential_aliases={}`；测试前 `POST_NOTIFICATIONS=false`，临时授权后已恢复 false；adb forward 19230 / reverse 18929 已删；自有 Linux Host/relay/Mockoon/SSH 转发/CDP 终端已停；未改电池/自启/无障碍/HOME；未涉及付费模型/真实 ASR/Hindsight。证据目录 basename `e-launcher-k80-1792825796727`（`k80-verification.json`）。
+
+## Bot 级扩展与 SOUL.md（Host 契约增量）
+
+本节记录托管扩展（当前只有 Hindsight）与每 Bot SOUL.md 的技术契约。它是 v2 方法的**增量**：原 35 个方法（旧 10 + M14 v2 25）wire 形状不变，新增 5 个方法，没有第二套扩展运行时、插件市场或任意 npm 安装。
+
+### Host 配置：runtime.extensions（兼容 legacy runtime.hindsight）
+
+```json
+{
+  "extensions": {
+    "hindsight": {
+      "enabled": true,
+      "defaultEnabled": true,
+      "config": { "baseUrl": "http://127.0.0.1:8888", "apiKeyEnv": "HINDSIGHT_API_KEY" }
+    }
+  }
+}
+```
+
+- 规范位置是 `runtime.extensions.hindsight = {enabled, defaultEnabled?, config?}`；`config` 必填且合法仅当 `enabled:true`，禁用时可保留。`defaultEnabled` 缺省跟随 `enabled`，只在该 Bot **首次初始化时复制一次**；之后改 Host 默认值不影响已初始化的 Bot。
+- legacy `runtime.hindsight`（模块 13 形状）继续接受，等价于 `enabled:true`/`defaultEnabled:true` + 原 config；存储与设置 CAS 不回写、不重写旧形状。两者同时出现属边界歧义，直接 `INVALID_ARGUMENT`。
+- `normalizeRuntimeConfig`/`parseRuntimeConfig` 返回现有字段再加生效的 `extensions`；`hindsight` 只包含生效启用的 config，凭证只在生效启用时解析。`host-service` 把两者同时前传给控制服务与 Runtime。设置与目录回执不含任何 secret 值。
+- 未配置扩展时目录仍列出 Hindsight（`available:false`、`reason:'not-configured'`、`defaultEnabled:false`），新 Bot 默认关闭。
+
+### 每 Bot 策略与生效语义
+
+- `BotExtensions = {hindsight:{enabled:boolean, mode:'read-write'|'read-only'}}`；每个 Bot 持久保存自己的设置，编辑一个 Bot 不影响其他 Bot。
+- 生效判定（`effective.hindsight`）：Bot 关闭 → `reason:'bot-disabled'`；Host 未配置 → `'not-configured'`；Host 关闭 → `'host-disabled'`；否则 `enabled:true` 且 reason 为 null。
+- 关闭：隐藏全部 `hindsight_*` 工具，并跳过该 Bot 的自动 recall/retain 与后台工作；`memoryStatus` 仍是正常的 `enabled:false` 状态（不产生新写入）。只读：允许 status/recall/reflect/get/source，拒绝 retain/correct/retry（`EXTENSION_READ_ONLY`），自动写入暂停但自动召回仍可用。其余未生效操作回 `EXTENSION_DISABLED`。
+- 原生扩展定义即使禁用也注册在 Durable registry（历史/恢复可用）；策略只控制会话内可见/可调用与后台执行，不是只隐藏 schema。工具过滤器重算时用完整的 manager 工具集清掉旧排除项，再追加当前排除项，因此 `关闭→启用` 与 `只读→读写` 都能恢复被移除的工具；同时保留非托管过滤器与 `modelTools`/延迟选择。
+- Bot 编辑仅在其实主/工作上下文没有 queued/placed 提交与挂起工作决策时允许，否则沿用 `RUNTIME_BUSY`；编辑不重置/分叉会话，下一次请求生效。
+- CAS：Bot 扩展 `revision` 从 0 起的非负安全整数（新 Bot 的 0 有效），成功写入递增；不匹配回 `REQUEST_CONFLICT`，不回放、不自动重试、不静默重连。未知 Bot 回 `BOT_NOT_FOUND`，输入错误回 `INVALID_ARGUMENT`。
+- 从关闭/只读转入读写时冻结当时的 native entry id 作为写入下限（`retentionFloor`），关闭/只读期间完成的交换不回填；已冻结的 job/run 不删除、ID 不改，恢复写权限后继续。后台投递泵先按“可写 Bot”在 SQL 内过滤（`dueJobs(now, limit, eligibleBotIds)`）再取本轮上限，所以暂停 Bot 的到期行不会占住其他 Bot 的投递窗口；省略 eligibleBotIds 保留旧的内部“不过滤”语义，`[]` 直接返回空。
+
+### SOUL.md
+
+- 每 Bot 一份真实 UTF-8 文件 `dataRoot/bots/<botId>/SOUL.md`，**绝不**写入共享 cwd；`path` 是相对路径 `bots/<id>/SOUL.md`（仅展示/核对，不用于读取），`revision` 是文件字节的 SHA-256 hex。
+- 首次创建与遗留 Bot 用已持久化 role 补建一次；已有内容永不被 bootstrap 覆盖。空 SOUL 合法且有意为空。公开编辑上限 64 KiB，文本须为 well-formed UTF-16/UTF-8。
+- CAS 写入：`expectedRevision` 必须是 64 位小写 SHA-256 hex，与当前文件一致才写，否则 `REQUEST_CONFLICT` 且不覆盖；发布走同目录临时文件 + rename 原子替换。同进程内无交错窗口，多进程同时写同一 Bot 仍可能后写覆盖（跨进程互斥未做，属已知限制）。
+- 人格：主会话 `instructions` = SOUL（空则清空，不回退 role）；工作会话 = SOUL + 既有来源归属说明 + 工作决策政策（不追加 role、不重复人格）。role 只保留为列表/创建元数据。
+
+### 方法、HTTP 与 CLI
+
+| Runtime / 控制方法 | HTTP | CLI |
+| --- | --- | --- |
+| `getExtensionCatalog()` | GET `/v1/extensions` | `extensions` |
+| `getBotExtensions(botId)` | GET `/v1/bots/:botId/extensions` | `bot-extensions --bot-id` |
+| `setBotExtensions(botId, input)` | PUT `/v1/bots/:botId/extensions` | `bot-extensions-set --bot-id --input` |
+| `getBotSoul(botId)` | GET `/v1/bots/:botId/soul` | `bot-soul --bot-id` |
+| `setBotSoul(botId, input)` | PUT `/v1/bots/:botId/soul` | `bot-soul-set --bot-id --input` |
+
+- 只有上述 5 个新方法，`CONTROL_METHODS` 现共 **40**（旧 10 + v2 30）。通用桌面/移动 broker 的 `call` 直接携带这五个方法，没有新增 Tauri 命令或 broker 操作。
+- `POST /v1/bots` 在 `host.createBot` 后调用 `runtime.initializeBot(bot.botId)`，去重重试也重复幂等初始化；Runtime 启动时初始化既有 Bot，遗留 Bot 在首次运行使用前初始化。
+- setter 是 CAS 请求，不做静默重连或重放；结果未知一律视为未确认，由 UI 显式重读对账。
+
+### SDK 与许可证
+
+- 固定 `@vectorize-io/hindsight-client@0.9.2`（host-core 依赖，lockfile 由父助手生成）：npm 发布包 gitHead `ebad478240d3171bb88201ececda5e8d9883d22d`，仓库根 LICENSE 为 MIT，Copyright (c) 2025 Vectorize AI, Inc.；逐字副本保留在 [`licenses/hindsight-client-0.9.2-MIT.txt`](../licenses/hindsight-client-0.9.2-MIT.txt)。
+- 适配器只用包公开导出 `createClient`/`createConfig`/`sdk`，不使用上游 `.pi` 源或内部路径，也不打全局 fetch 补丁；每实例自有 fetch 恢复 `redirect:error`、2 MiB 请求/响应上限与 AbortController，无自动重试或变更重放。
+- 新增可选 `timeoutMs`（默认 30000）与 `reflectTimeoutMs`（默认 120000），须为 ≤120000 的正安全整数（未知字段拒绝）；`HINDSIGHT_MAX_TIMEOUT_MS=120000` 供传输层对齐。未显式给出时不写进已存配置（保持 seed/CAS 兼容）。
+
+### 超时链（仅八个 memory 方法）
+
+Hindsight 后端 120s ≤ 本机控制 HTTP 空闲 130s ≤ 中继/目标执行 135s ≤ 远端/本机客户端 140s ≤ 桌面 broker 145s ≤ 原生外层 150s，每层严格包含内层。其他 RPC 与并发/准入/请求体/头/写超时不变（仍 20s/25s，在途 8/8、128 槽位）。调用方统一经 `controlMethodTimeoutMs`/`controlClientTimeoutMs`/`controlBrokerTimeoutMs` 取值，不使用过期常量。

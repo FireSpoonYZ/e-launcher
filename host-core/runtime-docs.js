@@ -90,6 +90,8 @@ export function initialToolsChange(removeTools) {
  * 由当前 AgentState 计算人格/工具变更（无变化返回 undefined，避免无谓 system 变更）：
  * - instructions：null/空串表示清空人格（空 SOUL 合法且有意为空）。
  * - tools：只并入/移除本模块管理的工具名；旧版显式白名单（数组）不在改写范围。
+ *   managedTools 是本模块完整工具定义（重算时清掉全部旧排除项），removeTools 是本次想要的排除项，
+ *   二者分开才能让「关闭→启用」「只读→读写」恢复被移除的工具。
  *   未知名字按原样保留（SDK 的 configure 只读取注册项的 name）。
  */
 export function agentProfileChange(state, profile) {
@@ -105,14 +107,19 @@ export function agentProfileChange(state, profile) {
     }
   }
 
-  const managed = profile?.removeTools ?? [];
+  const desired = profile?.removeTools ?? [];
+  const managed = profile?.managedTools ?? desired;
   const current = state?.tools;
   if (!Array.isArray(current)) {
     const managedNames = new Set(managed.map((tool) => tool.name));
-    const byName = new Map(managed.map((tool) => [tool.name, tool]));
+    const byName = new Map([...managed, ...desired].map((tool) => [tool.name, tool]));
     const previous = current?.remove ?? [];
-    const next = [...previous.filter((name) => !managedNames.has(name)), ...managedNames];
-    const unchanged = next.length === previous.length && next.every((name, index) => name === previous[index]);
+    const next = [
+      ...previous.filter((name) => !managedNames.has(name)),
+      ...desired.map((tool) => tool.name),
+    ];
+    // 排除项顺序不影响可调用性：同集合不写 configure，避免无谓 system 变更。
+    const unchanged = next.length === previous.length && next.every((name) => previous.includes(name));
     if (!unchanged) {
       change.tools = next.length === 0 ? null : { remove: next.map((name) => byName.get(name) ?? { name }) };
     }

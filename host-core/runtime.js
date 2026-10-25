@@ -270,13 +270,16 @@ export async function openRuntime(options) {
   return runtime;
 }
 
-/** 每 Bot 人格/工具视图：实际 SOUL 文本 + manager 管理的工具移除项。 */
+/**
+ * 每 Bot 人格/工具视图：实际 SOUL 文本 + manager 管理的完整工具集与本次要排除的工具。
+ * managedTools 与 removeTools 分开传递，才能让重开/只读→读写时恢复原先被排除的工具。
+ */
 function botProfile(host, extensions, hindsightTools, botId, workMeta) {
   const soul = host.getBotSoul(botId).text;
   const byName = new Map(hindsightTools.map((tool) => [tool.name, tool]));
   const removeTools = extensions.disabledToolNames(botId).map((name) => byName.get(name)).filter(Boolean);
   const instructions = workMeta ? workInstructions(soul, workMeta) : (soul === '' ? null : soul);
-  return { instructions, removeTools };
+  return { instructions, removeTools, managedTools: hindsightTools };
 }
 
 function parseBindingKey(key) {

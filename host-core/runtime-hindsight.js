@@ -265,11 +265,16 @@ export function createRuntimeHindsight({ host, getHarness, getWorkContexts, getW
     }
   }
 
+  // 可自动写入的 Bot：关闭/只读 Bot 的到期 job 在查询前就被排除，不让暂停行阻塞其他 Bot。
+  function writableBotIds() {
+    return host.listBots().map((bot) => bot.botId).filter((botId) => canWriteFor(botId));
+  }
+
   async function processJobs(store) {
-    // shortcut: 暂停 Bot 的到期 job 仍占用查询窗口，大量暂停 Bot 可能延迟其他 Bot；升级时按 bot 过滤查询。
-    const due = store.dueJobs(Date.now(), JOBS_PER_PUMP * 5);
-    const jobs = due.filter((job) => canWriteFor(job.botId)).slice(0, JOBS_PER_PUMP);
-    for (const job of jobs) {
+    const eligibleBotIds = writableBotIds();
+    if (eligibleBotIds.length === 0) return;
+    const due = store.dueJobs(Date.now(), JOBS_PER_PUMP, eligibleBotIds);
+    for (const job of due) {
       if (closing) return;
       try {
         await processOneJob(store, job);
