@@ -91,6 +91,37 @@ function throwIfAborted(callContext) {
   callContext?.abortSignal?.throwIfAborted?.();
 }
 
+const DEFAULT_CORRECTION_TIMEOUT_MS = 30_000;
+
+/**
+ * 一次纠错的 GET+PATCH 共享 config.timeoutMs 总预算（上限由
+ * normalizeHindsightConfig 保证 <=120s）。预算耗尽即 abort 本地信号，稳定映射
+ * HINDSIGHT_UNAVAILABLE；caller abort 同时生效。只传本地 signal 给 client，
+ * 不替换 callContext 对象。
+ */
+function correctionBudget(timeoutMs, callContext) {
+  const caller = callContext?.abortSignal;
+  const controller = new AbortController();
+  let expired = false;
+  const onAbort = () => controller.abort();
+  if (caller) {
+    if (caller.aborted) controller.abort();
+    else caller.addEventListener('abort', onAbort, { once: true });
+  }
+  const timer = setTimeout(() => {
+    expired = true;
+    controller.abort();
+  }, timeoutMs);
+  return {
+    signal: controller.signal,
+    expired: () => expired,
+    dispose: () => {
+      clearTimeout(timer);
+      if (caller) caller.removeEventListener('abort', onAbort);
+    },
+  };
+}
+
 /**
  * Hindsight 内存服务。config=null 表示未配置：除 status 外一律抛 HINDSIGHT_NOT_CONFIGURED，
  * 不注册工具、不建网络/存储。所有公开方法经 run() 接纳；resolve/doX 走内部实现。
@@ -367,52 +398,71 @@ export function createHindsightService({
     if (!created) return receipt;
 
     let before = null;
+    // 两个串行调用共用同一总预算，避免 GET 与 PATCH 各自耗尽单次期限后
+    // 超过外层传输静默期限（后端仍可超时完成 PATCH）。
+    const budget = correctionBudget(config.timeoutMs ?? DEFAULT_CORRECTION_TIMEOUT_MS, callContext);
     try {
-      before = await client.getMemory(ctx.bankId, normalized.memoryId, callContext?.abortSignal);
-    } catch (error) {
-      // GET 失败发生在 PATCH 前：确定未发送。
-      return getStore().finishCorrection(requestKey, {
-        state: 'rejected',
+      try {
+        before = await client.getMemory(ctx.bankId, normalized.memoryId, budget.signal);
+      } catch (error) {
+        // GET 失败发生在 PATCH 前：确定未发送。预算耗尽映射稳定超时。
+        return getStore().finishCorrection(requestKey, {
+          state: 'rejected',
+          outcome: 'not-sent',
+          errorCode: budget.expired() ? 'HINDSIGHT_UNAVAILABLE' : stableCode(error),
+          before: null,
+          after: null,
+        });
+      }
+
+      // PATCH 前持久 before 快照；本地持久失败必须传播，绝不进入网络/后端拒绝分类。
+      getStore().finishCorrection(requestKey, {
+        state: 'pending',
         outcome: 'not-sent',
-        errorCode: stableCode(error),
-        before: null,
-        after: null,
-      });
-    }
-
-    // PATCH 前持久 before 快照；本地持久失败必须传播，绝不进入网络/后端拒绝分类。
-    getStore().finishCorrection(requestKey, {
-      state: 'pending',
-      outcome: 'not-sent',
-      errorCode: null,
-      before,
-      after: null,
-    });
-
-    let after = null;
-    try {
-      // 单次 PATCH，不自动重放。
-      after = await client.updateMemory(ctx.bankId, normalized.memoryId, patch, callContext?.abortSignal);
-    } catch (error) {
-      // 网络/关闭/协议/中断或不明确响应均属未确认；仅已知 4xx 为确定拒绝。
-      const decline = definiteRejection(error) ? 'rejected' : 'unconfirmed';
-      const outcome = definiteRejection(error) ? 'responded' : 'unconfirmed';
-      return getStore().finishCorrection(requestKey, {
-        state: decline,
-        outcome,
-        errorCode: stableCode(error),
+        errorCode: null,
         before,
         after: null,
       });
+
+      // 预算已耗尽则不派发 PATCH：仍是确定未发送，保留 before 快照。
+      if (budget.expired()) {
+        return getStore().finishCorrection(requestKey, {
+          state: 'rejected',
+          outcome: 'not-sent',
+          errorCode: 'HINDSIGHT_UNAVAILABLE',
+          before,
+          after: null,
+        });
+      }
+
+      let after = null;
+      try {
+        // 单次 PATCH，不自动重放。
+        after = await client.updateMemory(ctx.bankId, normalized.memoryId, patch, budget.signal);
+      } catch (error) {
+        // 网络/关闭/协议/中断或不明确响应均属未确认；仅已知 4xx 为确定拒绝。
+        // PATCH 派发后超时同样保留未确认，不得当作可重放。
+        const timedOut = budget.expired();
+        const rejected = !timedOut && definiteRejection(error);
+        return getStore().finishCorrection(requestKey, {
+          state: rejected ? 'rejected' : 'unconfirmed',
+          outcome: rejected ? 'responded' : 'unconfirmed',
+          errorCode: timedOut ? 'HINDSIGHT_UNAVAILABLE' : stableCode(error),
+          before,
+          after: null,
+        });
+      }
+      // PATCH 成功后的审计持久失败必须传播，保留可恢复的 pending/applied 意图。
+      return getStore().finishCorrection(requestKey, {
+        state: 'applied',
+        outcome: 'responded',
+        errorCode: null,
+        before,
+        after,
+      });
+    } finally {
+      budget.dispose();
     }
-    // PATCH 成功后的审计持久失败必须传播，保留可恢复的 pending/applied 意图。
-    return getStore().finishCorrection(requestKey, {
-      state: 'applied',
-      outcome: 'responded',
-      errorCode: null,
-      before,
-      after,
-    });
   }
 
   async function doRetry(botId, input, callContext) {

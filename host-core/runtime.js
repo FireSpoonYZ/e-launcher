@@ -36,7 +36,7 @@ import {
 import { parseHindsightOptions } from './hindsight-client.js';
 import { createRuntimeHindsight } from './runtime-hindsight.js';
 import { createHindsightTools } from './hindsight-tools.js';
-import { createHostExtensionManager, normalizeBotExtensions } from './extension-manager.js';
+import { createHostExtensionManager, normalizeBotExtensions, resolveRuntimeExtensions } from './extension-manager.js';
 
 const CTX = BACKGROUND_CONTEXT;
 
@@ -53,6 +53,41 @@ function assertNonBlank(value, name) {
 }
 
 /**
+ * 每 Bot FIFO 准入：同一 Bot 的发送、设置与工作操作串行，不同 Bot 互不阻塞。
+ * 关闭时立即拒绝新准入，并排空已接纳操作（调用方仍各自收到自己的失败）。
+ */
+function createBotAdmission() {
+  const lanes = new Map();
+  const accepted = new Set();
+  let closed = false;
+
+  function admit(botId, operation) {
+    if (typeof botId !== 'string' || botId === '') {
+      return Promise.reject(errWithCode('botId must be a non-empty string', 'INVALID_ARGUMENT'));
+    }
+    if (closed) return Promise.reject(errWithCode('host is closing', 'NOT_CONNECTED'));
+    const previous = lanes.get(botId);
+    const start = () => operation();
+    const task = previous ? previous.then(start, start) : Promise.resolve().then(start);
+    lanes.set(botId, task);
+    accepted.add(task);
+    const release = () => {
+      accepted.delete(task);
+      if (lanes.get(botId) === task) lanes.delete(botId);
+    };
+    task.then(release, release);
+    return task;
+  }
+
+  async function close() {
+    closed = true;
+    while (accepted.size > 0) await Promise.allSettled([...accepted]);
+  }
+
+  return { admit, close };
+}
+
+/**
  * Open the Pi Durable primary private-chat runtime for one host.
  * Ownership of dataRoot is exclusive for the runtime's lifetime; close() releases it.
  */
@@ -64,8 +99,15 @@ export async function openRuntime(options) {
   if (nativeBridge !== undefined && typeof nativeBridge !== 'function') {
     throw errWithCode('nativeBridge must be a function', 'INVALID_ARGUMENT');
   }
-  // 遗留 hindsight 选项在打开 host/任何写入前先归一化校验（类型/环境变量错误在写数据前拒绝）。
-  parseHindsightOptions(options?.hindsight);
+  // 打开 host（会初始化数据目录/SQLite）前先解析有效规范扩展配置与已启用凭据：
+  // 关闭的扩展不解析缺失的环境引用，启动被拒时也不会留下已打开的 Host。
+  const resolvedExtensions = resolveRuntimeExtensions({
+    extensions: options?.extensions,
+    hindsight: options?.hindsight,
+  });
+  const hindsightOptions = parseHindsightOptions(
+    resolvedExtensions.hindsight?.enabled ? resolvedExtensions.hindsight.config : undefined,
+  );
   const host = openHost({ dataRoot: options?.dataRoot });
   // 扩展管理归 Host extension manager（配置/目录/默认值/生命周期）；歧义输入由它拒绝。
   const extensions = createHostExtensionManager({
@@ -73,8 +115,6 @@ export async function openRuntime(options) {
     extensions: options?.extensions,
     hindsight: options?.hindsight,
   });
-  // manager 给出有效 hindsight 配置；未启用/未配置时为 null，控制器仍创建为禁用态。
-  const hindsightOptions = parseHindsightOptions(extensions.hindsightConfig);
   const models = options?.models ?? createModels();
   const defaultModel = options?.defaultModel ?? null;
   let releaseOwner = null;
@@ -110,6 +150,8 @@ export async function openRuntime(options) {
 
   // 内嵌 Billion Context：每 Host 一个 registry/管理器，hook 仅随生成调度运行。
   const manager = createContextManager({ getHarness: () => harness, models });
+  // 每 Bot 准入队列归本 Runtime：send/设置/工作操作共用，关闭时先拒新准入再排空。
+  const bots = createBotAdmission();
   const decisions = createWorkDecisionRuntime({
     host,
     getHarness: () => harness,
@@ -117,6 +159,8 @@ export async function openRuntime(options) {
     models,
     defaultModel,
     context: CTX,
+    // 工作决策的 stop/resume/advance 在同一 Bot 队列内执行；scope lane 在前，Bot lane 在后。
+    admitBot: bots.admit,
     getProfile: (botId, workMeta) => botProfile(host, extensions, hindsightTools, botId, workMeta),
   });
   // 始终创建禁用兼容控制器（config:null 不产生网络/存储/listener）；工具经 manager 注册。
@@ -259,6 +303,7 @@ export async function openRuntime(options) {
     memory,
     extensions,
     hindsightTools,
+    botAdmissions: bots,
   });
   try {
     // 启动时初始化既有 Bot（扩展默认值 + SOUL + 已绑定会话的人格/工具）。
@@ -275,6 +320,8 @@ export async function openRuntime(options) {
  * managedTools 与 removeTools 分开传递，才能让重开/只读→读写时恢复原先被排除的工具。
  */
 function botProfile(host, extensions, hindsightTools, botId, workMeta) {
+  // 首次使用（主/工作上下文）前同步冻结该 Bot 的扩展默认值 + SOUL：遗留 Bot 不必先经主发送/读取。
+  extensions.ensureBot(botId);
   const soul = host.getBotSoul(botId).text;
   const byName = new Map(hindsightTools.map((tool) => [tool.name, tool]));
   const removeTools = extensions.disabledToolNames(botId).map((name) => byName.get(name)).filter(Boolean);
@@ -291,9 +338,11 @@ function parseBindingKey(key) {
   }
 }
 
-function createRuntime({ host, harness, models, defaultModel, releaseOwner, manager, cleanupEnvs, live, workContexts, decisions, memory, extensions, hindsightTools }) {
+function createRuntime({ host, harness, models, defaultModel, releaseOwner, manager, cleanupEnvs, live, workContexts, decisions, memory, extensions, hindsightTools, botAdmissions }) {
   let closePromise = null;
   let closing = false;
+  // 同一 Bot 的发送/设置/显式同步串行；内侧复用 raw 实现，避免自持同一 lane。
+  const admitBot = botAdmissions.admit;
   // 本运行时已初始化过人格/工具的 Bot；新 Bot 经 initializeBot 增量加入。
   const initializedBots = new Set();
   // 已接纳的异步迁移操作（preview/status/import/draft）：closing 关准入，
@@ -317,6 +366,8 @@ function createRuntime({ host, harness, models, defaultModel, releaseOwner, mana
       // 依次执行并收集每步错误：任何一步失败仍继续清理，最后显式抛出。
       const errors = [];
       try { await decisions.close(); } catch (err) { errors.push(err); }
+      // 拒新准入并排空已接纳 Bot 操作：仍有 op 在使用 harness/store。
+      try { await botAdmissions.close(); } catch (err) { errors.push(err); }
       // 排空已接纳迁移操作：必须在 harness/host 关闭前等待完成。
       try { await drainLegacyOps(); } catch (err) { errors.push(err); }
       // 排空已接纳导入，但共享消息账本须保留到原生工具退出。
@@ -425,7 +476,13 @@ function createRuntime({ host, harness, models, defaultModel, releaseOwner, mana
     return bot;
   }
 
-  // Hindsight 8 方法直接转发（read 方法直传，retain/correct 显式双参包装，内部 actor 不暴露）。
+  // 显式记忆操作前的幂等初始化：只保证扩展默认值 + SOUL，不做人格刷新/建会话。
+  function withBotSettings(botId, operation) {
+    if (typeof botId === 'string' && host.getBot(botId)) extensions.ensureBot(botId);
+    return operation();
+  }
+
+  // Hindsight 8 方法先在 Bot 就绪后转发（read 方法直传，retain/correct 显式双参包装，内部 actor 不暴露）。
   return {
     initializeBot,
 
@@ -444,7 +501,8 @@ function createRuntime({ host, harness, models, defaultModel, releaseOwner, mana
       return extensions.getBotExtensions(botId);
     },
 
-    async setBotExtensions(botId, input) {
+    // 设置修改在同一 Bot 准入内完成：空闲检查 + 下限计算 + CAS + 人格应用不再被并发发送/工作接纳穿过。
+    setBotExtensions: (botId, input) => admitBot(botId, async () => {
       const bot = await requireBot(botId);
       const requested = normalizeBotExtensions(input?.extensions);
       await assertBotIdle(bot);
@@ -458,22 +516,23 @@ function createRuntime({ host, harness, models, defaultModel, releaseOwner, mana
       // 空闲编辑不重置/分叉会话，下一次请求即生效。
       await refreshBotProfiles(bot);
       return snapshot;
-    },
+    }),
 
     async getBotSoul(botId) {
       await requireBot(botId);
       return host.getBotSoul(botId);
     },
 
-    async setBotSoul(botId, input) {
+    setBotSoul: (botId, input) => admitBot(botId, async () => {
       const bot = await requireBot(botId);
       await assertBotIdle(bot);
       const soul = host.setBotSoul(botId, input);
       await refreshBotProfiles(bot);
       return soul;
-    },
+    }),
 
-    async submit(botId, input) {
+    // 发送占位到原生接纳/回执为止（不等模型完成）；并发设置保存因此能看到已排队提交。
+    submit: (botId, input) => admitBot(botId, async () => {
       assertNonBlank(botId, 'botId');
       const requestId = input?.requestId;
       const text = input?.text;
@@ -534,7 +593,7 @@ function createRuntime({ host, harness, models, defaultModel, releaseOwner, mana
 
       const submission = await conversation.submit({ type: 'input', content: text, requestId }, CTX);
       return formatPrimarySubmission(harness, bot, await submission.status(CTX), CTX);
-    },
+    }),
 
     async wait(botId, requestId) {
       assertNonBlank(botId, 'botId');
@@ -603,17 +662,19 @@ function createRuntime({ host, harness, models, defaultModel, releaseOwner, mana
       return { botId, conversationId: bot.primaryConversationId, ...status };
     },
 
-    memoryStatus: (botId, input) => memory.memoryStatus(botId, input),
-    recallMemory: (botId, input) => memory.recallMemory(botId, input),
-    reflectMemory: (botId, input) => memory.reflectMemory(botId, input),
-    retainMemory: (botId, input) => memory.retainMemory(botId, input),
-    getMemory: (botId, input) => memory.getMemory(botId, input),
-    getMemorySource: (botId, input) => memory.getMemorySource(botId, input),
-    correctMemory: (botId, input) => memory.correctMemory(botId, input),
-    retryMemory: (botId, input) => memory.retryMemory(botId, input),
+    // 遗留 Bot 首次显式记忆操作前冻结扩展默认值 + SOUL（不刷新人格、不建会话）。
+    memoryStatus: (botId, input) => withBotSettings(botId, () => memory.memoryStatus(botId, input)),
+    recallMemory: (botId, input) => withBotSettings(botId, () => memory.recallMemory(botId, input)),
+    reflectMemory: (botId, input) => withBotSettings(botId, () => memory.reflectMemory(botId, input)),
+    retainMemory: (botId, input) => withBotSettings(botId, () => memory.retainMemory(botId, input)),
+    getMemory: (botId, input) => withBotSettings(botId, () => memory.getMemory(botId, input)),
+    getMemorySource: (botId, input) => withBotSettings(botId, () => memory.getMemorySource(botId, input)),
+    correctMemory: (botId, input) => withBotSettings(botId, () => memory.correctMemory(botId, input)),
+    retryMemory: (botId, input) => withBotSettings(botId, () => memory.retryMemory(botId, input)),
 
     getWorkContext: workContexts.getWorkContext,
-    syncWorkContext: workContexts.syncWorkContext,
+    // 显式同步与发送/设置同队列：决策内部走 raw workContexts.syncWorkContext（已在 Bot 准入内），不会递归取 lane。
+    syncWorkContext: (botId, scopeId, options) => admitBot(botId, () => workContexts.syncWorkContext(botId, scopeId, options)),
     workHistory: workContexts.workHistory,
     workContextStatus: workContexts.workContextStatus,
     getWorkActivity: decisions.getWorkActivity,
@@ -635,7 +696,13 @@ function createRuntime({ host, harness, models, defaultModel, releaseOwner, mana
     // admitted async ops drained before harness/host close.
     previewLegacyImport: (input) => runLegacyOp(() => corePreviewLegacyImport(host, input)),
     getLegacyImportStatus: (input) => runLegacyOp(() => coreGetLegacyImportStatus(host, input)),
-    importLegacySnapshot: (input) => runLegacyOp(() => coreImportLegacySnapshot(host, harness, input, CTX)),
+    importLegacySnapshot: (input) => runLegacyOp(async () => {
+      const status = await coreImportLegacySnapshot(host, harness, input, CTX);
+      // 导入发布后立即幂等初始化：遗留 Bot 的扩展默认值/SOUL 只复制一次，不等下次默认值变更。
+      // 关闭中跳过（下次启动统一初始化），不把已完成的导入变成错误。
+      if (!closing && status?.phase === 'completed' && typeof status.bot?.botId === 'string') await initializeBot(status.bot.botId);
+      return status;
+    }),
     readLegacyDraft: (input) => runLegacyOp(() => coreReadLegacyDraft(host, input)),
 
     resume() {

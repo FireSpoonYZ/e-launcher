@@ -85,16 +85,24 @@ export function BotSettings({ api, botId }: { api: DesktopViewApi; botId: string
     draftCache.set(key, { ...liveRef.current, ...patch });
   }, [key]);
 
+  /** 改回与当前基线一致即归一为无草稿：此时普通“重新读取”才能刷新基线与 revision。 */
   function updateExt(next: BotExtensions | null): void {
-    setExtDraft(next);
+    const base = liveRef.current.snapshot;
+    const draft = next && base && sameExtensions(next, base.extensions) ? null : next;
+    setExtDraft(draft);
     setNotice(null);
-    remember({ extDraft: next });
+    liveRef.current = { ...liveRef.current, extDraft: draft };
+    remember({ extDraft: draft });
   }
 
+  // SOUL 逐字节比较，不 trim：空内容与尾部空白都是有效文本。
   function updateSoul(next: string | null): void {
-    setSoulDraft(next);
+    const base = liveRef.current.soul;
+    const draft = next !== null && base && next === base.text ? null : next;
+    setSoulDraft(draft);
     setNotice(null);
-    remember({ soulDraft: next });
+    liveRef.current = { ...liveRef.current, soulDraft: draft };
+    remember({ soulDraft: draft });
   }
 
   const load = useCallback(async (adoptRemote: boolean): Promise<void> => {
@@ -176,7 +184,8 @@ export function BotSettings({ api, botId }: { api: DesktopViewApi; botId: string
   const extDirty = !!extDraft && !!baseExtensions && !sameExtensions(extDraft, baseExtensions);
   const soulValue = soulDraft ?? soul?.text ?? '';
   const soulDirty = soulDraft !== null && !!soul && soulDraft !== soul.text;
-  const busy = saving !== null;
+  // 读取（含“采用远端”）在途时同样锁住编辑与保存：点击后才输入的内容不会被迟到的采用结果清掉。
+  const busy = saving !== null || loading;
   const saveBusy = busy || !online;
   const canSaveExt = !saveBusy && !!snapshot && extDirty && !locked;
   const canSaveSoul = !saveBusy && !!soul && soulDirty && !locked;

@@ -72,12 +72,14 @@ async function main() {
   }
   const options = { dataRoot: values['data-root'], token };
   if (values.port !== undefined) options.port = parsePort(values.port);
-  const { models, defaultModel, bashPath, toolPaths, hindsight } = await loadRuntimeConfig(values.config);
+  const { models, defaultModel, bashPath, toolPaths, hindsight, extensions } = await loadRuntimeConfig(values.config);
   options.models = models;
   options.defaultModel = defaultModel;
   if (bashPath !== undefined) options.bashPath = bashPath;
   if (toolPaths !== undefined) options.toolPaths = toolPaths;
   if (hindsight !== undefined) options.hindsight = hindsight;
+  // 规范扩展配置必须一并转发：只传兼容字段会让 Bot 默认值按 legacy 语义回退。
+  if (extensions !== undefined) options.extensions = extensions;
 
   const server = await openControlServer(options);
 

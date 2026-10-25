@@ -207,8 +207,12 @@ export function createRuntimeHindsight({ host, getHarness, getWorkContexts, getW
     }
 
     if (notFound || operation?.status === 'not_found') {
+      // 等待期间 Bot 可被关闭/切只读：尚未发送的建 bank/retain 不再发出，保留原 job 行与 ID。
+      if (!canWriteFor(job.botId)) return;
       try {
         await ensureBank(job.bankId);
+        // 建 bank 也是网络等待：已发送的请求不回滚，但随后尚未发出的 retain 需重读策略。
+        if (!canWriteFor(job.botId)) return;
         await client.retain(job.bankId, retainInput(job), undefined);
       } catch (err) {
         if (err?.code === 'HINDSIGHT_UNAVAILABLE' || err?.code === CLOSED_CODE || isAbortLike(err)) throw err;
@@ -276,6 +280,8 @@ export function createRuntimeHindsight({ host, getHarness, getWorkContexts, getW
     const due = store.dueJobs(Date.now(), JOBS_PER_PUMP, eligibleBotIds);
     for (const job of due) {
       if (closing) return;
+      // 批次是开头选定的：每个 job 开始时重读策略，避免批次内后续 job 在关闭/只读后仍写远端。
+      if (!canWriteFor(job.botId)) continue;
       try {
         await processOneJob(store, job);
       } catch (err) {
@@ -459,17 +465,19 @@ export function createRuntimeHindsight({ host, getHarness, getWorkContexts, getW
 
       // 关闭/只读 Bot 不记录 run、不启动 pump；只读仍允许临时 recall，关闭则已在上游返回 null。
       const contextRow = buildContext(capture.identity, capture.target);
+      // recall/cache 需要本地 context 行：只读也先建跟踪上下文，但不记录 run、不启动写入 pump。
+      let localStore;
+      try {
+        localStore = getStore();
+        localStore.ensureContext(contextRow);
+      } catch (err) {
+        failAdapter(err);
+        throw err;
+      }
       if (capture.canWrite) {
         // 即使查询为空也先持久化输入跟踪，确保 provider 运行前本地已记录。
-        let store;
         try {
-          store = getStore();
-        } catch (err) {
-          failAdapter(err);
-          throw err;
-        }
-        try {
-          store.recordRuns(contextRow, capture.runs);
+          localStore.recordRuns(contextRow, capture.runs);
         } catch (err) {
           failAdapter(err);
           throw err;

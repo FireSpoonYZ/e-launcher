@@ -12,7 +12,7 @@ import {
   writeControlError,
 } from './control-http.js';
 import { serveBotLive, serveWorkLive } from './control-live.js';
-import { normalizeRuntimeExtensions } from './extension-manager.js';
+import { resolveRuntimeExtensions } from './extension-manager.js';
 import { MEMORY_HTTP_INACTIVITY_MS } from './remote-control-protocol.js';
 
 const BIND_HOST = '127.0.0.1';
@@ -119,13 +119,13 @@ export async function openControlServer(options) {
   // token 格式由 createControlAuthorizer 校验；在打开任何数据前调用并保留结果。
   const authorize = createControlAuthorizer(token);
 
-  // 先校验 Hindsight 配置（含 apiKeyEnv 解析），再打开本服务自己的 Host；
+  // 先校验生效的规范扩展配置（含 enabled 扩展的 apiKeyEnv 解析），再打开本服务自己的 Host；
   // 仍把原始字段传给 openRuntime，绝不把归一化后的 apiKey 对象送回公共解析器。
-  // extensions 只在确实提供时校验；未启用扩展的凭证别名不在这一层解析。
-  if (runtimeOptions.extensions !== undefined) {
-    normalizeRuntimeExtensions(runtimeOptions.extensions);
-  }
-  parseHindsightOptions(runtimeOptions.hindsight);
+  // 生效映射复用规范解析：disabled 的别名不解析凭证；HostService 同时传 extensions+hindsight 是合法输入。
+  const effectiveExtensions = resolveRuntimeExtensions(runtimeOptions);
+  parseHindsightOptions(
+    effectiveExtensions.hindsight?.enabled ? effectiveExtensions.hindsight.config : undefined
+  );
 
   // nativeBridge 只能注入函数；在打开本服务 Host 前拒绝，避免已开资源泄漏。
   if (runtimeOptions.nativeBridge !== undefined && typeof runtimeOptions.nativeBridge !== 'function') {

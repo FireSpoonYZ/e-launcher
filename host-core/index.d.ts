@@ -26,6 +26,26 @@ export interface Host {
   getBot(botId: string): BotRecord | null;
   findByRequest(requestId: string): BotRecord | null;
   listBots(): BotRecord[];
+  /*
+   * Managed Bot extensions and SOUL: synchronous store/file CAS only; the
+   * runtime busy check and profile refresh live in Runtime, not here.
+   */
+  /** Ensure the row once from `defaults`; returns the internal snapshot including retentionFloor. */
+  ensureBotExtensions(botId: string, defaults: BotExtensions): BotExtensionState;
+  /** Internal row snapshot; null when not initialized (callers distinguish unknown Bots via getBot). */
+  getBotExtensions(botId: string): BotExtensionState | null;
+  /** CAS on expectedRevision; options.retentionFloor is internal to the runtime, never a public input. */
+  setBotExtensions(
+    botId: string,
+    input: BotExtensionsUpdate,
+    options?: { retentionFloor?: number },
+  ): BotExtensionState;
+  /** Create SOUL.md once from the persisted role; existing content is never overwritten. */
+  ensureBotSoul(botId: string): BotSoul;
+  /** Reading also idempotently bootstraps a missing legacy document. */
+  getBotSoul(botId: string): BotSoul;
+  /** CAS on the file SHA-256; a stale revision rejects without overwriting. */
+  setBotSoul(botId: string, input: BotSoulUpdate): BotSoul;
   /**
    * Module 16 internal legacy-import registry methods. @internal: trusted only
    * by host-core/legacy-import.js; never exposed over HTTP/relay/remote/client.
@@ -608,7 +628,7 @@ export interface Runtime {
   getModelCatalog(): Promise<ModelCatalog>;
   /* Managed extensions and per-Bot SOUL. */
   /** Idempotent Bot initialization (extension defaults once + SOUL.md); retried by create/startup. */
-  initializeBot(botId: string): Promise<void>;
+  initializeBot(botId: string): Promise<BotExtensionSnapshot>;
   getExtensionCatalog(): Promise<ExtensionCatalog>;
   getBotExtensions(botId: string): Promise<BotExtensionSnapshot>;
   /** CAS on expectedRevision; busy Bot rejects RUNTIME_BUSY before the settings change. */

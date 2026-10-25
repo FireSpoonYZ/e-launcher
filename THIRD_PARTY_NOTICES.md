@@ -187,6 +187,16 @@ The host-core depends on **ws 8.22.0**, the WebSocket client/server implementati
 
 The full verbatim license is retained at [`licenses/ws-MIT.txt`](licenses/ws-MIT.txt). Source: https://github.com/websockets/ws
 
+## Hindsight client SDK
+
+The host-core depends on **@vectorize-io/hindsight-client 0.9.2**, the generated client for the Hindsight memory service, under the MIT License:
+
+- Copyright (c) 2025 Vectorize AI, Inc.
+- Exact npm version and registry integrity are pinned in [`host-core/package-lock.json`](host-core/package-lock.json); the npm registry records the package `gitHead` `ebad478240d3171bb88201ececda5e8d9883d22d` for 0.9.2.
+- The full verbatim license is retained at [`licenses/hindsight-client-0.9.2-MIT.txt`](licenses/hindsight-client-0.9.2-MIT.txt).
+
+The published 0.9.2 archive contains only generated `dist` sources and no LICENSE file, so `host-core/build-android.js` and `host-core/build-desktop.js` use the pinned in-repo MIT copy above when packaging this exact version, and fail the build for any other version without a license file. This notice describes the bundled SDK only; the Hindsight service itself is not part of this repository or the APK.
+
 ## Tauri Android UI (`:tauri_ui`, module 18)
 
 The APK now also ships a second UI process built from this repository's own frontend

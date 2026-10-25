@@ -10,8 +10,9 @@ import { createWorkInput } from './work-decision-codec.js';
 import { ContextState, BC_KERNEL_VERSION } from './context-state.js';
 import { parseModelRef } from './runtime-models.js';
 
-const CONTROL_ERRORS = new Set(['INVALID_ARGUMENT', 'BOT_NOT_FOUND', 'SCOPE_NOT_FOUND', 'SCOPE_FORBIDDEN', 'WORK_CONTEXT_INACTIVE']);
-const AUTO_ERRORS = new Set(['WORK_CONTEXT_INACTIVE']);
+const CONTROL_ERRORS = new Set(['INVALID_ARGUMENT', 'BOT_NOT_FOUND', 'SCOPE_NOT_FOUND', 'SCOPE_FORBIDDEN', 'WORK_CONTEXT_INACTIVE', 'NOT_CONNECTED']);
+// NOT_CONNECTED 来自 Bot 准入队列关闭（runtime 已在关闭）：只拒绝新准入，不升级为 fatal。
+const AUTO_ERRORS = new Set(['WORK_CONTEXT_INACTIVE', 'NOT_CONNECTED']);
 const WORK_ERRORS = new Set(['WORK_STOPPED', 'WORK_CONTEXT_INACTIVE', 'STALE_INPUT', 'MODEL_REQUIRED', 'MODEL_NOT_FOUND', 'CONTEXT_LIMIT', 'WORK_GENERATION_FAILED']);
 const PUBLICATION_ERRORS = new Set([...WORK_ERRORS, 'INVALID_ARGUMENT', 'BOT_CONTEXT_REQUIRED', 'BOT_NOT_FOUND', 'SCOPE_NOT_FOUND', 'SCOPE_FORBIDDEN', 'MESSAGE_NOT_FOUND', 'REQUEST_CONFLICT']);
 
@@ -34,7 +35,7 @@ function generationError(reason) {
 }
 
 /** Inert until resume(); ledger import, policy consumption and the frozen model view have separate watermarks. */
-export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, models, defaultModel, context, getProfile }) {
+export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, models, defaultModel, context, getProfile, admitBot }) {
   let active = false;
   let closing = false;
   let timer = null;
@@ -82,10 +83,15 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
     }
   }
 
-  function admit(operation, key, expected = CONTROL_ERRORS) {
+  // botId 非空时在现有 scope lane 之后取得 Bot 准入：同一 Bot 的发送/设置/工作操作串行，
+  // 且不重复取同一 lane（决策内部的 syncWorkContext 走 raw 实现）。
+  function admit(operation, key, expected = CONTROL_ERRORS, botId = null) {
     try { assertOpen(); } catch (error) { return Promise.reject(error); }
     const previous = key === undefined ? undefined : lanes.get(key);
-    const start = () => { assertOpen(); return operation(); };
+    const start = () => {
+      assertOpen();
+      return botId === null ? operation() : admitBot(botId, operation);
+    };
     const task = guarded(() => previous ? previous.then(start, start) : Promise.resolve().then(start), expected);
     inflight.add(task);
     if (key !== undefined) lanes.set(key, task);
@@ -151,7 +157,7 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
       }, context);
       await abortPending(binding);
       return activity(botId, scopeId);
-    }, JSON.stringify([botId, scopeId]));
+    }, JSON.stringify([botId, scopeId]), CONTROL_ERRORS, botId);
   }
 
   async function resumeWork(botId, scopeId) {
@@ -184,7 +190,7 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
         doc.error = null;
       }, context);
       return activity(botId, scopeId);
-    }, JSON.stringify([botId, scopeId]));
+    }, JSON.stringify([botId, scopeId]), CONTROL_ERRORS, botId);
     nudge();
     return result;
   }
@@ -356,7 +362,7 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
     const tasks = [];
     for (const [key, [botId, scopeId]] of pairs) {
       if (!active || closing) break;
-      if (!lanes.has(key)) tasks.push(admit(() => advance(botId, scopeId), key, AUTO_ERRORS));
+      if (!lanes.has(key)) tasks.push(admit(() => advance(botId, scopeId), key, AUTO_ERRORS, botId));
     }
     await Promise.all(tasks);
   }

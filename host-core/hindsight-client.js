@@ -280,6 +280,9 @@ export function createHindsightClient(config) {
   /**
    * Re-read the response through the 2MiB bound and hand the SDK an equivalent
    * Response: the generated client parses whatever body it receives unbounded.
+   * 2xx bodies must be strict UTF-8 and nonempty JSON; the SDK returns {} for
+   * 204/empty bodies and decodes text non-fatally, so both are rejected here
+   * before the SDK sees them (parseAs:'json' forces JSON parsing).
    */
   async function limitResponse(response) {
     const tooLarge = 'hindsight response body exceeds 2MiB limit';
@@ -308,6 +311,32 @@ export function createHindsightClient(config) {
       }
     }
     const bytes = Buffer.concat(chunks);
+    if (response.status >= 200 && response.status < 300) {
+      if (response.status === 204 || bytes.byteLength === 0) {
+        throw protocolError('hindsight response body must be nonempty JSON');
+      }
+      let text;
+      try {
+        text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+      } catch {
+        throw protocolError('hindsight response body is not valid UTF-8');
+      }
+      try {
+        JSON.parse(text);
+      } catch {
+        throw protocolError('hindsight response body is not valid JSON');
+      }
+      const headers = new Headers(response.headers);
+      // content-length:0 会让 SDK 走空体分支，content-encoding 对已解码文本不再成立。
+      headers.delete('content-length');
+      headers.delete('content-encoding');
+      return new Response(text, {
+        status: response.status,
+        statusText: response.statusText,
+        headers,
+      });
+    }
+    // 非 2xx 保持原样，交给 SDK 做既有稳定错误映射。
     // 204/304 and empty bodies must stay bodyless for the Response constructor.
     const body = response.status === 204 || response.status === 304 || bytes.byteLength === 0
       ? null
@@ -333,7 +362,7 @@ export function createHindsightClient(config) {
 
   const headers = { Accept: 'application/json' };
   if (apiKey !== undefined) headers.Authorization = `Bearer ${apiKey}`;
-  const client = createClient(createConfig({ baseUrl, headers, fetch: sdkFetch }));
+  const client = createClient(createConfig({ baseUrl, headers, fetch: sdkFetch, parseAs: 'json' }));
 
   function statusFor(response) {
     const status = response?.status;

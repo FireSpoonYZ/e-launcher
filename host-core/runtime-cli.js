@@ -111,12 +111,14 @@ async function main() {
   try {
     const openOptions = { dataRoot: values['data-root'] };
     if (command === 'send' || command === 'wait') {
-      const { models, defaultModel, bashPath, toolPaths, hindsight } = await loadRuntimeConfig(values.config);
+      const { models, defaultModel, bashPath, toolPaths, hindsight, extensions } = await loadRuntimeConfig(values.config);
       openOptions.models = models;
       openOptions.defaultModel = defaultModel;
       if (bashPath !== undefined) openOptions.bashPath = bashPath;
       if (toolPaths !== undefined) openOptions.toolPaths = toolPaths;
       if (hindsight !== undefined) openOptions.hindsight = hindsight;
+      // 规范扩展配置必须一并转发：只传兼容字段会让 Bot 默认值按 legacy 语义回退。
+      if (extensions !== undefined) openOptions.extensions = extensions;
     }
     runtime = await openRuntime(openOptions);
 
