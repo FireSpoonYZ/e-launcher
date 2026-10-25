@@ -10,6 +10,39 @@ import type { DesktopIdentity, DesktopViewApi } from './types';
 /** 与 Host 的公开上限一致（UTF-8 字节）。 */
 const SOUL_MAX_BYTES = 64 * 1024;
 
+const SOUL_SNIPPETS: { label: string; content: string }[] = [
+  {
+    label: '＋ 角色使命',
+    content: '# Role & Core Identity (核心身份)\n你是本工作区的专业智能体助手，负责严谨分析需求、核对代码与执行工具任务。\n',
+  },
+  {
+    label: '＋ 沟通风格',
+    content: '# Communication Style (沟通准则)\n- 结论先行，条理清晰，引用关键文件路径与行号。\n- 遇到不确定的破坏性操作先向用户确认。\n',
+  },
+  {
+    label: '＋ 群聊准则',
+    content: '# Multi-Bot Room & DM Etiquette (群聊与私聊协作)\n- 在群聊 (room) 中仅在属于自身职责或被点名时调用 send_room_message；若其他 Bot 已完整回答则保持静默。\n- 需要向其他 Bot 核实细节时，优先使用 send_dm_message 点对点确认。\n',
+  },
+  {
+    label: '＋ 安全禁区',
+    content: '# Safety Boundaries (安全禁区)\n- 严禁修改工作区外的系统文件或泄露凭据密钥。\n- 严守 expectedRevision CAS 与 requestId 幂等对账约束。\n',
+  },
+];
+
+const HINDSIGHT_READ_TOOLS = [
+  'hindsight_status',
+  'hindsight_recall',
+  'hindsight_reflect',
+  'hindsight_get',
+  'hindsight_source',
+] as const;
+
+const HINDSIGHT_WRITE_TOOLS = [
+  'hindsight_retain',
+  'hindsight_correct',
+  'hindsight_retry',
+] as const;
+
 /** 一个 Bot 的本地编辑状态：草稿与其原始基线成对保存，切走/重挂载后 CAS 仍指向同一远端版本。 */
 interface Cached {
   snapshot: BotExtensionSnapshot | null;
@@ -42,7 +75,17 @@ function reasonText(reason: BotExtensionSnapshot['effective']['hindsight']['reas
   return '生效';
 }
 
-export function BotSettings({ api, botId }: { api: DesktopViewApi; botId: string }) {
+export function BotSettings({
+  api,
+  botId,
+  open,
+  onOpenChange,
+}: {
+  api: DesktopViewApi;
+  botId: string;
+  open?: boolean;
+  onOpenChange?: (next: boolean) => void;
+}) {
   const identity = api.identity;
   const online = api.transportConnected;
   const key = identity ? cacheKey(identity, botId) : '';
@@ -57,6 +100,7 @@ export function BotSettings({ api, botId }: { api: DesktopViewApi; botId: string
   const [saving, setSaving] = useState<'extensions' | 'soul' | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [studioTab, setStudioTab] = useState<'all' | 'soul' | 'extensions'>('all');
 
   const mountedRef = useRef(true);
   /** 读取代次：同一选择内只应用最后一次读取。 */
@@ -103,6 +147,13 @@ export function BotSettings({ api, botId }: { api: DesktopViewApi; botId: string
     setNotice(null);
     liveRef.current = { ...liveRef.current, soulDraft: draft };
     remember({ soulDraft: draft });
+  }
+
+  function insertSoulSnippet(snippet: string): void {
+    if (busy) return;
+    const cur = soulDraft ?? soul?.text ?? '';
+    const sep = cur.length > 0 && !cur.endsWith('\n') ? '\n\n' : cur.length > 0 ? '\n' : '';
+    updateSoul(cur + sep + snippet);
   }
 
   const load = useCallback(async (adoptRemote: boolean): Promise<void> => {
@@ -191,6 +242,10 @@ export function BotSettings({ api, botId }: { api: DesktopViewApi; botId: string
   const canSaveSoul = !saveBusy && !!soul && soulDirty && !locked;
   const dirty = extDirty || soulDirty;
   const effective = snapshot ? snapshot.effective.hindsight : null;
+  const currentBytes = soulBytes(soulValue);
+  const bytePct = Math.min(100, Math.round((currentBytes / SOUL_MAX_BYTES) * 100));
+  const byteOverLimit = currentBytes > SOUL_MAX_BYTES;
+  const byteWarn = !byteOverLimit && currentBytes > SOUL_MAX_BYTES * 0.85;
 
   /** 统一收尾：确定的拒绝保留草稿可重试；冲突/未确认锁保存，只有显式采用远端才能继续。 */
   function reportSaveFailure(e: unknown, sel: string, what: string): void {
@@ -275,12 +330,75 @@ export function BotSettings({ api, botId }: { api: DesktopViewApi; botId: string
     }
   }
 
+  const showExtPanel = studioTab === 'all' || studioTab === 'extensions';
+  const showSoulPanel = studioTab === 'all' || studioTab === 'soul';
+
   return (
-    <details className="raw-history">
-      <summary>
-        <h4>{`Bot 设置（扩展 · SOUL）${dirty ? ' · 已修改' : ''}`}</h4>
+    <details
+      className="raw-history soul-studio-details"
+      open={open}
+      onToggle={(e) => {
+        if (onOpenChange) onOpenChange((e.currentTarget as HTMLDetailsElement).open);
+      }}
+    >
+      <summary className="soul-studio-summary">
+        <div className="soul-studio-summary-main">
+          <h4>{`✨ Bot 设置（扩展 · SOUL）${dirty ? ' · 已修改' : ''}`}</h4>
+          <span className="soul-studio-badges">
+            {effective ? (
+              <span className={`studio-pill ${effective.enabled ? (effective.mode === 'read-only' ? 'blue' : 'emerald') : 'muted'}`}>
+                {`Hindsight: ${effective.enabled ? (effective.mode === 'read-only' ? '只读' : '读写') : '关闭'}`}
+              </span>
+            ) : null}
+            {soul ? (
+              <span className={`studio-pill ${soulDirty ? 'amber' : 'purple'}`}>
+                {`SOUL.md · ${currentBytes} B`}
+              </span>
+            ) : null}
+            {locked ? <span className="studio-pill coral">🔒 冲突锁定</span> : null}
+          </span>
+        </div>
       </summary>
-      <div className="raw-history-content">
+      <div className="raw-history-content soul-studio-body">
+        <div className="soul-studio-topbar">
+          <div className="studio-seg" role="tablist" aria-label="灵魂与扩展视图切换">
+            <button
+              type="button"
+              className={studioTab === 'all' ? 'active' : undefined}
+              onClick={() => setStudioTab('all')}
+            >
+              ⚡ 同屏工作台
+            </button>
+            <button
+              type="button"
+              className={studioTab === 'soul' ? 'active' : undefined}
+              onClick={() => setStudioTab('soul')}
+            >
+              {`🎭 灵魂文档 (SOUL.md)${soulDirty ? ' ●' : ''}`}
+            </button>
+            <button
+              type="button"
+              className={studioTab === 'extensions' ? 'active' : undefined}
+              onClick={() => setStudioTab('extensions')}
+            >
+              {`🧩 插件与工具门控${extDirty ? ' ●' : ''}`}
+            </button>
+          </div>
+          <div className="soul-studio-actions">
+            <button type="button" onClick={() => void load(false)} disabled={!online || loading || busy}>
+              {loading ? '读取中…' : '↻ 重新读取'}
+            </button>
+            <button
+              type="button"
+              className={locked ? 'btn-amber' : undefined}
+              onClick={() => void load(true)}
+              disabled={!online || loading || busy || (!dirty && !locked)}
+            >
+              采用远端设置（丢弃本地修改）
+            </button>
+          </div>
+        </div>
+
         {!online ? <div className="status">离线：显示最后读取的设置，保存已禁用。</div> : null}
         {loading && !snapshot ? <div className="status">加载中…</div> : null}
         {error ? (
@@ -289,119 +407,235 @@ export function BotSettings({ api, botId }: { api: DesktopViewApi; botId: string
             <button onClick={() => setError(null)}>关闭</button>
           </div>
         ) : null}
-        {notice ? <div className="status">{notice}</div> : null}
+        {notice ? <div className="status online">{notice}</div> : null}
         {locked ? (
-          <div className="status">
-            保存保持锁定：请用“采用远端设置（丢弃本地修改）”核对远端；普通“重新读取”不会给未保存草稿换 revision。
+          <div className="studio-lock-banner" role="status">
+            <strong>🔒 保存保持锁定：</strong>
+            请用“采用远端设置（丢弃本地修改）”核对远端；普通“重新读取”不会给未保存草稿换 revision。
           </div>
         ) : null}
 
-        <div className="form-grid">
-          <div className="field">
-            <label>Hindsight 扩展</label>
-            {snapshot && extValue ? (
-              <>
-                <div className="metadata">
-                  {`revision ${snapshot.revision}${extDirty ? '（本地草稿基线）' : ''} · 远端生效：${effective && effective.enabled ? effective.mode : '关闭'}（${effective ? reasonText(effective.reason) : '—'}）`}
-                </div>
-                <label className="field checkbox-field">
-                  <input
-                    type="checkbox"
-                    checked={extValue.hindsight.enabled}
-                    disabled={saveBusy}
-                    onChange={(e) => {
-                      updateExt({ ...extValue, hindsight: { ...extValue.hindsight, enabled: e.target.checked } });
-                    }}
+        <div className={`form-grid soul-studio-grid ${studioTab !== 'all' ? 'single-col' : ''}`}>
+          {showExtPanel ? (
+            <div className="field studio-card">
+              <div className="studio-card-header">
+                <label>🧩 Hindsight 扩展策略与工具门控</label>
+                {snapshot ? <span className="studio-pill mono">{`CAS rev ${snapshot.revision}`}</span> : null}
+              </div>
+              {snapshot && extValue ? (
+                <>
+                  <div className="metadata">
+                    {`revision ${snapshot.revision}${extDirty ? '（本地草稿基线）' : ''} · 远端生效：${effective && effective.enabled ? effective.mode : '关闭'}（${effective ? reasonText(effective.reason) : '—'}）`}
+                  </div>
+
+                  {/* 三阶生效流水线可视化 */}
+                  <div className="effective-pipeline">
+                    <span className={`studio-pill ${effective?.reason === 'host-disabled' || effective?.reason === 'not-configured' ? 'amber' : 'emerald'}`}>
+                      {`1. Host: ${effective?.reason === 'host-disabled' ? '全局关闭' : effective?.reason === 'not-configured' ? '未配置' : '已就绪'}`}
+                    </span>
+                    <span className="pipeline-arrow">➔</span>
+                    <span className="studio-pill blue">
+                      {`2. Bot 策略: ${extValue.hindsight.enabled ? (extValue.hindsight.mode === 'read-only' ? '开启 · 只读' : '开启 · 读写') : '关闭'}`}
+                    </span>
+                    <span className="pipeline-arrow">➔</span>
+                    <span className={`studio-pill ${effective?.enabled ? 'emerald' : 'muted'}`}>
+                      {`⚡ 实际生效: ${effective && effective.enabled ? effective.mode : '关闭'}`}
+                    </span>
+                  </div>
+
+                  {/* 三态可视化档位选择（与下方标准 checkbox/radio 保持 100% 同步） */}
+                  <div className="policy-mode-grid">
+                    <button
+                      type="button"
+                      disabled={saveBusy}
+                      className={`policy-mode-btn ${!extValue.hindsight.enabled ? 'active' : ''}`}
+                      onClick={() => updateExt({ ...extValue, hindsight: { ...extValue.hindsight, enabled: false } })}
+                    >
+                      <strong>🚫 关闭 (Off)</strong>
+                      <span>隐藏全部 8 个工具，跳过自动召回与记录</span>
+                    </button>
+                    <button
+                      type="button"
+                      disabled={saveBusy}
+                      className={`policy-mode-btn ${extValue.hindsight.enabled && extValue.hindsight.mode === 'read-only' ? 'active' : ''}`}
+                      onClick={() => updateExt({ ...extValue, hindsight: { enabled: true, mode: 'read-only' } })}
+                    >
+                      <strong>👁️ 只读 (Read-Only)</strong>
+                      <span>开放 5 个查询工具；隐藏写入并暂停自动抽取</span>
+                    </button>
+                    <button
+                      type="button"
+                      disabled={saveBusy}
+                      className={`policy-mode-btn ${extValue.hindsight.enabled && extValue.hindsight.mode === 'read-write' ? 'active' : ''}`}
+                      onClick={() => updateExt({ ...extValue, hindsight: { enabled: true, mode: 'read-write' } })}
+                    >
+                      <strong>✍️ 读写 (Read-Write)</strong>
+                      <span>开放全部 8 个工具，开启自动召回与抽取写入</span>
+                    </button>
+                  </div>
+
+                  <label className="field checkbox-field">
+                    <input
+                      type="checkbox"
+                      checked={extValue.hindsight.enabled}
+                      disabled={saveBusy}
+                      onChange={(e) => {
+                        updateExt({ ...extValue, hindsight: { ...extValue.hindsight, enabled: e.target.checked } });
+                      }}
+                    />
+                    为该 Bot 启用 Hindsight
+                  </label>
+                  <div className="kind-row">
+                    <label>
+                      <input
+                        type="radio"
+                        name={`hindsight-mode-${botId}`}
+                        checked={extValue.hindsight.mode === 'read-write'}
+                        disabled={saveBusy || !extValue.hindsight.enabled}
+                        onChange={() => {
+                          updateExt({ ...extValue, hindsight: { ...extValue.hindsight, mode: 'read-write' } });
+                        }}
+                      />
+                      读写（read-write）
+                    </label>
+                    <label>
+                      <input
+                        type="radio"
+                        name={`hindsight-mode-${botId}`}
+                        checked={extValue.hindsight.mode === 'read-only'}
+                        disabled={saveBusy || !extValue.hindsight.enabled}
+                        onChange={() => {
+                          updateExt({ ...extValue, hindsight: { ...extValue.hindsight, mode: 'read-only' } });
+                        }}
+                      />
+                      只读（read-only）
+                    </label>
+                  </div>
+
+                  {/* 实时 8 工具门控预览矩阵 */}
+                  <div className="tool-gating-box">
+                    <div className="tool-gating-head">
+                      <span>🛠️ 工具门控实时预览 (disabledToolNames)</span>
+                      <span className="mono">
+                        {!extValue.hindsight.enabled
+                          ? '0 / 8 工具启用'
+                          : extValue.hindsight.mode === 'read-only'
+                            ? '5 查询启用 · 3 写入屏蔽'
+                            : '8 / 8 工具全部启用'}
+                      </span>
+                    </div>
+                    <div className="tool-gating-chips">
+                      {HINDSIGHT_READ_TOOLS.map((toolName) => {
+                        const allowed = extValue.hindsight.enabled;
+                        return (
+                          <span key={toolName} className={`gating-chip ${allowed ? 'allowed' : 'blocked'}`}>
+                            <code>{toolName}</code>
+                            <span>{allowed ? '✓ 允许' : '🚫 隐藏'}</span>
+                          </span>
+                        );
+                      })}
+                      {HINDSIGHT_WRITE_TOOLS.map((toolName) => {
+                        const allowed = extValue.hindsight.enabled && extValue.hindsight.mode === 'read-write';
+                        return (
+                          <span key={toolName} className={`gating-chip ${allowed ? 'allowed' : 'blocked'}`}>
+                            <code>{toolName}</code>
+                            <span>
+                              {allowed ? '✓ 允许' : extValue.hindsight.enabled ? '🔒 只读屏蔽' : '🚫 隐藏'}
+                            </span>
+                          </span>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  <p className="hint">
+                    只读允许状态/回忆/反思/读取，拒绝写入并暂停自动写入；关闭会隐藏该 Bot 的全部 Hindsight 工具并跳过自动回忆/记录。
+                    不影响其他 Bot；关闭或只读期间完成的对话（推进 retentionFloor）不会在重新开启后补写。
+                  </p>
+                  <div className="form-actions">
+                    <button onClick={() => void saveExtensions()} disabled={!canSaveExt}>
+                      {saving === 'extensions' ? '保存中…' : '保存扩展设置（CAS）'}
+                    </button>
+                    <button onClick={() => updateExt(null)} disabled={!extDirty || busy}>
+                      放弃扩展修改
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <div className="metadata">{loading ? '读取中…' : '尚未读取'}</div>
+              )}
+            </div>
+          ) : null}
+
+          {showSoulPanel ? (
+            <div className="field studio-card">
+              <div className="studio-card-header">
+                <label>🎭 SOUL.md（Bot 独立灵魂文档）</label>
+                {soul ? (
+                  <span className={`studio-pill mono ${byteOverLimit ? 'coral' : byteWarn ? 'amber' : 'emerald'}`}>
+                    {`UTF-8: ${currentBytes} / ${SOUL_MAX_BYTES} B (${bytePct}%)`}
+                  </span>
+                ) : null}
+              </div>
+              {soul ? (
+                <>
+                  <div className="metadata">
+                    {`${soul.path} · revision ${soul.revision.slice(0, 12)}…${soulDirty ? '（本地草稿基线）' : ''} · ${currentBytes} / ${SOUL_MAX_BYTES} 字节`}
+                  </div>
+                  <div className="soul-byte-progress" aria-hidden="true">
+                    <div
+                      className={`soul-byte-fill ${byteOverLimit ? 'danger' : byteWarn ? 'warn' : ''}`}
+                      style={{ width: `${bytePct}%` }}
+                    />
+                  </div>
+                  <div className="soul-snippet-bar">
+                    <span className="hint">快速插入片段：</span>
+                    {SOUL_SNIPPETS.map((s) => (
+                      <button
+                        key={s.label}
+                        type="button"
+                        className="snippet-chip"
+                        disabled={busy}
+                        onClick={() => insertSoulSnippet(s.content)}
+                      >
+                        {s.label}
+                      </button>
+                    ))}
+                    <button
+                      type="button"
+                      className="snippet-chip danger-chip"
+                      disabled={busy || soulValue === ''}
+                      onClick={() => updateSoul('')}
+                    >
+                      清空为空灵魂 ("")
+                    </button>
+                  </div>
+                  <textarea
+                    className="raw-history soul-editor-textarea"
+                    value={soulValue}
+                    rows={10}
+                    spellCheck={false}
+                    placeholder="在此编写该 Bot 的独立系统灵魂（SOUL.md）。留空保存代表显式使用空灵魂 (intentionally empty)…"
+                    disabled={busy}
+                    onChange={(e) => updateSoul(e.target.value)}
                   />
-                  为该 Bot 启用 Hindsight
-                </label>
-                <div className="kind-row">
-                  <label>
-                    <input
-                      type="radio"
-                      name={`hindsight-mode-${botId}`}
-                      checked={extValue.hindsight.mode === 'read-write'}
-                      disabled={saveBusy || !extValue.hindsight.enabled}
-                      onChange={() => {
-                        updateExt({ ...extValue, hindsight: { ...extValue.hindsight, mode: 'read-write' } });
-                      }}
-                    />
-                    读写（read-write）
-                  </label>
-                  <label>
-                    <input
-                      type="radio"
-                      name={`hindsight-mode-${botId}`}
-                      checked={extValue.hindsight.mode === 'read-only'}
-                      disabled={saveBusy || !extValue.hindsight.enabled}
-                      onChange={() => {
-                        updateExt({ ...extValue, hindsight: { ...extValue.hindsight, mode: 'read-only' } });
-                      }}
-                    />
-                    只读（read-only）
-                  </label>
-                </div>
-                <p className="hint">
-                  只读允许状态/回忆/反思/读取，拒绝写入并暂停自动写入；关闭会隐藏该 Bot 的全部 Hindsight 工具并跳过自动回忆/记录。
-                  不影响其他 Bot；关闭或只读期间完成的对话不会在重新开启后补写。
-                </p>
-                <div className="form-actions">
-                  <button onClick={() => void saveExtensions()} disabled={!canSaveExt}>
-                    {saving === 'extensions' ? '保存中…' : '保存扩展设置（CAS）'}
-                  </button>
-                  <button onClick={() => updateExt(null)} disabled={!extDirty || busy}>
-                    放弃扩展修改
-                  </button>
-                </div>
-              </>
-            ) : (
-              <div className="metadata">{loading ? '读取中…' : '尚未读取'}</div>
-            )}
-          </div>
-
-          <div className="field">
-            <label>SOUL.md</label>
-            {soul ? (
-              <>
-                <div className="metadata">
-                  {`${soul.path} · revision ${soul.revision.slice(0, 12)}…${soulDirty ? '（本地草稿基线）' : ''} · ${soulBytes(soulValue)} / ${SOUL_MAX_BYTES} 字节`}
-                </div>
-                <textarea
-                  className="raw-history"
-                  value={soulValue}
-                  rows={10}
-                  spellCheck={false}
-                  disabled={busy}
-                  onChange={(e) => updateSoul(e.target.value)}
-                />
-                <p className="hint">
-                  该 Bot 独立的系统人设（主/工作上下文都用它）；保存后在下一个请求生效，不重置会话与历史。允许为空。
-                </p>
-                <div className="form-actions">
-                  <button onClick={() => void saveSoul()} disabled={!canSaveSoul}>
-                    {saving === 'soul' ? '保存中…' : '保存 SOUL（CAS）'}
-                  </button>
-                  <button onClick={() => updateSoul(null)} disabled={!soulDirty || busy}>
-                    放弃 SOUL 修改
-                  </button>
-                </div>
-              </>
-            ) : (
-              <div className="metadata">{loading ? '读取中…' : '尚未读取'}</div>
-            )}
-          </div>
-        </div>
-
-        <div className="toolbar">
-          <button onClick={() => void load(false)} disabled={!online || loading || busy}>
-            {loading ? '读取中…' : '重新读取'}
-          </button>
-          <button
-            onClick={() => void load(true)}
-            disabled={!online || loading || busy || (!dirty && !locked)}
-          >
-            采用远端设置（丢弃本地修改）
-          </button>
+                  <p className="hint">
+                    该 Bot 独立的系统人设（主会话 Primary 与群聊/私聊 Room/DM 工作上下文共享同一份 SOUL.md）；保存后在下一个请求生效，不重置会话与历史。允许为空。
+                  </p>
+                  <div className="form-actions">
+                    <button onClick={() => void saveSoul()} disabled={!canSaveSoul || byteOverLimit}>
+                      {saving === 'soul' ? '保存中…' : '保存 SOUL（CAS）'}
+                    </button>
+                    <button onClick={() => updateSoul(null)} disabled={!soulDirty || busy}>
+                      放弃 SOUL 修改
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <div className="metadata">{loading ? '读取中…' : '尚未读取'}</div>
+              )}
+            </div>
+          ) : null}
         </div>
       </div>
     </details>

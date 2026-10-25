@@ -45,3 +45,30 @@
 @media (max-height: 720px) {
   .remote-client .chat-pane-inner:focus-within .chat-pane-header { display: none; }
 }
+
+/* 远端页已有专属 .remote-panel-toggle，隐藏桌面侧栏折叠按钮避免重复。 */
+.remote-client .sidebar-toggle-btn { display: none; }
+
+/* 本机 Host 页 Grok × Hermes 工作区聚焦胶囊栏 */
+.host-focus-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 0 12px;
+  min-width: 0;
+}
+.host-focus-chip {
+  min-height: 36px;
+  padding: 5px 11px;
+  font-size: .84rem;
+  font-weight: 600;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--muted);
+}
+.host-focus-chip.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}

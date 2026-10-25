@@ -33,6 +33,7 @@ interface State {
   /** 扩展目录（Host 级）：与设置读取分开，老 Host 不支持时不影响设置编辑。 */
   catalog: ExtensionCatalog | null;
   catalogError: string | null;
+  editorMode: 'both' | 'visual' | 'json';
 }
 
 export class SettingsPanel extends Component<Props, State> {
@@ -48,6 +49,7 @@ export class SettingsPanel extends Component<Props, State> {
     conflict: null,
     catalog: null,
     catalogError: null,
+    editorMode: 'both',
   };
 
   private mounted = false;
@@ -229,6 +231,77 @@ export class SettingsPanel extends Component<Props, State> {
     });
   }
 
+  private parsedDraft(fallback: HostSettings): HostSettings | null {
+    if (this.state.editText === null) return fallback;
+    try {
+      const parsed = JSON.parse(this.state.editText) as HostSettings;
+      if (!parsed || typeof parsed !== 'object' || !parsed.runtime) return null;
+      return parsed;
+    } catch {
+      return null;
+    }
+  }
+
+  private updateHindsightVisual(
+    fallback: HostSettings,
+    patch: {
+      enabled?: boolean;
+      defaultEnabled?: boolean;
+      baseUrl?: string;
+      apiKeyEnv?: string;
+      sharedMemory?: boolean;
+      timeoutMs?: number;
+      reflectTimeoutMs?: number;
+    },
+  ): void {
+    const base = this.parsedDraft(fallback);
+    if (!base) {
+      this.setState({ editError: '当前 JSON 存在语法错误，请先修复 JSON 后再使用可视化配置器。' });
+      return;
+    }
+    const prevExt = base.runtime.extensions?.hindsight;
+    const legacyCfg = base.runtime.hindsight;
+    const prevCfg = prevExt?.config ?? legacyCfg ?? { baseUrl: 'http://127.0.0.1:8888' };
+    const nextEnabled = patch.enabled ?? prevExt?.enabled ?? Boolean(legacyCfg);
+    const nextDefaultEnabled = patch.defaultEnabled ?? prevExt?.defaultEnabled ?? nextEnabled;
+    const nextBaseUrl = patch.baseUrl ?? prevCfg.baseUrl ?? 'http://127.0.0.1:8888';
+    const nextApiKeyEnvRaw = patch.apiKeyEnv !== undefined ? patch.apiKeyEnv : (prevCfg.apiKeyEnv ?? '');
+    const nextSharedMemory = patch.sharedMemory ?? prevCfg.sharedMemory ?? false;
+    const nextTimeoutMs = patch.timeoutMs ?? prevCfg.timeoutMs;
+    const nextReflectTimeoutMs = patch.reflectTimeoutMs ?? prevCfg.reflectTimeoutMs;
+
+    const nextCfg = {
+      baseUrl: nextBaseUrl,
+      ...(nextApiKeyEnvRaw.trim() ? { apiKeyEnv: nextApiKeyEnvRaw.trim() } : {}),
+      sharedMemory: nextSharedMemory,
+      ...(typeof nextTimeoutMs === 'number' && Number.isFinite(nextTimeoutMs) && nextTimeoutMs > 0
+        ? { timeoutMs: nextTimeoutMs }
+        : {}),
+      ...(typeof nextReflectTimeoutMs === 'number' && Number.isFinite(nextReflectTimeoutMs) && nextReflectTimeoutMs > 0
+        ? { reflectTimeoutMs: nextReflectTimeoutMs }
+        : {}),
+    };
+
+    const nextRuntime = { ...base.runtime };
+    delete nextRuntime.hindsight;
+    nextRuntime.extensions = {
+      ...(nextRuntime.extensions ?? {}),
+      hindsight: {
+        enabled: nextEnabled,
+        defaultEnabled: nextDefaultEnabled,
+        config: nextCfg,
+      },
+    };
+    const nextSettings: HostSettings = {
+      ...base,
+      runtime: nextRuntime,
+    };
+    this.setState({
+      editText: JSON.stringify(nextSettings, null, 2),
+      editError: null,
+    });
+  }
+
   render(): ReactNode {
     const identity = this.props.identity;
     if (!identity) {
@@ -258,6 +331,11 @@ export class SettingsPanel extends Component<Props, State> {
     }
     const s = this.state.settings;
     const editText = this.state.editText ?? JSON.stringify(s.settings, null, 2);
+    const parsed = this.parsedDraft(s.settings);
+    const hsExt = parsed?.runtime.extensions?.hindsight;
+    const hsCfg = hsExt?.config ?? parsed?.runtime.hindsight;
+    const hsEnabled = hsExt?.enabled ?? Boolean(parsed?.runtime.hindsight);
+    const hsDefaultEnabled = hsExt?.defaultEnabled ?? hsEnabled;
     const saveDisabled =
       this.state.busy ||
       this.state.reconciling ||
@@ -267,9 +345,36 @@ export class SettingsPanel extends Component<Props, State> {
     return (
       <div className="conversation-layout">
         <div className="chat-pane">
-          <h3>{`Host 设置 · ${s.deviceId}`}</h3>
-          <div className="metadata">
-            {`revision ${s.revision} · activeRevision ${s.activeRevision}`}
+          <div className="hermes-hub-header">
+            <div>
+              <h3>{`Host 设置 · ${s.deviceId}`}</h3>
+              <div className="metadata">
+                {`revision ${s.revision} · activeRevision ${s.activeRevision}`}
+              </div>
+            </div>
+            <div className="studio-seg" role="group" aria-label="设置视图模式">
+              <button
+                type="button"
+                className={this.state.editorMode === 'both' ? 'active' : ''}
+                onClick={() => this.setState({ editorMode: 'both' })}
+              >
+                🎛️ 可视化与 JSON 同屏
+              </button>
+              <button
+                type="button"
+                className={this.state.editorMode === 'visual' ? 'active' : ''}
+                onClick={() => this.setState({ editorMode: 'visual' })}
+              >
+                🧩 仅可视化卡片
+              </button>
+              <button
+                type="button"
+                className={this.state.editorMode === 'json' ? 'active' : ''}
+                onClick={() => this.setState({ editorMode: 'json' })}
+              >
+                {'{ } 仅 JSON 源码'}
+              </button>
+            </div>
           </div>
           <div className="status">{s.restartRequired ? '重启后生效' : '已生效'}</div>
           {!this.props.transportConnected && (
@@ -304,6 +409,70 @@ export class SettingsPanel extends Component<Props, State> {
                 ))}
               </ul>
             )}
+            {this.state.editorMode !== 'json' && (
+              <div className="hermes-ext-card">
+                <div className="studio-card-header">
+                  <div>
+                    <strong>🧩 托管扩展快捷配置 · Hindsight 长期记忆 (runtime.extensions.hindsight)</strong>
+                    <div className="metadata">
+                      Tier 1 Host 全局供给层：修改会实时同步至下方 JSON 草案，点击底部「保存（CAS）」后写入。
+                    </div>
+                  </div>
+                  <span className={`studio-pill ${hsEnabled ? 'ok' : 'warn'}`}>
+                    {hsEnabled ? 'Host 总开关：开启' : 'Host 总开关：关闭'}
+                  </span>
+                </div>
+                <div className="hermes-ext-switches">
+                  <label className="checkbox-inline">
+                    <input
+                      type="checkbox"
+                      checked={hsEnabled}
+                      disabled={saveDisabled || !parsed}
+                      onChange={(e) => this.updateHindsightVisual(s.settings, { enabled: e.target.checked })}
+                    />
+                    <span>Host 全局启用 (enabled)</span>
+                  </label>
+                  <label className="checkbox-inline">
+                    <input
+                      type="checkbox"
+                      checked={hsDefaultEnabled}
+                      disabled={saveDisabled || !parsed}
+                      onChange={(e) => this.updateHindsightVisual(s.settings, { defaultEnabled: e.target.checked })}
+                    />
+                    <span>新建 Bot 默认开启 (defaultEnabled · 仅首次初始化复制一次，不回溯已有 Bot)</span>
+                  </label>
+                  <label className="checkbox-inline">
+                    <input
+                      type="checkbox"
+                      checked={Boolean(hsCfg?.sharedMemory)}
+                      disabled={saveDisabled || !parsed}
+                      onChange={(e) => this.updateHindsightVisual(s.settings, { sharedMemory: e.target.checked })}
+                    />
+                    <span>允许跨 Bot 共享记忆库 (config.sharedMemory)</span>
+                  </label>
+                </div>
+                <div className="hermes-ext-grid">
+                  <label>
+                    <span className="metadata">Hindsight 服务地址 (config.baseUrl)</span>
+                    <input
+                      value={hsCfg?.baseUrl ?? ''}
+                      placeholder="http://127.0.0.1:8888"
+                      disabled={saveDisabled || !parsed}
+                      onChange={(e) => this.updateHindsightVisual(s.settings, { baseUrl: e.target.value })}
+                    />
+                  </label>
+                  <label>
+                    <span className="metadata">凭据环境变量名 (config.apiKeyEnv · 严禁明文密钥)</span>
+                    <input
+                      value={hsCfg?.apiKeyEnv ?? ''}
+                      placeholder="HINDSIGHT_API_KEY"
+                      disabled={saveDisabled || !parsed}
+                      onChange={(e) => this.updateHindsightVisual(s.settings, { apiKeyEnv: e.target.value })}
+                    />
+                  </label>
+                </div>
+              </div>
+            )}
             <p className="hint">
               {'连接/全局开关与凭据引用在下方 JSON 编辑器的 runtime.extensions 中配置（例如 '
                 + 'runtime.extensions.hindsight = {"enabled":true,"defaultEnabled":true,"config":{...}}）；'
@@ -311,7 +480,7 @@ export class SettingsPanel extends Component<Props, State> {
                 + '每个 Bot 的开关/只读策略与 SOUL 在“聊天”页选中 Bot 后的 Bot 设置里编辑。'}
             </p>
           </details>
-          <details>
+          <details open={this.state.editorMode !== 'json'}>
             <summary>模型环境变量</summary>
             <ul className="data-list">
               {s.settings.runtime.providers.map((p) => (
@@ -345,6 +514,7 @@ export class SettingsPanel extends Component<Props, State> {
           )}
           <textarea
             className="raw-history"
+            style={this.state.editorMode === 'visual' ? { display: 'none' } : undefined}
             value={editText}
             onChange={(e) => this.setState({ editText: e.target.value, editError: null })}
           />

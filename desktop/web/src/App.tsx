@@ -38,6 +38,7 @@ interface AppState {
   form: ProfileFormState;
   globalError: string | null;
   bannerError: string | null;
+  sidebarCollapsed: boolean;
 }
 
 interface AppProps {
@@ -267,6 +268,7 @@ export class App extends Component<AppProps, AppState> {
       form: { title: '', kind: 'local', url: '', expectedDeviceId: '', deviceId: '' },
       globalError: null,
       bannerError: null,
+      sidebarCollapsed: false,
     };
   }
 
@@ -418,10 +420,13 @@ export class App extends Component<AppProps, AppState> {
     const connection = status?.connection ?? null;
     const phaseLabel = phaseText(status, transportConnected);
     return (
-      <div className="desktop-shell">
+      <div className={`desktop-shell${this.state.sidebarCollapsed ? ' sidebar-collapsed' : ''}`}>
         <aside className="app-sidebar">
           <header className="workspace-header">
-            <h1>e-助手</h1>
+            <div className="brand-title-row">
+              <h1>e-助手</h1>
+              <span className="brand-badge">Grok × Hermes</span>
+            </div>
           </header>
           {this.state.busy ? (
             <p className="status">加载中…</p>
@@ -443,6 +448,15 @@ export class App extends Component<AppProps, AppState> {
         </aside>
         <main className="app-workspace">
           <div className="connection-strip">
+            <button
+              type="button"
+              className="sidebar-toggle-btn"
+              onClick={() => this.setState((s) => ({ sidebarCollapsed: !s.sidebarCollapsed }))}
+              title={this.state.sidebarCollapsed ? '展开连接与设备边栏' : '收起连接与设备边栏（专注对话）'}
+            >
+              {this.state.sidebarCollapsed ? '🔌 展开连接栏 ▸' : '🔌 收起连接栏 ◂'}
+            </button>
+            <span className={`conn-dot ${transportConnected ? 'online' : 'offline'}`} />
             <span>{phaseLabel}</span>
             {identity && <span className="status">{identity.targetDeviceId || '未选目标'}</span>}
             {connection && (

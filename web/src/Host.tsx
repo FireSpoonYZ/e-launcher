@@ -183,6 +183,7 @@ export function HostPage({onBack, persistentPending = false, connectionEpoch = 0
   const [role, setRole] = useState('');
   const [cwd, setCwd] = useState('');
   const [modelRef, setModelRef] = useState('');
+  const [focusTab, setFocusTab] = useState<'all' | 'chat' | 'soul' | 'config' | 'voice'>('all');
   const observeIdRef = useRef<string | undefined>(undefined);
   const captureRef = useRef<{botId:string; requestId:string} | undefined>(undefined);
   // 正在等原生 startVoice（Tauri 授权弹窗会暂停 Activity 并触发 hidden）的那一次 capture。
@@ -781,6 +782,25 @@ export function HostPage({onBack, persistentPending = false, connectionEpoch = 0
 
   return <main className="page">
     <Header title={t('本机 Host','Local Host')} onBack={onBack} actions={<button className="button secondary-button" onClick={() => void refreshSnapshot()}>{t('刷新','Refresh')}</button>}/>
+    <div className="host-focus-bar" role="group" aria-label={t('工作区聚焦模式','Workspace focus')}>
+      {([
+        { key: 'all', zh: '📋 全部视图', en: 'All' },
+        { key: 'chat', zh: '💬 极简对话', en: 'Chat' },
+        { key: 'soul', zh: '🎭 灵魂与插件', en: 'SOUL & Ext' },
+        { key: 'config', zh: '🧩 Host 配置', en: 'Config' },
+        { key: 'voice', zh: '🎙️ 语音与迁移', en: 'Voice' },
+      ] as const).map(item => (
+        <button
+          key={item.key}
+          type="button"
+          className={`host-focus-chip${focusTab === item.key ? ' active' : ''}`}
+          onClick={() => setFocusTab(item.key)}
+        >
+          {t(item.zh, item.en)}
+        </button>
+      ))}
+    </div>
+    <div hidden={focusTab !== 'all' && focusTab !== 'chat' && focusTab !== 'config'}>
     <Section title={t('运行状态','Host status')}>
       {!host && <p className="secondary">{t('正在读取状态…','Loading status…')}</p>}
       {host && <>
@@ -795,6 +815,8 @@ export function HostPage({onBack, persistentPending = false, connectionEpoch = 0
         {lifecycleNotice && <p className="secondary" role="status">{lifecycleNotice}</p>}
       </>}
     </Section>
+    </div>
+    <div hidden={focusTab !== 'all' && focusTab !== 'chat' && focusTab !== 'soul'}>
     <Section title={t('Bot','Bots')}>
       {host?.phase === 'running'
         ? <>
@@ -811,7 +833,10 @@ export function HostPage({onBack, persistentPending = false, connectionEpoch = 0
           </>
         : <p className="secondary">{t('Host 运行后可用。','Available while the Host is running.')}</p>}
     </Section>
-    <HostLegacyImport phase={host?.phase ?? 'stopped'} workspace={host?.workspace} locked={!!pending || !!capture} activeBotId={selected?.botId} onOpenBot={openImportedBot} onRefreshBots={refreshBotsAfterImport} onApplyDraft={applyImportedDraft}/>
+    </div>
+    <div hidden={focusTab !== 'all' && focusTab !== 'voice'}>
+      <HostLegacyImport phase={host?.phase ?? 'stopped'} workspace={host?.workspace} locked={!!pending || !!capture} activeBotId={selected?.botId} onOpenBot={openImportedBot} onRefreshBots={refreshBotsAfterImport} onApplyDraft={applyImportedDraft}/>
+    </div>
     {pending && pending.kind !== 'create' && <Section title={t('待确认请求','Pending requests')}>
       {pending.kind === 'text' && <>
         <p className="secondary" role="status">{t('冻结的请求（目标与内容已锁定）：','Frozen request (target and content locked): ')}<br/><code>{pending.botId}</code> · <code>{pending.requestId}</code><br/>{pending.text}</p>
@@ -836,6 +861,7 @@ export function HostPage({onBack, persistentPending = false, connectionEpoch = 0
       </>}
       {reconcileNotice && <p className="secondary" role="status">{reconcileNotice}</p>}
     </Section>}
+    <div hidden={focusTab !== 'all' && focusTab !== 'chat'}>
     {selected && <Section title={t('主会话','Primary chat')}>
       <Row title={selected.role} detail={`${selected.botId} · ${selected.cwd}${selected.modelRef ? ` · ${selected.modelRef}` : ''}`}/>
       <form className="form" onSubmit={e => { e.preventDefault(); void submit(); }}>
@@ -856,9 +882,13 @@ export function HostPage({onBack, persistentPending = false, connectionEpoch = 0
         {history.items.map((item, index) => <p key={index} className="secondary">{historyEntry(item)}</p>)}
       </>}
     </Section>}
+    </div>
+    <div hidden={focusTab !== 'all' && focusTab !== 'soul'}>
     {selected && <Section title={t('Bot 扩展与 SOUL','Bot extensions & SOUL')}>
       <HostBotSettings bot={selected} disabled={host?.phase !== 'running'}/>
     </Section>}
+    </div>
+    <div hidden={focusTab !== 'all' && focusTab !== 'config'}>
     <Section title={t('配置','Configuration')}>
       <Row title={t('读取配置','Read configuration')} detail={settings ? `${t('修订号','Revision')} ${settings.revision}${settings.activeRevision !== undefined ? ` · active ${settings.activeRevision}` : ''}` : undefined} onClick={loadSettings}/>
       {settings && <>
@@ -873,9 +903,13 @@ export function HostPage({onBack, persistentPending = false, connectionEpoch = 0
         </form>
       </>}
     </Section>
+    </div>
+    <div hidden={focusTab !== 'all' && focusTab !== 'soul' && focusTab !== 'config'}>
     <Section title={t('扩展','Extensions')}>
       <HostExtensionCatalog disabled={host?.phase !== 'running'}/>
     </Section>
+    </div>
+    <div hidden={focusTab !== 'all' && focusTab !== 'voice'}>
     <Section title={t('语音','Host voice')}>
       {!voice && <Row title={t('读取语音设置','Read voice settings')} onClick={() => action.run(async () => setVoice(await BotHost.voiceSettings()))}/>}
       {voice && <>
@@ -894,6 +928,7 @@ export function HostPage({onBack, persistentPending = false, connectionEpoch = 0
         {voiceEvents.map((event, index) => <p key={index} className="secondary">{voiceEventText(event, t)}</p>)}
       </>}
     </Section>
+    </div>
     <ErrorNotice error={action.error || snapshotError || storageNotice}/>
     {remoteKind && voice && <RemoteVoiceForm kind={remoteKind} remote={remoteKind === 'stt' ? voice.stt : voice.tts} close={() => setRemoteKind(undefined)} save={next => applyRemote(remoteKind, next)}/>}
   </main>;

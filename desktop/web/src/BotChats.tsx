@@ -503,6 +503,7 @@ function PrimaryChatPane({ api, bot, pageActive = true }: { api: DesktopViewApi;
   const [liveEnded, setLiveEnded] = useState(false);
   const [watchTick, setWatchTick] = useState(0);
   const [stopping, setStopping] = useState(false);
+  const [soulStudioOpen, setSoulStudioOpen] = useState(false);
 
   useEffect(() => {
     // 离线/页面不可见（远端页切回本机）不发 observe：保留最后读取的 live 数据，重连后被动重建。
@@ -622,10 +623,21 @@ function PrimaryChatPane({ api, bot, pageActive = true }: { api: DesktopViewApi;
 
   return (
     <div className="chat-pane-inner">
-      <header className="chat-pane-header">
-        <div className="chat-title">{bot.role}</div>
-        <div className="metadata">
-          <span>{bot.botId}</span> · <span>cwd: {bot.cwd}</span> · <span>模型: {bot.modelRef ?? '默认'}</span>
+      <header className="chat-pane-header chat-pane-header-row">
+        <div>
+          <div className="chat-title">{bot.role}</div>
+          <div className="metadata">
+            <span>{bot.botId}</span> · <span>cwd: {bot.cwd}</span> · <span>模型: {bot.modelRef ?? '默认'}</span>
+          </div>
+        </div>
+        <div className="chat-header-actions">
+          <button
+            type="button"
+            className={`soul-studio-trigger ${soulStudioOpen ? 'active' : ''}`}
+            onClick={() => setSoulStudioOpen((v) => !v)}
+          >
+            {soulStudioOpen ? '✨ 收起灵魂与插件' : '✨ 灵魂与插件 (SOUL & Ext)'}
+          </button>
         </div>
       </header>
 
@@ -642,7 +654,12 @@ function PrimaryChatPane({ api, bot, pageActive = true }: { api: DesktopViewApi;
           ) : <span>正在建立观察…</span>}
       </div>
 
-      <BotSettings api={api} botId={bot.botId} />
+      <BotSettings
+        api={api}
+        botId={bot.botId}
+        open={soulStudioOpen}
+        onOpenChange={setSoulStudioOpen}
+      />
 
       <div className="live-pane">
         {live ? (

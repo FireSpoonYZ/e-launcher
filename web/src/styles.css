@@ -339,6 +339,24 @@ small, .secondary { font-size: .85rem; color: var(--muted); }
 .reasoning-labels { display: flex; justify-content: space-between; margin: 8px 28px 0; color: var(--muted); font-size: .72rem; }
 .reasoning-labels > span { display: flex; justify-content: center; flex: 0 0 0; min-width: 0; white-space: nowrap; }
 .reasoning-labels .active { color: var(--control-blue); font-weight: 600; }
+.host-focus-bar { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 12px; min-width: 0; }
+.host-focus-chip { min-height: 36px; padding: 5px 11px; font-size: .84rem; font-weight: 600; border-radius: 999px; border: 1px solid var(--line); background: var(--surface); color: var(--muted); }
+.host-focus-chip.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+.tool-gating-box { display: flex; flex-direction: column; gap: 6px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+.tool-gating-row { display: flex; flex-direction: column; gap: 4px; }
+.tool-gating-label { font-size: .78rem; font-weight: 600; color: var(--muted); }
+.tool-gating-chips { display: flex; flex-wrap: wrap; gap: 4px; }
+.gating-chip { font-family: ui-monospace, Consolas, monospace; font-size: .75rem; padding: 2px 6px; border-radius: 4px; border: 1px solid var(--line); overflow-wrap: anywhere; }
+.gating-chip.allowed { color: var(--accent); border-color: var(--accent); }
+.gating-chip.gated { color: var(--muted); text-decoration: line-through; opacity: .75; }
+.soul-byte-progress { display: flex; flex-direction: column; gap: 4px; }
+.soul-byte-bar { height: 6px; border-radius: 999px; background: var(--line); overflow: hidden; }
+.soul-byte-fill { height: 100%; background: var(--accent); border-radius: 999px; }
+.soul-byte-fill.over { background: #b3261e; }
+.soul-byte-meta { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 10px; font-size: .75rem; color: var(--muted); font-family: ui-monospace, Consolas, monospace; }
+.soul-snippet-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.snippet-chip { min-height: 28px; padding: 3px 9px; font-size: .78rem; border-radius: 999px; border: 1px solid var(--line); background: var(--surface); color: var(--text); }
+.snippet-chip.danger { color: #b3261e; }
 @keyframes fade-in { from { opacity: 0; } }
 @media (min-width: 680px) { .messages { padding-inline: 32px; }.composer-wrap { padding-inline: 28px; }.page { padding-inline: 32px; } }
 @media (prefers-reduced-motion: reduce) { *, *:before, *:after { animation: none!important; transition: none!important; scroll-behavior: auto!important; } }

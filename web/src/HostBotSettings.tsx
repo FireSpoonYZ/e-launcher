@@ -9,6 +9,35 @@ type CatalogExtension = ExtensionCatalog['extensions'][number];
 
 // Host 的公开上限，本地先挡明显超限；权威校验仍在 Host。
 const SOUL_MAX_BYTES = 65536;
+const HINDSIGHT_READ_TOOLS = [
+  'hindsight_recall',
+  'hindsight_reflect',
+  'hindsight_get',
+  'hindsight_source',
+  'hindsight_status',
+] as const;
+const HINDSIGHT_WRITE_TOOLS = [
+  'hindsight_retain',
+  'hindsight_correct',
+  'hindsight_retry',
+] as const;
+const SOUL_SNIPPETS: { zh: string; en: string; text: string }[] = [
+  {
+    zh: '＋ 角色使命',
+    en: '+ Mission',
+    text: '\n## 核心角色与使命\n你是一个专注、可靠的 AI 工程与知识助手，优先给出可验证的结论与清晰步骤。\n',
+  },
+  {
+    zh: '＋ 沟通风格',
+    en: '+ Style',
+    text: '\n## 沟通风格\n- 保持 Grok 式的极简与直接，拒绝空洞套话\n- 复杂问题先给结论，再展开关键依据\n',
+  },
+  {
+    zh: '＋ 群聊准则',
+    en: '+ Room Rules',
+    text: '\n## 群聊与协作准则 (Scope / Room)\n- 仅在被明确提及时或掌握关键上下文时发言，否则保持 silent\n',
+  },
+];
 const modeOf = (value: unknown): AccessMode|undefined => value === 'read-write' || value === 'read-only' ? value : undefined;
 const reasonOf = (value: unknown): HindsightPolicy['reason'] => value === 'bot-disabled' || value === 'host-disabled' || value === 'not-configured' ? value : null;
 const policyOf = (value: unknown): HindsightPolicy|undefined => {
@@ -157,7 +186,9 @@ export function HostBotSettings({bot, disabled}: {bot: HostBot; disabled: boolea
   const extensionsDirty = !!snapshot && !!edited && !sameExtensions(edited, snapshot.extensions);
   const soulText = draft ?? soul?.text ?? '';
   const soulDirty = draft !== undefined;
-  const overLimit = soulDirty && soulBytes(soulText) > SOUL_MAX_BYTES;
+  const currentSoulBytes = soulBytes(soulText);
+  const overLimit = soulDirty && currentSoulBytes > SOUL_MAX_BYTES;
+  const bytePct = Math.min(100, Math.round((currentSoulBytes / SOUL_MAX_BYTES) * 100));
   const locked = action.busy || disabled;
   const patch = (next: BotExtensions['hindsight']) => {
     if (!snapshot) return;
@@ -175,6 +206,10 @@ export function HostBotSettings({bot, disabled}: {bot: HostBot; disabled: boolea
     return {...prev, [bot.botId]: text};
   });
 
+  const hostOk = snapshot ? snapshot.effective.hindsight.reason !== 'host-disabled' && snapshot.effective.hindsight.reason !== 'not-configured' : false;
+  const readAllowed = Boolean(current?.hindsight.enabled && hostOk);
+  const writeAllowed = Boolean(current?.hindsight.enabled && current?.hindsight.mode === 'read-write' && hostOk);
+
   return <>
     <Row title={t('读取扩展状态','Read extension state')} detail={[
       snapshot ? `${t('修订号','Revision')} ${snapshot.revision}` : t('尚未读取','Not loaded'),
@@ -184,6 +219,24 @@ export function HostBotSettings({bot, disabled}: {bot: HostBot; disabled: boolea
       <Row title={t('Hindsight 启用','Hindsight enabled')}><input type="checkbox" aria-label={t('Hindsight 启用','Hindsight enabled')} disabled={locked} checked={current.hindsight.enabled} onChange={event => patch({...current.hindsight, enabled: event.target.checked})}/></Row>
       <Row title={t('访问模式','Access mode')}><select aria-label={t('访问模式','Access mode')} disabled={locked} value={current.hindsight.mode} onChange={event => patch({...current.hindsight, mode: event.target.value === 'read-only' ? 'read-only' : 'read-write'})}><option value="read-write">{t('读写','Read-write')}</option><option value="read-only">{t('只读','Read-only')}</option></select></Row>
       <Row title={t('实际生效','Effective')} detail={`${snapshot.effective.hindsight.enabled ? t('已启用','enabled') : t('未启用','off')} · ${snapshot.effective.hindsight.mode} · ${reasonText(snapshot.effective.hindsight.reason)}`}/>
+      <div className="tool-gating-box" style={{margin: '6px 0'}}>
+        <div className="tool-gating-row">
+          <span className="tool-gating-label">{t(`读取工具 (${HINDSIGHT_READ_TOOLS.length})`, `Read tools (${HINDSIGHT_READ_TOOLS.length})`)}</span>
+          <div className="tool-gating-chips">
+            {HINDSIGHT_READ_TOOLS.map(name => (
+              <code key={name} className={`gating-chip ${readAllowed ? 'allowed' : 'gated'}`}>{`${readAllowed ? '✓' : '🚫'} ${name}`}</code>
+            ))}
+          </div>
+        </div>
+        <div className="tool-gating-row">
+          <span className="tool-gating-label">{t(`写入工具 (${HINDSIGHT_WRITE_TOOLS.length})`, `Write tools (${HINDSIGHT_WRITE_TOOLS.length})`)}</span>
+          <div className="tool-gating-chips">
+            {HINDSIGHT_WRITE_TOOLS.map(name => (
+              <code key={name} className={`gating-chip ${writeAllowed ? 'allowed' : 'gated'}`}>{`${writeAllowed ? '✓' : '🚫'} ${name}`}</code>
+            ))}
+          </div>
+        </div>
+      </div>
       <p className="secondary">{t('只影响该 Bot：关闭时隐藏全部 Hindsight 工具并跳过自动回忆与自动保存；只读保留回忆/查询，拒绝写入并暂停自动写入。改动在下一个请求前生效。','Applies to this bot only: off hides every Hindsight tool and skips automatic recall/save; read-only keeps recall and queries, denies writes and pauses automatic writes. Changes apply before the next request.')}</p>
       <div className="action-row">
         <button className="button" disabled={locked || !extensionsDirty} onClick={() => saveExtensions(snapshot, current)}>{t('保存（CAS）','Save (CAS)')}</button>
@@ -195,6 +248,38 @@ export function HostBotSettings({bot, disabled}: {bot: HostBot; disabled: boolea
       soulDirty ? t('有未保存草稿','unsaved draft') : '',
     ].filter(Boolean).join(' · ')} onClick={locked || soulDirty ? undefined : () => loadSoul(bot.botId)}/>
     {soul && <form className="form" onSubmit={event => { event.preventDefault(); if (soulDirty && !overLimit) saveSoul(soul, soulText); }}>
+      <div className="soul-byte-progress">
+        <div className="soul-byte-bar">
+          <div className={`soul-byte-fill ${overLimit ? 'over' : ''}`} style={{width: `${bytePct}%`}}/>
+        </div>
+        <div className="soul-byte-meta">
+          <span>{`SHA-256: ${soul.revision.slice(0, 12)}`}</span>
+          <span>{`${currentSoulBytes.toLocaleString()} / ${SOUL_MAX_BYTES.toLocaleString()} B (${bytePct}%)`}</span>
+        </div>
+      </div>
+      <div className="soul-snippet-bar">
+        {SOUL_SNIPPETS.map(item => (
+          <button
+            key={item.zh}
+            type="button"
+            className="snippet-chip"
+            disabled={locked}
+            onClick={() => editSoul((soulText ? soulText.trimEnd() + '\n' : '') + item.text.trimStart())}
+          >
+            {t(item.zh, item.en)}
+          </button>
+        ))}
+        {soulText.length > 0 && (
+          <button
+            type="button"
+            className="snippet-chip danger"
+            disabled={locked}
+            onClick={() => editSoul('')}
+          >
+            {t('清空 ("")', 'Clear ("")')}
+          </button>
+        )}
+      </div>
       <label>{t('SOUL.md 内容（UTF-8，允许为空）','SOUL.md content (UTF-8, may be empty)')}<textarea rows={10} spellCheck={false} aria-label={t('SOUL.md 内容','SOUL.md content')} disabled={locked} value={soulText} onChange={event => editSoul(event.target.value)}/></label>
       <p className="secondary">{t('这是该 Bot 自己的 SOUL.md，作为主会话与工作上下文的系统人设；空内容表示有意为空。','This is the bot\'s own SOUL.md and the system persona for its primary and work contexts; empty means intentionally empty.')}</p>
       {soulDirty && <p className="secondary" role="status">{t('草稿未保存；自动读取不会改动它的基线修订号。','Draft not saved; automatic reads do not move its baseline revision.')}</p>}
