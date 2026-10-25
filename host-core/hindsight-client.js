@@ -1,6 +1,6 @@
 // host-core/hindsight-client.js
 // Hindsight REST client adapter for Pi Durable. Frozen upstream protocol from
-// @vectorize-io/hindsight-client 0.9.2 generated SDK (verbs: GET /profile,
+// @vectorize-io/hindsight-client 0.9.2 generated SDK (bank GET updated to /config,
 // PUT bank, POST memories, GET/PATCH memory, POST recall/reflect, GET
 // operation/document, POST operation retry). Built-in fetch only; no new
 // dependencies.
@@ -229,9 +229,9 @@ export function createHindsightClient(config) {
     if (!condition) throw protocolError(message);
   }
 
-  function validateBankProfile(response, bankId) {
+  function validateBankResponse(response, bankId) {
     plainObject(response);
-    protocolCheck(response.bank_id === bankId, 'bank profile response bank_id mismatch');
+    protocolCheck(response.bank_id === bankId, 'bank response bank_id mismatch');
     return response;
   }
 
@@ -386,8 +386,8 @@ export function createHindsightClient(config) {
 
   return {
     async getBank(bankId, signal) {
-      const response = await request('GET', `${bankPath(bankId)}/profile`, { signal });
-      return validateBankProfile(response, bankId);
+      const response = await request('GET', `${bankPath(bankId)}/config`, { signal });
+      return validateBankResponse(response, bankId);
     },
     async createBank(bankId, options = {}, signal) {
       const opts = mustPlain(options ?? {}, 'createBank options');
@@ -400,7 +400,7 @@ export function createHindsightClient(config) {
         payload.reflect_mission = mustOptString(opts.reflectMission, 'reflectMission');
       }
       const response = await request('PUT', bankPath(bankId), { json: payload, signal });
-      return validateBankProfile(response, bankId);
+      return validateBankResponse(response, bankId);
     },
     async retain(bankId, input, signal) {
       const opts = mustPlain(input, 'retain input');
