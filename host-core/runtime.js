@@ -363,11 +363,14 @@ function createRuntime({ host, harness, models, defaultModel, releaseOwner, mana
   const close = () => {
     closing = true;
     closePromise ??= (async () => {
+      // 同步封闭 Bot 新准入并开始排空：必须在本次 async 体的首个 await 之前调用，
+      // 否则等待 decisions.close() 期间新设置/发送操作仍能入队。
+      const botClose = botAdmissions.close();
       // 依次执行并收集每步错误：任何一步失败仍继续清理，最后显式抛出。
       const errors = [];
       try { await decisions.close(); } catch (err) { errors.push(err); }
-      // 拒新准入并排空已接纳 Bot 操作：仍有 op 在使用 harness/store。
-      try { await botAdmissions.close(); } catch (err) { errors.push(err); }
+      // 已接纳 Bot 操作在 harness/store 释放前排空。
+      try { await botClose; } catch (err) { errors.push(err); }
       // 排空已接纳迁移操作：必须在 harness/host 关闭前等待完成。
       try { await drainLegacyOps(); } catch (err) { errors.push(err); }
       // 排空已接纳导入，但共享消息账本须保留到原生工具退出。
