@@ -175,11 +175,19 @@ const DYNAMIC_ASSET_RE = /(?:require\s*\.\s*resolve|createRequire\s*\([^)]*\)\s*
 // use the verified in-repo upstream MIT copies if any are ever bundled.
 // @vectorize-io/hindsight-client 0.9.2 publishes dist/src/generated only, so its
 // MIT text must also be kept in-repo (licenses/hindsight-client-0.9.2-MIT.txt).
-const UPSTREAM_MIT_ALLOWLIST = new Map([
-  ['@earendil-works/chord', { version: '1.3.0', license: 'pi-v1.3.0-MIT.txt' }],
-  ['@earendil-works/pi-ai', { version: '1.3.0', license: 'pi-v1.3.0-MIT.txt' }],
-  ['@earendil-works/pi-durable', { version: '1.3.0', license: 'pi-v1.3.0-MIT.txt' }],
-  ['@vectorize-io/hindsight-client', { version: '0.9.2', license: 'hindsight-client-0.9.2-MIT.txt' }],
+// standardwebhooks 1.1.1 (arrives with the anthropic-messages API through
+// @anthropic-ai/sdk) ships no license file either. Its npm manifest declares MIT,
+// but the repository at the npm gitHead commit only carries the Apache-2.0 LICENSE
+// text, vendored verbatim (provenance header included) in
+// licenses/standardwebhooks-1.1.1-LICENSE.txt -- that text is NOT an MIT copy.
+// `declared` is the manifest license to match, `license` the in-repo text file; a
+// package@version outside this map still fails the missing-license check.
+const UPSTREAM_LICENSE_ALLOWLIST = new Map([
+  ['@earendil-works/chord', { version: '1.3.0', declared: 'MIT', license: 'pi-v1.3.0-MIT.txt' }],
+  ['@earendil-works/pi-ai', { version: '1.3.0', declared: 'MIT', license: 'pi-v1.3.0-MIT.txt' }],
+  ['@earendil-works/pi-durable', { version: '1.3.0', declared: 'MIT', license: 'pi-v1.3.0-MIT.txt' }],
+  ['@vectorize-io/hindsight-client', { version: '0.9.2', declared: 'MIT', license: 'hindsight-client-0.9.2-MIT.txt' }],
+  ['standardwebhooks', { version: '1.1.1', declared: 'MIT', license: 'standardwebhooks-1.1.1-LICENSE.txt' }],
 ]);
 
 // UI packages explicitly used by the desktop frontend; their full licenses are
@@ -736,11 +744,11 @@ async function collectNpmLicenseSections(metafile) {
     const licenseFiles = await findLicenseFiles(pkg.root);
     sections.push(`## npm: ${pkg.name}@${pkg.version} (${pkg.license ?? 'unknown'})`);
     if (licenseFiles.length === 0) {
-      const upstream = UPSTREAM_MIT_ALLOWLIST.get(pkg.name);
-      if (upstream && upstream.version === pkg.version && pkg.license === 'MIT') {
+      const upstream = UPSTREAM_LICENSE_ALLOWLIST.get(pkg.name);
+      if (upstream && upstream.version === pkg.version && pkg.license === upstream.declared) {
         const upstreamPath = path.join(ROOT, 'licenses', upstream.license);
         const text = await readIfPresent(upstreamPath);
-        if (!text) throw fail(`in-repo upstream MIT license missing: ${upstreamPath}`);
+        if (!text) throw fail(`in-repo upstream license missing: ${upstreamPath}`);
         sections.push(text.toString('utf8').trim());
       } else {
         throw fail(`bundled npm package ${pkg.name}@${pkg.version} has no license file`);

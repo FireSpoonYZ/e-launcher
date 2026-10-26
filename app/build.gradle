@@ -80,6 +80,7 @@ def buildHostRuntime = tasks.register('buildHostRuntime', Exec) {
     inputs.files rootProject.fileTree('host-core') { exclude 'build/**', 'node_modules/**' },
             rootProject.file('licenses/pi-v1.3.0-MIT.txt'),
             rootProject.file('licenses/hindsight-client-0.9.2-MIT.txt'),
+            rootProject.file('licenses/standardwebhooks-1.1.1-LICENSE.txt'),
             file("$buildDir/host-native-tools/licenses")
     inputs.file file('build.gradle')
     outputs.dir file("$buildDir/generated/assets/botHost")
