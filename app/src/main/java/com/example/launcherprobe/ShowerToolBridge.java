@@ -272,7 +272,7 @@ final class ShowerToolBridge {
         return controller.key(keyCode, metaState, name);
     }
 
-    private static int integer(JSONObject arguments, String name) {
+    static int integer(JSONObject arguments, String name) {
         if (!arguments.has(name)) throw new IllegalArgumentException("缺少参数 " + name);
         return integer(arguments, name, 0);
     }

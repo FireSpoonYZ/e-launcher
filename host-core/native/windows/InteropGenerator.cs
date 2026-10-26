@@ -19,6 +19,7 @@ using System.Reflection;
 using System.Reflection.Emit;
 using System.Runtime.InteropServices;
 using System.Runtime.InteropServices.ComTypes;
+using TYPELIBATTR = System.Runtime.InteropServices.ComTypes.TYPELIBATTR;
 using System.Text;
 
 namespace ELauncher.Shower.Build
@@ -116,22 +117,21 @@ namespace ELauncher.Shower.Build
             string assemblyPath = Path.Combine(outDir, assemblyFileName);
             AssemblyBuilder builder = Converter.ConvertTypeLibToAssembly(
                 typeLib,
-                assemblyFileName,
+                assemblyPath,
                 TypeLibImporterFlags.None,
                 this,
-                (StrongNameKeyPair)null,
                 null,
+                null,
+                Path.GetFileNameWithoutExtension(assemblyFileName),
                 null);
-            // This overload returns an in-memory builder that must be saved explicitly.
-            // If a compiler ever reports it as void (writing asmFileName itself), drop
-            // the Save and pass assemblyPath as the second argument instead.
-            builder.Save(assemblyPath);
+            builder.Save(assemblyFileName);
             return assemblyPath;
         }
 
         private static TYPELIBATTR GetLibAttribute(ITypeLib typeLib)
         {
-            IntPtr attributes = typeLib.GetLibAttr();
+            IntPtr attributes;
+            typeLib.GetLibAttr(out attributes);
             try
             {
                 return (TYPELIBATTR)Marshal.PtrToStructure(attributes, typeof(TYPELIBATTR));

@@ -17,8 +17,8 @@ namespace ELauncher.Shower
         public const int DefaultMaxBytes = 720 * 1024;
         public const int MinDimension = 160;
         public const int MaxDimension = 4096;
-        public const int MinLimitBytes = 16 * 1024;
-        public const int MaxLimitBytes = 960 * 1024;
+        public const int MinLimitBytes = 1;
+        public const int MaxLimitBytes = 720 * 1024;
 
         public AgentCaptureLimits()
         {

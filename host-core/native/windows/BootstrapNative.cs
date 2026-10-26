@@ -9,6 +9,7 @@ using System.Runtime.InteropServices;
 using System.Security.AccessControl;
 using System.Security.Principal;
 using System.ServiceProcess;
+using TimeoutException = System.TimeoutException;
 using System.Text;
 using System.Threading;
 

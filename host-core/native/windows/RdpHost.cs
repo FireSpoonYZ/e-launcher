@@ -615,7 +615,7 @@ namespace ELauncher.Shower
             // The RDP logon, the credential prompt and the bootstrap steps all continue in the background so
             // the caller never waits on a local UAC or credentials dialog.
             SetPhase("starting", null, null);
-            var worker = new Thread(delegate { StartSession(expectedGeneration, width, height); });
+            var worker = new Thread(delegate() { StartSession(expectedGeneration, width, height); });
             worker.IsBackground = true;
             worker.Name = "shower-host-start";
             worker.Start();
@@ -787,7 +787,7 @@ namespace ELauncher.Shower
         private void RunBounded(string label, Action action, int timeoutMs)
         {
             Exception failure = null;
-            var thread = new Thread(delegate
+            var thread = new Thread(delegate()
             {
                 try
                 {
