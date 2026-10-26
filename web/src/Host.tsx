@@ -118,6 +118,7 @@ const PI_PROVIDER_PROTOCOLS = [
   { id: 'openai-completions', label: 'openai-completions (OpenAI / 通用兼容)' },
   { id: 'openai-responses', label: 'openai-responses (OpenAI Responses)' },
   { id: 'pi-messages', label: 'pi-messages (Pi Gateway 协议)' },
+  { id: 'anthropic-messages', label: 'anthropic-messages (Anthropic Messages)' },
 ] as const;
 
 const MODEL_PROVIDER_PRESETS: {
