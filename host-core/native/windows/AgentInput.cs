@@ -45,7 +45,7 @@ namespace ELauncher.Shower
         /// <summary>Input can only reach this session while its own default desktop is the input desktop.</summary>
         public static bool IsInputDesktop()
         {
-            IntPtr input = OpenInputDesktop(0, false, DesktopSwitchDesktop | DesktopReadObjects);
+            IntPtr input = OpenInputDesktop(0, false, DesktopReadObjects);
             if (input == IntPtr.Zero) return false;
             try
             {
@@ -94,7 +94,7 @@ namespace ELauncher.Shower
         [DllImport("kernel32.dll")]
         private static extern uint GetCurrentThreadId();
 
-        [DllImport("user32.dll", SetLastError = true)]
+        [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
         private static extern bool GetUserObjectInformation(IntPtr handle, int index, IntPtr info, uint length, out uint needed);
     }
 

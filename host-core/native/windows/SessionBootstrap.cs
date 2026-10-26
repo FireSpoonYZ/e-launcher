@@ -188,7 +188,9 @@ namespace ELauncher.Shower
             }
             catch (Exception e)
             {
-                Console.Error.WriteLine("bootstrap 失败: " + SanitizeMessage(e.Message));
+                string diagnostic = e.InnerException != null ? e.InnerException.Message : e.Message;
+                string logDir = BootstrapFile.Get(ParseOptions(args, 1), "state-dir");
+                BootstrapLog.Write(logDir, "bootstrap 失败: " + SanitizeMessage(diagnostic));
                 return 3;
             }
         }

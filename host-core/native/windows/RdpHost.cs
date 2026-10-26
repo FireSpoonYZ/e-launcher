@@ -426,7 +426,7 @@ namespace ELauncher.Shower
             session["height"] = sourceHeight;
             session["capabilities"] = Capabilities();
             session["updatedAt"] = updatedAt.ToString("o", CultureInfo.InvariantCulture);
-            if (string.Equals(phase, "error", StringComparison.Ordinal) && phaseCode != null)
+            if (phaseCode != null)
             {
                 var error = new Dictionary<string, object>();
                 error["code"] = phaseCode;
@@ -632,6 +632,7 @@ namespace ELauncher.Shower
                 {
                     throw new HostFault(HostErrorCodes.Unavailable, "this Windows build does not expose WTSGetChildSessionId; child sessions are unavailable");
                 }
+                if (before > 0) throw new HostFault(HostErrorCodes.Busy, "another child session already exists; it will not be adopted");
                 HostLog.Info("child session before connect: " + before.ToString(CultureInfo.InvariantCulture));
                 RunBounded("child session enablement", delegate { SessionBootstrap.EnsureEnabled(stateDir); }, BootstrapTimeoutMs);
                 RequireCurrent(expectedGeneration);
@@ -839,7 +840,7 @@ namespace ELauncher.Shower
                 rdp.AdvancedSettings7.RedirectClipboard = false;
                 // Credentials only ever come from the local Windows prompt: nothing is supplied, stored or logged.
                 ((IMsRdpClientNonScriptable5)ocx).AllowPromptingForCredentials = true;
-                ((IMsRdpClientNonScriptable3)ocx).PromptForCredentials = true;
+                ((IMsRdpClientNonScriptable3)ocx).PromptForCredentials = false;
                 ((IMsRdpClientNonScriptable4)ocx).AllowCredentialSaving = false;
                 object connectToChild = true;
                 ((IMsRdpExtendedSettings)ocx).set_Property("ConnectToChildSession", ref connectToChild);

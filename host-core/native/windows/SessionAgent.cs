@@ -80,7 +80,7 @@ namespace ELauncher.Shower
                     return 3;
                 }
                 AgentNative.EnableDpiAwareness();
-                using (var pipe = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut, PipeOptions.None, TokenImpersonationLevel.Identification))
+                using (var pipe = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut, PipeOptions.Asynchronous, TokenImpersonationLevel.Identification))
                 {
                     pipe.Connect(ConnectTimeoutMs);
                     int hostSession;

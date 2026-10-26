@@ -533,14 +533,15 @@ namespace ELauncher.Shower
 
         private static bool TokenIsElevated(IntPtr token)
         {
-            IntPtr buffer = Marshal.AllocHGlobal(8);
+            IntPtr buffer = Marshal.AllocHGlobal(4);
             try
             {
                 int needed;
-                if (!GetTokenInformation(token, TokenElevationClass, buffer, 8, out needed))
+                if (!GetTokenInformation(token, TokenElevationClass, buffer, 4, out needed))
                 {
                     // 查不到提权状态就不能冒充“普通令牌”，必须向上报错。
-                    throw new Win32Exception(Marshal.GetLastWin32Error(), "查询令牌提权状态失败");
+                    int error = Marshal.GetLastWin32Error();
+                    throw new Win32Exception(error, "查询令牌提权状态失败 (Win32=" + error + ", needed=" + needed + ")");
                 }
                 return Marshal.ReadInt32(buffer) != 0;
             }
@@ -1037,7 +1038,7 @@ namespace ELauncher.Shower
             {
                 service = Connect();
                 folder = Invoke(service, "GetFolder", new object[] { "\\" });
-                definition = Invoke(service, "NewTaskDefinition", new object[0]);
+                definition = Invoke(service, "NewTask", new object[] { 0 });
 
                 object registrationInfo = Get(definition, "RegistrationInfo");
                 Set(registrationInfo, "Author", "ELauncher Shower");
