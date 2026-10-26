@@ -1,8 +1,8 @@
 // 统一 Shower 预览/接管面板：Android / Windows / Linux 共用同一份组件与协议类型。
 // 平台差异只在 props.call 适配器（桌面 = RemoteControlMethodMap，Android 本机 = BotHost.call），
 // 因此这里只 import type host-core 的公共数据形状，不引入任何 Node/平台句柄。
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
-import type { FormEvent, KeyboardEvent, PointerEvent } from 'react';
+import { useEffect, useId, useMemo, useRef, useState } from 'react';
+import type { ChangeEvent, CompositionEvent, KeyboardEvent, PointerEvent } from 'react';
 import type {
   ShowerCapabilities,
   ShowerFrame,
@@ -176,16 +176,18 @@ export function ShowerPreview({ call, target, connected, onClose }: ShowerPrevie
   const [pollError, setPollError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const [busy, setBusy] = useState<null | 'create' | 'frame' | 'takeover' | 'release' | 'input'>(null);
+  const [busy, setBusy] = useState<null | 'create' | 'frame' | 'takeover' | 'release'>(null);
   /** 已完成的接管所属会话；会话被替换后自动失效，无需“交还”按钮。 */
   const [takeoverSessionId, setTakeoverSessionId] = useState<string | null>(null);
-  const [text, setText] = useState('');
   const textInputId = useId();
 
   const epochRef = useRef(0);
   const actionSeqRef = useRef(0);
   const busyRef = useRef(false);
   const imgRef = useRef<HTMLImageElement | null>(null);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  /** IME 组合中；组合期间的 input 事件不发，组合结束由 compositionend 整段发一次。 */
+  const composingRef = useRef(false);
   const dragRef = useRef<{ x: number; y: number; at: number; button: number } | null>(null);
   const wheelAccRef = useRef({ x: 0, y: 0 });
 
@@ -235,26 +237,18 @@ export function ShowerPreview({ call, target, connected, onClose }: ShowerPrevie
     setBusy(null);
   }
 
-  /** 输入只带当前会话 ID，失败绝不自动重发。 */
-  const sendInput = useCallback(
-    async (input: ShowerInput) => {
-      const sid = sessionIdNow;
-      if (!sid || !inputEnabled || !connected) return;
-      if (!beginBusy('input')) return;
-      const seq = ++actionSeqRef.current;
-      setActionError(null);
-      try {
-        await call('sendShowerInput', { ...base, sessionId: sid, input });
-      } catch (e) {
-        if (seq === actionSeqRef.current) {
-          setActionError(`输入未确认：${errText(e)}（不会自动重发）`);
-        }
-      } finally {
-        endBusy(seq);
-      }
-    },
-    [call, base, sessionIdNow, inputEnabled, connected],
-  );
+  /** 输入只带当前会话 ID，失败绝不自动重发；输入不占用 busy（否则快速输入会被丢字）。 */
+  async function sendInput(input: ShowerInput): Promise<void> {
+    const sid = sessionIdNow;
+    if (!sid || !inputEnabled || !connected) return;
+    const epoch = epochRef.current;
+    setActionError(null);
+    try {
+      await call('sendShowerInput', { ...base, sessionId: sid, input });
+    } catch (e) {
+      if (epoch === epochRef.current) setActionError(`输入未确认：${errText(e)}（不会自动重发）`);
+    }
+  }
 
   // 最新值引用：供只挂一次的原生 wheel/指针路径读取，不因渲染重建监听。
   const sessionRef = useRef<ShowerSession | null>(null);
@@ -278,7 +272,9 @@ export function ShowerPreview({ call, target, connected, onClose }: ShowerPrevie
     setActionError(null);
     setNotice(null);
     setTakeoverSessionId(null);
-    setText('');
+    // 目标/连接变化：丢弃输入框里未提交的残留与进行中的组合。
+    composingRef.current = false;
+    if (inputRef.current) inputRef.current.value = '';
     if (!connected) return;
     let stopped = false;
     let inflight = false;
@@ -508,16 +504,15 @@ export function ShowerPreview({ call, target, connected, onClose }: ShowerPrevie
     void sendInput({ type: 'key', key: name, ...(modifiers.length ? { modifiers } : {}) });
   }
 
-  /** 文本走 input 事件；IME 组合中不发，组合结束后整段发出（协议 text <=1000 字符）。 */
-  function onTextInput(ev: FormEvent<HTMLInputElement>): void {
-    const native = ev.nativeEvent as InputEvent;
-    const value = ev.currentTarget.value;
-    if (native.isComposing) {
-      setText(value);
-      return;
-    }
-    setText('');
-    if (!inputEnabled || !value) return;
+  /**
+   * 文本输入：非受控远程键盘输入（DOM 持有 value，React 不写回，避免同一事件里两个 setState 互相覆盖）。
+   * 每次提交（普通 input 或 IME 组合结束）只读一次 value、立即清空、只发一次，不双发不丢字。
+   */
+  function commitText(el: HTMLInputElement): void {
+    const value = el.value;
+    el.value = '';
+    if (!value) return;
+    if (!inputEnabled) return;
     if (!canText) {
       setActionError('SHOWER_UNSUPPORTED: 目标平台不支持文本输入。');
       return;
@@ -527,6 +522,26 @@ export function ShowerPreview({ call, target, connected, onClose }: ShowerPrevie
       return;
     }
     void sendInput({ type: 'text', text: value });
+  }
+
+  /** 普通输入（含 CDP insertText / 粘贴）；IME 组合期间的 input 事件一律不发。 */
+  function onTextChange(ev: ChangeEvent<HTMLInputElement>): void {
+    if (composingRef.current) return;
+    commitText(ev.currentTarget);
+  }
+
+  function onTextCompositionStart(): void {
+    composingRef.current = true;
+  }
+
+  /**
+   * 组合结束：整段发一次并清空。若浏览器在 compositionend 之后又补一个末尾 input 事件，
+   * 该事件读到的是已清空的 value（空字符串直接返回），所以只发一次；反过来在 input 先于
+   * compositionend 的浏览器里，组合期间的 input 已被 composingRef 挡住，也不会重复。
+   */
+  function onTextCompositionEnd(ev: CompositionEvent<HTMLInputElement>): void {
+    composingRef.current = false;
+    commitText(ev.currentTarget);
   }
 
   const pollCode = codeOf(pollError);
@@ -671,10 +686,11 @@ export function ShowerPreview({ call, target, connected, onClose }: ShowerPrevie
         </label>
         <input
           id={textInputId}
+          ref={inputRef}
           className="shower-text"
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          onInput={onTextInput}
+          onChange={onTextChange}
+          onCompositionStart={onTextCompositionStart}
+          onCompositionEnd={onTextCompositionEnd}
           onKeyDown={onKeyDown}
           disabled={!inputEnabled}
           placeholder={inputEnabled ? '输入文本或按键…' : '接管成功后可用'}
