@@ -10,7 +10,7 @@ import { createAndroidTools } from './android-tools.js';
 import { createHostExecutionEnv } from './host-environment.js';
 import { openHost } from './host.js';
 import { acquireRuntimeOwner } from './runtime-owner.js';
-import { parseExecutionOptions, parseModelRef, describeModelCatalog, syncModelsFromRuntimeConfig, discoverProviderModels } from './runtime-models.js';
+import { parseExecutionOptions, parseModelRef, describeModelCatalog, syncModelsFromRuntimeConfig, discoverProviderModels, normalizeThinkingLevel } from './runtime-models.js';
 import { createGrepTool } from './grep-tool.js';
 import { createFindTool } from './find-tool.js';
 import { createLsTool } from './ls-tool.js';
@@ -97,6 +97,8 @@ function createBotAdmission() {
 export async function openRuntime(options) {
   // 执行选项先于任何写数据校验：bashPath/toolPaths 类型错误在打开 host 前拒绝。
   const execution = parseExecutionOptions(options);
+  // 思考档位同样在打开 host 前校验，非法值不留下已打开的 Host。
+  const thinkingLevel = normalizeThinkingLevel(options?.thinkingLevel) ?? null;
   // 可信原生桥接仅进程注入时接受：非函数直接拒绝，且绝不来自配置/HTTP/relay。
   const nativeBridge = options?.nativeBridge;
   if (nativeBridge !== undefined && typeof nativeBridge !== 'function') {
@@ -164,7 +166,8 @@ export async function openRuntime(options) {
     context: CTX,
     // 工作决策的 stop/resume/advance 在同一 Bot 队列内执行；scope lane 在前，Bot lane 在后。
     admitBot: bots.admit,
-    getProfile: (botId, workMeta) => botProfile(host, extensions, hindsightTools, botId, workMeta),
+    // 工作会话同样需要默认思考档位：新绑定由 ensureWorkBinding 写入。
+    getProfile: (botId, workMeta) => botProfile(host, extensions, hindsightTools, botId, workMeta, undefined, thinkingLevel),
   });
   // 始终创建禁用兼容控制器（config:null 不产生网络/存储/listener）；工具经 manager 注册。
   memory = createRuntimeHindsight({
@@ -300,7 +303,7 @@ export async function openRuntime(options) {
     harness,
     manager,
     context: CTX,
-    getProfile: (botId, workMeta) => botProfile(host, extensions, hindsightTools, botId, workMeta),
+    getProfile: (botId, workMeta) => botProfile(host, extensions, hindsightTools, botId, workMeta, undefined, thinkingLevel),
     // sync 提交成功后附着等待中的 work watch（事务外，观察失败不影响导入）。
     onBound: (botId, scopeId, binding) => live.bindWork(botId, scopeId, binding),
   });
@@ -309,6 +312,7 @@ export async function openRuntime(options) {
     harness,
     models,
     defaultModel,
+    thinkingLevel,
     releaseOwner,
     manager,
     cleanupEnvs,
@@ -335,7 +339,7 @@ export async function openRuntime(options) {
  * 每 Bot 人格/工具视图：实际 SOUL 文本 + manager 管理的完整工具集与本次要排除的工具。
  * managedTools 与 removeTools 分开传递，才能让重开/只读→读写时恢复原先被排除的工具。
  */
-function botProfile(host, extensions, hindsightTools, botId, workMeta, defaultModel) {
+function botProfile(host, extensions, hindsightTools, botId, workMeta, defaultModel, thinkingLevel) {
   const bot = host.getBot(botId);
   const modelRef = bot?.modelRef ?? defaultModel ?? null;
   let model;
@@ -348,7 +352,8 @@ function botProfile(host, extensions, hindsightTools, botId, workMeta, defaultMo
   const byName = new Map(hindsightTools.map((tool) => [tool.name, tool]));
   const removeTools = extensions.disabledToolNames(botId).map((name) => byName.get(name)).filter(Boolean);
   const instructions = workMeta ? workInstructions(soul, workMeta) : (soul === '' ? null : soul);
-  return { instructions, removeTools, managedTools: hindsightTools, ...(model ? { model } : {}) };
+  // thinkingLevel 总是给出：(null 表示 SDK 默认) 才能让 reload 后重应用人格时回写变更。
+  return { instructions, removeTools, managedTools: hindsightTools, thinkingLevel: thinkingLevel ?? null, ...(model ? { model } : {}) };
 }
 
 function parseBindingKey(key) {
@@ -360,8 +365,9 @@ function parseBindingKey(key) {
   }
 }
 
-function createRuntime({ host, harness, models, defaultModel: initialDefaultModel, releaseOwner, manager, cleanupEnvs, live, workContexts, decisions, memory, extensions, hindsightTools, botAdmissions, shower }) {
+function createRuntime({ host, harness, models, defaultModel: initialDefaultModel, thinkingLevel: initialThinkingLevel, releaseOwner, manager, cleanupEnvs, live, workContexts, decisions, memory, extensions, hindsightTools, botAdmissions, shower }) {
   let defaultModel = initialDefaultModel;
+  let defaultThinkingLevel = initialThinkingLevel ?? null;
   let closePromise = null;
   let closing = false;
   // 同一 Bot 的发送/设置/显式同步串行；内侧复用 raw 实现，避免自持同一 lane。
@@ -424,7 +430,7 @@ function createRuntime({ host, harness, models, defaultModel: initialDefaultMode
     return workContexts.runMessageOperation(operation);
   };
 
-  const profileFor = (botId, workMeta) => botProfile(host, extensions, hindsightTools, botId, workMeta, defaultModel);
+  const profileFor = (botId, workMeta) => botProfile(host, extensions, hindsightTools, botId, workMeta, defaultModel, defaultThinkingLevel);
 
   // 统一图形环境的 Runtime 门面：Actor 只来自可信主会话或工作绑定，绝不采信调用方会话。
   const showerRuntime = createRuntimeShower({
@@ -603,6 +609,7 @@ function createRuntime({ host, harness, models, defaultModel: initialDefaultMode
         conversation = await getPrimaryConversation(harness, bot, {
           create: true,
           defaultModel,
+          thinkingLevel: profile.thinkingLevel,
           instructions: profile.instructions,
           removeTools: profile.removeTools,
         }, CTX);
@@ -699,6 +706,8 @@ function createRuntime({ host, harness, models, defaultModel: initialDefaultMode
       if (rawRuntime && typeof models.clearProviders === 'function') {
         const normalized = syncModelsFromRuntimeConfig(models, rawRuntime);
         defaultModel = normalized.defaultModel ?? null;
+        // 生效档位随设置热更新：下一次 submit/sync 重应用人格时落到会话。
+        defaultThinkingLevel = normalized.thinkingLevel ?? null;
       }
     },
 

@@ -1,4 +1,4 @@
-import type { Models } from '@earendil-works/pi-ai';
+import type { Models, ModelCost, ModelInputLimits, ModelThinkingLevel, ThinkingLevelMap } from '@earendil-works/pi-ai';
 import type { EntryRecord } from '@earendil-works/pi-durable';
 import type { CompressionBlock, StatusReport } from 'acp-kernel';
 import type {
@@ -501,11 +501,22 @@ export interface ModelConfig {
   maxTokens?: number;
   /** Optional input modalities; omitted stays text-only, explicit arrays require text and may add image. */
   input?: ('text' | 'image')[];
+  /** Pi 计费费率；四档必填于 SDK，缺省补 0，可选按输入量分档。 */
+  cost?: ModelCost;
+  /** Pi 按 api 读取的兼容开关；只校验对象边界，原样交给 SDK。 */
+  compat?: Record<string, unknown>;
+  /** pi 思考档位到 provider 原生档位的映射；null 表示该档不受支持。 */
+  thinkingLevelMap?: ThinkingLevelMap;
+  /** 图像/请求输入上限与缓存安全预处理；原样交给 SDK 与原生工具。 */
+  inputLimits?: ModelInputLimits;
 }
 
 export interface ProviderConfig {
   id: string;
+  name?: string;
   baseUrl: string;
+  /** 该 provider 全部模型共用的 API；缺省 openai-completions，其他值显式拒绝。 */
+  api?: 'openai-completions' | 'openai-responses' | 'pi-messages' | 'anthropic-messages';
   apiKeyEnv?: string;
   models: ModelConfig[];
 }
@@ -513,6 +524,8 @@ export interface ProviderConfig {
 export interface RuntimeConfig {
   providers: ProviderConfig[];
   defaultModel?: string | null;
+  /** 默认思考档位；缺省/null 交给 SDK 默认值。 */
+  thinkingLevel?: ModelThinkingLevel | null;
   hindsight?: HindsightOptions;
   /** Canonical Host extension config; ambiguous with legacy hindsight, never both. */
   extensions?: RuntimeExtensionsConfig;
@@ -571,6 +584,8 @@ export interface OpenRuntimeOptions {
   dataRoot: string;
   models?: Models;
   defaultModel?: string | null;
+  /** 默认思考档位，与 runtime 配置同义；缺省/null 交给 SDK 默认值。 */
+  thinkingLevel?: ModelThinkingLevel | null;
   /** Optional explicit bash (Git Bash on Windows) executable; when omitted, HostEnv probes fixed Git install directories (Windows) or /bin/bash and /usr/bin/bash (Linux), never PATH. */
   bashPath?: string;
   /** Optional explicit search binaries for grep (rg) and find (fd); existence is checked at use. */
@@ -932,6 +947,7 @@ export function openHostService(options: HostServiceOptions): Promise<HostServic
 export interface ParsedRuntimeConfig {
   models: Models;
   defaultModel: string | null;
+  thinkingLevel?: ModelThinkingLevel;
   bashPath?: string;
   toolPaths?: { rg?: string; fd?: string };
   hindsight?: HindsightOptions;

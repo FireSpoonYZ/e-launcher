@@ -122,6 +122,7 @@ export async function openHostService(options) {
       port,
       models: runtimeConfig.models,
       defaultModel: runtimeConfig.defaultModel,
+      thinkingLevel: runtimeConfig.thinkingLevel,
       bashPath: runtimeConfig.bashPath,
       toolPaths: runtimeConfig.toolPaths,
       hindsight: runtimeConfig.hindsight,
