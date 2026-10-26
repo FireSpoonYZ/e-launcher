@@ -128,8 +128,11 @@ final class ShowerSurfaceBridge {
                     : ShowerToolBridge.integer(options, "width", metrics.widthPixels);
             int height = options == null ? metrics.heightPixels
                     : ShowerToolBridge.integer(options, "height", metrics.heightPixels);
-            return ensure(tools.surfaceController(ownerKey), sessionId, width, height,
+            JSONObject result = ensure(tools.surfaceController(ownerKey), sessionId, width, height,
                     metrics.densityDpi, cancelled);
+            // adopt 成功后该 surface 才由本 bridge 保活；status/frame 等只读路径不启动保活。
+            tools.startSurfaceKeepAlive();
+            return result;
         }
         ShowerController controller = existingController(tools, ownerKey);
         return switch (action) {

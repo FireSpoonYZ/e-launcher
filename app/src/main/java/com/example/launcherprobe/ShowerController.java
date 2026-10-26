@@ -241,6 +241,20 @@ final class ShowerController {
         surfaceSessionId = sessionId;
     }
 
+    /**
+     * 统一 surface 的空闲保活：只对已绑定 sessionId 且 binder 仍活的显示用现有 touchDisplay 延寿；
+     * 显示丢失时 clearDisplay（清 sessionId）后返回 false，绝不 ensureService、不重建。
+     */
+    synchronized boolean keepSurfaceAlive() {
+        if (surfaceSessionId == null) return false;
+        try {
+            activeService();
+            return surfaceSessionId != null;
+        } catch (Exception lost) {
+            return false;
+        }
+    }
+
     /** 统一 text 输入：插入光标处（不做 select-all 替换），经系统剪贴板粘贴。 */
     synchronized JSONObject surfaceText(String text) throws Exception {
         if (text == null || text.isEmpty() || text.length() > 1000) {
