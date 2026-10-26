@@ -12,6 +12,7 @@ import type {
 import { useDrafts } from './drafts';
 import type { DraftSnapshot } from './drafts';
 import { BotSettings } from './BotSettings';
+import { ShowerPreview } from './ShowerPreview';
 
 type AnyRawEntry = { id: unknown; kind: string; model?: unknown; data?: unknown };
 
@@ -314,6 +315,20 @@ function PrimaryChatPane({ api, bot, pageActive = true }: { api: DesktopViewApi;
   const [sendError, setSendError] = useState<string | null>(null);
   const [recOutcome, setRecOutcome] = useState<{ action: string; found: boolean; recordId: string | null; recordState: string | null } | null>(null);
   const lockedRef = useRef(false);
+  const [showerOpen, setShowerOpen] = useState(false);
+  /** 统一 Shower 面板的平台无关 RPC 适配：方法名/扁平参数由面板给出，身份仍取当前连接。 */
+  const callShower = useCallback(
+    (method: string, params: Record<string, unknown>): Promise<unknown> => {
+      const current = api.identity;
+      if (!current) return Promise.reject(new Error('NOT_CONNECTED: 没有活动连接身份'));
+      // 直接从 api 调用同一方法（保留 this 绑定）；方法名由面板限定为六个 Shower 控制方法。
+      const rawApi = api as unknown as {
+        call: (identity: DesktopIdentity, method: string, params: Record<string, unknown>) => Promise<unknown>;
+      };
+      return rawApi.call(current, method, params);
+    },
+    [api],
+  );
 
   const mountedRef = useRef(true);
   useEffect(() => {
@@ -633,6 +648,13 @@ function PrimaryChatPane({ api, bot, pageActive = true }: { api: DesktopViewApi;
         <div className="chat-header-actions">
           <button
             type="button"
+            className={`soul-studio-trigger ${showerOpen ? 'active' : ''}`}
+            onClick={() => setShowerOpen((v) => !v)}
+          >
+            {showerOpen ? '🖥 收起桌面环境' : '🖥 桌面环境'}
+          </button>
+          <button
+            type="button"
             className={`soul-studio-trigger ${soulStudioOpen ? 'active' : ''}`}
             onClick={() => setSoulStudioOpen((v) => !v)}
           >
@@ -660,6 +682,16 @@ function PrimaryChatPane({ api, bot, pageActive = true }: { api: DesktopViewApi;
         open={soulStudioOpen}
         onOpenChange={setSoulStudioOpen}
       />
+
+      {/* 页面不可见时等同断开：停止轮询与输入，避免后台轮询（面板只有 4 个契约 props）。 */}
+      {showerOpen ? (
+        <ShowerPreview
+          call={callShower}
+          target={{ botId: bot.botId }}
+          connected={api.transportConnected && pageActive}
+          onClose={() => setShowerOpen(false)}
+        />
+      ) : null}
 
       <div className="live-pane">
         {live ? (

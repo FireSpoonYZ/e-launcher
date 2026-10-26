@@ -1,0 +1,133 @@
+/* Shower 预览面板的小范围样式：复用 app.css 的变量与克制风格，不重做页面。 */
+.shower-preview {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 8px 16px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  max-height: 58vh;
+  overflow: auto;
+}
+
+.shower-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.shower-head-text { flex: 1; min-width: 0; }
+
+.shower-title { font-weight: 650; font-size: 15px; }
+
+.shower-sub {
+  font-size: 12px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.shower-close {
+  flex: none;
+  min-height: 28px;
+  padding: 3px 8px;
+  font-size: 12px;
+}
+
+.shower-status {
+  font-size: 12px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.shower-offline { color: var(--warn); }
+
+.shower-caps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.shower-unsupported { color: var(--danger); }
+
+.shower-guide {
+  font-size: 12px;
+  color: var(--warn);
+  overflow-wrap: anywhere;
+}
+
+.shower-notice {
+  font-size: 12px;
+  color: var(--ok);
+  overflow-wrap: anywhere;
+}
+
+.shower-surface {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg);
+  min-height: 120px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.shower-frame {
+  display: block;
+  width: 100%;
+  height: auto;
+  border-radius: 6px;
+  user-select: none;
+  touch-action: none;
+}
+
+.shower-frame.interactive { cursor: crosshair; }
+
+.shower-empty {
+  padding: 28px 12px;
+  font-size: 12px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.shower-meta {
+  font-size: 12px;
+  color: var(--muted);
+  font-family: var(--mono);
+  overflow-wrap: anywhere;
+}
+
+.shower-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.shower-controls button { min-height: 28px; padding: 3px 9px; font-size: 12px; }
+
+.shower-input { display: flex; flex-direction: column; gap: 4px; }
+
+.shower-input-label { font-size: 12px; color: var(--muted); }
+
+.shower-text { width: 100%; }
+
+.shower-footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.shower-release {
+  min-height: 28px;
+  padding: 3px 9px;
+  font-size: 12px;
+  color: var(--danger);
+  border-color: var(--danger);
+  background: var(--danger-soft);
+}
