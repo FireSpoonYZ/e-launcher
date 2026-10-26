@@ -413,7 +413,7 @@ export function ShowerPreview({ call, target, connected, onClose }: ShowerPrevie
       }
       setSession(s);
       setTakeoverSessionId(sid);
-      setNotice('已接管：当前 AI 回合已中止，输入只发到该环境。下一条消息/新回合会重新截图，无需交还。');
+      setNotice('已接管：输入发往该环境；新回合会重新截图，无需交还。');
     });
   }
 
@@ -538,9 +538,12 @@ export function ShowerPreview({ call, target, connected, onClose }: ShowerPrevie
       <header className="shower-head">
         <div className="shower-head-text">
           <div className="shower-title">桌面环境</div>
-          <div className="shower-sub">
-            {botId}
-            {scopeId ? ` · scope ${scopeId}` : ' · 主会话'}
+          <div
+            className="shower-sub"
+            title={`${botId}${scopeId ? ` · scope ${scopeId}` : ''}`}
+          >
+            {shortId(botId)}
+            {scopeId ? ` · scope ${shortId(scopeId)}` : ' · 主会话'}
           </div>
         </div>
         <button
@@ -553,15 +556,18 @@ export function ShowerPreview({ call, target, connected, onClose }: ShowerPrevie
         </button>
       </header>
 
-      <div className="shower-status" aria-live="polite">
+      <div
+        className="shower-status"
+        aria-live="polite"
+        title={session?.updatedAt ? `状态更新 ${formatTs(session.updatedAt)}` : undefined}
+      >
         {!connected ? (
           <span className="shower-offline">离线：已停止轮询，不显示实时画面。</span>
         ) : (
           <span>
             {phaseText(phase)}
-            {session ? ` · 平台 ${session.platform} · ${session.width}×${session.height}` : ''}
+            {session ? ` · ${session.platform} · ${session.width}×${session.height}` : ''}
             {sessionIdNow ? ` · 会话 ${shortId(sessionIdNow)}` : ' · 无环境'}
-            {session?.updatedAt ? ` · 更新 ${formatTs(session.updatedAt)}` : ''}
           </span>
         )}
       </div>
@@ -569,7 +575,7 @@ export function ShowerPreview({ call, target, connected, onClose }: ShowerPrevie
       {capabilities ? (
         <div className="shower-caps">
           <span>
-            能力：输入 {inputKinds.length ? inputKinds.join('/') : '无'} · 启动{' '}
+            输入 {inputKinds.length ? inputKinds.join('/') : '无'} · 启动{' '}
             {capabilities.launchKinds.length ? capabilities.launchKinds.join('/') : '无'} · 原生预览{' '}
             {capabilities.nativePreview ? '支持' : '不支持'}
           </span>
@@ -633,8 +639,8 @@ export function ShowerPreview({ call, target, connected, onClose }: ShowerPrevie
 
       {live && liveFrame ? (
         <div className="shower-meta">
-          实时（每 1 秒单飞轮询）· 帧 {formatTs(liveFrame.capturedAt)} · 编码{' '}
-          {liveFrame.imageWidth}×{liveFrame.imageHeight} → 源 {liveFrame.width}×{liveFrame.height}
+          实时 · 帧 {formatTs(liveFrame.capturedAt)} · {liveFrame.imageWidth}×{liveFrame.imageHeight} → 源{' '}
+          {liveFrame.width}×{liveFrame.height}
         </div>
       ) : null}
 
@@ -661,7 +667,7 @@ export function ShowerPreview({ call, target, connected, onClose }: ShowerPrevie
 
       <div className="shower-input">
         <label className="shower-input-label" htmlFor={textInputId}>
-          人工输入（发送后清空；Enter/Tab/方向键/Ctrl 组合走按键，其余走文本与 IME）
+          人工输入（提交即发送；特殊键/组合键走按键）
         </label>
         <input
           id={textInputId}
@@ -688,7 +694,7 @@ export function ShowerPreview({ call, target, connected, onClose }: ShowerPrevie
         >
           {busy === 'release' ? '结束中…' : '结束桌面环境（释放会话）'}
         </button>
-        <span className="hint">关闭预览只停轮询；释放环境用左侧按钮。</span>
+        <span className="hint">关闭预览不释放环境。</span>
       </div>
     </section>
   );

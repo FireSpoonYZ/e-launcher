@@ -13,13 +13,16 @@
   overflow: auto;
 }
 
+/* 子项按内容自然高度排列：任何子项不得被压缩（否则会被裁切的画幅反向溢出覆盖上下控件）。 */
+.shower-preview > * { flex: 0 0 auto; }
+
 .shower-head {
   display: flex;
   align-items: flex-start;
   gap: 8px;
 }
 
-.shower-head-text { flex: 1; min-width: 0; }
+.shower-head-text { flex: 1 1 auto; min-width: 0; }
 
 .shower-title { font-weight: 650; font-size: 15px; }
 
@@ -75,6 +78,9 @@
   display: flex;
   align-items: center;
   justify-content: center;
+  /* 占真实画面高度（不压缩），并保证图像绝不越出自身盒子覆盖上下控件。 */
+  flex: 0 0 auto;
+  overflow: hidden;
 }
 
 .shower-frame {
@@ -83,10 +89,11 @@
   height: auto;
   border-radius: 6px;
   user-select: none;
-  touch-action: none;
+  /* 未接管：允许在画面上纵向滑动面板；接管后由 .interactive 关掉手势给远程拖拽。 */
+  touch-action: pan-y;
 }
 
-.shower-frame.interactive { cursor: crosshair; }
+.shower-frame.interactive { cursor: crosshair; touch-action: none; }
 
 .shower-empty {
   padding: 28px 12px;
