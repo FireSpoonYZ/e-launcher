@@ -7,9 +7,9 @@ runtime, the control API or the shared preview component use. Existing
 `android_shower` keeps working as a compatibility path on the same Android
 controller/owner mapping.
 
-Nothing in this document is an acceptance result. All real-machine behaviour
-described here (window visibility, child session login, input injection, Xvnc
-frame content) still has to be executed and accepted by the parent.
+Architecture and the 2026-10-26 device acceptance results are recorded below.
+The parent performed builds and device verification; implementation workers did
+not run acceptance checks.
 
 ## One abstraction
 
@@ -48,7 +48,7 @@ no video streaming.
 | launch kinds | `app` | `process` | `process` |
 | input kinds | click, drag, scroll, key, text | click, drag, scroll, key, text | click, drag, scroll, key, text |
 | extra keys | `BACK`, `ANDROID_HOME` | – | – |
-| native preview | yes (in-app preview) | yes, via native preview modes | optional local noVNC only |
+| native preview capability | false (shared frame preview) | true, via native preview modes | false (shared frame preview) |
 | concurrent sessions | one per chat | one per machine | one per owning record |
 
 Key names are `ENTER TAB ESCAPE SPACE BACKSPACE DELETE LEFT RIGHT UP DOWN HOME END
@@ -159,8 +159,10 @@ The control connects to localhost with CredSSP, `AuthenticationLevel=0` and
 connecting, and the phase stays `authentication-required` while the native prompt
 waits, so a human login never blocks the RPC for 20 seconds. Native preview modes
 are `visible`, `minimized`, `offscreen` and `hidden`; the default after login is
-`hidden`, and an explicit preview request may show it. Whether the window is truly
-hidden must be checked on a real machine — that acceptance has not been run.
+`hidden`, and an explicit preview request may show it. Real-machine capture and
+input passed with the host visible, offscreen and hidden. Native minimization
+failed input/capture, so `minimized` is implemented as `hidden`, and the native
+window's minimize button is disabled.
 
 ### Bootstrap and cleanup
 
@@ -190,7 +192,7 @@ claim that silent login works.
 ## Linux provider
 
 The Linux backend (`shower-linux.js`) starts `Xvnc` on a private `DISPLAY` with its
-own `XAUTHORITY` under `dbus-run-session`. It never uses `x0vncserver` or any shadow
+own `XAUTHORITY` and a private `dbus-daemon` session bus. It never uses `x0vncserver` or any shadow
 of the physical desktop, and it only owns the PID/port it started.
 
 Required system programs, which must already be installed (the backend reports an
@@ -198,7 +200,7 @@ explicit dependency error and never installs packages):
 
 - `Xvnc` or `Xtigervnc`
 - a window manager: `xfwm4` or `openbox`
-- `xdotool` (input), `ffmpeg` (frame encoding), `xauth`, `dbus-run-session`
+- `xdotool` (input), `ffmpeg` (frame encoding), `xauth`, `dbus-daemon`
 
 Launch uses argument arrays, never shell strings. An optional noVNC view may only
 listen on localhost behind the existing authenticated route; no unauthenticated
@@ -225,15 +227,43 @@ existing `INVALID_ARGUMENT`/`CANCELLED`. Input keeps the existing not-sent /
 unconfirmed / responded outcome semantics and is never retried automatically; a
 session id from another session or Actor is rejected instead of acted on.
 
-## Still to be accepted on hardware
+## Android retention
 
-Not verified by this document and not to be reported as passing:
+The legacy server still reclaims an idle display after 300 seconds. A successful
+unified surface ensure starts one Host-owned native timer, which touches only
+already-bound, live surfaces every 60 seconds. It never starts Shizuku, reconnects
+or recreates a lost display. Release clears the binding; Host shutdown stops the
+timer and releases its controllers. Legacy-only displays keep their existing
+idle policy. This is independent of preview frame polling.
 
-- Windows build (generator compile, interop generation, host compile) and a real
-  child session login, window hidden-by-default behaviour, frame content and input
-  in the child desktop, guardian restore of the recorded state.
-- Linux Xvnc startup with the dependency set above, window manager, frame capture
-  and input, on a real non-WSL machine.
-- Shared preview component polling, takeover and abort over the v2 control methods
-  on each platform, and the Android legacy `android_shower` path after the unified
-  manager was introduced.
+## Device acceptance — 2026-10-26
+
+| Check | Observed result |
+| --- | --- |
+| Windows native build | Framework C# 5 / x64 and locally generated COM interop compiled successfully. |
+| Windows child session | Session 8, non-elevated executor, capture/click/text/Chinese input passed. |
+| Windows visibility | Visible, offscreen and hidden input/capture passed; sampled primary desktop cursor, foreground and focus stayed unchanged. Native minimization failed, hence the hidden-mode mapping. |
+| Windows release | Authenticated WSS release succeeded; native host, agent and guardian exited. Read-back: child sessions disabled, no child session, TermService stopped. |
+| Linux | Ubuntu 26.04 via SSH, private Xvnc :100 with private D-Bus, screenshot and confirmed GUI text input passed without a VNC viewer. |
+| Takeover cancellation | Windows and Linux in-flight drags returned CANCELLED; the same environment remained ready. |
+| WSS remote control | TLS relay + registered Windows/Linux device links + separate authenticated client. Remote frames/input passed, with application-side text evidence; Linux takeover and both releases passed. |
+| Android | Redmi 25102RKBEC / Android 17: virtual display, frame, click, Chinese text, takeover and shared preview passed. |
+| Android input UI | Device WebView CDP sent A, B and an IME commit; exactly three native text requests and actual Settings text AB中. Input field cleared after each submission. |
+| Android retention | With the app in the background and no preview requests, the same session remained ready for about 29 minutes. Explicit release removed the display; status returned idle. |
+| Builds | Android APK, Web build, desktop TypeScript, and Windows native build passed. |
+
+Evidence is outside the repository in the local temporary directory
+`desktop-shower-development-1793002760507/e2e`. Test Host/device-link/relay
+processes and tunnels are stopped after verification; test credentials are removed.
+
+### Next-stage coverage
+
+Deployment and real-model testing on Windows, Linux and both Android devices
+follow this baseline acceptance. Use `antigravity:gemini-3.8-flash-high:high` for
+that stage, including actual `shower.launch`, screenshot results consumed by the
+model, and takeover during an active model conversation. The baseline checks used
+the real control/native paths but not an active model conversation.
+
+Linux's physical seat was a GDM greeter, so simultaneous physical-user focus was
+not compared. Mobile UI checks used device automation, not physical finger input.
+Per-application compatibility work, Xpra and Wayland are outside this change.

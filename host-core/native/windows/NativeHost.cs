@@ -21,6 +21,47 @@ namespace ELauncher.Shower
         private const int ProcessQueryLimitedInformation = 0x1000;
         private const int TokenQuery = 0x0008;
 
+        [StructLayout(LayoutKind.Sequential)]
+        private struct InternetAccount
+        {
+            public int IsInternetIdentity;
+            public uint Flags;
+            public IntPtr Provider;
+            public IntPtr Principal;
+            public IntPtr Sid;
+        }
+
+        [DllImport("netapi32.dll", CharSet = CharSet.Unicode)]
+        private static extern int NetUserGetInfo(string server, string user, int level, out IntPtr buffer);
+
+        [DllImport("netapi32.dll")]
+        private static extern int NetApiBufferFree(IntPtr buffer);
+
+        internal static void CurrentAccountHint(out string user, out string domain)
+        {
+            user = Environment.UserName;
+            domain = Environment.UserDomainName;
+            IntPtr buffer;
+            if (NetUserGetInfo(null, user, 24, out buffer) != 0) return;
+            try
+            {
+                InternetAccount account = (InternetAccount)Marshal.PtrToStructure(buffer, typeof(InternetAccount));
+                if (account.IsInternetIdentity == 0 || account.Sid == IntPtr.Zero) return;
+                if (new SecurityIdentifier(account.Sid).Value != CurrentUserSid()) return;
+                string principal = Marshal.PtrToStringUni(account.Principal);
+                string provider = Marshal.PtrToStringUni(account.Provider);
+                if (!string.IsNullOrEmpty(principal) && !string.IsNullOrEmpty(provider))
+                {
+                    user = principal;
+                    domain = provider;
+                }
+            }
+            finally
+            {
+                NetApiBufferFree(buffer);
+            }
+        }
+
         [DllImport("wtsapi32.dll", SetLastError = true)]
         private static extern bool WTSGetChildSessionId(out uint sessionId);
 

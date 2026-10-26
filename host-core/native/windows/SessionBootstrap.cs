@@ -38,7 +38,9 @@ namespace ELauncher.Shower
 
             bool enabled;
             bool known = BootstrapNative.TryIsChildSessionsEnabled(out enabled);
-            if (known && enabled && BootstrapNative.TermServiceRunning())
+            BootstrapGuardian.EnableState remainingOwner = BootstrapGuardian.ReadState(dir);
+            bool currentOwner = remainingOwner == null || (remainingOwner.HostPid == hostPid && remainingOwner.HostStartTicks == hostStart);
+            if (known && enabled && BootstrapNative.TermServiceRunning() && currentOwner)
             {
                 // 系统状态无需改动，但仍要登记 owner 并派无需额外授权的 guardian：
                 // 否则宿主被强杀时会遗留已登录的 child。基线为 enabled/running，guardian 不会改全局设置。
@@ -346,6 +348,7 @@ namespace ELauncher.Shower
 
             BootstrapGuardian.EnableState state = BootstrapGuardian.ReadState(dir);
             bool adopted = state != null && state.HostPid == hostPid && state.HostStartTicks == hostStart;
+            if (state != null && !adopted) throw new Win32Exception(170, "上一宿主的清理尚未完成，不能覆盖恢复基线");
 
             bool beforeChildSessions;
             if (!BootstrapNative.TryIsChildSessionsEnabled(out beforeChildSessions))

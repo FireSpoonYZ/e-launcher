@@ -154,6 +154,7 @@ namespace ELauncher.Shower
         {
             EnableState existing = ReadState(dir);
             bool matches = existing != null && existing.HostPid == hostPid && existing.HostStartTicks == hostStartTicks;
+            if (existing != null && !matches) throw new Win32Exception(170, "上一宿主的清理尚未完成，保留其原始状态记录");
             EnableState record = matches ? existing : new EnableState();
             if (!matches)
             {
@@ -393,6 +394,11 @@ namespace ELauncher.Shower
                 {
                     return !process.HasExited;
                 }
+            }
+            catch (Win32Exception)
+            {
+                // 普通宿主可能无法查询提权 guardian，不能据此启动第二个恢复者。
+                return true;
             }
             catch (Exception)
             {

@@ -44,7 +44,6 @@ namespace ELauncher.Shower
         private const int UiStopTimeoutMs = 2000;
         private const int BootstrapTimeoutMs = 300000;
         private const int AgentConnectTimeoutMs = 60000;
-        private const int LoginTimeoutMs = 600000;
         private const int RelayTimeoutMs = 25000;
         private const int SessionCloseTimeoutMs = 5000;
 
@@ -200,6 +199,7 @@ namespace ELauncher.Shower
                 ui = new Form();
                 ui.Text = "e-launcher shower";
                 ui.FormBorderStyle = FormBorderStyle.SizableToolWindow;
+                ui.MinimizeBox = false;
                 ui.ShowInTaskbar = false;
                 ui.StartPosition = FormStartPosition.Manual;
                 ui.Location = new Point(PreviewOrigin, PreviewOrigin);
@@ -644,11 +644,8 @@ namespace ELauncher.Shower
                 }
                 ConnectRdp(width, height);
                 SetPhaseFor(expectedGeneration, "authentication-required", null, null);
-                if (!loginComplete.Wait(LoginTimeoutMs))
-                {
-                    // Bounded: the caller releases and creates again, which reopens the credential prompt.
-                    throw new HostFault(HostErrorCodes.BackendFailed, "the rdp logon did not finish within " + (LoginTimeoutMs / 1000).ToString(CultureInfo.InvariantCulture) + " seconds; release the session and create it again to sign in locally");
-                }
+                // 人工认证不占用 RPC；保持可取消等待，不能因用户暂时离开而拆掉登录窗口。
+                while (!loginComplete.Wait(500)) RequireCurrent(expectedGeneration);
                 RequireCurrent(expectedGeneration);
                 string fault;
                 lock (stateLock)
@@ -717,7 +714,7 @@ namespace ELauncher.Shower
             var limits = new Dictionary<string, object>();
             limits["maxWidth"] = AgentCaptureLimits.MinDimension;
             limits["maxHeight"] = AgentCaptureLimits.MinDimension;
-            limits["maxBytes"] = AgentCaptureLimits.MinLimitBytes;
+            limits["maxBytes"] = AgentCaptureLimits.DefaultMaxBytes;
             var parameters = new Dictionary<string, object>();
             parameters["sessionId"] = child;
             parameters["limits"] = limits;
@@ -830,6 +827,11 @@ namespace ELauncher.Shower
                 events.OnLoginComplete += delegate { HandleLoginComplete(); };
                 events.OnDisconnected += delegate(int reason) { HandleDisconnected(reason); };
                 events.OnFatalError += delegate(int code) { HandleFatal(code); };
+                string accountUser;
+                string accountDomain;
+                HostNative.CurrentAccountHint(out accountUser, out accountDomain);
+                rdp.UserName = accountUser;
+                rdp.Domain = accountDomain;
                 rdp.Server = "localhost";
                 rdp.DesktopWidth = width > 0 ? width : DefaultDesktopWidth;
                 rdp.DesktopHeight = height > 0 ? height : DefaultDesktopHeight;
@@ -928,9 +930,9 @@ namespace ELauncher.Shower
                             ui.Activate();
                             break;
                         case "minimized":
+                            // RDP 原生最小化会暂停输入；缩起预览统一隐藏宿主并保持连接。
+                            ui.Visible = false;
                             ui.ShowInTaskbar = false;
-                            ui.Visible = true;
-                            ui.WindowState = FormWindowState.Minimized;
                             break;
                         case "offscreen":
                             ui.ShowInTaskbar = false;
@@ -1157,7 +1159,7 @@ namespace ELauncher.Shower
             ApplyPreview(mode);
             var result = new Dictionary<string, object>();
             result["sessionId"] = requested;
-            result["preview"] = mode;
+            result["preview"] = mode == "minimized" ? "hidden" : mode;
             return result;
         }
 
