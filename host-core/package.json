@@ -6,6 +6,9 @@
   "engines": {
     "node": ">=22.19.0"
   },
+  "scripts": {
+    "build:shower-windows": "node build-shower-windows.js"
+  },
   "exports": {
     ".": {
       "types": "./index.d.ts",
