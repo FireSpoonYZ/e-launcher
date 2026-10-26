@@ -7,6 +7,7 @@
 import path from 'node:path';
 import { messageError, assertId } from './message-protocol.js';
 import { CONTROL_ERROR_CODES, CONTROL_OUTCOMES } from './remote-control-protocol.js';
+import { SHOWER_ERROR_CODES } from './shower-protocol.js';
 import { normalizeHostSettings } from './host-settings.js';
 
 export const BRIDGE_PROTOCOL_VERSION = 1;
@@ -57,6 +58,18 @@ export const ANDROID_NATIVE_CODES = new Set([
   'ANDROID_NATIVE_BUSY',
   'ANDROID_NATIVE_UNCONFIRMED',
   'ANDROID_NATIVE_ERROR',
+]);
+
+// Inbound native_result may additionally carry the shared shower protocol code of
+// a classified shower_surface failure (or the shared CANCELLED/INVALID_ARGUMENT),
+// so the Android backend keeps SHOWER_UNSUPPORTED/SHOWER_SESSION_MISMATCH instead
+// of collapsing every native failure onto a transport error. Outbound bridge
+// error frames are unchanged (BRIDGE_ERROR_CODES does not use this set).
+const NATIVE_RESULT_ERROR_CODES = new Set([
+  ...ANDROID_NATIVE_CODES,
+  ...SHOWER_ERROR_CODES,
+  'CANCELLED',
+  'INVALID_ARGUMENT',
 ]);
 
 // Private bridge legacy migration codes: the public remote control table must
@@ -479,7 +492,7 @@ export function normalizeNativeResultFrame(parsed) {
   }
   if (!isPlainObject(parsed.error)) throw invalid('BAD_FRAME', 'native_result error must be an object');
   rejectUnknownFields(parsed.error, new Set(['code', 'message']), 'native_result error');
-  if (typeof parsed.error.code !== 'string' || !ANDROID_NATIVE_CODES.has(parsed.error.code)) {
+  if (typeof parsed.error.code !== 'string' || !NATIVE_RESULT_ERROR_CODES.has(parsed.error.code)) {
     throw invalid('BAD_FRAME', 'native_result error code must be an allowed android native error code');
   }
   if (parsed.error.message !== undefined && (typeof parsed.error.message !== 'string' || !parsed.error.message.isWellFormed())) {
@@ -496,23 +509,80 @@ export function normalizeNativeResultFrame(parsed) {
   };
 }
 
-const NATIVE_TOOLS = new Set(['android_apps', 'android_shower', 'android_speak', 'schedule_task']);
+const NATIVE_TOOLS = new Set(['android_apps', 'android_shower', 'android_speak', 'schedule_task', 'shower_surface']);
 const NATIVE_KINDS = new Set(['primary', 'room', 'dm']);
+// Unified Shower private entry: only the six environment actions cross this IPC.
+// Arguments are assembled by the trusted Android backend, never by model output.
+const SHOWER_SURFACE_ACTIONS = new Map([
+  ['status', null],
+  ['ensure', 'options'],
+  ['frame', 'limits'],
+  ['input', 'input'],
+  ['launch', 'target'],
+  ['release', null],
+]);
+const SHOWER_SURFACE_SOURCES = new Set(['agent', 'human']);
+// Human operations have no durable numeric task; the manager still must pass a
+// nonempty synthetic id so the native side can tell human calls apart.
+const HUMAN_TASK_ID_RE = /^human:[0-9a-fA-F-]{8,64}$/;
+
+function normalizeShowerSurfaceArguments(value) {
+  const action = value.action;
+  if (typeof action !== 'string' || !SHOWER_SURFACE_ACTIONS.has(action)) {
+    throw invalid('INVALID_ARGUMENT', 'shower_surface action must be status, ensure, frame, input, launch or release');
+  }
+  if (!SHOWER_SURFACE_SOURCES.has(value.source)) {
+    throw invalid('INVALID_ARGUMENT', "shower_surface source must be 'agent' or 'human'");
+  }
+  const payload = SHOWER_SURFACE_ACTIONS.get(action);
+  const allowed = new Set(['action', 'sessionId', 'source']);
+  if (payload) allowed.add(payload);
+  rejectUnknownFields(value, allowed, 'shower_surface arguments');
+  if (action === 'status') {
+    // status may describe an environment that does not exist yet.
+    if (value.sessionId !== undefined && value.sessionId !== null) {
+      assertId(value.sessionId, 'sessionId');
+    }
+  } else {
+    assertId(value.sessionId, 'sessionId');
+  }
+  if (payload && !isPlainObject(value[payload])) {
+    throw invalid('INVALID_ARGUMENT', `shower_surface ${action} requires a ${payload} object`);
+  }
+  return value;
+}
+
+function normalizeNativeTaskId(value, tool) {
+  if (tool === 'shower_surface' && typeof value === 'string') {
+    if (!HUMAN_TASK_ID_RE.test(value)) {
+      throw invalid('INVALID_ARGUMENT', "shower_surface human taskId must be 'human:<id>'");
+    }
+    return value;
+  }
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw invalid('INVALID_ARGUMENT', 'taskId must be a positive safe integer');
+  }
+  return value;
+}
 
 /**
  * Normalize the trusted native tool request (core factory contract) into the
  * native_call context. Caller metadata only, no arbitrary fields. taskId is
- * a Durable numeric Id<'task'>; kind is primary|room|dm with scope relation
- * (primary has no scope, work kinds require one). Only the four real native
- * tools are allowed.
+ * a Durable numeric Id<'task'>; only the private shower_surface entry may carry
+ * the manager's synthetic 'human:<id>' task instead. kind is primary|room|dm
+ * with scope relation (primary has no scope, work kinds require one). Only the
+ * five private native tools are allowed.
  */
 export function normalizeNativeRequest(request) {
   if (!isPlainObject(request)) throw invalid('INVALID_ARGUMENT', 'native request must be an object');
   if (typeof request.tool !== 'string' || !NATIVE_TOOLS.has(request.tool)) {
-    throw invalid('INVALID_ARGUMENT', 'native tool must be one of android_apps, android_shower, android_speak, schedule_task');
+    throw invalid('INVALID_ARGUMENT', 'native tool must be one of android_apps, android_shower, android_speak, schedule_task, shower_surface');
   }
-  const args = request.arguments === undefined ? {} : request.arguments;
-  if (!isPlainObject(args)) throw invalid('INVALID_ARGUMENT', 'native request arguments must be an object');
+  const rawArguments = request.arguments === undefined ? {} : request.arguments;
+  if (!isPlainObject(rawArguments)) throw invalid('INVALID_ARGUMENT', 'native request arguments must be an object');
+  const args = request.tool === 'shower_surface'
+    ? normalizeShowerSurfaceArguments(rawArguments)
+    : rawArguments;
   const actor = request.actor;
   if (!isPlainObject(actor)) throw invalid('INVALID_ARGUMENT', 'native request actor must be an object');
   rejectUnknownFields(actor, new Set(['deviceId', 'botId', 'conversationId', 'scopeId', 'kind']), 'native actor');
@@ -532,9 +602,7 @@ export function normalizeNativeRequest(request) {
   } else {
     assertId(actor.scopeId, 'actor.scopeId');
   }
-  if (!Number.isSafeInteger(request.taskId) || request.taskId <= 0) {
-    throw invalid('INVALID_ARGUMENT', 'taskId must be a positive safe integer');
-  }
+  const taskId = normalizeNativeTaskId(request.taskId, request.tool);
   return {
     context: {
       deviceId: actor.deviceId,
@@ -542,7 +610,7 @@ export function normalizeNativeRequest(request) {
       conversationId: actor.conversationId,
       scopeId: actor.scopeId === undefined ? null : actor.scopeId,
       kind: actor.kind,
-      taskId: request.taskId,
+      taskId,
     },
     tool: request.tool,
     arguments: args,

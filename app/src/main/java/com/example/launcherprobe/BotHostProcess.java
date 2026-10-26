@@ -728,7 +728,7 @@ final class BotHostProcess {
     }
 
     private static final List<String> NATIVE_TOOLS =
-            Arrays.asList("android_apps", "android_shower", "android_speak", "schedule_task");
+            Arrays.asList("android_apps", "android_shower", "android_speak", "schedule_task", "shower_surface");
 
     private boolean validNativeCall(JSONObject message) {
         if (message.optString("id").isEmpty()) return false;
@@ -749,7 +749,12 @@ final class BotHostProcess {
             return false;
         }
         // JS 安全整数上限 9007199254740991，精确校验且不得带小数（不得强转 int）。
+        // 唯一例外：shower_surface 的人工调用带 manager 合成的 'human:'+UUID（不是模型参数），
+        // 规则与 android-bridge-protocol.js / BotHostNativeTools 完全一致。
         Object taskId = context.opt("taskId");
+        if ("shower_surface".equals(tool) && taskId instanceof String) {
+            return BotHostNativeTools.isHumanTaskId(taskId);
+        }
         if (!(taskId instanceof Number)) return false;
         double value = ((Number) taskId).doubleValue();
         return value > 0 && value <= 9007199254740991L && value == Math.floor(value);

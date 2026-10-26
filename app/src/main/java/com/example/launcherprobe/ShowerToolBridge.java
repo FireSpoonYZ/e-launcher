@@ -187,13 +187,48 @@ final class ShowerToolBridge {
         return conversationId == null ? null : controllers.get(conversationId);
     }
 
+    /**
+     * 统一 shower 入口：按可信 ownerKey 取/建常驻控制器。与旧 android_shower 共用同一
+     * controller map，但不在取消时释放——环境跨 abort/新回合存活，只有显式 release 或宿主关闭才回收。
+     */
+    ShowerController surfaceController(String ownerKey) {
+        if (ownerKey == null || ownerKey.isEmpty()) throw new IllegalArgumentException("Shower 操作缺少归属键");
+        if (bridgeClosed.get()) throw new IllegalStateException("Shower 工具桥已关闭");
+        ShowerManager manager = ensureManager();
+        if (bridgeClosed.get()) {
+            releaseOwned();
+            throw new IllegalStateException("Shower 工具桥已关闭");
+        }
+        ShowerController existing = controllers.get(ownerKey);
+        if (existing != null) return existing;
+        ShowerController created = new ShowerController(context, manager);
+        ShowerController raced = controllers.putIfAbsent(ownerKey, created);
+        ShowerController controller = raced != null ? raced : created;
+        if (bridgeClosed.get() || controllers.get(ownerKey) != controller) {
+            if (raced == null && controllers.remove(ownerKey, created)) releaseQuietly(created);
+            throw new IllegalStateException("Shower 工具桥已关闭");
+        }
+        return controller;
+    }
+
+    /** 只读查找：status 不得因查询而创建虚拟屏。 */
+    ShowerController existingSurfaceController(String ownerKey) {
+        return ownerKey == null ? null : controllers.get(ownerKey);
+    }
+
+    /** 主屏真实像素作为虚拟屏默认尺寸（旧 create 与统一 ensure 共用）。 */
     @SuppressWarnings("deprecation") // Real metrics are the default display's full, current logical size.
-    private JSONObject create(ShowerController controller, JSONObject arguments) throws Exception {
+    android.util.DisplayMetrics realMetrics() {
         DisplayManager displays = context.getSystemService(DisplayManager.class);
         Display display = displays == null ? null : displays.getDisplay(Display.DEFAULT_DISPLAY);
         if (display == null) throw new IllegalStateException("无法读取系统主屏参数");
         DisplayMetrics metrics = new DisplayMetrics();
         display.getRealMetrics(metrics);
+        return metrics;
+    }
+
+    private JSONObject create(ShowerController controller, JSONObject arguments) throws Exception {
+        DisplayMetrics metrics = realMetrics();
         return controller.create(integer(arguments, "width", metrics.widthPixels),
                 integer(arguments, "height", metrics.heightPixels),
                 integer(arguments, "dpi", metrics.densityDpi),
@@ -242,7 +277,8 @@ final class ShowerToolBridge {
         return integer(arguments, name, 0);
     }
 
-    private static int integer(JSONObject arguments, String name, int fallback) {
+    /** shower_surface 也用同一严格整数解析。 */
+    static int integer(JSONObject arguments, String name, int fallback) {
         if (!arguments.has(name)) return fallback;
         Object value = arguments.opt(name);
         if (!(value instanceof Number number)) throw new IllegalArgumentException(name + " 必须是整数");
