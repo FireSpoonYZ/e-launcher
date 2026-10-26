@@ -51,7 +51,8 @@ import {
 import { onMobileStreamFailure } from './native/tauri-host';
 import type { DesktopIdentity, DesktopPanelApi } from '../../desktop/web/src/types';
 import type { DesktopConnectionInput, DesktopUiProfile } from '../../host-core/desktop-client.js';
-import type { DevicesDirectoryItem } from '../../host-core/index.js';
+import type { DevicesDirectoryItem, ShowerTarget } from '../../host-core/index.js';
+import { ShowerPreview, type ShowerCall } from './ShowerPreview';
 import { Markdown } from './Markdown';
 import {
   GROK_AVATAR_PRESETS,
@@ -2662,6 +2663,44 @@ export function HostPage({
   const anyDrawerOpen = leftDrawerOpen || rightDrawerOpen;
   const primaryPreset = resolveBotAvatarPreset(primaryBot.key, primaryBot.role, true);
 
+  // 工作环境预览：本机与远程 Bot 共用同一右侧面板与同一共享组件，只换 call 桥。
+  // target 是当前已选真实 Bot 的主会话（无 scopeId）；合成主助手 __jarvis__ 没有环境。
+  const showerBotId = activeBot && activeBot.botId !== '__jarvis__' ? activeBot.botId : null;
+  const showerHostKind = activeBot?.hostKind;
+  const showerIdentity = activeBot?.remoteIdentity;
+  const showerTarget = useMemo<ShowerTarget | null>(
+    () => (showerBotId ? { botId: showerBotId } : null),
+    [showerBotId],
+  );
+  // 远程 Bot 必须与当前连接档案/设备/代一致，否则不把旧设备的帧当当前画面。
+  const showerRemoteReady = Boolean(
+    showerHostKind === 'remote' &&
+      remoteConnected &&
+      showerIdentity &&
+      remoteIdentity &&
+      showerIdentity.profileId === remoteIdentity.profileId &&
+      showerIdentity.targetDeviceId === remoteIdentity.targetDeviceId &&
+      showerIdentity.generation === remoteIdentity.generation,
+  );
+  // 复用既有 remote 面板 call（与 Host 其它调用同源），绝不发给本机 BotHost；
+  // 本机 Bot 不传 call，由 adapter 默认走 BotHost.call。
+  const showerCall = useMemo<ShowerCall | undefined>(() => {
+    if (showerHostKind !== 'remote' || !showerRemoteReady || !showerIdentity) return undefined;
+    const api = remoteClientRef.current?.api;
+    if (!api) return undefined;
+    const call = api.call.bind(api) as (
+      identity: DesktopIdentity,
+      method: string,
+      params: Record<string, unknown>,
+    ) => Promise<unknown>;
+    return (method, params) => call(showerIdentity, method, params);
+  }, [showerHostKind, showerRemoteReady, showerIdentity]);
+  const showerConnected =
+    showerHostKind === 'local' ? localHost?.phase === 'running' : showerRemoteReady;
+  // 换主机/档案/设备/代/Bot 就换 key：旧画面与旧会话随卸载丢弃，不跨设备复用帧。
+  const showerPreviewKey = `${showerHostKind ?? '-'}:${showerIdentity?.profileId ?? '-'}:${showerIdentity?.generation ?? '-'}:${showerIdentity?.targetDeviceId ?? '-'}:${showerBotId ?? '-'}`;
+  const closeShowerPreview = useCallback(() => setRightDrawerOpen(false), []);
+
   return (
     <div
       className={`bot-hub-shell${leftDrawerOpen ? ' drawer-left-active' : ''}${rightDrawerOpen ? ' drawer-right-active' : ''}`}
@@ -2876,7 +2915,7 @@ export function HostPage({
                     }}
                   >
                     <PanelRight size={19} />
-                    <span>{t('右侧控制面板', 'Screen Control Panel')}</span>
+                    <span>{t('工作环境预览', 'Work environment preview')}</span>
                   </button>
                   <button
                     type="button"
@@ -5036,10 +5075,24 @@ export function HostPage({
               <X size={20} />
             </button>
           </header>
-          <div className="hub-right-drawer-empty">
-            <Monitor size={30} />
-            <p>{t('Remote / Local 屏幕控制与实时画面预留面板', 'Reserved for Remote / Local Screen Control')}</p>
-          </div>
+          {showerTarget && (showerHostKind === 'local' || showerCall) ? (
+            rightDrawerOpen && (
+              <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+                <ShowerPreview
+                  key={showerPreviewKey}
+                  call={showerCall}
+                  target={showerTarget}
+                  connected={showerConnected}
+                  onClose={closeShowerPreview}
+                />
+              </div>
+            )
+          ) : (
+            <div className="hub-right-drawer-empty">
+              <Monitor size={30} />
+              <p>{t('该 Bot 还没有可预览的工作环境', 'No work environment for this Bot yet')}</p>
+            </div>
+          )}
         </aside>
       </div>
     </div>
