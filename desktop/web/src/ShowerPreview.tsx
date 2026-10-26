@@ -179,6 +179,8 @@ export function ShowerPreview({ call, target, connected, onClose }: ShowerPrevie
   const [busy, setBusy] = useState<null | 'create' | 'frame' | 'takeover' | 'release'>(null);
   /** 已完成的接管所属会话；会话被替换后自动失效，无需“交还”按钮。 */
   const [takeoverSessionId, setTakeoverSessionId] = useState<string | null>(null);
+  /** 本地页面可见性：Capacitor 本机 Host 页面隐藏/息屏时 connected 仍为 true，必须单独跟踪。 */
+  const [visible, setVisible] = useState(() => document.visibilityState !== 'hidden');
   const textInputId = useId();
 
   const epochRef = useRef(0);
@@ -202,10 +204,10 @@ export function ShowerPreview({ call, target, connected, onClose }: ShowerPrevie
   const canText = inputKinds.includes('text');
   const supportedKeys = capabilities?.keys ?? [];
   const inputEnabled =
-    connected && phase === 'ready' && sessionIdNow !== null && takeoverSessionId === sessionIdNow;
+    connected && visible && phase === 'ready' && sessionIdNow !== null && takeoverSessionId === sessionIdNow;
   // 严格会话归属：旧会话/旧目标的帧不渲染。
   const liveFrame = frame && session && frame.sessionId === session.sessionId ? frame : null;
-  const live = connected && phase === 'ready' && !!liveFrame;
+  const live = connected && visible && phase === 'ready' && !!liveFrame;
   const unsupported = [
     !canClick ? 'click' : '',
     !canDrag ? 'drag' : '',
@@ -216,13 +218,15 @@ export function ShowerPreview({ call, target, connected, onClose }: ShowerPrevie
 
   const inputHint = !connected
     ? '离线：预览与输入已停止（不把旧帧当实时画面）。'
-    : !sessionIdNow
-      ? '还没有桌面环境，请先创建。'
-      : phase !== 'ready'
-        ? `环境未就绪（${phaseText(phase)}），输入不可用。`
-        : takeoverSessionId !== sessionIdNow
-          ? '需先点“接管控制”，RPC 返回后才开放输入。'
-          : null;
+    : !visible
+      ? '页面不可见：预览与输入已暂停，返回后自动刷新。'
+      : !sessionIdNow
+        ? '还没有桌面环境，请先创建。'
+        : phase !== 'ready'
+          ? `环境未就绪（${phaseText(phase)}），输入不可用。`
+          : takeoverSessionId !== sessionIdNow
+            ? '需先点“接管控制”，RPC 返回后才开放输入。'
+            : null;
 
   function beginBusy(kind: NonNullable<typeof busy>): boolean {
     if (busyRef.current) return false;
@@ -260,7 +264,16 @@ export function ShowerPreview({ call, target, connected, onClose }: ShowerPrevie
   const canScrollRef = useRef(false);
   canScrollRef.current = canScroll;
 
-  // 轮询：可见期间每 1000ms 单飞一次（status，ready 再取 frame）；目标/连接变化即作废旧请求。
+  // 本机页面可见性：document 隐藏（切后台/息屏）时 transport 仍 connected，
+  // 所以只听 visibilitychange 并只用于停轮询/禁输入；不重放输入、不释放环境、不新增 props。
+  useEffect(() => {
+    const onVisibilityChange = (): void => setVisible(document.visibilityState !== 'hidden');
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    onVisibilityChange();
+    return () => document.removeEventListener('visibilitychange', onVisibilityChange);
+  }, []);
+
+  // 轮询：可见期间每 1000ms 单飞一次（status，ready 再取 frame）；目标/连接/可见性变化即作废旧请求。
   useEffect(() => {
     const epoch = ++epochRef.current;
     actionSeqRef.current += 1;
@@ -272,10 +285,11 @@ export function ShowerPreview({ call, target, connected, onClose }: ShowerPrevie
     setActionError(null);
     setNotice(null);
     setTakeoverSessionId(null);
-    // 目标/连接变化：丢弃输入框里未提交的残留与进行中的组合。
+    // 目标/连接/可见性变化：丢弃输入框里未提交的残留与进行中的组合。
     composingRef.current = false;
     if (inputRef.current) inputRef.current.value = '';
-    if (!connected) return;
+    // 隐藏时既不起 interval 也不读状态；重新可见时本 effect 重跑并从 tick() 立即刷新。
+    if (!connected || !visible) return;
     let stopped = false;
     let inflight = false;
     const tick = async (): Promise<void> => {
@@ -310,7 +324,7 @@ export function ShowerPreview({ call, target, connected, onClose }: ShowerPrevie
       stopped = true;
       window.clearInterval(timer);
     };
-  }, [call, base, connected]);
+  }, [call, base, connected, visible]);
 
   // 滚轮：原生非被动监听，把三种 deltaMode 折成整数轮格；小增量累积后再发。
   useEffect(() => {
