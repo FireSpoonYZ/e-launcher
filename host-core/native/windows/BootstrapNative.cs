@@ -234,6 +234,7 @@ namespace ELauncher.Shower
         private const int WtsDomainNameClass = 7;
         private const int WtsConnectStateClass = 8;
         private const int WtsActiveState = 0;
+        private const int WtsDisconnectedState = 4;
         private const int StartfUseShowWindow = 0x1;
         private const int ErrorNotAllAssigned = 1300;
 
@@ -348,6 +349,9 @@ namespace ELauncher.Shower
 
         [DllImport("wtsapi32.dll", SetLastError = true)]
         private static extern bool WTSGetChildSessionId(out uint sessionId);
+
+        [DllImport("wtsapi32.dll", SetLastError = true)]
+        private static extern bool WTSLogoffSession(IntPtr server, uint sessionId, bool wait);
 
         [DllImport("wtsapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
         private static extern bool WTSQuerySessionInformation(IntPtr server, uint sessionId, int infoClass, out IntPtr buffer, out uint bytesReturned);
@@ -624,6 +628,70 @@ namespace ELauncher.Shower
             {
                 throw new InvalidOperationException("目标会话 " + expectedChildSessionId.ToString(CultureInfo.InvariantCulture)
                     + " 不是本会话的子会话(实际=" + actual.ToString(CultureInfo.InvariantCulture) + ")");
+            }
+        }
+
+        internal static bool TryGetChildSessionId(out uint sessionId)
+        {
+            uint value;
+            bool ok = WTSGetChildSessionId(out value);
+            sessionId = value;
+            return ok;
+        }
+
+        /// <summary>会话处于登录态（Active/Disconnected 且已登录用户），用于注销前后的核验。</summary>
+        internal static bool SessionLoggedOn(uint sessionId)
+        {
+            IntPtr buffer;
+            uint bytes;
+            if (!WTSQuerySessionInformation(IntPtr.Zero, sessionId, WtsConnectStateClass, out buffer, out bytes))
+            {
+                return false;
+            }
+            int state;
+            try
+            {
+                state = Marshal.ReadInt32(buffer);
+            }
+            finally
+            {
+                WTSFreeMemory(buffer);
+            }
+            if (state != WtsActiveState && state != WtsDisconnectedState)
+            {
+                return false;
+            }
+            return !string.IsNullOrEmpty(SessionUserName(sessionId));
+        }
+
+        /// <summary>
+        /// 不依赖 WTSQueryUserToken（需要 SYSTEM）拿会话用户 SID：会话用户名 + NTAccount 翻译。
+        /// </summary>
+        internal static bool TrySessionUserSid(uint sessionId, out string sid)
+        {
+            sid = null;
+            string account = SessionUserName(sessionId);
+            if (string.IsNullOrEmpty(account))
+            {
+                return false;
+            }
+            try
+            {
+                SecurityIdentifier identifier = (SecurityIdentifier)new NTAccount(account).Translate(typeof(SecurityIdentifier));
+                sid = identifier.Value;
+                return true;
+            }
+            catch (Exception)
+            {
+                return false;
+            }
+        }
+
+        internal static void LogoffSession(uint sessionId)
+        {
+            if (!WTSLogoffSession(IntPtr.Zero, sessionId, true))
+            {
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "WTSLogoffSession 失败(session=" + sessionId.ToString(CultureInfo.InvariantCulture) + ")");
             }
         }
 

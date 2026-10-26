@@ -29,19 +29,24 @@ namespace ELauncher.Shower
         {
             string dir = BootstrapFile.NormalizeDir(stateDir, true);
             BootstrapNative.EnsureStateDirAcl(dir, null);
-
-            bool enabled;
-            bool known = BootstrapNative.TryIsChildSessionsEnabled(out enabled);
-            if (known && enabled && BootstrapNative.TermServiceRunning())
-            {
-                BootstrapLog.Write(dir, "子会话与 TermService 已就绪，不修改系统状态");
-                return;
-            }
+            BootstrapGuardian.RestoreAbandoned(dir);
 
             Process host = Process.GetCurrentProcess();
             int hostPid = host.Id;
             long hostStart = HostStartTicks(host);
             string hostSid = BootstrapNative.CurrentUserSid();
+
+            bool enabled;
+            bool known = BootstrapNative.TryIsChildSessionsEnabled(out enabled);
+            if (known && enabled && BootstrapNative.TermServiceRunning())
+            {
+                // 系统状态无需改动，但仍要登记 owner 并派无需额外授权的 guardian：
+                // 否则宿主被强杀时会遗留已登录的 child。基线为 enabled/running，guardian 不会改全局设置。
+                BootstrapGuardian.EnableState owner = BootstrapGuardian.EnsureOwnerRecord(dir, hostPid, hostStart, host.SessionId, true, true);
+                BootstrapGuardian.EnsureGuardian(dir, owner);
+                BootstrapLog.Write(dir, "子会话与 TermService 已就绪，只登记 owner 与 guardian");
+                return;
+            }
 
             if (BootstrapGuardian.IsReadyForHost(dir, hostPid, hostStart))
             {
@@ -107,6 +112,9 @@ namespace ELauncher.Shower
             string exe = NormalizeAgentExe(exePath);
             string userSid = BootstrapNative.CurrentUserSid();
             long hostStart = HostStartTicks(host);
+
+            // 先绑定归属：即使后续启动失败或宿主被强杀，guardian 也能只注销这一条 child。
+            BootstrapGuardian.BindOwnedChild(dir, host.Id, hostStart, parentSessionId, childSessionId, userSid);
 
             string nonce = Guid.NewGuid().ToString("N");
             string requestPath = Path.Combine(dir, BootstrapFile.LaunchPrefix + nonce + BootstrapFile.RequestSuffix);
@@ -379,6 +387,7 @@ namespace ELauncher.Shower
                 BootstrapGuardian.EnableState record = new BootstrapGuardian.EnableState();
                 record.HostPid = hostPid;
                 record.HostStartTicks = hostStart;
+                record.ParentSessionId = Process.GetCurrentProcess().SessionId;
                 record.ChildSessionsBefore = beforeChildSessions;
                 record.TermServiceBeforeRunning = beforeTermService;
                 record.Applied = true;
