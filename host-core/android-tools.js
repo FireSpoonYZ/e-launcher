@@ -190,12 +190,12 @@ export function createAndroidTools({ host, getHarness, nativeBridge }) {
     }),
     defineTool({
       name: 'android_shower',
-      description: '只操作宿主分配给当前聊天的 Operit Shower 虚拟屏，不操作手机主屏或其他聊天的屏幕；每个聊天一块屏。'
-        + '先 create（默认主屏当前完整分辨率与密度，自动启动 Shower），再 launch；同一聊天 create 复用现有屏幕。'
-        + '每次动作后用 screenshot 核实。屏幕跨回复保留，5 分钟无工具操作且用户未在任务详情观看则自动回收。'
-        + '用户手动接管时本聊天工具调用会等待；接管结束后，已等待的非截图操作返回未执行错误，先 screenshot 重新定位，'
-        + '不要盲目重放动作；确定不再使用时 release，仅释放本聊天的屏幕。最后一块屏幕关闭后 Shower 空闲 15 秒自动退出。'
-        + '同一应用不能同时被不同聊天的虚拟屏占用，launch 冲突会报错。tap/swipe 坐标始终使用 create 返回的虚拟屏尺寸；'
+      description: '只操作宿主分配给当前 Bot 的 Operit Shower 虚拟屏，不操作手机主屏或其他 Bot 的屏幕；每个 Bot 一块屏，'
+        + '主私聊、群与 DM 共用。先 create（默认主屏当前完整分辨率与密度，自动启动 Shower），再 launch；同一 Bot create 复用现有屏幕。'
+        + '每次动作后用 screenshot 核实。屏幕跨回复保留，5 分钟无工具操作且用户未在 Bot 屏幕面板观看则自动回收。'
+        + '用户可以接管屏幕：接管会中断当前对话，之后用户可能与你同时操作；接管后第一次非截图动作返回未执行错误，'
+        + '必须先 screenshot 按当前画面重新定位，不要盲目重放动作；确定不再使用时 release，仅释放本 Bot 的屏幕。'
+        + '最后一块屏幕关闭后 Shower 空闲 15 秒自动退出。同一应用不能同时被不同 Bot 的虚拟屏占用，launch 冲突会报错。tap/swipe 坐标始终使用 create 返回的虚拟屏尺寸；'
         + '截图按 maxWidth/maxHeight 等比缩小，返回同时给出虚拟尺寸和图片尺寸，不要把缩小后的图片坐标当虚拟坐标。'
         + '截图只在当前模型支持图片输入时执行；非视觉模型或不支持图片的模型会返回错误，必须先切换模型或不要截图。'
         + '失败会报错，不产生截图对象。text 通过系统剪贴板粘贴中文等 Unicode 文本并全选替换，空字符串或 clear 清空输入框；'

@@ -43,6 +43,12 @@ const ALLOWED_METHODS: &[&str] = &[
   "openLegacy",
   "reconnect",
   "hide",
+  // Bot 屏幕：Kotlin 侧 UI-local 原生覆盖层（只观看/接管已有屏幕，不进 bridge 服务）
+  "screenOpen",
+  "screenLayout",
+  "screenStatus",
+  "screenTakeover",
+  "screenClose",
   // 私有 bridge 服务的固定 op
   "snapshot",
   "status",
@@ -73,7 +79,14 @@ const ALLOWED_METHODS: &[&str] = &[
 ];
 
 /// 不占普通准入槽的本地 UI 动作：普通槽满时仍可执行，不产生 bridge 请求堆积。
-const CLEANUP_METHODS: &[&str] = &["hide", "reconnect"];
+const CLEANUP_METHODS: &[&str] = &[
+  "hide",
+  "reconnect",
+  // 屏幕布局/状态/关闭是高频本地 UI 动作，不占普通准入槽。
+  "screenLayout",
+  "screenStatus",
+  "screenClose",
+];
 
 /// 客户端观察清理：不占普通槽，改用独立小额度（与 Kotlin 侧同名额度一致），超限立即拒绝不排队。
 const CLIENT_CLEANUP_METHODS: &[&str] = &["clientUnobserve"];

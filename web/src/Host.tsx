@@ -53,6 +53,7 @@ import type { DesktopIdentity, DesktopPanelApi } from '../../desktop/web/src/typ
 import type { DesktopConnectionInput, DesktopUiProfile } from '../../host-core/desktop-client.js';
 import type { DevicesDirectoryItem } from '../../host-core/index.js';
 import { Markdown } from './Markdown';
+import { BotScreenPanel } from './BotScreenPanel';
 import {
   GROK_AVATAR_PRESETS,
   GROK_COLOR_PALETTE,
@@ -721,6 +722,10 @@ export function HostPage({
   // Hidden drawers (always mounted in DOM for smooth slide-in & slide-out animation)
   const [leftDrawerOpen, setLeftDrawerOpen] = useState(false);
   const [rightDrawerOpen, setRightDrawerOpen] = useState(false);
+  const [screenFullscreen, setScreenFullscreen] = useState(false);
+  useEffect(() => {
+    if (!rightDrawerOpen) setScreenFullscreen(false);
+  }, [rightDrawerOpen]);
 
   // Hub search
   const [searchQuery, setSearchQuery] = useState('');
@@ -5020,7 +5025,7 @@ export function HostPage({
         onClick={() => setRightDrawerOpen(false)}
       >
         <aside
-          className="grok-right-drawer"
+          className={`grok-right-drawer${screenFullscreen ? ' screen-fullscreen' : ''}`}
           role="dialog"
           aria-label={t('右侧边栏', 'Right sidebar')}
           onClick={e => e.stopPropagation()}
@@ -5036,10 +5041,28 @@ export function HostPage({
               <X size={20} />
             </button>
           </header>
-          <div className="hub-right-drawer-empty">
-            <Monitor size={30} />
-            <p>{t('Remote / Local 屏幕控制与实时画面预留面板', 'Reserved for Remote / Local Screen Control')}</p>
-          </div>
+          {activeBot ? (
+            <BotScreenPanel
+              botId={activeBot.botId}
+              hostKind={activeBot.hostKind}
+              open={rightDrawerOpen && screen === 'chat'}
+              fullscreen={screenFullscreen}
+              onFullscreenChange={setScreenFullscreen}
+              onInterrupt={async () => {
+                // 接管先中断当前对话（与停止按钮相同的 abort），执行器侧停止由屏幕客户端完成。
+                if (activeBot.hostKind === 'local' && activeBot.botId !== '__jarvis__') {
+                  await BotHost.call({ method: 'abort', params: { botId: activeBot.botId } });
+                } else if (activeBot.hostKind === 'remote' && activeBot.remoteIdentity && remoteClientRef.current) {
+                  await remoteClientRef.current.api.call(activeBot.remoteIdentity, 'abort', { botId: activeBot.botId });
+                }
+              }}
+            />
+          ) : (
+            <div className="hub-right-drawer-empty">
+              <Monitor size={30} />
+              <p>{t('选择一个 Bot 查看它的屏幕', 'Select a Bot to view its screen')}</p>
+            </div>
+          )}
         </aside>
       </div>
     </div>

@@ -97,6 +97,18 @@ export function onMobileStreamFailure(listener: StreamFailure): () => void {
 
 let active: MobileBotHost | undefined;
 
+/**
+ * UI-local 原生动作（Bot 屏幕覆盖层 screen*）：不经 Host 桥，也不参与事件流失败锁定；
+ * 失败只规范化，不重试。
+ */
+export async function mobileLocalRequest<T = unknown>(method: string, params: Record<string, unknown> = {}): Promise<T> {
+  try {
+    return (await invoke('mobile_host_request', { method, params })) as T;
+  } catch (error) {
+    throw toError(error);
+  }
+}
+
 /** 单条请求：params 与 BotHostPlugin 的调用参数同形；失败只规范化，不重试、不重放 mutation。 */
 async function request<T>(method: string, params: Record<string, unknown> = {}): Promise<T> {
   // 派发时记录连接代际：只有仍是当前代的失败才允许锁死事件流。

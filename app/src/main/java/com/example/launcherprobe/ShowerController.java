@@ -28,8 +28,12 @@ final class ShowerController {
     private int dpi;
     private IBinder displayService;
     private IShowerClient clientToken;
-    private Preview preview;
+    private volatile Preview preview;
     private boolean manualControl;
+    /** 新 Host Bot 屏幕面板的接管：用户输入与 Agent 工具并行，不阻塞工具。 */
+    private volatile boolean userControl;
+    /** 用户接管过且 Agent 尚未重新截图：非截图动作拒绝执行，避免按旧画面坐标操作。 */
+    private volatile boolean userDirty;
     private final java.util.LinkedHashSet<String> launchedPackages = new java.util.LinkedHashSet<>();
 
     static final class Preview {
@@ -121,8 +125,15 @@ final class ShowerController {
         }
         preview = next;
         manualControl = false;
+        userControl = false;
         notifyAll();
         return next;
+    }
+
+    /** 当前虚拟屏 {width, height, dpi}；没有屏幕时返回 null。不创建屏幕，也不延长空闲时间。 */
+    synchronized int[] displaySize() throws android.os.RemoteException {
+        if (!hasDisplay()) return null;
+        return new int[] {width, height, dpi};
     }
 
     synchronized boolean keepPreviewAlive(Preview current) throws Exception {
@@ -134,8 +145,31 @@ final class ShowerController {
         // Unblock waiting tools even if the service has died.
         preview = null;
         manualControl = false;
+        userControl = false;
         notifyAll();
         current.service.setPreviewSurface(current.displayId, null, current.token);
+    }
+
+    /**
+     * Bot 屏幕面板接管：拿到控制器锁说明 Agent 当前动作已结束（调用方先中断在途工具），
+     * 之后接受用户输入，并要求 Agent 下一次非截图动作前重新截图。不阻塞后续工具调用。
+     */
+    synchronized void takeover(Preview current) {
+        requirePreview(current);
+        userControl = true;
+        userDirty = true;
+    }
+
+    boolean isUserDirty() {
+        return userDirty;
+    }
+
+    /** 与 Agent 工具并行：不取控制器锁，只校验仍是当前画面且已接管。 */
+    void userTouch(Preview current, android.view.MotionEvent event) throws Exception {
+        if (preview != current || !userControl) throw new IllegalStateException("请先接管操作");
+        if (!current.service.injectTouch(current.displayId, event)) {
+            throw new IllegalStateException("虚拟桌面触摸注入失败");
+        }
     }
 
     synchronized void setManualControl(Preview current, boolean enabled) throws Exception {
@@ -233,6 +267,7 @@ final class ShowerController {
         if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
             throw new IllegalStateException("无法读取截图尺寸");
         }
+        userDirty = false;
         return state("screenshot").put("imageWidth", bounds.outWidth)
                 .put("imageHeight", bounds.outHeight).put("mimeType", "image/png")
                 .put("data", Base64.encodeToString(png, Base64.NO_WRAP));
@@ -356,6 +391,8 @@ final class ShowerController {
     private void clearDisplay() {
         preview = null;
         manualControl = false;
+        userControl = false;
+        userDirty = false;
         launchedPackages.clear();
         notifyAll();
         displayId = null;

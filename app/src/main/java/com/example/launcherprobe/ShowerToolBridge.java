@@ -42,6 +42,8 @@ final class ShowerToolBridge {
     private ShowerManager manager;
     private boolean acquired;
     private boolean released;
+    /** 用户接管后、重新截图前仍允许的动作：不依赖旧画面坐标。 */
+    private static final java.util.Set<String> USER_DIRTY_ALLOWED = java.util.Set.of("screenshot", "create", "release");
     private final Map<String, ShowerController> controllers = new ConcurrentHashMap<>();
     private final Map<String, Integer> activeRefs = new ConcurrentHashMap<>();
     private final AtomicBoolean bridgeClosed = new AtomicBoolean();
@@ -102,15 +104,14 @@ final class ShowerToolBridge {
         return run(ownerKey, arguments, cancelled);
     }
 
-    /** 长度前缀编码，杜绝分隔歧义；归属只来自可信 Host metadata。 */
-    static String ownerKey(String deviceId, String botId, String scopeId, String kind,
-            String conversationId) {
+    /**
+     * 每个 Bot 一块屏：长度前缀编码，杜绝分隔歧义；归属只来自可信 Host metadata。
+     * 同一 Bot 的主私聊、群与 DM 上下文共用这块屏。
+     */
+    static String ownerKey(String deviceId, String botId) {
         StringBuilder key = new StringBuilder("bot-host|");
         appendPrefixed(key, deviceId);
         appendPrefixed(key, botId);
-        appendPrefixed(key, scopeId == null ? "" : scopeId);
-        appendPrefixed(key, kind);
-        appendPrefixed(key, conversationId);
         return key.toString();
     }
 
@@ -146,6 +147,9 @@ final class ShowerToolBridge {
             String action = arguments.optString("action", "");
             if (userOperated && !"screenshot".equals(action)) {
                 throw new IllegalStateException("用户刚结束手动接管，画面可能已改变；本次操作未执行，请先 screenshot 重新定位再继续");
+            }
+            if (controller.isUserDirty() && !USER_DIRTY_ALLOWED.contains(action)) {
+                throw new IllegalStateException("用户已接管过本屏幕并可能仍在操作，画面可能已改变；本次操作未执行，请先 screenshot 重新定位再继续");
             }
             return switch (action) {
                 case "create" -> create(controller, arguments);

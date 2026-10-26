@@ -412,6 +412,18 @@ small, .secondary { font-size: .85rem; color: var(--muted); }
 .hub-left-settings-btn:hover, .hub-left-settings-btn:active { background: var(--surface); }
 .hub-right-drawer-header { display: flex; align-items: center; justify-content: space-between; min-height: 44px; padding-bottom: 10px; border-bottom: 1px solid var(--line); font-weight: 650; }
 .hub-right-drawer-empty { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; gap: 10px; color: var(--muted); padding: 24px 12px; }
+.grok-right-drawer.screen-fullscreen { width: 100vw; border-left: 0; }
+.bot-screen-panel { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 10px; padding-top: 12px; }
+.bot-screen-stage { position: relative; flex: 1; min-height: 0; border-radius: 14px; background: var(--surface); overflow: hidden; }
+.bot-screen-status { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; padding: 24px 16px; text-align: center; color: var(--muted); font-size: .9rem; line-height: 1.5; }
+.bot-screen-status p { margin: 0; }
+.bot-screen-error { margin: 0; color: var(--danger, #c0392b); font-size: .85rem; }
+.bot-screen-toolbar { flex: none; display: flex; align-items: center; gap: 8px; min-height: 44px; }
+.bot-screen-meta { flex: 1; min-width: 0; color: var(--muted); font-size: .8rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bot-screen-takeover { display: inline-flex; align-items: center; gap: 6px; min-height: 38px; padding: 0 14px; border-radius: 999px; background: var(--text); color: var(--bg); font-size: .88rem; font-weight: 650; transition: opacity 150ms ease, transform 150ms ease; }
+.bot-screen-takeover:active:not(:disabled) { transform: scale(.97); }
+.bot-screen-takeover:disabled { opacity: .45; }
+.bot-screen-takeover.active { opacity: 1; background: var(--surface); color: var(--text); border: 1px solid var(--line); }
 .grok-chat-floating-header { flex: none; position: relative; z-index: 12; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: calc(var(--top) + 6px) 16px 8px; background: transparent; }
 .grok-chat-center-pill { display: inline-flex; align-items: center; gap: 9px; max-width: calc(100% - 112px); min-height: 44px; padding: 6px 16px 6px 10px; border-radius: 999px; background: color-mix(in srgb, var(--bg) 94%, #fff); border: 1px solid color-mix(in srgb, var(--line) 80%, transparent); box-shadow: 0 3px 14px rgb(0 0 0 / .06); transition: transform 160ms cubic-bezier(.22, 1, .36, 1); }
 .grok-chat-pill-name { font-size: .96rem; font-weight: 650; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

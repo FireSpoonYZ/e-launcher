@@ -207,6 +207,12 @@ public final class BotHostManager {
         this.restartRequired = prefs.getBoolean(PREF_RESTART_REQUIRED, false);
     }
 
+    /** Bot 屏幕服务：只读取当前运行代的原生工具；Host 未运行或已关闭时返回 null，不启动任何东西。 */
+    BotHostNativeTools currentNativeTools() {
+        Gen g = gen;
+        return g == null || g.closed ? null : g.nativeTools;
+    }
+
     /** 冷单例访问：不准备资产/不启动 Node/不拉起 FGS。 */
     public static BotHostManager get(Context context) {
         if (instance == null) {

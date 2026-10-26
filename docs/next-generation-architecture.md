@@ -337,7 +337,7 @@ M20-01（手机远端入口 + 限定范围跨设备联调）已交付，**M20 �
 
 - applicationId=`com.example.launcherprobe`、包名、原签名不变。保留 `chat` SharedPreferences、`files/chat-attachments`、`files/pi-contexts`、`files/node/.pi/agent`、`files/pi-workspaces` 及旧草稿；新数据库在既有私有应用数据内独立管理，不卸载、清数据或重签名。
 - 旧 SDK 会话只读导入，保留原 ID 与新 Bot/conversation 的映射及附件来源；不能宣称旧运行检查点能按 Durable 原样恢复。旧 OAuth 凭证需明确格式适配与验证，不保证原样运行；失败保留原数据并提示重新授权。
-- Shower 保留非零虚拟屏、Binder UID 校验及本应用归属，不退回物理主屏。原来每聊天屏幕的归属映射到内部 conversation，不能粗暴每 Bot 一块屏幕；接管、释放与超时边界不因换壳丢失。
+- Shower 保留非零虚拟屏、Binder UID 校验及本应用归属，不退回物理主屏。新 Host 按用户决定改为**每个 Bot 一块屏**（一个员工一台电脑，主私聊、群与 DM 上下文共用；旧版每聊天一块屏只保留在旧 Pi 路径）。接管按统一「图形工作环境」语义：先 interrupt 当前对话，执行器停止在途动作后接受人工输入，没有「交还」，之后 Bot 与用户可同时操作，Bot 下一次非截图动作前必须重新截图；释放与超时边界不因换壳丢失。抽象类型见 `web/src/screen/types.ts`，Windows（Child Session）/Linux（Xvnc）按同一接口接入。
 - Widget 保留 RemoteViews/XML、普通事件至少 1000ms 尾沿节流、关键状态及时更新、私有 task_widget 冷态快照及时间，不嵌输入框/虚拟屏，不冷启动运行时。
 - 导航只在 `gestures.pending_restore=true` 时写 0，读回且 commit 清标成功才完成；不写 1、不改无障碍列表，不扩大恢复契约。应用仍是普通助手，不恢复 HOME、桌面、网格、导航手势或应用切换页。
 - **旧定时能力单列兼容**：保留 schedule_task、AlarmManager 定义、执行记录、入口和数据。如何接新版运行及 conversation 映射单独验证；“暂不要新后台任务产品”不授权删除、清除或自动停用旧能力，也不借迁移扩展新定时功能。

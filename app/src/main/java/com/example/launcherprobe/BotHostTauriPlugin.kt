@@ -78,6 +78,8 @@ class BotHostTauriPlugin(private val hostActivity: Activity) : Plugin(hostActivi
     private var pendingVoiceParams: JSONObject? = null
     private var pendingVoiceGeneration = 0
     private var pendingVoiceGranted = false
+    /** Bot 屏幕原生覆盖层（懒创建）；只观看/接管已有屏幕，与 Host 事件流无关。 */
+    private var screenOverlay: BotScreenOverlay? = null
 
     override fun load(webView: WebView) {
         mainWebView = webView
@@ -200,6 +202,19 @@ class BotHostTauriPlugin(private val hostActivity: Activity) : Plugin(hostActivi
             "hide" -> hide(invoke)
             "openLegacy" -> openLegacy(invoke, params)
             "reconnect" -> reconnect(invoke)
+            "screenOpen" -> screenOpen(invoke, params)
+            "screenLayout" -> screenLayout(invoke, params)
+            "screenStatus" -> {
+                val overlay = screenOverlay
+                replyOk(invoke, if (overlay != null && overlay.isSession(screenSession(params))) overlay.status() else idleScreen())
+            }
+            "screenTakeover" -> screenTakeover(invoke, params)
+            "screenClose" -> {
+                val overlay = screenOverlay
+                // 只关闭同一会话：过期页面的迟到 close 不影响新打开的画面。
+                if (overlay != null && overlay.isSession(screenSession(params))) overlay.close()
+                replyOk(invoke, idleScreen())
+            }
             else -> dispatchService(invoke, method, params)
         }
     }
@@ -540,6 +555,73 @@ class BotHostTauriPlugin(private val hostActivity: Activity) : Plugin(hostActivi
         }
     }
 
+    // ---------- Bot 屏幕（UI 本地动作，不经 Host 桥） ----------
+
+    private fun screenOpen(invoke: Invoke, params: JSONObject) {
+        val botId = params.opt("botId") as? String
+        if (botId.isNullOrEmpty() || botId.length > 256) {
+            replyInvalid(invoke, "INVALID_ARGS", "botId 无效")
+            return
+        }
+        if (!uiReady()) {
+            replyInvalid(invoke, "NOT_READY", "界面未就绪")
+            return
+        }
+        try {
+            val overlay = screenOverlay ?: BotScreenOverlay(hostActivity) { mainWebView }.also { screenOverlay = it }
+            overlay.open(botId)
+            replyOk(invoke, overlay.status())
+        } catch (t: Throwable) {
+            replyFailure(invoke, t)
+        }
+    }
+
+    private fun screenLayout(invoke: Invoke, params: JSONObject) {
+        val overlay = screenOverlay
+        if (overlay == null || !overlay.isSession(screenSession(params))) {
+            replyOk(invoke, idleScreen())
+            return
+        }
+        val x = params.optDouble("x", Double.NaN)
+        val y = params.optDouble("y", Double.NaN)
+        val width = params.optDouble("width", Double.NaN)
+        val height = params.optDouble("height", Double.NaN)
+        val dpr = params.optDouble("dpr", Double.NaN)
+        val radius = params.optDouble("radius", 0.0)
+        val visible = params.optBoolean("visible", false)
+        val values = listOf(x, y, width, height, dpr, radius)
+        if (values.any { it.isNaN() || it.isInfinite() } || dpr <= 0 || dpr > 8
+            || width < 0 || height < 0 || width > 20000 || height > 20000) {
+            replyInvalid(invoke, "INVALID_ARGS", "布局参数无效")
+            return
+        }
+        overlay.layout(x, y, width, height, dpr, radius, visible)
+        replyOk(invoke, overlay.status())
+    }
+
+    private fun screenTakeover(invoke: Invoke, params: JSONObject) {
+        val overlay = screenOverlay
+        if (overlay == null || !uiReady() || !overlay.isSession(screenSession(params))) {
+            replyInvalid(invoke, "NOT_READY", "画面未连接")
+            return
+        }
+        overlay.takeover { result, error ->
+            main.post {
+                if (error != null) replyFailure(invoke, error) else replyOk(invoke, result)
+            }
+        }
+    }
+
+    private fun screenSession(params: JSONObject): Int {
+        val value = params.opt("session")
+        return if (value is Number) value.toInt() else -1
+    }
+
+    private fun idleScreen(): JSObject = objectOf(
+        "phase" to "idle", "live" to false, "userControl" to false,
+        "width" to 1, "height" to 1, "platform" to "android-shower"
+    )
+
     // ---------- 生命周期：只清理本 UI 资源 ----------
 
     override fun onPause(activity: AppCompatActivity) {
@@ -548,9 +630,12 @@ class BotHostTauriPlugin(private val hostActivity: Activity) : Plugin(hostActivi
             // 取消本进程的观察/语音捕获；Host/Agent 与在途请求语义不变。
             if (!destroyed) client?.pause()
         }
+        // 离开前台即解绑 Bot 屏幕画面并结束接管；回到前台后按观看状态重连（需重新接管）。
+        screenOverlay?.pause()
     }
 
     override fun onResume(activity: AppCompatActivity) {
+        if (!destroyed) screenOverlay?.resume()
         // TauriMainActivity 在 super.onResume() 返回后才置 resumed=true，所以推迟一轮：
         // 权限已授予、但回调早于 onResume 的 pending 在这里补完（不轮询、不弱化前台判定）。
         if (destroyed || pendingVoiceInvoke == null) return
@@ -574,6 +659,8 @@ class BotHostTauriPlugin(private val hostActivity: Activity) : Plugin(hostActivi
         discardFrames()
         streamFailure = null
         failedDeliveryId = null
+        screenOverlay?.destroy()
+        screenOverlay = null
         mainWebView = null
         val existing = client
         client = null

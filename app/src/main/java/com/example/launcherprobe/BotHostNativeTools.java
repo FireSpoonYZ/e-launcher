@@ -215,6 +215,7 @@ final class BotHostNativeTools {
         final JSONObject frame;
         final AtomicBoolean cancelled = new AtomicBoolean();
         volatile Future<?> future;
+        private Thread runner; // 受 this 保护：只在 execute 期间非空，避免中断复用线程上的其他任务。
 
         Task(String id, BotHostProcess process, JSONObject frame) {
             this.id = id;
@@ -222,14 +223,22 @@ final class BotHostNativeTools {
             this.frame = frame;
         }
 
+        synchronized void interruptIfRunning() {
+            if (runner != null) runner.interrupt();
+        }
+
         @Override public void run() {
             if (closed.get() || cancelled.get()) return;
             Object result = null;
             JSONObject error = null;
+            synchronized (this) { runner = Thread.currentThread(); }
             try {
                 result = execute(frame, cancelled);
             } catch (Throwable t) {
                 error = fixedError(t);
+            } finally {
+                synchronized (this) { runner = null; }
+                Thread.interrupted(); // 接管中断只针对本次执行，不泄漏到回执写入或下一个任务。
             }
             if (closed.get() || cancelled.get()) return;
             if (!tasks.remove(id, this)) return; // 已被取消而抑制回执。
@@ -270,9 +279,28 @@ final class BotHostNativeTools {
     private JSONObject shower(JSONObject context, JSONObject arguments, BooleanSupplier cancelled)
             throws Exception {
         String ownerKey = ShowerToolBridge.ownerKey(context.optString("deviceId"),
-                context.optString("botId"), context.isNull("scopeId") ? null : context.optString("scopeId"),
-                context.optString("kind"), context.optString("conversationId"));
+                context.optString("botId"));
         return showerTools.executeOwner(ownerKey, arguments, cancelled);
+    }
+
+    /** Bot 屏幕面板：只读取当前代该 Bot 已有的屏幕，不创建。 */
+    ShowerController screenController(String botId) {
+        String device = deviceId;
+        if (closed.get() || device == null || botId == null || botId.isEmpty()) return null;
+        return showerTools.existingController(ShowerToolBridge.ownerKey(device, botId));
+    }
+
+    /**
+     * 接管：中断该 Bot 正在执行的屏幕工具（滑动等可取消动作随即停止）。被中断的调用照常回执错误；
+     * 尚未开始的调用由控制器的 userDirty 标记拒绝非截图动作，因此不在这里静默取消（否则 Node 收不到回执）。
+     */
+    void interruptShower(String botId) {
+        if (botId == null || botId.isEmpty()) return;
+        for (Task task : tasks.values()) {
+            if (!"android_shower".equals(task.frame.optString("tool"))) continue;
+            JSONObject context = task.frame.optJSONObject("context");
+            if (context != null && botId.equals(context.optString("botId"))) task.interruptIfRunning();
+        }
     }
 
     private JSONObject speak(JSONObject arguments) throws Exception {
