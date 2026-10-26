@@ -30,9 +30,13 @@ const MAX_DIMENSION = 4096;
 // 原生宿主自己等 agent 25 s；这里更早失败，好在 20 s 的控制 RPC 之前报告“未确认”。
 const REQUEST_TIMEOUT_MS = 15_000;
 const CANCEL_TIMEOUT_MS = 5_000;
+// 显式释放要快速失败：原生主线程可能卡在 RDP 登录弹窗，之后由强制关闭收尾。
+const RELEASE_TIMEOUT_MS = 5_000;
 const SHUTDOWN_GRACE_MS = 2_000;
+const EXIT_WAIT_MS = SHUTDOWN_GRACE_MS + 1_000;
 const MAX_REQUEST_BYTES = 1024 * 1024;
-const MAX_LINE_BYTES = 4 * 1024 * 1024; // 原生 wire 帧上限 2 MiB base64
+// contract：原生整行 base64 帧上限 2 MiB。
+const MAX_LINE_BYTES = 2 * 1024 * 1024;
 const MAX_PENDING = 16;
 const MAX_STDERR_LINE = 512;
 const STDERR_KEEP = 10;
@@ -75,6 +79,13 @@ function invalid(message, outcome = 'not-sent') {
 
 function cancelled(message, outcome) {
   return showerError('CANCELLED', message, outcome);
+}
+
+function delay(ms) {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    timer.unref?.();
+  });
 }
 
 function checkAborted(signal) {
@@ -313,6 +324,7 @@ function openNativeHost(child) {
   let stderrBuffer = '';
   let exitError = null;
   let closed = false;
+  let closing = null;
 
   const started = new Promise((resolve, reject) => {
     const cleanup = () => {
@@ -332,6 +344,11 @@ function openNativeHost(child) {
     child.once('error', onStartError);
   });
   started.catch(() => {});
+
+  const exited = new Promise((resolve) => {
+    if (child.exitCode !== null || child.signalCode !== null) resolve();
+    else child.once('exit', () => resolve());
+  });
 
   function finish(entry, error, result) {
     if (entry.settled) return;
@@ -497,8 +514,9 @@ function openNativeHost(child) {
     });
   }
 
+  // 只结束本后端自己 spawn 的进程：先 EOF 让它自清理，grace 后仍存活才强杀。
   function close() {
-    if (closed) return;
+    if (closing) return closing;
     closed = true;
     failPending('SHOWER_UNAVAILABLE', 'Windows Shower 原生宿主已关闭');
     // EOF 让原生宿主释放它拥有的会话并自行退出；超时后强制结束。
@@ -515,6 +533,9 @@ function openNativeHost(child) {
       }
     }, SHUTDOWN_GRACE_MS);
     timer.unref?.();
+    // 有界退出等待：即使强杀也失败，关闭路径也不会永久挂住调用方。
+    closing = Promise.race([exited, delay(EXIT_WAIT_MS)]).catch(() => {});
+    return closing;
   }
 
   child.stdout.setEncoding('utf8');
@@ -553,6 +574,10 @@ export function createWindowsShowerBackend({ dataRoot } = {}) {
   // 原生宿主意外退出后保留失败快照，status 报告 error 而不是假装空闲。
   let hostFailure = null;
   let closed = false;
+  // 正在有界关闭的宿主：下一次 spawn 前等它真正退出，避免两个原生进程抢同一状态目录/文件锁。
+  let retiring = null;
+  // 已经强制收尾的会话：宿主已退出/关闭后重复 release 要幂等完成，而不是永远卡住归属。
+  let teardownSessionId = null;
 
   function markHostFailure(dead) {
     if (host === dead) host = null;
@@ -570,10 +595,24 @@ export function createWindowsShowerBackend({ dataRoot } = {}) {
     return errorView(failure.sessionId, failure.code, failure.message, failure.updatedAt);
   }
 
+  /** 只关闭本后端 spawn 的宿主（stdin EOF + 有界强杀），并返回有界完成 Promise。 */
   function shutdownHost() {
     const current = host;
     host = null;
-    if (current) current.close();
+    if (!current) return Promise.resolve();
+    let done;
+    try {
+      done = current.close();
+    } catch {
+      done = Promise.resolve();
+    }
+    const tracked = Promise.resolve(done)
+      .catch(() => {})
+      .finally(() => {
+        if (retiring === tracked) retiring = null;
+      });
+    retiring = tracked;
+    return tracked;
   }
 
   async function startHost() {
@@ -608,6 +647,9 @@ export function createWindowsShowerBackend({ dataRoot } = {}) {
     if (closed) throw showerError('SHOWER_UNAVAILABLE', 'Shower Windows 后端已关闭', 'not-sent');
     if (host && !host.closed && !host.exitError) return host;
     if (host) markHostFailure(host);
+    // 上一个宿主可能还在有界关闭：先等它退出，避免第二个进程继续持有 MSTSCLib.dll 等文件锁。
+    if (retiring) await retiring;
+    if (host && !host.closed && !host.exitError) return host;
     if (starting) return starting;
     checkAborted(signal);
     const promise = startHost()
@@ -700,6 +742,7 @@ export function createWindowsShowerBackend({ dataRoot } = {}) {
     }
     activeSessionId = sessionId;
     hostFailure = null;
+    teardownSessionId = null;
     return viewFromSnapshot(snapshot, sessionId);
   }
 
@@ -766,15 +809,45 @@ export function createWindowsShowerBackend({ dataRoot } = {}) {
     if (sessionId === null) return { sessionId: null, released: false, phase: 'idle' };
     if (host && host.exitError) markHostFailure(host);
     if (!host) {
-      if (activeSessionId === sessionId) activeSessionId = null;
-      hostFailure = null;
+      // 宿主已退出/已关闭：同一归属重复 release 必须幂等收尾，而不是永远卡住 manager 归属。
+      if (activeSessionId === sessionId || teardownSessionId === sessionId) {
+        if (activeSessionId === sessionId) activeSessionId = null;
+        hostFailure = null;
+        teardownSessionId = sessionId;
+        // 没有任何原生应答：只声明本后端已结束该环境，不伪装成原生确认。
+        return { sessionId, released: true, phase: 'closed', forced: true, nativeRelease: 'unconfirmed' };
+      }
       return { sessionId, released: false, phase: 'closed' };
     }
-    const raw = await host.request('release', { sessionId });
-    if (activeSessionId === sessionId) activeSessionId = null;
-    hostFailure = null;
-    // EOF 让原生宿主自己注销它拥有的子会话并退出。
-    shutdownHost();
+    if (activeSessionId === null) {
+      // 宿主没有拥有会话（ensure 未成功）：无需原生 release，直接收尾让出文件锁。
+      await shutdownHost();
+      hostFailure = null;
+      teardownSessionId = sessionId;
+      return { sessionId, released: false, phase: 'closed' };
+    }
+    if (activeSessionId !== sessionId) {
+      // 宿主拥有其他会话：过期的 record 不能关掉别人的桌面。
+      if (teardownSessionId === sessionId) {
+        return { sessionId, released: true, phase: 'closed', forced: true, nativeRelease: 'unconfirmed' };
+      }
+      return { sessionId, released: false, phase: 'closed' };
+    }
+    let raw = null;
+    let failure = null;
+    try {
+      raw = await host.request('release', { sessionId }, { timeoutMs: RELEASE_TIMEOUT_MS });
+    } catch (error) {
+      failure = error;
+    } finally {
+      // 无论原生是否应答都必须关闭本后端 spawn 的宿主：否则它继续持有 MSTSCLib.dll，
+      // 后续构建被文件锁卡住，manager 的归属也只能永远挂着。
+      await shutdownHost();
+      if (activeSessionId === sessionId) activeSessionId = null;
+      hostFailure = null;
+      teardownSessionId = sessionId;
+    }
+    if (failure) throw failure;
     return {
       sessionId,
       released: isPlainObject(raw) ? raw.released !== false : true,
@@ -785,9 +858,15 @@ export function createWindowsShowerBackend({ dataRoot } = {}) {
   async function close() {
     if (closed) return;
     closed = true;
-    hostFailure = null;
-    activeSessionId = null;
-    shutdownHost();
+    try {
+      // 单个关闭步骤失败/超时不能跳过后面的清理。
+      if (retiring) await retiring.catch(() => {});
+      await shutdownHost();
+    } finally {
+      hostFailure = null;
+      activeSessionId = null;
+      teardownSessionId = null;
+    }
   }
 
   return {
