@@ -1,6 +1,8 @@
 import path from 'node:path';
 import { createModels, createProvider } from '@earendil-works/pi-ai/models';
 import { openAICompletionsApi } from '@earendil-works/pi-ai/api/openai-completions.lazy';
+import { openAIResponsesApi } from '@earendil-works/pi-ai/api/openai-responses.lazy';
+import { piMessagesApi } from '@earendil-works/pi-ai/api/pi-messages.lazy';
 import { normalizeHindsightConfig, parseHindsightOptions } from './hindsight-client.js';
 import { normalizeRuntimeExtensions, resolveRuntimeExtensions } from './extension-manager.js';
 import { readInputObject } from './cli-input.js';
@@ -185,7 +187,7 @@ function validateProviders(providers) {
     if (!isPlainObject(p)) {
       throw invalidArgument('runtime config: each provider must be an object');
     }
-    rejectUnknownFields(p, new Set(['id', 'baseUrl', 'apiKeyEnv', 'models']), 'runtime config provider');
+    rejectUnknownFields(p, new Set(['id', 'name', 'api', 'baseUrl', 'apiKeyEnv', 'models']), 'runtime config provider');
     const id = p.id;
     if (typeof id !== 'string' || id.trim() === '' || !id.isWellFormed()) {
       throw invalidArgument('runtime config: provider id must be a non-empty well-formed string');
@@ -267,17 +269,35 @@ function validateProviders(providers) {
     }
     // 规范结果不带 undefined 属性，保证 normalize -> stringify/parse -> normalize 等价。
     const provider = { id, baseUrl, models };
+    if (typeof p.name === 'string' && p.name.trim() !== '') provider.name = p.name.trim();
+    if (typeof p.api === 'string' && p.api.trim() !== '') provider.api = p.api.trim();
     if (apiKeyEnv !== undefined) provider.apiKeyEnv = apiKeyEnv;
     out.push(provider);
   }
   return out;
 }
 
+function resolveProviderApi(apiKind) {
+  if (apiKind === 'openai-responses') return { id: 'openai-responses', impl: openAIResponsesApi() };
+  if (apiKind === 'pi-messages') return { id: 'pi-messages', impl: piMessagesApi() };
+  return { id: 'openai-completions', impl: openAICompletionsApi() };
+}
+
+export function syncModelsFromRuntimeConfig(models, raw) {
+  const normalized = normalizeRuntimeConfig(raw);
+  models.clearProviders();
+  for (const provider of normalized.providers) {
+    models.setProvider(buildProvider(provider));
+  }
+  return normalized;
+}
+
 function buildProvider(provider) {
+  const resolvedApi = resolveProviderApi(provider.api);
   const models = provider.models.map((m) => ({
     id: m.id,
     name: m.name ?? m.id,
-    api: 'openai-completions',
+    api: resolvedApi.id,
     provider: provider.id,
     baseUrl: provider.baseUrl,
     input: m.input ?? ['text'],
@@ -291,7 +311,8 @@ function buildProvider(provider) {
     baseUrl: provider.baseUrl,
     auth: { apiKey: createApiKeyAuth(provider.apiKeyEnv) },
     models,
-    api: openAICompletionsApi(),
+    name: provider.name ?? provider.id,
+    api: resolvedApi.impl,
   });
 }
 
@@ -325,4 +346,109 @@ export function describeModelCatalog(models, defaultModel) {
   }
   entries.sort((a, b) => Buffer.compare(Buffer.from(a.modelRef, 'utf8'), Buffer.from(b.modelRef, 'utf8')));
   return { defaultModel: defaultModel ?? null, models: entries };
+}
+
+const NON_CHAT_MODEL_RE = /(?:^|[-_/])(embedding|text-embedding|rerank|whisper|tts|dall-e|moderation|omni-moderation|babbage|davinci)(?:$|[-_/.])/i;
+
+function extractModelRows(payload) {
+  if (Array.isArray(payload)) return payload;
+  if (payload && typeof payload === 'object') {
+    if (Array.isArray(payload.data)) return payload.data;
+    if (Array.isArray(payload.models)) return payload.models;
+    if (Array.isArray(payload.result)) return payload.result;
+  }
+  return [];
+}
+
+export async function discoverProviderModels(input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    throw modelError('INVALID_ARGUMENT', 'input must be an object');
+  }
+  const apiKeyEnv = typeof input.apiKeyEnv === 'string' && ENV_NAME.test(input.apiKeyEnv.trim())
+    ? input.apiKeyEnv.trim()
+    : '';
+  const rawKey = typeof input.apiKey === 'string' ? input.apiKey.trim() : '';
+  if (apiKeyEnv && rawKey) {
+    process.env[apiKeyEnv] = rawKey;
+  }
+  if (input.syncEnvOnly === true) {
+    return { models: [] };
+  }
+  const baseUrl = normalizeHttpUrl(input.baseUrl, 'baseUrl');
+  const token = rawKey || (apiKeyEnv ? (process.env[apiKeyEnv] ?? '') : '');
+  const headers = { Accept: 'application/json' };
+  if (token) {
+    headers.Authorization = `Bearer ${token}`;
+    headers['x-api-key'] = token;
+  }
+  if (baseUrl.includes('anthropic.com') || input.api === 'anthropic-messages') {
+    headers['anthropic-version'] = '2023-06-01';
+  }
+
+  const candidateUrls = [`${baseUrl}/models`];
+  if (!/\/v\d+(?:beta\d*)?(?:\/openai)?$/i.test(baseUrl)) {
+    candidateUrls.push(`${baseUrl}/v1/models`);
+  }
+
+  let lastError = null;
+  let rows = null;
+  for (const url of candidateUrls) {
+    try {
+      const res = await fetch(url, {
+        method: 'GET',
+        headers,
+        signal: AbortSignal.timeout(12000),
+      });
+      if (!res.ok) {
+        const text = await res.text().catch(() => '');
+        lastError = new Error(`HTTP ${res.status}${text ? `: ${text.slice(0, 160)}` : ''}`);
+        if (res.status === 404 && candidateUrls.length > 1) continue;
+        break;
+      }
+      const json = await res.json();
+      rows = extractModelRows(json);
+      break;
+    } catch (err) {
+      lastError = err;
+    }
+  }
+
+  if (!rows) {
+    throw modelError('INVALID_ARGUMENT', `拉取模型失败: ${lastError?.message ?? '无法连接服务商 /models 接口'}`);
+  }
+
+  const seen = new Set();
+  const discovered = [];
+  for (const item of rows) {
+    if (!item || typeof item !== 'object') continue;
+    let id = typeof item.id === 'string'
+      ? item.id.trim()
+      : typeof item.name === 'string'
+        ? item.name.trim()
+        : typeof item.model === 'string'
+          ? item.model.trim()
+          : '';
+    if (!id) continue;
+    if (id.startsWith('models/')) id = id.slice('models/'.length);
+    if (!id || seen.has(id) || NON_CHAT_MODEL_RE.test(id)) continue;
+    seen.add(id);
+    const name = typeof item.display_name === 'string' && item.display_name.trim()
+      ? item.display_name.trim()
+      : typeof item.displayName === 'string' && item.displayName.trim()
+        ? item.displayName.trim()
+        : id;
+    const reasoning = Boolean(
+      item.reasoning ||
+      /(?:reasoner|[-_/]r1\b|[-_/]o1\b|[-_/]o3\b|[-_/]o4\b|thinking|qwq)/i.test(id),
+    );
+    const contextWindow = Number.isSafeInteger(item.context_length) && item.context_length > 0
+      ? item.context_length
+      : Number.isSafeInteger(item.inputTokenLimit) && item.inputTokenLimit > 0
+        ? item.inputTokenLimit
+        : DEFAULT_CONTEXT_WINDOW;
+    discovered.push({ id, name, reasoning, contextWindow });
+  }
+
+  return { models: discovered };
+
 }

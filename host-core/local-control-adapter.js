@@ -243,6 +243,8 @@ const METHOD_HANDLERS = new Map([
     control.setBotExtensions(params.botId, params.input, { signal })],
   ['getBotSoul', (control, params, signal) => control.getBotSoul(params.botId, { signal })],
   ['setBotSoul', (control, params, signal) => control.setBotSoul(params.botId, params.input, { signal })],
+  ['setBotModel', (control, params, signal) => control.setBotModel(params.botId, params.input, { signal })],
+  ['discoverProviderModels', (control, params, signal) => control.discoverProviderModels(params.input, { signal })],
 ]);
 
 function requireValidId(value) {

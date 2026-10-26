@@ -174,7 +174,7 @@ export type HostPhase = 'stopped'|'starting'|'running'|'stopping'|'failed';
 export type HostSnapshot = { phase: HostPhase; deviceId: string|null; lastUpdated: number; errorCode: string|null; restartRequired: boolean; workspace?: string|null };
 export type HostStatus = HostSnapshot;
 export type HostSettingsModel = { id: string; name?: string; reasoning?: boolean; contextWindow?: number; maxTokens?: number };
-export type HostProviderConfig = { id: string; baseUrl: string; apiKeyEnv?: string; models: HostSettingsModel[] };
+export type HostProviderConfig = { id: string; name?: string; api?: string; baseUrl: string; apiKeyEnv?: string; models: HostSettingsModel[] };
 export type HostRelayConfig = { url: string; tokenEnv: string; caFile?: string };
 // Canonical extension/SOUL DTOs are declared once in host-core/index.d.ts and
 // re-exported here for the local Host UI (types only, no runtime import).

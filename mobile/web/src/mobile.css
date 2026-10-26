@@ -1,5 +1,6 @@
-/* M18 mobile（Tauri 辅助进程）外壳样式：复用 web/src/styles.css，只补工具栏与滚动区。 */
-.mobile-shell { display: flex; flex-direction: column; height: 100%; min-height: 0; min-width: 0; }
+/* M18 mobile（Tauri 辅助进程）外壳样式：全面屏沉浸，由内部顶栏/底栏按 --top / --bottom 单次让位。 */
+#root { padding-top: 0; padding-bottom: 0; height: 100dvh; }
+.mobile-shell { display: flex; flex-direction: column; height: 100%; min-height: 0; min-width: 0; background: var(--bg); }
 /* 工具栏控件变多（含本机/远端切换）：允许换行，自身不横向滚动/裁切，页面不产生横向溢出。 */
 .mobile-toolbar { flex: none; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--line); background: var(--surface); min-width: 0; }
 .mobile-toolbar .button { min-height: 40px; min-width: 0; max-width: 100%; padding: 6px 12px; font-size: .85rem; white-space: nowrap; }
@@ -7,7 +8,7 @@
 @media (max-width: 480px) {
   .mobile-toolbar .button { flex: 1 1 auto; }
 }
-.mobile-body { flex: 1; min-height: 0; min-width: 0; }
+.mobile-body { flex: 1; min-height: 0; min-width: 0; height: 100%; display: flex; flex-direction: column; overflow: hidden; }
 .mobile-shell > .inline-error { flex: none; margin: 8px 12px; }
 /* desktop app.css 是全局样式（先加载）：在本机页容器内恢复 styles.css 的排版基线，
  * 避免字体族/字号/行高/字重/段落下边距被桌面元素规则改变。 */

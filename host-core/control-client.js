@@ -323,6 +323,12 @@ export function createControlClient({ url, token, fetch: fetchImpl = globalThis.
     },
     setBotSoul(botId, input, options) {
       return request('PUT', ['v1', 'bots', botId, 'soul'], { ...callOptions(options), body: input });
+    },
+    setBotModel(botId, input, options) {
+      return request('PUT', ['v1', 'bots', botId, 'model'], { ...callOptions(options), body: input });
+    },
+    discoverProviderModels(input, options) {
+      return request('POST', ['v1', 'models', 'discover'], { ...callOptions(options), body: input });
     }
   };
 }

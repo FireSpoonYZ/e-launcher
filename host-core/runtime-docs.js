@@ -96,6 +96,13 @@ export function initialToolsChange(removeTools) {
  */
 export function agentProfileChange(state, profile) {
   const change = {};
+  const model = profile?.model;
+  if (model && typeof model.provider === 'string' && typeof model.modelId === 'string') {
+    const cur = state?.model;
+    if (!cur || cur.provider !== model.provider || cur.modelId !== model.modelId) {
+      change.model = { provider: model.provider, modelId: model.modelId };
+    }
+  }
   const instructions = profile?.instructions;
   if (instructions !== undefined) {
     const next = instructions === null || instructions === '' ? null : instructions;

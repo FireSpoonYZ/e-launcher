@@ -1,14 +1,18 @@
 package com.example.launcherprobe;
 
+import android.graphics.Color;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Process;
 import android.view.View;
+import android.view.WindowManager;
 import android.webkit.WebView;
 
 import androidx.core.graphics.Insets;
 import androidx.core.view.ViewCompat;
 import androidx.core.view.WindowCompat;
 import androidx.core.view.WindowInsetsCompat;
+import androidx.core.view.WindowInsetsControllerCompat;
 
 /**
  * M18 Tauri 界面入口：独立 {@code :tauri_ui} 进程，SDK 退出只结束本进程，
@@ -23,21 +27,46 @@ public class TauriMainActivity extends TauriActivity {
 
     private volatile boolean resumed;
     private View insetsTarget;
+    private WebView activeWebView;
+    private int lastSafeTopDp;
+    private int lastSafeBottomDp;
 
     @Override protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        // 沿用既有外观偏好决定状态/导航栏图标明暗；只改系统栏，不换主题、不重建 Activity。
+        WindowCompat.setDecorFitsSystemWindows(getWindow(), false);
+        if (Build.VERSION.SDK_INT >= 28) {
+            WindowManager.LayoutParams lp = getWindow().getAttributes();
+            lp.layoutInDisplayCutoutMode = Build.VERSION.SDK_INT >= 30
+                    ? WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+                    : WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+            getWindow().setAttributes(lp);
+        }
+        // 沿用既有外观偏好决定状态/导航栏图标明暗；状态栏与导航栏完全透明以实现全面屏沉浸。
         AppAppearance appearance = AppAppearance.read(this);
-        appearance.applySystemBars(this, appearance.surface);
-        // edge-to-edge 下系统栏区域显示窗口底色，跟随机身外观偏好，避免白图标压白底。
-        getWindow().getDecorView().setBackgroundColor(appearance.surface);
+        int bgColor = appearance.dark ? 0xff191b19 : 0xfffaf9f6;
+        appearance.applySystemBars(this, Color.TRANSPARENT);
+        WindowInsetsControllerCompat controller = WindowCompat.getInsetsController(getWindow(), getWindow().getDecorView());
+        if (controller != null) {
+            controller.setAppearanceLightStatusBars(!appearance.dark);
+            controller.setAppearanceLightNavigationBars(!appearance.dark);
+        }
+        // edge-to-edge 下窗口底色与前端主背景一致，避免首帧或边缘露白。
+        getWindow().getDecorView().setBackgroundColor(bgColor);
+    }
+
+    private void syncSafeAreaCss() {
+        WebView wv = activeWebView;
+        if (wv == null) return;
+        String js = "if(document.documentElement){"
+                + "document.documentElement.style.setProperty('--safe-area-inset-top','" + lastSafeTopDp + "px');"
+                + "document.documentElement.style.setProperty('--safe-area-inset-bottom','" + lastSafeBottomDp + "px');"
+                + "}";
+        wv.evaluateJavascript(js, null);
     }
 
     /**
-     * targetSdk 36 强制 edge-to-edge：内容容器按真实 systemBars/displayCutout + IME 让位。
-     * wry 0.57 的顺序是 setWebView→onWebViewCreate（main_pipe.rs:239-244）之后才 setContentView
-     * （317-322），且 AppCompat 可能替换 android.R.id.content，所以必须在 WebView 真正 attach
-     * 之后才绑定容器；绑到旧的初始内容容器会直接失效。
+     * targetSdk 36 全面屏沉浸：WebView 铺满整屏（top=0, bottom=ime.bottom），
+     * 状态栏与手势导航栏安全区通过 CSS 变量单次注入前端，避免原生 padding 与 WebView safe-area 叠加。
      */
     private void applyContentInsets() {
         View content = getWindow().getDecorView().findViewById(android.R.id.content);
@@ -48,8 +77,15 @@ public class TauriMainActivity extends TauriActivity {
             Insets bars = windowInsets.getInsets(
                     WindowInsetsCompat.Type.systemBars() | WindowInsetsCompat.Type.displayCutout());
             Insets ime = windowInsets.getInsets(WindowInsetsCompat.Type.ime());
-            // 键盘与系统导航栏重叠时取较大者，底部只留一次；绝对赋值，重复分发不累积。
-            view.setPadding(bars.left, bars.top, bars.right, Math.max(bars.bottom, ime.bottom));
+            float density = view.getResources().getDisplayMetrics().density;
+            lastSafeTopDp = Math.round(bars.top / Math.max(1f, density));
+            lastSafeBottomDp = ime.bottom > 0 ? 0 : Math.round(bars.bottom / Math.max(1f, density));
+            // 仅在软键盘弹出时让出底部 IME 高度，其余时间 WebView 延伸至状态栏与底部导航栏全屏区域。
+            view.setPadding(bars.left, 0, bars.right, ime.bottom);
+            syncSafeAreaCss();
+            if (activeWebView != null) {
+                activeWebView.postDelayed(this::syncSafeAreaCss, 180);
+            }
             return windowInsets;
         });
         ViewCompat.requestApplyInsets(content);
@@ -57,10 +93,14 @@ public class TauriMainActivity extends TauriActivity {
 
     @Override public void onWebViewCreate(WebView webView) {
         super.onWebViewCreate(webView);
+        activeWebView = webView;
+        AppAppearance appearance = AppAppearance.read(this);
+        webView.setBackgroundColor(appearance.dark ? 0xff191b19 : 0xfffaf9f6);
         // 仅 debug 构建开启 WebView 检查；release 保持 false，不放松 CSP/Origin/TLS。
         WebView.setWebContentsDebuggingEnabled(BuildConfig.DEBUG);
         // 此回调早于 Rust 的 setContentView（见上），post 到当前调用栈之后再绑定真实内容容器。
         webView.post(this::applyContentInsets);
+        webView.postDelayed(this::syncSafeAreaCss, 350);
     }
 
     @Override protected void onResume() {
@@ -75,6 +115,7 @@ public class TauriMainActivity extends TauriActivity {
 
     @Override protected void onDestroy() {
         resumed = false;
+        activeWebView = null;
         super.onDestroy();
         // SDK 清理完成后只终止隔离 UI 进程，避免 C 全局析构与绘图线程冲突。
         if (!isChangingConfigurations()) {

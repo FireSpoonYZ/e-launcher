@@ -122,6 +122,8 @@ const CONTROL_V2_METHODS = Object.freeze([
   'setBotExtensions',
   'getBotSoul',
   'setBotSoul',
+  'setBotModel',
+  'discoverProviderModels',
 ]);
 
 export const CONTROL_METHODS = Object.freeze([...CONTROL_V1_METHODS, ...CONTROL_V2_METHODS]);
@@ -486,6 +488,39 @@ function normalizeControlParams(method, params) {
       return {
         botId: params.botId,
         input: { expectedRevision: params.input.expectedRevision, text: params.input.text },
+      };
+    }
+    case 'setBotModel': {
+      rejectUnknownFields(params, new Set(['botId', 'input']), 'params');
+      assertId(params.botId, 'botId');
+      if (!isPlainObject(params.input)) throw invalid('input must be an object');
+      rejectUnknownFields(params.input, new Set(['modelRef']), 'input');
+      let modelRef = null;
+      if (params.input.modelRef !== undefined && params.input.modelRef !== null) {
+        assertNonEmptyString(params.input.modelRef, 'modelRef');
+        modelRef = params.input.modelRef.trim();
+      }
+      return {
+        botId: params.botId,
+        input: { modelRef },
+      };
+    }
+    case 'discoverProviderModels': {
+      rejectUnknownFields(params, new Set(['input']), 'params');
+      if (!isPlainObject(params.input)) throw invalid('input must be an object');
+      rejectUnknownFields(
+        params.input,
+        new Set(['baseUrl', 'apiKey', 'apiKeyEnv', 'api', 'syncEnvOnly']),
+        'input',
+      );
+      const out = {};
+      if (typeof params.input.baseUrl === 'string') out.baseUrl = params.input.baseUrl;
+      if (typeof params.input.apiKey === 'string') out.apiKey = params.input.apiKey;
+      if (typeof params.input.apiKeyEnv === 'string') out.apiKeyEnv = params.input.apiKeyEnv;
+      if (typeof params.input.api === 'string') out.api = params.input.api;
+      if (typeof params.input.syncEnvOnly === 'boolean') out.syncEnvOnly = params.input.syncEnvOnly;
+      return {
+        input: out,
       };
     }
     default:

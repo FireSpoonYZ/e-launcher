@@ -609,6 +609,24 @@ public final class BotHostManager {
 
     /** 固定控制调用：不隐式启动；返回完整 {type:'result',id,result} 信封，不做二次包装。 */
     public CompletableFuture<JSONObject> call(String method, JSONObject params) {
+        if ("uiScheduleTask".equals(method)) {
+            return onControl(() -> {
+                Gen g = gen;
+                String devId = (g != null && !g.closed && g.deviceId != null) ? g.deviceId : lastDeviceId;
+                JSONObject p = params != null ? params : new JSONObject();
+                String botId = p.optString("botId");
+                String convId = p.optString("conversationId");
+                JSONObject input = p.optJSONObject("input");
+                return BotHostSchedules.get(context).applyUi(devId, botId, convId, input)
+                        .thenApply(res -> {
+                            try {
+                                return new JSONObject().put("type", "result").put("id", "ui-schedule").put("result", res);
+                            } catch (JSONException e) {
+                                throw new IllegalStateException("响应构造失败");
+                            }
+                        });
+            });
+        }
         return onControl(() -> {
             Gen g = gen;
             if (!running(g)) return failedFuture(new IllegalStateException("Host 未运行"));

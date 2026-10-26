@@ -10,7 +10,7 @@ import { createAndroidTools } from './android-tools.js';
 import { createHostExecutionEnv } from './host-environment.js';
 import { openHost } from './host.js';
 import { acquireRuntimeOwner } from './runtime-owner.js';
-import { parseExecutionOptions, parseModelRef, describeModelCatalog } from './runtime-models.js';
+import { parseExecutionOptions, parseModelRef, describeModelCatalog, syncModelsFromRuntimeConfig, discoverProviderModels } from './runtime-models.js';
 import { createGrepTool } from './grep-tool.js';
 import { createFindTool } from './find-tool.js';
 import { createLsTool } from './ls-tool.js';
@@ -319,14 +319,20 @@ export async function openRuntime(options) {
  * 每 Bot 人格/工具视图：实际 SOUL 文本 + manager 管理的完整工具集与本次要排除的工具。
  * managedTools 与 removeTools 分开传递，才能让重开/只读→读写时恢复原先被排除的工具。
  */
-function botProfile(host, extensions, hindsightTools, botId, workMeta) {
+function botProfile(host, extensions, hindsightTools, botId, workMeta, defaultModel) {
+  const bot = host.getBot(botId);
+  const modelRef = bot?.modelRef ?? defaultModel ?? null;
+  let model;
+  if (typeof modelRef === 'string' && modelRef.trim() !== '') {
+    try { model = parseModelRef(modelRef.trim()); } catch { /* ignore invalid ref during profile snapshot */ }
+  }
   // 首次使用（主/工作上下文）前同步冻结该 Bot 的扩展默认值 + SOUL：遗留 Bot 不必先经主发送/读取。
   extensions.ensureBot(botId);
   const soul = host.getBotSoul(botId).text;
   const byName = new Map(hindsightTools.map((tool) => [tool.name, tool]));
   const removeTools = extensions.disabledToolNames(botId).map((name) => byName.get(name)).filter(Boolean);
   const instructions = workMeta ? workInstructions(soul, workMeta) : (soul === '' ? null : soul);
-  return { instructions, removeTools, managedTools: hindsightTools };
+  return { instructions, removeTools, managedTools: hindsightTools, ...(model ? { model } : {}) };
 }
 
 function parseBindingKey(key) {
@@ -338,7 +344,8 @@ function parseBindingKey(key) {
   }
 }
 
-function createRuntime({ host, harness, models, defaultModel, releaseOwner, manager, cleanupEnvs, live, workContexts, decisions, memory, extensions, hindsightTools, botAdmissions }) {
+function createRuntime({ host, harness, models, defaultModel: initialDefaultModel, releaseOwner, manager, cleanupEnvs, live, workContexts, decisions, memory, extensions, hindsightTools, botAdmissions }) {
+  let defaultModel = initialDefaultModel;
   let closePromise = null;
   let closing = false;
   // 同一 Bot 的发送/设置/显式同步串行；内侧复用 raw 实现，避免自持同一 lane。
@@ -399,7 +406,7 @@ function createRuntime({ host, harness, models, defaultModel, releaseOwner, mana
     return workContexts.runMessageOperation(operation);
   };
 
-  const profileFor = (botId, workMeta) => botProfile(host, extensions, hindsightTools, botId, workMeta);
+  const profileFor = (botId, workMeta) => botProfile(host, extensions, hindsightTools, botId, workMeta, defaultModel);
 
   /** Bot 已映射的原生会话（primary + work）：只读快照，不创建会话。 */
   async function botConversations(bot) {
@@ -534,6 +541,17 @@ function createRuntime({ host, harness, models, defaultModel, releaseOwner, mana
       return soul;
     }),
 
+    setBotModel: (botId, input) => admitBot(botId, async () => {
+      const bot = await requireBot(botId);
+      await assertBotIdle(bot);
+      if (input?.modelRef !== undefined && input?.modelRef !== null) {
+        parseModelRef(String(input.modelRef).trim());
+      }
+      const updated = host.setBotModel(botId, input);
+      await refreshBotProfiles(updated);
+      return updated;
+    }),
+
     // 发送占位到原生接纳/回执为止（不等模型完成）；并发设置保存因此能看到已排队提交。
     submit: (botId, input) => admitBot(botId, async () => {
       assertNonBlank(botId, 'botId');
@@ -648,6 +666,17 @@ function createRuntime({ host, harness, models, defaultModel, releaseOwner, mana
       const conversation = await getPrimaryConversation(harness, bot, {}, CTX);
       if (!conversation) return;
       await conversation.abort(CTX);
+    },
+
+    reloadModels(rawRuntime) {
+      if (rawRuntime && typeof models.clearProviders === 'function') {
+        const normalized = syncModelsFromRuntimeConfig(models, rawRuntime);
+        defaultModel = normalized.defaultModel ?? null;
+      }
+    },
+
+    async discoverProviderModels(input) {
+      return discoverProviderModels(input);
     },
 
     async getModelCatalog() {

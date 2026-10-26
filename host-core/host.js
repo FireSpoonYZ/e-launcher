@@ -70,6 +70,18 @@ export function openHost(options) {
       assertId(botId, 'botId');
       return store.getBot(botId);
     },
+    setBotModel(botId, input) {
+      requireBot(botId);
+      if (typeof input !== 'object' || input === null) throw invalidArgument('input must be an object');
+      let resolvedModelRef = null;
+      if (input.modelRef !== undefined && input.modelRef !== null) {
+        if (typeof input.modelRef !== 'string' || input.modelRef.trim() === '') {
+          throw invalidArgument('modelRef must be null or a non-blank string');
+        }
+        resolvedModelRef = input.modelRef.trim();
+      }
+      return store.setBotModel(botId, resolvedModelRef);
+    },
     findByRequest(requestId) {
       assertId(requestId, 'requestId');
       return store.findByRequest(requestId);

@@ -1634,6 +1634,22 @@ export interface RemoteControlMethodMap {
   setBotExtensions: { params: { botId: string; input: BotExtensionsUpdate }; result: BotExtensionSnapshot };
   getBotSoul: { params: { botId: string }; result: BotSoul };
   setBotSoul: { params: { botId: string; input: BotSoulUpdate }; result: BotSoul };
+  setBotCwd: { params: { botId: string; input: { cwd: string } }; result: BotRecord };
+  setBotModel: { params: { botId: string; input: { modelRef?: string | null } }; result: BotRecord };
+  discoverProviderModels: {
+    params: {
+      input: {
+        baseUrl?: string;
+        apiKey?: string;
+        apiKeyEnv?: string;
+        api?: string;
+        syncEnvOnly?: boolean;
+      };
+    };
+    result: {
+      models: { id: string; name: string; reasoning: boolean; contextWindow: number }[];
+    };
+  };
 }
 
 export interface OpenRemoteControlOptions {

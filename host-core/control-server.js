@@ -50,6 +50,7 @@ const routes = [
   { method: 'POST', key: '/v1/bots/:botId/work-contexts/:scopeKey/stop', pattern: /^\/v1\/bots\/([^/]+)\/work-contexts\/([^/]+)\/stop\/?$/, params: ['botId', 'scopeKey'], hasBody: true, handler: stopWork },
   { method: 'POST', key: '/v1/bots/:botId/work-contexts/:scopeKey/resume', pattern: /^\/v1\/bots\/([^/]+)\/work-contexts\/([^/]+)\/resume\/?$/, params: ['botId', 'scopeKey'], hasBody: true, handler: resumeWork },
   { method: 'GET', key: '/v1/models', pattern: /^\/v1\/models\/?$/, params: [], hasBody: false, handler: models },
+  { method: 'POST', key: '/v1/models/discover', pattern: /^\/v1\/models\/discover\/?$/, params: [], hasBody: true, handler: discoverModels },
   { method: 'GET', key: '/v1/bots/:botId/work-contexts/:scopeKey/live', pattern: /^\/v1\/bots\/([^/]+)\/work-contexts\/([^/]+)\/live\/?$/, params: ['botId', 'scopeKey'], hasBody: false, handler: workLive },
   { method: 'GET', key: '/v1/scopes', pattern: /^\/v1\/scopes\/?$/, params: [], hasBody: false, handler: listScopes },
   { method: 'POST', key: '/v1/scopes', pattern: /^\/v1\/scopes\/?$/, params: [], hasBody: true, handler: createScope },
@@ -63,6 +64,7 @@ const routes = [
   { method: 'PUT', key: '/v1/bots/:botId/extensions', pattern: /^\/v1\/bots\/([^/]+)\/extensions\/?$/, params: ['botId'], hasBody: true, handler: setBotExtensions },
   { method: 'GET', key: '/v1/bots/:botId/soul', pattern: /^\/v1\/bots\/([^/]+)\/soul\/?$/, params: ['botId'], hasBody: false, handler: getBotSoul },
   { method: 'PUT', key: '/v1/bots/:botId/soul', pattern: /^\/v1\/bots\/([^/]+)\/soul\/?$/, params: ['botId'], hasBody: true, handler: setBotSoul },
+  { method: 'PUT', key: '/v1/bots/:botId/model', pattern: /^\/v1\/bots\/([^/]+)\/model\/?$/, params: ['botId'], hasBody: true, handler: setBotModel },
   { method: 'GET', key: '/v1/service', pattern: /^\/v1\/service\/?$/, params: [], hasBody: false, handler: serviceStatus },
   { method: 'GET', key: '/v1/scopes/:scopeKey', pattern: /^\/v1\/scopes\/([^/]+)\/?$/, params: ['scopeKey'], hasBody: false, handler: getScopeState },
   { method: 'POST', key: '/v1/scopes/:scopeKey/members', pattern: /^\/v1\/scopes\/([^/]+)\/members\/?$/, params: ['scopeKey'], hasBody: true, handler: updateScopeMembers },
@@ -475,6 +477,7 @@ async function putSettings(host, runtime, params, body, req, res, ctx) {
   assertNoQuery(req);
   if (!ctx.settingsStore) throw new ControlHttpError(503, 'CONTROL_UNAVAILABLE', 'settings store is not configured');
   const snapshot = ctx.settingsStore.replace(validateSettingsUpdate(body));
+  try { runtime?.reloadModels?.(snapshot.settings?.runtime); } catch { /* ignore */ }
   writeControlJson(res, 200, {
     ...snapshot,
     activeRevision: ctx.activeRevision,
@@ -531,6 +534,17 @@ async function setBotSoul(host, runtime, params, body, req, res) {
   assertNoQuery(req);
   requireBot(host, params.botId);
   writeControlJson(res, 200, await runtime.setBotSoul(params.botId, body));
+}
+
+async function setBotModel(host, runtime, params, body, req, res) {
+  assertNoQuery(req);
+  requireBot(host, params.botId);
+  writeControlJson(res, 200, await runtime.setBotModel(params.botId, body));
+}
+
+async function discoverModels(host, runtime, params, body, req, res) {
+  assertNoQuery(req);
+  writeControlJson(res, 200, await runtime.discoverProviderModels(body));
 }
 
 async function serviceStatus(host, runtime, params, body, req, res, ctx) {

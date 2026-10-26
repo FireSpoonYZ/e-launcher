@@ -348,6 +348,91 @@ final class BotHostSchedules {
         }
     }
 
+    /** UI 管理入口：在专用调度执行器内按指定 Bot 主会话归属执行列表/创建/编辑/启停/删除/闹钟授权。 */
+    CompletableFuture<JSONObject> applyUi(String deviceId, String botId, String conversationId, JSONObject input) {
+        CompletableFuture<JSONObject> future = new CompletableFuture<>();
+        try {
+            executor.execute(() -> {
+                try {
+                    if (input == null || input.length() == 0) {
+                        throw new IllegalArgumentException("缺少参数");
+                    }
+                    String action = input.optString("action");
+                    if ("requestExactAlarm".equals(action)) {
+                        if (Build.VERSION.SDK_INT >= 31 && !exactAlarmGranted()) {
+                            context.startActivity(new Intent(android.provider.Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM,
+                                    android.net.Uri.parse("package:" + context.getPackageName()))
+                                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+                        }
+                        future.complete(new JSONObject()
+                                .put("requested", true)
+                                .put("exactAlarmGranted", exactAlarmGranted()));
+                        return;
+                    }
+                    if (deviceId == null || deviceId.isEmpty() || botId == null || botId.isEmpty()
+                            || conversationId == null || conversationId.isEmpty()) {
+                        throw new IllegalArgumentException("缺少 Bot 主私聊身份");
+                    }
+                    Owner owner = new Owner(deviceId, botId, conversationId);
+                    JSONObject result = switch (action) {
+                        case "create" -> {
+                            requireKeys(input, CREATE_FIELDS);
+                            yield enrichPrompt(create(owner, input, 1L));
+                        }
+                        case "update" -> {
+                            requireKeys(input, UPDATE_FIELDS);
+                            yield enrichPrompt(update(owner, input));
+                        }
+                        case "delete" -> {
+                            requireKeys(input, MUTATION_ID_FIELDS);
+                            yield delete(owner, input);
+                        }
+                        case "setEnabled" -> {
+                            requireKeys(input, ENABLE_FIELDS);
+                            yield enrichPrompt(setEnabled(owner, input));
+                        }
+                        case "list" -> {
+                            requireKeys(input, LIST_FIELDS);
+                            yield enrichPrompt(list(owner, input));
+                        }
+                        default -> throw new IllegalArgumentException("未知操作");
+                    };
+                    future.complete(result);
+                } catch (Throwable t) {
+                    future.completeExceptionally(t);
+                }
+            });
+        } catch (RejectedExecutionException e) {
+            future.completeExceptionally(new IllegalStateException("调度繁忙"));
+        }
+        return future;
+    }
+
+    /** UI 列表与编辑需要读取完整 prompt；原生工具路径的 taskDTO 保持原字段不变。 */
+    private JSONObject enrichPrompt(JSONObject result) {
+        return inTx(db -> {
+            State st = load(db);
+            JSONObject single = result.optJSONObject("task");
+            if (single != null) {
+                JSONObject stored = findTask(st, single.optString("id"));
+                if (stored != null && stored.has("prompt")) {
+                    single.put("prompt", stored.optString("prompt"));
+                }
+            }
+            JSONArray list = result.optJSONArray("tasks");
+            if (list != null) {
+                for (int i = 0; i < list.length(); i++) {
+                    JSONObject dto = list.getJSONObject(i);
+                    JSONObject stored = findTask(st, dto.optString("id"));
+                    if (stored != null && stored.has("prompt")) {
+                        dto.put("prompt", stored.optString("prompt"));
+                    }
+                }
+            }
+            return result;
+        });
+    }
+
     // ---------- 工具操作 ----------
 
     private JSONObject create(Owner owner, JSONObject input, long sourceTaskId) {

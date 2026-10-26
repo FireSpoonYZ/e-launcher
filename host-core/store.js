@@ -184,7 +184,12 @@ export function openStore(dataRoot) {
       'UPDATE bot_extension_settings SET revision = ?, extensions_json = ?, retention_floor = ? WHERE bot_id = ? AND revision = ?'
     );
 
+    const stmtUpdateBotModel = db.prepare('UPDATE bots SET model_ref = ? WHERE bot_id = ?');
     const getBot = (botId) => toBot(stmtGetBot.get(botId));
+    const setBotModel = (botId, modelRef) => {
+      stmtUpdateBotModel.run(modelRef == null ? null : modelRef, botId);
+      return getBot(botId);
+    };
     const findByRequest = (requestId) => {
       const row = stmtGetRequest.get(requestId);
       return row ? getBot(row.bot_id) : null;
@@ -326,7 +331,7 @@ export function openStore(dataRoot) {
     };
 
     return {
-      deviceId, createBot, getBot, findByRequest, listBots,
+      deviceId, createBot, getBot, setBotModel, findByRequest, listBots,
       ensureBotExtensionSettings, getBotExtensionSettings, updateBotExtensionSettings,
       reserveLegacyImport, getLegacyImport, completeLegacyImport, close,
     };
