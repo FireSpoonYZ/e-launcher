@@ -18,6 +18,7 @@ COPY --from=build --chown=node:node /app/center-web/ ./center-web/
 COPY --from=build --chown=node:node /app/host-core/ ./host-core/
 COPY --chown=node:node LICENSE THIRD_PARTY_NOTICES.md ./
 COPY --chown=node:node licenses/ ./licenses/
+COPY --chown=node:node plugins/ ./plugins/
 RUN mkdir -p /data && chown node:node /data
 USER node
 EXPOSE 8443 8790
