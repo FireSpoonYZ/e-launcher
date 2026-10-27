@@ -1,0 +1,44 @@
+{
+  "type": "object",
+  "properties": {
+    "baseUrl": {
+      "type": "string",
+      "title": "Hindsight URL",
+      "minLength": 1
+    },
+    "apiKeyRef": {
+      "type": "string",
+      "title": "API key",
+      "format": "credential-ref",
+      "minLength": 1
+    },
+    "mode": {
+      "type": "string",
+      "title": "Access mode",
+      "enum": [
+        "read-write",
+        "read-only"
+      ],
+      "default": "read-write"
+    },
+    "sharedMemory": {
+      "type": "boolean",
+      "title": "Shared memory",
+      "default": false
+    },
+    "timeoutMs": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 120000
+    },
+    "reflectTimeoutMs": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 120000
+    }
+  },
+  "required": [
+    "baseUrl"
+  ],
+  "additionalProperties": false
+}
