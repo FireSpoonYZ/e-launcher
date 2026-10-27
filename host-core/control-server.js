@@ -3,6 +3,7 @@
 import http from 'node:http';
 import { openHost } from './host.js';
 import { openRuntime } from './runtime.js';
+import { validateCenterProvider, discoverCenterProviderModels } from './runtime-models.js';
 import { parseHindsightOptions } from './hindsight-client.js';
 import {
   ControlHttpError,
@@ -30,6 +31,9 @@ const JOB_STATE_RE = /^(pending|accepted|completed|failed)$/;
 const MAX_STATUS_LIMIT = 200;
 
 const routes = [
+  { method: 'POST', key: '/v1/center/provider/validate', pattern: /^\/v1\/center\/provider\/validate\/?$/, params: [], hasBody: true, handler: centerValidateProvider },
+  { method: 'POST', key: '/v1/center/provider/discover', pattern: /^\/v1\/center\/provider\/discover\/?$/, params: [], hasBody: true, handler: centerDiscoverProvider },
+  { method: 'POST', key: '/v1/center/action', pattern: /^\/v1\/center\/action\/?$/, params: [], hasBody: true, handler: centerAction },
   { method: 'GET', key: '/v1/host', pattern: /^\/v1\/host\/?$/, params: [], hasBody: false, handler: getHostInfo },
   { method: 'GET', key: '/v1/bots', pattern: /^\/v1\/bots\/?$/, params: [], hasBody: false, handler: listBots },
   { method: 'POST', key: '/v1/bots', pattern: /^\/v1\/bots\/?$/, params: [], hasBody: true, handler: createBot },
@@ -104,7 +108,7 @@ const MEMORY_ROUTE_KEYS = new Set([
  * 只固定绑定 127.0.0.1；单个 openRuntime + 单独 openHost 登记连接。
  */
 export async function openControlServer(options) {
-  const { token, port = DEFAULT_PORT, settings, getServiceStatus, ...runtimeOptions } = options ?? {};
+  const { token, port = DEFAULT_PORT, settings, getServiceStatus, deferResume, onBotsChanged, ...runtimeOptions } = options ?? {};
   // 可选 settings/callback 一旦提供必须完整合法，否则 INVALID_ARGUMENT，不静默当未配置。
   let settingsStore = null;
   let activeRevision = null;
@@ -130,6 +134,7 @@ export async function openControlServer(options) {
     settingsStore,
     activeRevision,
     getServiceStatus: getServiceStatus ?? null,
+    onBotsChanged,
   };
   assertPort(port);
   // token 格式由 createControlAuthorizer 校验；在打开任何数据前调用并保留结果。
@@ -192,7 +197,7 @@ export async function openControlServer(options) {
   });
 
   try {
-    runtime.resume(); // 仅监听成功后启动已有任务调度
+    if (!deferResume) runtime.resume(); // 仅监听成功后启动已有任务调度
   } catch (err) {
     try { server.close(); server.closeAllConnections(); } catch { /* 不掩盖原错误 */ }
     try { await runtime.close(); } catch { /* 不掩盖原错误 */ }
@@ -228,6 +233,10 @@ export async function openControlServer(options) {
     deviceId: host.deviceId,
     url,
     close,
+    resume: () => runtime.resume(),
+    applyCenterSnapshot: (snapshot) => runtime.applyCenterSnapshot(snapshot),
+    setCenterOnline: (online) => runtime.setCenterOnline(online),
+    withCapabilityActivation: (id, publish) => runtime.withCapabilityActivation(id, publish),
     // Private legacy migration local methods only; no new HTTP/remote/relay routes.
     previewLegacyImport: (input) => runtime.previewLegacyImport(input),
     getLegacyImportStatus: (input) => runtime.getLegacyImportStatus(input),
@@ -259,6 +268,11 @@ async function dispatch(host, runtime, authorize, req, res, ctx) {
     throw new ControlHttpError(405, 'METHOD_NOT_ALLOWED', 'method ' + method + ' not allowed for ' + url.pathname);
   }
 
+  const centerStatus = ctx.getServiceStatus?.().center;
+  if (centerStatus && centerStatus.state !== 'ready' &&
+      !['/v1/host', '/v1/settings', '/v1/service'].includes(match.route.key)) {
+    throw new ControlHttpError(503, 'CENTER_OFFLINE', 'center is not ready');
+  }
   const params = {};
   match.route.params.forEach((name, i) => {
     params[name] = decodeSegment(match.segments[i]);
@@ -281,6 +295,16 @@ async function dispatch(host, runtime, authorize, req, res, ctx) {
   }
 }
 
+async function centerValidateProvider(host, runtime, params, body, req, res) {
+  writeControlJson(res, 200, await validateCenterProvider(body));
+}
+async function centerDiscoverProvider(host, runtime, params, body, req, res) {
+  writeControlJson(res, 200, await discoverCenterProviderModels(body));
+}
+async function centerAction(host, runtime, params, body, req, res) {
+  writeControlJson(res, 200, await runtime.callCapabilityAction(body.installationId, body.action, body.request));
+}
+
 async function getHostInfo(host, runtime, params, body, req, res) {
   writeControlJson(res, 200, {
     protocolVersion: PROTOCOL_VERSION,
@@ -294,8 +318,9 @@ async function listBots(host, runtime, params, body, req, res) {
   writeControlJson(res, 200, host.listBots());
 }
 
-async function createBot(host, runtime, params, body, req, res) {
+async function createBot(host, runtime, params, body, req, res, ctx) {
   const bot = host.createBot(body);
+  if (ctx.onBotsChanged) await ctx.onBotsChanged();
   // 去重重试也重跑幂等初始化：登记记录先落地，初始化失败可重试完成。
   await runtime.initializeBot(bot.botId);
   writeControlJson(res, 201, bot);

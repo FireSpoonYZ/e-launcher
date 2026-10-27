@@ -330,6 +330,15 @@ export function createControlClient({ url, token, fetch: fetchImpl = globalThis.
     discoverProviderModels(input, options) {
       return request('POST', ['v1', 'models', 'discover'], { ...callOptions(options), body: input });
     },
+    validateCenterProvider(input, options) {
+      return request('POST', ['v1', 'center', 'provider', 'validate'], { ...callOptions(options), body: input });
+    },
+    discoverCenterProviderModels(input, options) {
+      return request('POST', ['v1', 'center', 'provider', 'discover'], { ...callOptions(options), body: input });
+    },
+    callCapabilityAction(input, options) {
+      return request('POST', ['v1', 'center', 'action'], { ...callOptions(options), body: input });
+    },
     // Unified Shower：参数顺序与 Runtime/远端 v2 方法表一致，body 恰为
     // {botId,scopeId?,...}；Actor/targetDeviceId 从不来自客户端。
     getShowerStatus(target, options) {

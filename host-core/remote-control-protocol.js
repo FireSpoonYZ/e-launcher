@@ -135,6 +135,9 @@ const CONTROL_V2_METHODS = Object.freeze([
   'setBotSoul',
   'setBotModel',
   'discoverProviderModels',
+  'validateCenterProvider',
+  'discoverCenterProviderModels',
+  'callCapabilityAction',
   'getShowerStatus',
   'createShowerSession',
   'getShowerFrame',
@@ -158,6 +161,7 @@ export function controlMethodVersion(method) {
 // Never mutate this Set; it is the complete wire error code table.
 export const CONTROL_ERROR_CODES = new Set([
   'INVALID_ARGUMENT',
+  'CENTER_OFFLINE',
   'INVALID_CWD',
   'REQUEST_CONFLICT',
   'BOT_NOT_FOUND',
@@ -528,6 +532,20 @@ function normalizeControlParams(method, params) {
         botId: params.botId,
         input: { modelRef },
       };
+    }
+    case 'validateCenterProvider':
+    case 'discoverCenterProviderModels': {
+      rejectUnknownFields(params, new Set(['provider', 'models', 'credential']), 'params');
+      if (!isPlainObject(params.provider) || !Array.isArray(params.models) ||
+          (params.credential !== undefined && typeof params.credential !== 'string')) throw invalid('invalid provider probe');
+      return params;
+    }
+    case 'callCapabilityAction': {
+      rejectUnknownFields(params, new Set(['installationId', 'action', 'request']), 'params');
+      assertId(params.installationId, 'installationId');
+      assertNonEmptyString(params.action, 'action');
+      if (!isPlainObject(params.request)) throw invalid('invalid action request');
+      return params;
     }
     case 'discoverProviderModels': {
       rejectUnknownFields(params, new Set(['input']), 'params');

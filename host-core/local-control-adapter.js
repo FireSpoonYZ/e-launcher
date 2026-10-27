@@ -18,6 +18,7 @@ const LOOPBACK_HOSTNAMES = new Set(['127.0.0.1', '[::1]']);
 // Local domain codes the control server may return; forwarded unchanged with
 // outcome responded. Everything else (transport/protocol) is mapped below.
 const LOCAL_DOMAIN_CODES = new Set([
+  'CENTER_OFFLINE',
   'INVALID_ARGUMENT',
   'INVALID_CWD',
   'REQUEST_CONFLICT',
@@ -255,6 +256,9 @@ const METHOD_HANDLERS = new Map([
   ['setBotSoul', (control, params, signal) => control.setBotSoul(params.botId, params.input, { signal })],
   ['setBotModel', (control, params, signal) => control.setBotModel(params.botId, params.input, { signal })],
   ['discoverProviderModels', (control, params, signal) => control.discoverProviderModels(params.input, { signal })],
+  ['validateCenterProvider', (control, params, signal) => control.validateCenterProvider(params, { signal })],
+  ['discoverCenterProviderModels', (control, params, signal) => control.discoverCenterProviderModels(params, { signal })],
+  ['callCapabilityAction', (control, params, signal) => control.callCapabilityAction(params, { signal })],
   ['getShowerStatus', (control, params, signal) => control.getShowerStatus(showerTarget(params), { signal })],
   ['createShowerSession', (control, params, signal) =>
     control.createShowerSession(showerTarget(params), params.input ?? {}, { signal })],

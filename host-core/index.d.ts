@@ -1,4 +1,5 @@
 import type { Models, ModelCost, ModelInputLimits, ModelThinkingLevel, ThinkingLevelMap } from '@earendil-works/pi-ai';
+import type { CenterConnectionStatus, Provider, Model as CenterModel, ProviderCheckResult, DiscoveryResult, ActionRequest, ActionResult } from '../center-contract/index.js';
 import type { EntryRecord } from '@earendil-works/pi-durable';
 import type { CompressionBlock, StatusReport } from 'acp-kernel';
 import type {
@@ -916,6 +917,8 @@ export interface HostServiceOptions {
   token: string;
   port?: number;
   initialSettings?: HostSettings;
+  center: { url: string; deviceToken: string; ca?: string };
+  npmPath?: string;
   /** Optional trusted JS native bridge for Android tools; never persisted as a settings field. */
   nativeBridge?: NativeBridge;
 }
@@ -928,7 +931,11 @@ export interface HostServiceStatus {
   activeSettingsRevision: number;
   settingsRevision: number;
   restartRequired: boolean;
+  center: CenterConnectionStatus;
 }
+
+export interface CenterProviderProbe { provider: Provider; models: CenterModel[]; credential?: string }
+export interface CenterActionCall { installationId: string; action: string; request: ActionRequest }
 
 export interface HostService {
   readonly deviceId: string;
@@ -1712,6 +1719,9 @@ export interface RemoteControlMethodMap {
   };
   setBotCwd: { params: { botId: string; input: { cwd: string } }; result: BotRecord };
   setBotModel: { params: { botId: string; input: { modelRef?: string | null } }; result: BotRecord };
+  validateCenterProvider: { params: CenterProviderProbe; result: ProviderCheckResult };
+  discoverCenterProviderModels: { params: CenterProviderProbe; result: DiscoveryResult };
+  callCapabilityAction: { params: CenterActionCall; result: ActionResult };
   discoverProviderModels: {
     params: {
       input: {

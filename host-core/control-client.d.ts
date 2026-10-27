@@ -46,6 +46,8 @@ import type {
   LocalSettingsSnapshot,
   SettingsUpdate,
   HostServiceStatus,
+  CenterProviderProbe,
+  CenterActionCall,
   ExtensionCatalog,
   BotExtensionSnapshot,
   BotExtensionsUpdate,
@@ -107,6 +109,9 @@ export interface ScopeHistoryClientOptions extends ControlClientCallOptions {
 }
 
 export interface ControlClient {
+  validateCenterProvider(input: CenterProviderProbe, options?: ControlClientCallOptions): Promise<import('../center-contract/index.js').ProviderCheckResult>;
+  discoverCenterProviderModels(input: CenterProviderProbe, options?: ControlClientCallOptions): Promise<import('../center-contract/index.js').DiscoveryResult>;
+  callCapabilityAction(input: CenterActionCall, options?: ControlClientCallOptions): Promise<import('../center-contract/index.js').ActionResult>;
   getHostInfo(options?: ControlClientCallOptions): Promise<ControlHostInfo>;
   listBots(options?: ControlClientCallOptions): Promise<BotRecord[]>;
   createBot(input: CreateBotInput, options?: ControlClientCallOptions): Promise<BotRecord>;

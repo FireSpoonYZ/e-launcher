@@ -390,7 +390,7 @@ export function syncModelsFromRuntimeConfig(models, raw) {
   return normalized;
 }
 
-function buildProvider(provider) {
+function buildProvider(provider, credential) {
   const resolvedApi = resolveProviderApi(provider.id, provider.api);
   const models = provider.models.map((m) => ({
     id: m.id,
@@ -410,7 +410,13 @@ function buildProvider(provider) {
   return createProvider({
     id: provider.id,
     baseUrl: provider.baseUrl,
-    auth: { apiKey: createApiKeyAuth(provider.apiKeyEnv) },
+    auth: { apiKey: credential === undefined ? createApiKeyAuth(provider.apiKeyEnv) : {
+      name: 'Center credential',
+      async resolve() {
+        if (credential === null) throw errWithCode('center provider credential is unavailable', 'INVALID_STATE');
+        return { auth: { apiKey: credential }, source: 'center' };
+      },
+    } },
     models,
     name: provider.name ?? provider.id,
     api: resolvedApi.impl,
@@ -431,6 +437,71 @@ function createApiKeyAuth(apiKeyEnv) {
       return { auth: { apiKey: key }, source: apiKeyEnv };
     },
   };
+}
+
+/** Build the registry from the authenticated snapshot; credentials never enter local settings or process.env. */
+export function applyCenterModels(snapshot, existingModels) {
+  const providers = snapshot.providers.filter((provider) => provider.enabled).map((provider) => ({
+    id: provider.id,
+    name: provider.name,
+    api: provider.api,
+    baseUrl: provider.baseUrl,
+    models: (snapshot.models[provider.id] ?? []).filter((model) => model.enabled).map(
+      ({ enabled, revision, ...model }) => model
+    ),
+  }));
+  const normalized = validateProviders(providers);
+  const botModels = {};
+  for (const bot of snapshot.bots) {
+    const selection = bot.model;
+    if (selection.modelRef != null) {
+      const ref = parseModelRef(selection.modelRef);
+      if (!normalized.find((p) => p.id === ref.provider)?.models.some((m) => m.id === ref.modelId)) {
+        throw errWithCode('center selected model is unavailable', 'MODEL_NOT_FOUND');
+      }
+      const selected = snapshot.providers.find((p) => p.id === ref.provider);
+      if (selected.credentialRef !== null && !snapshot.credentials[selected.credentialRef]) {
+        throw errWithCode('center provider credential is unavailable', 'INVALID_STATE');
+      }
+    }
+    normalizeThinkingLevel(selection.thinkingLevel);
+    botModels[bot.botId] = selection;
+  }
+  const built = normalized.map((provider) => {
+    const original = snapshot.providers.find((p) => p.id === provider.id);
+    let credential;
+    if (original.credentialRef !== null) {
+      credential = snapshot.credentials[original.credentialRef] ?? null;
+    }
+    return buildProvider(provider, credential);
+  });
+  const models = existingModels ?? createModels();
+  models.clearProviders();
+  for (const provider of built) models.setProvider(provider);
+  return { models, botModels };
+}
+
+export async function validateCenterProvider({ provider, models, credential }) {
+  try {
+    const snapshot = { providers: [{ ...provider, enabled: true, credentialRef: credential === undefined ? null : 'probe' }], models: { [provider.id]: models }, bots: [], credentials: { probe: credential } };
+    const registry = applyCenterModels(snapshot).models;
+    const model = registry.getModels(provider.id)[0];
+    if (!model) throw invalidArgument('provider has no enabled model');
+    const result = await registry.completeSimple(model, { messages: [{ role: 'user', content: 'ping', timestamp: Date.now() }] }, { signal: AbortSignal.timeout(15000), maxTokens: 8, maxRetries: 0 });
+    if (result.stopReason === 'error' || result.stopReason === 'aborted') throw new Error('probe failed');
+    return { ok: true, message: model.id };
+  } catch {
+    throw errWithCode('provider probe failed', 'INVALID_ARGUMENT');
+  }
+}
+
+export async function discoverCenterProviderModels({ provider, credential }) {
+  try {
+    const result = await discoverProviderModels({ baseUrl: provider.baseUrl, api: provider.api, apiKey: credential });
+    return { models: result.models.map((model) => ({ ...model, maxTokens: Math.min(DEFAULT_MAX_TOKENS, model.contextWindow), input: ['text'], enabled: true, revision: 0 })) };
+  } catch {
+    throw errWithCode('provider discovery failed', 'INVALID_ARGUMENT');
+  }
 }
 
 /** 只读 chat 模型白名单，六字段投影，按 modelRef UTF-8 字节序排序，无凭证/baseUrl/env。 */
