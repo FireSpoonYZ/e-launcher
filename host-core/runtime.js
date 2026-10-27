@@ -31,7 +31,6 @@ import { WorkDecisionState } from './work-decision-state.js';
 import { createWorkDecisionRuntime } from './runtime-work-decisions.js';
 import { normalizeUserMessage } from './scope-protocol.js';
 import { createCommunicationTools } from './communication-tools.js';
-import { resolveBotIdentity } from './bot-identity.js';
 import { createCollaborationService } from './collaboration-service.js';
 import { renderCollaborationPrompt } from './collaboration-prompt.js';
 import {
