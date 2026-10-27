@@ -204,7 +204,7 @@ export async function openHostService(options) {
       withActivation: async (id, publish) => {
         if (control) return control.withCapabilityActivation(id, async () => {
           state = { ...state, state: 'connecting', appliedRevision: null };
-          await control.setCenterOnline(false);
+          // withCapabilityActivation 已关闭准入；重入其生命周期队列会死锁。
           await publish();
           activationRevision++;
         });
