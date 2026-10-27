@@ -12,7 +12,19 @@
 - 老中继服务停止并禁用；原注册表保留且已迁入 center-data。回滚备份：Linux backups/pre-center-fe5d0ec，Windows backups/pre-center-fe5d0ec，K80 原数据位于仓库外受限验收目录。
 - 中心登录密码保存在服务器 secrets/center-owner-password，密钥与设备凭据在 secrets/，未写入仓库。
 
-## 已通过
+## K80 界面验收遗漏与补验（2026-10-28）
+
+此前 K80 跨机任务主要通过原生桥执行，遗漏了普通启动后从中心连接表单进入首页的完整路径。原生桥可调用远端不能替代首页 Bot 列表验收。用户反馈 K80 看不到其他机器的 Bot 后，确认 UI 仍保留旧测试中继配置，中心认证也没有初始化首页使用的中继连接与 UI identity。
+
+修复提交 a92c8ee：中心连接后读取仅含连接元数据的 `/api/host/connection`，接入中心指定中继，再初始化移动端连接配置和首页订阅。客户端不为发现中继地址获取包含 Host 凭据的配置快照。设置页默认选中当前连接。
+
+补验使用 K80 实际 WebView 表单、Bot 行和聊天输入框（CDP 操作 DOM，未直接调用发送消息的原生桥）：首页显示 Windows/Linux 的四个 Bot；分别发送唯一标记并在聊天页收到模型回复。重新安装最终 APK 后，从 MAIN/LAUNCHER 入口打开，错误令牌显示连接失败；换回有效令牌后自动恢复四个远程 Bot，无需另外配置远程节点。应用进程重启后仍需重新输入客户端令牌，这是当前仅内存保存凭据的行为。
+
+中心已更新为 e-launcher-center:a92c8ee，源码在 releases/20261028-a92c8ee；Linux Host 的 current 链接保持原版本。升级前备份在 backups/pre-k80-ui-a92c8ee。K80/K90 覆盖安装同一 APK，SHA-256 为 af6247fa8756a1c805e5e8a5ab39d7760f4a315c5a79e151852e0c7934a7916f。K90（myron / 25102RKBEC）安装前完整备份私有 files/shared_prefs/databases，安装及启动检查通过，当前停在首次连接中心页面，尚未配置中心身份或验收跨机聊天。
+
+本轮截图、DOM 与私有备份在仓库外 e-launcher-k80-ui-1793129888940；目录包含凭据，禁止整体上传。
+
+## 原有后端与分项验收
 
 | 范围 | 本轮证据 |
 | --- | --- |
