@@ -68,6 +68,7 @@ namespace ELauncher.Shower
                     + " --host-pid " + hostPid.ToString(CultureInfo.InvariantCulture)
                     + " --host-start " + hostStart.ToString(CultureInfo.InvariantCulture)
                     + " --host-sid " + Quote(hostSid);
+                BootstrapLog.Write(dir, "bootstrap-ensure request: " + arguments);
                 RunElevatedSync(dir, "bootstrap-ensure", arguments, ElevationTimeoutMilliseconds);
                 if (!BootstrapGuardian.IsReadyForHost(dir, hostPid, hostStart))
                 {
