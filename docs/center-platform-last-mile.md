@@ -3,6 +3,7 @@
 本文件由父助手记录已经明确的最新接线，配合center-platform-contract-addendum.md；不是增加新产品范围。
 
 - 全局停用必须可恢复：manager.enable、POST /api/installations/:id/enable，Operation/Plan action含enable；只恢复实例，不修改各Bot选择。
+- UpdateRequest可选source:{type:'artifact',artifactRef}，用于上传新版制品；校验packageId及准确targetVersion。中心准备成功后一起发布targetVersion/source，各Host独立应用，失败保留本机旧active并报告；不做跨Host原子提交或自动全局回滚。requestId指纹包含source。
 - MCP OAuth由effectiveConfig.oauth===true启用，仅中心托管HTTP；与显式Authorization/apiKeyRef同时配置报冲突。openCenterServer增加publicUrl来自CENTER_PUBLIC_URL。
 - OAuth模块：center-server/oauth/index.js → openMcpOAuth({store,publicUrl})；start({installationId,deviceId,botId})→{flowId,authorizationUrl}，status(flowId)→{status:'pending'|'complete'|'failed',error?}，complete({state,code?,error?})，logout({installationId,deviceId,botId})，getAuthProvider({installationId,deviceId,botId,url})→官方McpOAuthProvider，close()。异步操作返回Promise，status同步。callback路径/api/oauth/mcp/callback。
 - openCenterExecution增加oauth参数，对oauth实例使用adaptOAuthProvider。身份校验仍在execution。
