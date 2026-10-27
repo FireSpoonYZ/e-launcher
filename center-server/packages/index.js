@@ -12,6 +12,10 @@ import { openManagedInstaller, runNpm } from '../../host-core/managed-install/in
 const key = (value) => Buffer.from(value).toString('base64url');
 const error = (code, message) => Object.assign(new Error(message), { code });
 const credential = { type: 'string', format: 'credential-ref' };
+const mcpActions = ['validate', 'listTools'].map(id => ({
+  id, title: id === 'validate' ? 'Validate connection' : 'List tools',
+  inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+}));
 const mcpSchema = (url) => ({
   $schema: 'http://json-schema.org/draft-07/schema#', type: 'object',
   properties: {
@@ -117,7 +121,7 @@ export function openPackageManager({ dataRoot, store, npmPath, withActivation, o
       }
       const id = 'http-' + createHash('sha256').update(url.href).digest('hex');
       return { packageVersion: { packageId: id, version: '1.0.0', kind, digest: digest(Buffer.from(url.href)),
-        artifactRef: null, manifest: {}, configSchema: mcpSchema(url.href), resolved: url.href, integrity: null }, lockfile: null };
+        artifactRef: null, manifest: { actions: mcpActions }, configSchema: mcpSchema(url.href), resolved: url.href, integrity: null }, lockfile: null };
     }
     let bytes, resolved = null, integrity = null, expected = null;
     if (source.type === 'npm') {
@@ -184,7 +188,7 @@ export function openPackageManager({ dataRoot, store, npmPath, withActivation, o
         }
       } else if (kind === 'mcp') {
         configSchema = mcpSchema();
-        manifest = { bin: pkg.bin ?? {} };
+        manifest = { bin: pkg.bin ?? {}, actions: mcpActions };
       } else if (kind === 'skill') {
         let capability = {};
         try { capability = await readJson(path.join(temp, 'capability.json')); }

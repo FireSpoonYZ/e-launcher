@@ -89,10 +89,30 @@ export async function createMcpDriver({ installationId, version, target, package
         checkOpen();
         host.assertCapabilityAllowed(botId, installationId);
       };
+      const listTools = async () => {
+        check();
+        if (!active) throw fail('MCP_CLOSED', 'MCP capability is not active.');
+        let tools;
+        try {
+          tools = target === 'center'
+            ? (await host.centerClient.listCapabilityTools(installationId, botId, { signal: abort.signal })).tools
+            : await client.listTools();
+        } catch {
+          check();
+          throw fail('MCP_UNAVAILABLE', 'MCP connection or tool listing failed.');
+        }
+        check();
+        if (!active) throw fail('MCP_CLOSED', 'MCP capability is not active.');
+        return { tools: tools.map(({ name, description, inputSchema }) => ({ name, ...(description ? { description } : {}), inputSchema })) };
+      };
+      const inputSchema = { type: 'object', properties: {}, additionalProperties: false };
       const bot = {
         durableContributions: contributions,
         requestContributions: {},
-        actions: {},
+        actions: {
+          listTools: { inputSchema, execute: listTools },
+          validate: { inputSchema, async execute() { await listTools(); return { ok: true, message: 'Connection successful' }; } },
+        },
         async prepare() {
           checkOpen();
           let tools;

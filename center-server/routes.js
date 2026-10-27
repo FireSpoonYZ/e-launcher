@@ -108,6 +108,15 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
     return result;
   }
   route('POST', '/api/installations/:id/actions/:action', req => action(req.params.id, req.params.action, req.body), true);
+  route('POST', '/api/installations/:id/tools/list', async req => {
+    const body = object(req.body); const deviceId = text(body.deviceId, 'deviceId'); const botId = text(body.botId, 'botId');
+    const installation = required(store.getInstallation(req.params.id), 'Installation');
+    if (installation.kind !== 'mcp' || !installation.enabled || !store.listDeviceBots(deviceId).some(bot => bot.botId === botId) || !store.getBotCapability(deviceId, botId, req.params.id).enabled) fail('FORBIDDEN', 'Capability unavailable');
+    if (installation.target === 'center') return execution.listTools(deviceId, req.params.id, { botId });
+    if (installation.target !== 'host') fail('UNSUPPORTED_TARGET', 'Unsupported MCP target');
+    const result = await action(req.params.id, 'listTools', { requestId: randomUUID(), deviceId, botId, input: {} });
+    return result.result;
+  }, true);
   route('POST', '/api/installations/:id/validate', async req => {
     const body = object(req.body); text(body.deviceId, 'deviceId'); text(body.botId, 'botId');
     if (!actions(req.params.id).some(item => item.id === 'validate')) return { ok: false, message: 'Connection validation is not supported' };

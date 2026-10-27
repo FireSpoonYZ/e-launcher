@@ -19,7 +19,9 @@ const parse = (row) => row ? JSON.parse(row.json) : null;
 const json = (value) => JSON.stringify(value);
 const object = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
 const pick = (value, fields) => Object.fromEntries(fields.filter((field) => value[field] !== undefined).map((field) => [field, value[field]]));
-const safeError = (value) => value == null ? null : { code: 'INTERNAL_ERROR', message: 'Operation failed' };
+const safeError = (value) => value == null ? null : value.code === 'INTERRUPTED'
+  ? { code: 'INTERRUPTED', message: 'Operation interrupted; retry explicitly' }
+  : { code: 'INTERNAL_ERROR', message: 'Operation failed' };
 const safeReceipt = (receipt) => ({ ...receipt, error: safeError(receipt.error) });
 
 function assertId(value) {
