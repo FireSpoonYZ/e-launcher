@@ -25,9 +25,9 @@ sh scripts/center-build.sh
 的 node_modules 复制到其他平台。桌面应用仅运行客户端 broker，不启动 Host，
 因此不打包 npm，也无需 `npmPath`。Android 由 App 启动桥准备并传入原有
 版本化 npm 资产路径，不新增第二份资产。独立 Node Host 可使用其安装的
-`host-core` npm 11.6.2 依赖，并通过 HostService 的可选 `npmPath` 显式传入
-`npm-cli.js` 绝对路径；未提供时不影响启动，但需要 npm 的安装会报告
-`NPM_UNAVAILABLE`。
+`host-core` npm 11.6.2 依赖，并通过 `serve --npm-path` 显式传入
+`npm-cli.js` 绝对路径；未提供时 Host 尝试查找安装的 npm，找不到不影响
+启动，但需要 npm 的安装会报告 `NPM_UNAVAILABLE`。
 
 ## 配置和启动
 
@@ -69,10 +69,45 @@ docker compose up -d --no-build
 `CENTER_NPM_PATH` 为容器内 npm-cli.js 的绝对路径，默认使用中心安装的
 固定 npm。不要更换密钥或覆盖数据来“修复”启动失败。
 
-访问管理 HTTPS 地址，使用所有者口令登录并登记设备；Host 和 App 连接中心
-并使用设备身份认证后才能运行。Hindsight 的 URL、凭证及 Bot 启用状态在
-中心作为普通插件配置，后端服务不由本 Compose 创建。部署、版本、状态以
-中心 operation 和设备实际回执为准，不以请求受理或容器启动代替验收。
+### 首次登记 Host 设备
+
+Host 机器使用绝对路径作为其独立数据目录，先执行 init，记下输出中的
+`deviceId`（后续启动使用同一目录）：
+
+```sh
+node host-core/cli.js init --data-root "$HOST_DATA_ROOT"
+```
+
+在中心侧安全设置设备 token 环境变量 `HOST_DEVICE_TOKEN`，将
+`HOST_DEVICE_ID` 设为上述 deviceId，通过唯一登记写入口注册。设备 token
+应为 32–512 位字母、数字、下划线或连字符，与本机控制 token 不同；不要
+放进命令行、历史或日志。Compose 示例使用同一个 center-data volume，
+其中 `CENTER_DATA_ROOT` 是 `/data`，不是 `/data/relay`：
+
+```sh
+docker compose run -T --rm --no-deps -e HOST_DEVICE_TOKEN --entrypoint node center \
+  host-core/relay-registry-cli.js register --data-root /data \
+  --device-id "$HOST_DEVICE_ID" --token-env HOST_DEVICE_TOKEN
+```
+
+若中心直接运行而非 Compose，在中心机器使用实际绝对数据根执行
+`node host-core/relay-registry-cli.js register --data-root "$CENTER_DATA_ROOT" --device-id "$HOST_DEVICE_ID" --token-env HOST_DEVICE_TOKEN`。
+安全地将同一设备 token 提供给 Host 环境变量 `HOST_DEVICE_TOKEN`，并单独
+设置本机控制 token 环境变量 `HOST_CONTROL_TOKEN`；两者不得相同。然后在
+Host 机器启动（替换中心地址；私有 CA 时添加可选参数，npm 路径同理）：
+
+```sh
+node host-core/host-service-cli.js serve --data-root "$HOST_DATA_ROOT" \
+  --token-env HOST_CONTROL_TOKEN --center-url https://center.example.com:8443 \
+  --device-token-env HOST_DEVICE_TOKEN
+# 可选：--center-ca-file /path/to/ca.pem --npm-path /absolute/path/to/npm-cli.js
+```
+
+访问管理 HTTPS 地址，使用所有者口令登录。UI 只列出已登记设备，没有网页
+登记表单；Host 和 App 使用设备身份认证连接中心。Hindsight 的 URL、
+凭证及 Bot 启用状态在中心作为普通插件配置，后端服务不由本 Compose
+创建。部署、版本、状态以中心 operation 和设备实际回执为准，不以请求
+受理或容器启动代替验收。
 
 ## 维护和升级
 

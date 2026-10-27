@@ -7,18 +7,22 @@ import { pathToFileURL } from 'node:url';
 import { openHost } from './host.js';
 import { openHostSettings } from './host-settings.js';
 import { openHostService } from './host-service.js';
-import { invalid, readInputObject } from './cli-input.js';
+import { invalid, readInputObject, readTextFile } from './cli-input.js';
 
 const USAGE = `usage: node host-core/host-service-cli.js [serve|settings-get|settings-set] [options]
 
 commands (default: serve):
-  serve          start the unified local host service; requires --data-root --token-env [--port] [--initial-settings]
+  serve          start the unified local host service; requires --data-root --token-env --center-url --device-token-env
   settings-get   print the persisted local host settings snapshot; requires --data-root
   settings-set   replace persisted local host settings (next startup only); requires --data-root --input
 
 options:
   --data-root <dir>         verified absolute data directory (required)
   --token-env <name>        environment variable holding the control token (serve only, required)
+  --center-url <url>        center HTTPS origin (serve only, required)
+  --device-token-env <name> environment variable holding the device token (serve only, required)
+  --center-ca-file <file>   center CA PEM file (serve only)
+  --npm-path <file>         absolute npm-cli.js path (serve only)
   --port <int>              TCP port on 127.0.0.1, decimal 0..65535 (serve only, default 8787)
   --initial-settings <file> settings seed file: single JSON object {runtime,relay} (serve only)
   --input <file>            settings-set input file: single JSON object {expectedRevision,settings} (required)
@@ -30,6 +34,10 @@ const COMMANDS = new Set(['serve', 'settings-get', 'settings-set']);
 const OPTIONS = {
   'data-root': { type: 'string' },
   'token-env': { type: 'string' },
+  'center-url': { type: 'string' },
+  'device-token-env': { type: 'string' },
+  'center-ca-file': { type: 'string' },
+  'npm-path': { type: 'string' },
   port: { type: 'string' },
   'initial-settings': { type: 'string' },
   input: { type: 'string' },
@@ -37,13 +45,13 @@ const OPTIONS = {
 };
 
 const ALLOWED_FLAGS = {
-  serve: ['data-root', 'token-env', 'port', 'initial-settings'],
+  serve: ['data-root', 'token-env', 'center-url', 'device-token-env', 'center-ca-file', 'npm-path', 'port', 'initial-settings'],
   'settings-get': ['data-root'],
   'settings-set': ['data-root', 'input'],
 };
 
 const REQUIRED = {
-  serve: ['data-root', 'token-env'],
+  serve: ['data-root', 'token-env', 'center-url', 'device-token-env'],
   'settings-get': ['data-root'],
   'settings-set': ['data-root', 'input'],
 };
@@ -68,13 +76,13 @@ function parseDataRoot(value) {
   return path.resolve(value);
 }
 
-function tokenFromEnv(name) {
+function tokenFromEnv(name, flag) {
   if (!ENV_NAME_RE.test(name)) {
-    throw invalid(`invalid --token-env name: ${name}`);
+    throw invalid(`invalid --${flag} name`);
   }
   const token = process.env[name];
   if (token === undefined || token === '') {
-    throw invalid(`environment variable ${name} is not set`);
+    throw invalid(`environment variable for --${flag} is not set`);
   }
   return token;
 }
@@ -157,7 +165,15 @@ async function settingsSet(dataRoot, patch) {
 
 async function serve(values) {
   const options = { dataRoot: parseDataRoot(values['data-root']) };
-  options.token = tokenFromEnv(values['token-env']);
+  options.token = tokenFromEnv(values['token-env'], 'token-env');
+  options.center = {
+    url: values['center-url'],
+    deviceToken: tokenFromEnv(values['device-token-env'], 'device-token-env'),
+  };
+  if (values['center-ca-file'] !== undefined) {
+    options.center.ca = readTextFile(values['center-ca-file'], '--center-ca-file');
+  }
+  if (values['npm-path'] !== undefined) options.npmPath = values['npm-path'];
   if (values.port !== undefined) options.port = parsePort(values.port);
   if (values['initial-settings'] !== undefined) {
     options.initialSettings = readInputObject(values['initial-settings']);

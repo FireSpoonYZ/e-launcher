@@ -1112,10 +1112,10 @@ CLI 均要求 `--bot-id`。`memory-status` 可选 `--input`，其余命令必须
 
 ### 统一本机服务（openHostService / host-service-cli）
 
-- `openHostService({dataRoot, token, port?, initialSettings?})` 返回 `{deviceId, url, getStatus(), close()}`。启动顺序：先在任何数据打开前完整校验显式 token/port/initialSettings；openHost 取本机 identity（随即关闭）；openHostSettings 读取设置快照；parseRuntimeConfig 解析运行时配置；解析 relay 配置（tokenEnv 变量名合法性并从环境读值，caFile 绝对路径显式读取 CA PEM）；再 openControlServer（同一进程唯一 Runtime，监听成功后调用 resume），监听成功后才 openDeviceLink 连接 relay。同进程一个 Runtime 复用同一个 DeviceLink，绝不 spawn 第二个进程。
+- `openHostService({dataRoot, token, center:{url, deviceToken, ca?}, port?, initialSettings?, npmPath?})` 返回 `{deviceId, url, getStatus(), close()}`。Host 先连接中心并取得配置，再启动本机控制服务与中心提供的 relay 链路；`npmPath` 可指定绝对的 `npm-cli.js` 路径。控制 token 与设备 token 必须不同，设备须先在中心登记。
 - 默认命令为 `serve`，也支持显式 `serve` 与离线 `settings-get`/`settings-set`。启动仅输出一行 JSONL `{"event":"listening","deviceId":...,"url":...}`——只表示本机回环控制监听成功，不声称 relay 在线/ready。stdin 一行 `shutdown`、SIGINT、SIGTERM 走同一幂等 `close()`：成功 exit 0，失败 stderr 输出 `{"error":{"code":...,"message":...}}` 后 exit 1；stdin EOF 不关服务；关闭不持久 abort Agent。
-- 状态 `getStatus()`/GET `/v1/service`：`{deviceId, phase:'starting'|'running'|'closing'|'closed', control:{url,listening}, relay:<DeviceLinkStatus|null>, activeSettingsRevision, settingsRevision, restartRequired}`。`phase:'running'` 只表示本机服务在运行；**远端在线以 `relay.phase==='online'` 为准**，connecting/backoff/blocked 一律不虚报 online/ready。无 relay 配置时 relay=null；认证 blocked 仍保留本机服务以便改配置。关闭后 getStatus 冻结最终 revision/状态，不再查询已关数据库，也不虚报 listening。`getHostInfo` 旧字段形状保持。
-- 局部启动失败按已打开资源反向关闭；link 异步 connecting/backoff 不算启动失败。保留既有独立 `control-server-cli`/`device-link-cli` 可用，统一服务不删除 legacy 用法。
+- 状态 `getStatus()`/GET `/v1/service` 包含本机控制、relay、中心状态与设置 revision；`phase:'running'` 不代替远端在线状态。关闭后状态冻结，不再查询已关数据库。`getHostInfo` 旧字段形状保持。
+- 局部启动失败按已打开资源关闭。保留既有独立 `control-server-cli`/`device-link-cli` 可用，统一服务不删除 legacy 用法。
 
 ### 本机设置持久化（host-settings.sqlite）
 
@@ -1174,9 +1174,16 @@ scopeKey/messageKey 固定 `~` 前缀再逐段编码，保护 `.`/`..`/Unicode/�
 # TARGET_DEVICE_ID、RELAY_URL、CLIENT_STATE、CLIENT_DEVICE_ID、RECORD_ID）；[ ] 表示可选参数，
 # 复制时按需取舍。
 
-# 统一本机服务（默认 serve；--initial-settings 用于初始化，已有库相同 seed 可重开）
-node host-core/host-service-cli.js --data-root "$DATA_ROOT" --token-env CONTROL_TOKEN \
+# 首次取得 Host 身份；在中心机器用相同设备 token 登记该 deviceId（CENTER_DATA_ROOT 为中心数据根）
+node host-core/cli.js init --data-root "$DATA_ROOT"
+node host-core/relay-registry-cli.js register --data-root "$CENTER_DATA_ROOT" \
+  --device-id "$HOST_DEVICE_ID" --token-env HOST_DEVICE_TOKEN
+# 统一本机服务（默认 serve；两种 token 各从环境变量读取且必须不同）
+node host-core/host-service-cli.js serve --data-root "$DATA_ROOT" --token-env CONTROL_TOKEN \
+  --center-url https://center.example.com:8443 --device-token-env HOST_DEVICE_TOKEN \
+  [--center-ca-file /path/to/ca.pem] [--npm-path /absolute/path/to/npm-cli.js] \
   [--initial-settings initial-settings.json] [--port 8787]
+# --initial-settings 用于初始化，已有库相同 seed 可重开。中心 UI 只列已登记设备，没有网页登记表单。
 # 离线设置读取/修复（不启动 Runtime/模型/链路）
 node host-core/host-service-cli.js settings-get --data-root "$DATA_ROOT"
 node host-core/host-service-cli.js settings-set --data-root "$DATA_ROOT" --input settings-update.json
