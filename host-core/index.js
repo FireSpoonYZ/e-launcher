@@ -14,5 +14,4 @@ export {
   normalizeBotExtensions,
   normalizeRuntimeExtensions,
   resolveRuntimeExtensions,
-  createHostExtensionManager,
 } from './extension-manager.js';

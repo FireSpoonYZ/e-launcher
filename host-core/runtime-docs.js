@@ -123,6 +123,14 @@ export function agentProfileChange(state, profile) {
     change.thinkingLevel = thinkingLevel;
   }
 
+  if (profile?.selectedExtensions) {
+    const desired = profile.selectedExtensions;
+    const current = state?.extensions;
+    if (!Array.isArray(current) || current.length !== desired.length || current.some((name, index) => name !== desired[index].name)) {
+      change.extensions = desired;
+    }
+  }
+
   const desired = profile?.removeTools ?? [];
   const managed = profile?.managedTools ?? desired;
   const current = state?.tools;

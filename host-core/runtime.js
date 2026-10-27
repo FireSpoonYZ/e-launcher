@@ -1,16 +1,18 @@
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
+import * as durable from '@earendil-works/pi-durable';
+import * as chord from '@earendil-works/chord';
 import { Harness, createRegistry, defineExtension, section, hook, GenerationTask } from '@earendil-works/pi-durable';
 import { openNodeSqliteStorage } from '@earendil-works/pi-durable/storage/sqlite/node';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { createModels } from '@earendil-works/pi-ai/models';
-import { buildCompressSystemPrompt } from 'acp-kernel';
+import { buildCompressSystemPrompt, countMessageTokens } from 'acp-kernel';
 import { createCodingTools } from '@earendil-works/pi-durable/tools';
 import { createAndroidTools } from './android-tools.js';
 import { createHostExecutionEnv } from './host-environment.js';
 import { openHost } from './host.js';
 import { acquireRuntimeOwner } from './runtime-owner.js';
-import { parseExecutionOptions, parseModelRef, describeModelCatalog, syncModelsFromRuntimeConfig, discoverProviderModels, normalizeThinkingLevel } from './runtime-models.js';
+import { parseExecutionOptions, parseModelRef, describeModelCatalog, discoverProviderModels, applyCenterModels } from './runtime-models.js';
 import { createGrepTool } from './grep-tool.js';
 import { createFindTool } from './find-tool.js';
 import { createLsTool } from './ls-tool.js';
@@ -18,7 +20,9 @@ import { getPrimaryConversation, RequestKeys, PrimaryIndex, upgradeLegacyContext
 import { formatPrimarySubmission, normalizeHistoryOptions, readPrimaryHistory } from './runtime-history.js';
 import { createContextManager } from './context-manager.js';
 import { createContextTools } from './context-tools.js';
-import { BC_KERNEL_VERSION } from './context-state.js';
+import { ContextState, BC_KERNEL_VERSION } from './context-state.js';
+import { resolveBotIdentity } from './bot-identity.js';
+import { createPluginManager } from './plugins/manager.js';
 import { createRuntimeLive } from './runtime-live.js';
 import { readScopeHistory, readScopeMessage, readScopeMessageDelivery } from './runtime-scope-queries.js';
 import { createWorkContextRuntime } from './runtime-work-contexts.js';
@@ -33,10 +37,6 @@ import {
   importLegacySnapshot as coreImportLegacySnapshot,
   readLegacyDraft as coreReadLegacyDraft,
 } from './legacy-import.js';
-import { parseHindsightOptions } from './hindsight-client.js';
-import { createRuntimeHindsight } from './runtime-hindsight.js';
-import { createHindsightTools } from './hindsight-tools.js';
-import { createHostExtensionManager, normalizeBotExtensions, resolveRuntimeExtensions } from './extension-manager.js';
 import { createShowerManager } from './shower-manager.js';
 import { createShowerTools } from './shower-tools.js';
 import { createRuntimeShower } from './runtime-shower.js';
@@ -63,14 +63,18 @@ function createBotAdmission() {
   const lanes = new Map();
   const accepted = new Set();
   let closed = false;
+  let suspended = false;
 
   function admit(botId, operation) {
     if (typeof botId !== 'string' || botId === '') {
       return Promise.reject(errWithCode('botId must be a non-empty string', 'INVALID_ARGUMENT'));
     }
-    if (closed) return Promise.reject(errWithCode('host is closing', 'NOT_CONNECTED'));
+    if (closed || suspended) return Promise.reject(errWithCode('host is not connected', 'NOT_CONNECTED'));
     const previous = lanes.get(botId);
-    const start = () => operation();
+    const start = () => {
+      if (closed || suspended) throw errWithCode('host is not connected', 'NOT_CONNECTED');
+      return operation();
+    };
     const task = previous ? previous.then(start, start) : Promise.resolve().then(start);
     lanes.set(botId, task);
     accepted.add(task);
@@ -87,7 +91,8 @@ function createBotAdmission() {
     while (accepted.size > 0) await Promise.allSettled([...accepted]);
   }
 
-  return { admit, close };
+  return { admit, close, suspend() { suspended = true; }, resume() { suspended = false; },
+    async drain() { while (accepted.size) await Promise.allSettled([...accepted]); } };
 }
 
 /**
@@ -97,37 +102,25 @@ function createBotAdmission() {
 export async function openRuntime(options) {
   // 执行选项先于任何写数据校验：bashPath/toolPaths 类型错误在打开 host 前拒绝。
   const execution = parseExecutionOptions(options);
-  // 思考档位同样在打开 host 前校验，非法值不留下已打开的 Host。
-  // 共享可变档位：reloadModels 热更新后，两个 getProfile 闭包与 profileFor 都读到新值。
-  const thinking = { level: normalizeThinkingLevel(options?.thinkingLevel) ?? null };
   // 可信原生桥接仅进程注入时接受：非函数直接拒绝，且绝不来自配置/HTTP/relay。
   const nativeBridge = options?.nativeBridge;
   if (nativeBridge !== undefined && typeof nativeBridge !== 'function') {
     throw errWithCode('nativeBridge must be a function', 'INVALID_ARGUMENT');
   }
-  // 打开 host（会初始化数据目录/SQLite）前先解析有效规范扩展配置与已启用凭据：
-  // 关闭的扩展不解析缺失的环境引用，启动被拒时也不会留下已打开的 Host。
-  const resolvedExtensions = resolveRuntimeExtensions({
-    extensions: options?.extensions,
-    hindsight: options?.hindsight,
-  });
-  const hindsightOptions = parseHindsightOptions(
-    resolvedExtensions.hindsight?.enabled ? resolvedExtensions.hindsight.config : undefined,
-  );
+  const centerRuntime = options?.centerRuntime;
+  if (!centerRuntime?.snapshot || !centerRuntime.installer || typeof centerRuntime.getClient !== 'function') {
+    throw errWithCode('center runtime is required', 'CENTER_OFFLINE');
+  }
   const host = openHost({ dataRoot: options?.dataRoot });
-  // 扩展管理归 Host extension manager（配置/目录/默认值/生命周期）；歧义输入由它拒绝。
-  const extensions = createHostExtensionManager({
-    host,
-    extensions: options?.extensions,
-    hindsight: options?.hindsight,
-  });
   const models = options?.models ?? createModels();
-  const defaultModel = options?.defaultModel ?? null;
+  const defaultModel = null;
   let releaseOwner = null;
   let storage = null;
   let harness = null;
   let workContexts = null;
-  let memory = null;
+  let online = false;
+  let botModels = {};
+  let getBotEntryWatermark;
 
   // 每 conversationId+cwd 一个执行环境；绝不 process.chdir 或默认 process.cwd，缺 cwd 明确报错。
   const envCache = new Map();
@@ -158,6 +151,7 @@ export async function openRuntime(options) {
   const manager = createContextManager({ getHarness: () => harness, models });
   // 每 Bot 准入队列归本 Runtime：send/设置/工作操作共用，关闭时先拒新准入再排空。
   const bots = createBotAdmission();
+  bots.suspend();
   const decisions = createWorkDecisionRuntime({
     host,
     getHarness: () => harness,
@@ -167,26 +161,9 @@ export async function openRuntime(options) {
     context: CTX,
     // 工作决策的 stop/resume/advance 在同一 Bot 队列内执行；scope lane 在前，Bot lane 在后。
     admitBot: bots.admit,
-    // 工作会话同样需要默认思考档位：新绑定由 ensureWorkBinding 写入。
-    getProfile: (botId, workMeta) => botProfile(host, extensions, hindsightTools, botId, workMeta, undefined, thinking.level),
+    getProfile: (botId, workMeta) => botProfile(host, plugins, botModels, coreExtensions, finalBudgetExtension, botId, workMeta),
   });
-  // 始终创建禁用兼容控制器（config:null 不产生网络/存储/listener）；工具经 manager 注册。
-  memory = createRuntimeHindsight({
-    host,
-    getHarness: () => harness,
-    getWorkContexts: () => workContexts,
-    getWorkActivity: decisions.getWorkActivity,
-    getBotPolicy: (botId) => extensions.getPolicy(botId),
-    config: hindsightOptions,
-    context: CTX,
-  });
-  // 原生 Hindsight 扩展即使关闭也注册：定义按名字持久，可见性/可调用性由每 Bot 策略过滤。
-  const hindsightTools = createHindsightTools(memory);
-  extensions.registerRuntime('hindsight', {
-    extension: defineExtension({ name: 'host.hindsight', tools: hindsightTools }),
-    quiesce: () => memory.quiesce(),
-    close: () => memory.close(),
-  });
+
   // 统一图形环境：管理器按注入的可信原生桥接（Android）或当前平台（Windows/Linux）选后端；
   // 构造不启动原生/进程资源，首次 ensure 才申请，随 Runtime 关闭释放。
   const shower = createShowerManager({ dataRoot: host.dataRoot, nativeBridge });
@@ -232,8 +209,44 @@ export async function openRuntime(options) {
       tools: createShowerTools({ host, getHarness: () => harness, manager: shower }),
     }));
   }
-  // 已注册扩展按原位置装入 registry：保持 core 扩展顺序与 BC-before-memory 链不变。
-  extensions.install(registry);
+  let plugins;
+  const services = {
+    host, getHarness: () => harness, context: CTX, getWorkContexts: () => workContexts,
+    getWorkActivity: decisions.getWorkActivity,
+    resolveConversationBot: async (id) => {
+      const identity = await resolveBotIdentity(host, harness, id, CTX);
+      const primary = await harness.snapshot(PrimaryIndex, CTX);
+      const work = await harness.snapshot(WorkIndex, CTX);
+      const owners = host.listBots().filter((bot) => bot.deviceId === host.deviceId && primary?.byPrimary?.[bot.primaryConversationId] === id)
+        .map((bot) => ({ botId: bot.botId, scopeId: null }));
+      for (const [key, binding] of Object.entries(work?.byKey ?? {})) {
+        const pair = parseBindingKey(key);
+        if (binding.nativeId === id && pair) owners.push({ botId: pair[0], scopeId: pair[1] });
+      }
+      if (owners.length !== 1 || owners[0].botId !== identity.botId || owners[0].scopeId !== identity.scopeId) {
+        throw errWithCode('conversation has ambiguous ownership', 'BOT_CONTEXT_REQUIRED');
+      }
+      return identity.botId;
+    },
+    assertCapabilityAllowed: (botId, id) => plugins.assertCapabilityAllowed(botId, id),
+    getExecutionEnv: async (botId) => envFor({ conversationId: 'plugin:' + botId, cwd: host.getBot(botId).cwd }),
+    getBotEntryWatermark: (botId) => getBotEntryWatermark(botId),
+    documents: { PrimaryIndex, RequestKeys, WorkIndex, WorkContextState, WorkDecisionState, ContextState },
+    sdk: { ...durable, chord }, countMessageTokens,
+    centerClient: {
+      listCapabilityTools: (...args) => {
+        const client = centerRuntime.getClient();
+        if (!client) throw errWithCode('center is offline', 'CENTER_OFFLINE');
+        return client.listCapabilityTools(...args);
+      },
+      callCapabilityTool: (...args) => {
+        const client = centerRuntime.getClient();
+        if (!client) throw errWithCode('center is offline', 'CENTER_OFFLINE');
+        return client.callCapabilityTool(...args);
+      },
+    },
+  };
+  plugins = createPluginManager({ host, registry, installer: centerRuntime.installer, services, isOnline: () => online });
   registry.install(defineExtension({
     name: 'host.billion-context',
     tools: createContextTools(manager),
@@ -241,14 +254,20 @@ export async function openRuntime(options) {
     hooks: [hook(GenerationTask, {
       async beforeRequest(request, api, context) {
         try {
+          if (!online) throw errWithCode('center is offline', 'CENTER_OFFLINE');
+          const botId = await services.resolveConversationBot(api.conversationId);
+          const modelRef = botModels[botId]?.modelRef;
+          if (!modelRef) throw errWithCode('center model is required', 'MODEL_REQUIRED');
+          const expected = parseModelRef(modelRef);
+          const task = await harness.getTask(api.taskId, context);
+          const actual = task?.state?.checkpoint?.model;
+          if (!actual || actual.provider !== expected.provider || actual.modelId !== expected.modelId) throw errWithCode('center model changed', 'INVALID_STATE');
           await decisions.beforeRequest(request, api, context);
           const prepared = await manager.prepare(request, api, context);
           // BC 消息作为实际首参：合并 request 与 prepared，不发明第 4 参。
           const requestView = { ...request, ...prepared };
-          const memoryResult = await memory.beforeRequest(requestView, api, context);
-          const result = memoryResult ?? prepared;
-          await decisions.checkBudget(requestView, api, context);
-          return result;
+          if (!online) throw errWithCode('center is offline', 'CENTER_OFFLINE');
+          return await plugins.beforeRequest(requestView, api, context);
         } catch (err) {
           if (!context.abortSignal?.aborted) {
             // SDK 会吞普通 hook 异常；用本次 invocation context 取消当前任务，避免 join 自身。
@@ -263,6 +282,31 @@ export async function openRuntime(options) {
       },
     })],
   }));
+  // Selected after each Bot's plugin hooks, so this check sees their complete request.
+  const finalBudgetExtension = defineExtension({ name: 'cap-final-budget', hooks: [hook(GenerationTask, {
+    async beforeRequest(request, api, context) {
+      try {
+        if (!online) throw errWithCode('center is offline', 'CENTER_OFFLINE');
+        const prepared = (await harness.snapshot(ContextState, api.conversationId, context))?.prepared;
+        if (!prepared || prepared.taskId !== String(api.taskId)) throw errWithCode('context is not prepared', 'INVALID_STATE');
+        const tokens = (messages) => messages.reduce((sum, message) => {
+          const content = message.content;
+          const pure = (message.role === 'user' || message.role === 'assistant') &&
+            (message.role === 'user' && typeof content === 'string' || Array.isArray(content) && content.every((item) => item.type === 'text'));
+          const text = pure ? (typeof content === 'string' ? content : content.map((item) => item.text).join('\n')) : JSON.stringify(message);
+          return sum + countMessageTokens({ text });
+        }, 0);
+        const added = Math.max(0, tokens(request.messages) - tokens(prepared.messages));
+        if (prepared.tokenCount + added >= prepared.contextWindow) throw errWithCode('context limit reached', 'CONTEXT_LIMIT');
+        await decisions.checkBudget(request, api, context);
+      } catch (err) {
+        if (!context.abortSignal?.aborted) await harness.abortTask(api.taskId, context);
+        throw err;
+      }
+    },
+  })] });
+  registry.install(finalBudgetExtension);
+  const coreExtensions = registry.snapshot().installed().filter((extension) => extension !== finalBudgetExtension);
   // 显式传入 models 才是主动模式：把旧 tools:[] 会话升级为继承 registry 默认工具。
   const upgradeLegacy = options?.models !== undefined;
   try {
@@ -271,7 +315,7 @@ export async function openRuntime(options) {
     harness = await Harness.open(storage, {
       models,
       registry,
-      settings: { compaction: { enabled: false } },
+      settings: { compaction: { enabled: false }, extensions: coreExtensions },
       env: envFor,
     }, CTX);
     if (upgradeLegacy) {
@@ -283,10 +327,7 @@ export async function openRuntime(options) {
     } else if (storage) {
       try { await storage.close(CTX); } catch { /* close 失败不掩盖原错误 */ }
     }
-    if (memory) {
-      try { await extensions.quiesce(); } catch { /* quiesce 失败不掩盖原错误 */ }
-      try { await extensions.close(); } catch { /* close 失败不掩盖原错误 */ }
-    }
+    try { await plugins.close(); } catch { /* close 失败不掩盖原错误 */ }
     try { await shower.close(); } catch { /* close 失败不掩盖原错误 */ }
     try { await cleanupEnvs(); } catch { /* open 失败清理不掩盖原错误 */ }
     try { releaseOwner?.(); } catch { /* release 失败不掩盖原错误 */ }
@@ -304,7 +345,7 @@ export async function openRuntime(options) {
     harness,
     manager,
     context: CTX,
-    getProfile: (botId, workMeta) => botProfile(host, extensions, hindsightTools, botId, workMeta, undefined, thinking.level),
+    getProfile: (botId, workMeta) => botProfile(host, plugins, botModels, coreExtensions, finalBudgetExtension, botId, workMeta),
     // sync 提交成功后附着等待中的 work watch（事务外，观察失败不影响导入）。
     onBound: (botId, scopeId, binding) => live.bindWork(botId, scopeId, binding),
   });
@@ -313,21 +354,25 @@ export async function openRuntime(options) {
     harness,
     models,
     defaultModel,
-    thinking,
     releaseOwner,
     manager,
     cleanupEnvs,
     live,
     workContexts,
     decisions,
-    memory,
-    extensions,
-    hindsightTools,
+    plugins,
+    coreExtensions,
+    finalBudgetExtension,
+    centerRuntime,
+    setOnline: (value) => { online = value; },
+    setBotModels: (value) => { botModels = value; },
+    getBotModels: () => botModels,
+    setWatermarkReader: (fn) => { getBotEntryWatermark = fn; },
     botAdmissions: bots,
     shower,
   });
   try {
-    // 启动时初始化既有 Bot（扩展默认值 + SOUL + 已绑定会话的人格/工具）。
+    // 启动时初始化已有 Bot 的 SOUL 和会话人格；中心策略稍后应用。
     await runtime.initializeBots();
   } catch (err) {
     try { await runtime.close(); } catch { /* close 失败不掩盖启动错误 */ }
@@ -336,25 +381,18 @@ export async function openRuntime(options) {
   return runtime;
 }
 
-/**
- * 每 Bot 人格/工具视图：实际 SOUL 文本 + manager 管理的完整工具集与本次要排除的工具。
- * managedTools 与 removeTools 分开传递，才能让重开/只读→读写时恢复原先被排除的工具。
- */
-function botProfile(host, extensions, hindsightTools, botId, workMeta, defaultModel, thinkingLevel) {
-  const bot = host.getBot(botId);
-  const modelRef = bot?.modelRef ?? defaultModel ?? null;
+/** 构建该 Bot 的 SOUL、中心模型和明确的 core + 插件扩展视图。 */
+function botProfile(host, plugins, botModels, coreExtensions, finalBudgetExtension, botId, workMeta) {
+  const selection = botModels[botId] ?? {};
+  const modelRef = selection.modelRef ?? null;
   let model;
   if (typeof modelRef === 'string' && modelRef.trim() !== '') {
     try { model = parseModelRef(modelRef.trim()); } catch { /* ignore invalid ref during profile snapshot */ }
   }
-  // 首次使用（主/工作上下文）前同步冻结该 Bot 的扩展默认值 + SOUL：遗留 Bot 不必先经主发送/读取。
-  extensions.ensureBot(botId);
   const soul = host.getBotSoul(botId).text;
-  const byName = new Map(hindsightTools.map((tool) => [tool.name, tool]));
-  const removeTools = extensions.disabledToolNames(botId).map((name) => byName.get(name)).filter(Boolean);
   const instructions = workMeta ? workInstructions(soul, workMeta) : (soul === '' ? null : soul);
   // thinkingLevel 总是给出：(null 表示 SDK 默认) 才能让 reload 后重应用人格时回写变更。
-  return { instructions, removeTools, managedTools: hindsightTools, thinkingLevel: thinkingLevel ?? null, ...(model ? { model } : {}) };
+  return { instructions, selectedExtensions: [...coreExtensions, ...plugins.extensionsFor(botId), finalBudgetExtension], thinkingLevel: selection.thinkingLevel ?? null, ...(model ? { model } : {}) };
 }
 
 function parseBindingKey(key) {
@@ -366,10 +404,19 @@ function parseBindingKey(key) {
   }
 }
 
-function createRuntime({ host, harness, models, defaultModel: initialDefaultModel, thinking, releaseOwner, manager, cleanupEnvs, live, workContexts, decisions, memory, extensions, hindsightTools, botAdmissions, shower }) {
-  let defaultModel = initialDefaultModel;
+function createRuntime({ host, harness, models, defaultModel, releaseOwner, manager, cleanupEnvs, live, workContexts, decisions, plugins, coreExtensions, finalBudgetExtension, centerRuntime, setOnline, setBotModels, getBotModels, setWatermarkReader, botAdmissions, shower }) {
   let closePromise = null;
   let closing = false;
+  let centerOnline = false;
+  let appliedRevision = null;
+  let highestRevision = -1;
+  let lifecycle = Promise.resolve();
+  let epoch = 0;
+  const serial = (operation) => {
+    const next = lifecycle.then(operation);
+    lifecycle = next.catch(() => {});
+    return next;
+  };
   // 同一 Bot 的发送/设置/显式同步串行；内侧复用 raw 实现，避免自持同一 lane。
   const admitBot = botAdmissions.admit;
   // 本运行时已初始化过人格/工具的 Bot；新 Bot 经 initializeBot 增量加入。
@@ -391,7 +438,14 @@ function createRuntime({ host, harness, models, defaultModel: initialDefaultMode
   };
   const close = () => {
     closing = true;
+    ++epoch;
+    centerOnline = false;
+    setOnline(false);
+    botAdmissions.suspend();
+    plugins.suspend();
+    plugins.abortActions();
     closePromise ??= (async () => {
+      await lifecycle;
       // 同步封闭 Bot 新准入并开始排空：必须在本次 async 体的首个 await 之前调用，
       // 否则等待 decisions.close() 期间新设置/发送操作仍能入队。
       const botClose = botAdmissions.close();
@@ -407,13 +461,13 @@ function createRuntime({ host, harness, models, defaultModel: initialDefaultMode
       // 排空已接纳导入，但共享消息账本须保留到原生工具退出。
       try { await workContexts.quiesce(); } catch (err) { errors.push(err); }
       try { await live.close(); } catch (err) { errors.push(err); }
-      // Seal Durable first so memory cancellation cannot turn shutdown into a persistent task abort.
+      // Seal Durable before stopping plugin resources.
       const nativeClose = harness.close(CTX);
-      const memoryQuiesce = extensions.quiesce();
-      for (const result of await Promise.allSettled([nativeClose, memoryQuiesce])) {
+      const pluginQuiesce = plugins.quiesce();
+      for (const result of await Promise.allSettled([nativeClose, pluginQuiesce])) {
         if (result.status === 'rejected') errors.push(result.reason);
       }
-      try { await extensions.close(); } catch (err) { errors.push(err); }
+      try { await plugins.close(); } catch (err) { errors.push(err); }
       try { await workContexts.close(); } catch (err) { errors.push(err); }
       try { await cleanupEnvs(); } catch (err) { errors.push(err); }
       try { host.close(); } catch (err) { errors.push(err); }
@@ -430,7 +484,7 @@ function createRuntime({ host, harness, models, defaultModel: initialDefaultMode
     return workContexts.runMessageOperation(operation);
   };
 
-  const profileFor = (botId, workMeta) => botProfile(host, extensions, hindsightTools, botId, workMeta, defaultModel, thinking.level);
+  const profileFor = (botId, workMeta) => botProfile(host, plugins, getBotModels(), coreExtensions, finalBudgetExtension, botId, workMeta);
 
   // 统一图形环境的 Runtime 门面：Actor 只来自可信主会话或工作绑定，绝不采信调用方会话。
   const showerRuntime = createRuntimeShower({
@@ -476,12 +530,11 @@ function createRuntime({ host, harness, models, defaultModel: initialDefaultMode
     if (closing) throw errWithCode('host is closing', 'NOT_CONNECTED');
     const bot = host.getBot(botId);
     if (!bot) throw errWithCode(`bot not found: ${botId}`, 'BOT_NOT_FOUND');
-    await extensions.ensureBot(botId);
+    host.ensureBotSoul(botId);
     if (!initializedBots.has(botId)) {
       await refreshBotProfiles(bot);
       initializedBots.add(botId);
     }
-    return extensions.getBotExtensions(botId);
   }
 
   /** 编辑准入：Bot 的任一已映射会话有 queued/placed 提交或挂起工作决策则忙。 */
@@ -519,47 +572,113 @@ function createRuntime({ host, harness, models, defaultModel: initialDefaultMode
     return bot;
   }
 
-  // 显式记忆操作前的幂等初始化：只保证扩展默认值 + SOUL，不做人格刷新/建会话。
-  function withBotSettings(botId, operation) {
-    if (typeof botId === 'string' && host.getBot(botId)) extensions.ensureBot(botId);
-    return operation();
+  setWatermarkReader(async (botId) => botMaxEntryId(await requireBot(botId)));
+
+  async function abortConversations() {
+    if ((await harness.inspect(CTX)).scheduling === 'paused') return;
+    const ids = new Set();
+    for (const bot of host.listBots()) for (const id of await botConversations(bot)) ids.add(id);
+    for (const id of ids) {
+      const conversation = await harness.conversation(id, CTX);
+      if (conversation) await conversation.abort(CTX, { background: true });
+    }
   }
 
-  // Hindsight 8 方法先在 Bot 就绪后转发（read 方法直传，retain/correct 显式双参包装，内部 actor 不暴露）。
-  return {
+  function setCenterOnline(value) {
+    if (!value) {
+      ++epoch;
+      centerOnline = false;
+      appliedRevision = null;
+      setOnline(false);
+      botAdmissions.suspend();
+      plugins.suspend();
+      plugins.abortActions();
+      return serial(async () => { await abortConversations(); await botAdmissions.drain(); await plugins.quiesce(); });
+    }
+    const generation = epoch;
+    return serial(async () => {
+      if (closing || appliedRevision === null || !centerRuntime.getClient() || generation !== epoch) throw errWithCode('center is offline', 'CENTER_OFFLINE');
+      setOnline(true);
+      try {
+        await plugins.activate();
+        if (generation !== epoch || !centerRuntime.getClient()) throw errWithCode('center is offline', 'CENTER_OFFLINE');
+        plugins.resumeAdmissions();
+        centerOnline = true;
+        botAdmissions.resume();
+      } catch (err) {
+        centerOnline = false;
+        setOnline(false);
+        botAdmissions.suspend();
+        plugins.suspend();
+        plugins.abortActions();
+        await plugins.quiesce().catch(() => {});
+        throw err;
+      }
+    });
+  }
+
+  function applyCenterSnapshot(snapshot) {
+    centerOnline = false;
+    appliedRevision = null;
+    setOnline(false);
+    botAdmissions.suspend();
+    plugins.suspend();
+    plugins.abortActions();
+    const generation = ++epoch;
+    return serial(async () => {
+      if (snapshot.protocol !== 1 || snapshot.deviceId !== host.deviceId || !Number.isSafeInteger(snapshot.revision) || snapshot.revision < highestRevision) {
+        throw errWithCode('invalid or stale center snapshot', 'INVALID_ARGUMENT');
+      }
+      highestRevision = snapshot.revision;
+      appliedRevision = null;
+      await abortConversations();
+      await botAdmissions.drain();
+      await plugins.quiesce();
+      const { botModels } = applyCenterModels(snapshot, models);
+      await plugins.apply(snapshot);
+      setBotModels(botModels);
+      for (const bot of host.listBots()) await refreshBotProfiles(bot);
+      if (generation !== epoch || !centerRuntime.getClient()) throw errWithCode('center is offline', 'CENTER_OFFLINE');
+      appliedRevision = snapshot.revision;
+    });
+  }
+
+  function withCapabilityActivation(installationId, publish) {
+    return serial(async () => {
+      const generation = epoch;
+      if (!centerRuntime.getClient()) return false;
+      const initial = await harness.inspect(CTX);
+      if (generation !== epoch || !centerRuntime.getClient() || initial.tasks.length || initial.submissions.length || plugins.hasActiveExecutions()) return false;
+      const wasOnline = centerOnline;
+      centerOnline = false;
+      botAdmissions.suspend();
+      plugins.suspend();
+      await botAdmissions.drain();
+      const inspection = await harness.inspect(CTX);
+      if (generation !== epoch || !centerRuntime.getClient() || inspection.tasks.length || inspection.submissions.length || plugins.hasActiveExecutions()) {
+        if (wasOnline && generation === epoch && centerRuntime.getClient()) { plugins.resumeAdmissions(); centerOnline = true; botAdmissions.resume(); }
+        return false;
+      }
+      setOnline(false);
+      await plugins.quiesce();
+      appliedRevision = null;
+      await publish();
+      return true;
+    });
+  }
+
+  const runtime = {
+    applyCenterSnapshot, setCenterOnline, withCapabilityActivation,
+    callCapabilityAction: (id, action, request) => plugins.action(id, action, request),
     initializeBot,
 
     async initializeBots() {
       for (const bot of host.listBots()) await initializeBot(bot.botId);
     },
 
-    async getExtensionCatalog() {
-      return extensions.listExtensions();
-    },
-
-    async getBotExtensions(botId) {
-      await requireBot(botId);
-      // 遗留 Bot 在首次读取前初始化（默认值 + SOUL），读取不创建会话。
-      await extensions.ensureBot(botId);
-      return extensions.getBotExtensions(botId);
-    },
-
-    // 设置修改在同一 Bot 准入内完成：空闲检查 + 下限计算 + CAS + 人格应用不再被并发发送/工作接纳穿过。
-    setBotExtensions: (botId, input) => admitBot(botId, async () => {
-      const bot = await requireBot(botId);
-      const requested = normalizeBotExtensions(input?.extensions);
-      await assertBotIdle(bot);
-      await extensions.ensureBot(botId);
-      const previous = extensions.getBotExtensions(botId).extensions.hindsight;
-      const writeMode = requested.hindsight.enabled && requested.hindsight.mode === 'read-write';
-      const wasWrite = previous.enabled && previous.mode === 'read-write';
-      // 从关闭/只读转入读写才冻结下限：关闭期间的交换不回填。
-      const options = writeMode && !wasWrite ? { retentionFloor: await botMaxEntryId(bot) } : undefined;
-      const snapshot = await extensions.setBotExtensions(botId, input, options);
-      // 空闲编辑不重置/分叉会话，下一次请求即生效。
-      await refreshBotProfiles(bot);
-      return snapshot;
-    }),
+    getExtensionCatalog() { throw errWithCode('capabilities are managed by the center', 'INVALID_STATE'); },
+    getBotExtensions() { throw errWithCode('capabilities are managed by the center', 'INVALID_STATE'); },
+    setBotExtensions() { throw errWithCode('capabilities are managed by the center', 'INVALID_STATE'); },
 
     async getBotSoul(botId) {
       await requireBot(botId);
@@ -574,16 +693,7 @@ function createRuntime({ host, harness, models, defaultModel: initialDefaultMode
       return soul;
     }),
 
-    setBotModel: (botId, input) => admitBot(botId, async () => {
-      const bot = await requireBot(botId);
-      await assertBotIdle(bot);
-      if (input?.modelRef !== undefined && input?.modelRef !== null) {
-        parseModelRef(String(input.modelRef).trim());
-      }
-      const updated = host.setBotModel(botId, input);
-      await refreshBotProfiles(updated);
-      return updated;
-    }),
+    setBotModel() { throw errWithCode('models are managed by the center', 'INVALID_STATE'); },
 
     // 发送占位到原生接纳/回执为止（不等模型完成）；并发设置保存因此能看到已排队提交。
     submit: (botId, input) => admitBot(botId, async () => {
@@ -594,21 +704,22 @@ function createRuntime({ host, harness, models, defaultModel: initialDefaultMode
       assertNonBlank(text, 'text');
       const bot = host.getBot(botId);
       if (!bot) throw errWithCode(`bot not found: ${botId}`, 'BOT_NOT_FOUND');
-      // 遗留 Bot 在首次运行使用前完成幂等初始化（扩展默认值 + SOUL 回填）。
+      // 遗留 Bot 在首次运行使用前完成 SOUL 回填。
       await initializeBot(botId);
       const profile = profileFor(botId, null);
+      if (!getBotModels()[botId]?.modelRef) throw errWithCode('center model is required', 'MODEL_REQUIRED');
 
       let conversation = await getPrimaryConversation(harness, bot, {}, CTX);
       if (!conversation) {
-        const modelRef = bot.modelRef ?? defaultModel;
+        const modelRef = getBotModels()[botId]?.modelRef;
         if (!modelRef) throw errWithCode('model is required', 'MODEL_REQUIRED');
         const ref = parseModelRef(modelRef);
         if (!models.getModel(ref.provider, ref.modelId)) {
           throw errWithCode(`model not found: ${modelRef}`, 'MODEL_NOT_FOUND');
         }
-        conversation = await getPrimaryConversation(harness, bot, {
+        conversation = await getPrimaryConversation(harness, { ...bot, modelRef }, {
           create: true,
-          defaultModel,
+          defaultModel: modelRef,
           thinkingLevel: profile.thinkingLevel,
           instructions: profile.instructions,
           removeTools: profile.removeTools,
@@ -702,14 +813,7 @@ function createRuntime({ host, harness, models, defaultModel: initialDefaultMode
       await conversation.abort(CTX);
     },
 
-    reloadModels(rawRuntime) {
-      if (rawRuntime && typeof models.clearProviders === 'function') {
-        const normalized = syncModelsFromRuntimeConfig(models, rawRuntime);
-        defaultModel = normalized.defaultModel ?? null;
-        // 生效档位随设置热更新：下一次 submit/sync 重应用人格时落到会话。
-        thinking.level = normalized.thinkingLevel ?? null;
-      }
-    },
+    reloadModels() { throw errWithCode('models are managed by the center', 'INVALID_STATE'); },
 
     async discoverProviderModels(input) {
       return discoverProviderModels(input);
@@ -730,15 +834,14 @@ function createRuntime({ host, harness, models, defaultModel: initialDefaultMode
       return { botId, conversationId: bot.primaryConversationId, ...status };
     },
 
-    // 遗留 Bot 首次显式记忆操作前冻结扩展默认值 + SOUL（不刷新人格、不建会话）。
-    memoryStatus: (botId, input) => withBotSettings(botId, () => memory.memoryStatus(botId, input)),
-    recallMemory: (botId, input) => withBotSettings(botId, () => memory.recallMemory(botId, input)),
-    reflectMemory: (botId, input) => withBotSettings(botId, () => memory.reflectMemory(botId, input)),
-    retainMemory: (botId, input) => withBotSettings(botId, () => memory.retainMemory(botId, input)),
-    getMemory: (botId, input) => withBotSettings(botId, () => memory.getMemory(botId, input)),
-    getMemorySource: (botId, input) => withBotSettings(botId, () => memory.getMemorySource(botId, input)),
-    correctMemory: (botId, input) => withBotSettings(botId, () => memory.correctMemory(botId, input)),
-    retryMemory: (botId, input) => withBotSettings(botId, () => memory.retryMemory(botId, input)),
+    memoryStatus: (botId, input) => plugins.actionByName(botId, 'memoryStatus', input),
+    recallMemory: (botId, input) => plugins.actionByName(botId, 'recallMemory', input),
+    reflectMemory: (botId, input) => plugins.actionByName(botId, 'reflectMemory', input),
+    retainMemory: (botId, input) => plugins.actionByName(botId, 'retainMemory', input),
+    getMemory: (botId, input) => plugins.actionByName(botId, 'getMemory', input),
+    getMemorySource: (botId, input) => plugins.actionByName(botId, 'getMemorySource', input),
+    correctMemory: (botId, input) => plugins.actionByName(botId, 'correctMemory', input),
+    retryMemory: (botId, input) => plugins.actionByName(botId, 'retryMemory', input),
 
     getWorkContext: workContexts.getWorkContext,
     // 显式同步与发送/设置同队列：决策内部走 raw workContexts.syncWorkContext（已在 Bot 准入内），不会递归取 lane。
@@ -784,7 +887,6 @@ function createRuntime({ host, harness, models, defaultModel: initialDefaultMode
     resume() {
       harness.resume();
       decisions.resume();
-      memory.resume();
     },
 
     watch(botId, options) {
@@ -797,4 +899,15 @@ function createRuntime({ host, harness, models, defaultModel: initialDefaultMode
 
     close,
   };
+  const lifecycleMethods = new Set(['initializeBots', 'applyCenterSnapshot', 'setCenterOnline', 'withCapabilityActivation', 'close']);
+  return new Proxy(runtime, {
+    get(target, key) {
+      const value = target[key];
+      if (typeof value !== 'function' || lifecycleMethods.has(key)) return value;
+      return (...args) => {
+        if (!centerOnline) throw errWithCode('center is offline', 'CENTER_OFFLINE');
+        return value(...args);
+      };
+    },
+  });
 }

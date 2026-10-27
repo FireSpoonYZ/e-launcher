@@ -67,6 +67,8 @@ export async function ensureWorkBinding(tx, deviceId, bot, scope, profile) {
     // 与主会话一致：未配置时 null 即 SDK 默认档位。
     thinkingLevel: profile.thinkingLevel ?? null,
     instructions: profile.instructions === undefined ? null : profile.instructions,
+    model: profile.model,
+    extensions: profile.selectedExtensions,
     tools: initialToolsChange(profile.removeTools),
   });
   const state = await tx.doc(WorkContextState, nativeId);
