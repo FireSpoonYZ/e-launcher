@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { HashRouter } from 'react-router-dom';
 import { HostPage } from '../../../web/src/Host';
+import { CenterGate } from '../../../web/src/native/CenterGate';
 import { ErrorNotice, LanguageOverride, errorText } from '../../../web/src/ui';
 import {
   mobileHide,
@@ -25,6 +26,8 @@ function MobileShell() {
   const [notice, setNotice] = useState('');
   const [connectionEpoch] = useState(0);
   const remoteRef = useRef<MobileRemoteClient | undefined>(undefined);
+
+  const centerDisconnected = useCallback(() => { remoteRef.current?.invalidate(); }, []);
 
   const getOrCreateRemoteClient = useCallback(() => {
     if (!remoteRef.current) {
@@ -57,14 +60,14 @@ function MobileShell() {
     <LanguageOverride.Provider value={ui.language}>
       <div className="mobile-shell">
         <div className="mobile-body">
-          <HostPage
+          <CenterGate remoteClient onDisconnected={centerDisconnected}><HostPage
             onBack={() => void mobileHide()}
             persistentPending
             connectionEpoch={connectionEpoch}
             active
             getOrCreateRemoteClient={getOrCreateRemoteClient}
             onOpenSystemSettings={() => void mobileOpenLegacy('settings')}
-          />
+          /></CenterGate>
         </div>
         <ErrorNotice error={notice} />
       </div>

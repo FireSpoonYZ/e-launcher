@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowLeft,
   ArrowUp,
@@ -31,6 +31,7 @@ import {
 } from 'lucide-react';
 import {
   BotHost,
+  openCenterManagement,
   type BotExtensionSnapshot,
   type BotExtensions,
   type BotSoul,
@@ -48,6 +49,7 @@ import {
   type HostVoiceSettings,
 } from './native';
 import { onMobileStreamFailure } from './native/tauri-host';
+import { ActiveCenter } from './native/CenterGate';
 import type { DesktopIdentity, DesktopPanelApi } from '../../desktop/web/src/types';
 import type { DesktopConnectionInput, DesktopUiProfile } from '../../host-core/desktop-client.js';
 import type { DevicesDirectoryItem, ShowerTarget } from '../../host-core/index.js';
@@ -74,7 +76,6 @@ const uuid = () =>
     ? crypto.randomUUID()
     : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
-const LOCAL_BOTS_CACHE_KEY = 'bot-hub-local-bots-v1';
 const BOT_META_CACHE_KEY = 'bot-hub-bot-meta-v2';
 const BOT_CLEAR_MAP_KEY = 'bot-hub-cleared-v1';
 const REMOTE_PROFILES_FLAG_KEY = 'bot-hub-has-remote-v1';
@@ -353,25 +354,6 @@ interface ChatTurn {
   thinking?: string;
   toolSummary?: string[];
   createdAt?: string;
-}
-
-function readLocalBotsCache(): HostBot[] {
-  try {
-    const raw = window.localStorage.getItem(LOCAL_BOTS_CACHE_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? (parsed as HostBot[]) : [];
-  } catch {
-    return [];
-  }
-}
-
-function writeLocalBotsCache(bots: HostBot[]): void {
-  try {
-    window.localStorage.setItem(LOCAL_BOTS_CACHE_KEY, JSON.stringify(bots));
-  } catch {
-    // Ignore storage errors
-  }
 }
 
 function readBotMetaMap(): Record<string, BotPreviewMeta> {
@@ -727,6 +709,7 @@ export function HostPage({
 }: HostPageProps = {}) {
   const t = useText();
   const action = useAction();
+  const activeCenter = useContext(ActiveCenter);
 
   // Screen stack navigation
   const [screen, setScreen] = useState<HubScreen>('hub');
@@ -742,7 +725,7 @@ export function HostPage({
 
   // Local Host state (managed transparently in background)
   const [localHost, setLocalHost] = useState<HostSnapshot>();
-  const [localBots, setLocalBots] = useState<HostBot[]>(() => readLocalBotsCache());
+  const [localBots, setLocalBots] = useState<HostBot[]>([]);
   const startingLocalRef = useRef<Promise<HostSnapshot | undefined> | null>(null);
 
   // Remote Host state
@@ -880,16 +863,21 @@ export function HostPage({
     try {
       const currentSnap = snap ?? (await BotHost.snapshot());
       setLocalHost(currentSnap);
-      if (currentSnap.phase !== 'running') return readLocalBotsCache();
+      if (currentSnap.phase !== 'running') { setLocalBots([]); return []; }
+      const status = await BotHost.status();
+      if (status.center?.state !== 'ready' || new URL(status.center.centerUrl).origin !== new URL(activeCenter).origin) {
+        setLocalBots([]);
+        return [];
+      }
       const envelope = await BotHost.call({ method: 'listBots', params: {} });
       const list = array<HostBot>(envelope.result);
       setLocalBots(list);
-      writeLocalBotsCache(list);
       return list;
     } catch {
-      return readLocalBotsCache();
+      setLocalBots([]);
+      return [];
     }
-  }, []);
+  }, [activeCenter]);
 
   const ensureLocalHostRunning = useCallback(async (): Promise<HostSnapshot | undefined> => {
     if (startingLocalRef.current) return startingLocalRef.current;
@@ -898,6 +886,8 @@ export function HostPage({
         let snap = await BotHost.snapshot();
         setLocalHost(snap);
         if (snap.phase === 'running') {
+          const status = await BotHost.status();
+          if (status.center?.state !== 'ready' || new URL(status.center.centerUrl).origin !== new URL(activeCenter).origin) return undefined;
           await syncLocalBots(snap);
           return snap;
         }
@@ -910,6 +900,8 @@ export function HostPage({
           snap = await BotHost.snapshot();
           setLocalHost(snap);
           if (snap.phase === 'running') {
+            const status = await BotHost.status();
+            if (status.center?.state !== 'ready' || new URL(status.center.centerUrl).origin !== new URL(activeCenter).origin) return undefined;
             await syncLocalBots(snap);
             return snap;
           }
@@ -924,7 +916,7 @@ export function HostPage({
     })();
     startingLocalRef.current = task;
     return task;
-  }, [syncLocalBots]);
+  }, [syncLocalBots, activeCenter]);
 
   // Read-only initial snapshot check on mount (does not auto-spawn Local Host on cold open;
   // cached local bots render immediately and Local Host starts on first bot interaction)
@@ -1018,14 +1010,13 @@ export function HostPage({
     const allLocal: UnifiedBotItem[] = localBots.map(b => {
       const key = `local:local:${b.botId}`;
       const customName = botMetaMap[key]?.customName;
-      const modelOverride = botMetaMap[key]?.modelOverride;
       return {
         key,
         botId: b.botId,
         primaryConversationId: b.primaryConversationId,
         role: customName || b.role,
         cwd: b.cwd,
-        modelRef: modelOverride !== undefined ? (modelOverride || null) : b.modelRef,
+        modelRef: b.modelRef,
         createdAt: b.createdAt,
         hostKind: 'local',
         hostId: 'local',
@@ -1038,14 +1029,13 @@ export function HostPage({
         ? remoteBots.map(b => {
             const key = `remote:${remoteIdentity.profileId}:${b.botId}`;
             const customName = botMetaMap[key]?.customName;
-            const modelOverride = botMetaMap[key]?.modelOverride;
             return {
               key,
               botId: b.botId,
               primaryConversationId: b.primaryConversationId,
               role: customName || b.role,
               cwd: b.cwd,
-              modelRef: modelOverride !== undefined ? (modelOverride || null) : b.modelRef,
+              modelRef: b.modelRef,
               createdAt: b.createdAt,
               hostKind: 'remote',
               hostId: remoteIdentity.profileId,
@@ -1069,13 +1059,12 @@ export function HostPage({
       restLocal.splice(jarvisIdx, 1);
     } else {
       const jarvisKey = 'local:local:__jarvis__';
-      const jarvisOverride = botMetaMap[jarvisKey]?.modelOverride;
       primary = {
         key: jarvisKey,
         botId: '__jarvis__',
         role: primaryRoleName,
         cwd: localHost?.workspace ?? '',
-        modelRef: jarvisOverride ? jarvisOverride : null,
+        modelRef: null,
         createdAt: '',
         hostKind: 'local',
         hostId: 'local',
@@ -1769,7 +1758,7 @@ export function HostPage({
               requestId: uuid(),
               role: roleName,
               cwd: cwdToUse,
-              modelRef: editModel.trim() || null,
+              modelRef: null,
             },
           });
           const created = env.result as HostBot;
@@ -1819,7 +1808,7 @@ export function HostPage({
             requestId: uuid(),
             role: roleName,
             cwd: cwdToUse,
-            ...(editModel.trim() ? { modelRef: editModel.trim() } : {}),
+            modelRef: null,
           })) as unknown as HostBot;
           const key = `remote:${remoteIdentity.profileId}:${created.botId}`;
           saveBotAvatarConfig(key, editAvatarPreset);
@@ -1843,7 +1832,6 @@ export function HostPage({
           setPrimaryRoleName(roleName);
           writePrimaryRoleOverride(roleName);
         }
-        const nextModelRef = editModel.trim() || null;
         saveBotAvatarConfig(activeBot.key, editAvatarPreset);
         setAvatarVersion(v => v + 1);
         updateBotMeta(activeBot.key, {
@@ -1852,32 +1840,7 @@ export function HostPage({
           voiceTone: editVoiceTone,
           voiceSpeed: editVoiceSpeed,
           voiceLang: editVoiceLang,
-          modelOverride: nextModelRef ?? '',
         });
-        if (activeBot.hostKind === 'local' && activeBot.botId !== '__jarvis__') {
-          try {
-            const snap = await BotHost.snapshot();
-            if (snap.phase === 'running') {
-              await BotHost.call({
-                method: 'setBotModel',
-                params: { botId: activeBot.botId, input: { modelRef: nextModelRef } },
-              });
-              await syncLocalBots(snap);
-            }
-          } catch {
-            // Keep modelOverride in botMetaMap if Host is offline
-          }
-        } else if (activeBot.hostKind === 'remote' && activeBot.remoteIdentity && remoteClientRef.current) {
-          try {
-            await remoteClientRef.current.api.call(activeBot.remoteIdentity, 'setBotModel', {
-              botId: activeBot.botId,
-              input: { modelRef: nextModelRef },
-            });
-            await syncRemoteBots();
-          } catch {
-            // Ignore transient remote model update failure
-          }
-        }
         setScreen('bot-profile');
       }
     });
@@ -1936,14 +1899,8 @@ export function HostPage({
     });
   }, []);
 
-  const openModelPickerSheet = useCallback((target: 'bot-edit' | 'bot-profile') => {
-    setModelSheetTarget(target);
-    setModelSheetView('list');
-    setModelSearchQuery('');
-    setModelSheetOpen(true);
-    void BotHost.settingsGet()
-      .then(payload => setHindsightSettingsPayload(payload))
-      .catch(() => {});
+  const openModelPickerSheet = useCallback((_target: 'bot-edit' | 'bot-profile') => {
+    void openCenterManagement().catch(() => {});
   }, []);
 
   const selectModelFromSheet = (nextModelRef: string) =>
@@ -3388,10 +3345,7 @@ export function HostPage({
               <button
                 type="button"
                 className="grok-card-row"
-                onClick={() => {
-                  setSubPageReturnScreen('bot-profile');
-                  setScreen('bot-extensions');
-                }}
+                onClick={() => void openCenterManagement()}
               >
                 <Puzzle size={20} className="grok-row-icon" />
                 <span className="grok-row-label">{t('长期记忆', 'Memory')}</span>
@@ -3593,7 +3547,7 @@ export function HostPage({
                   <button
                     type="button"
                     className={`grok-model-quick-chip${!editModel.trim() ? ' active' : ''}`}
-                    onClick={() => setEditModel('')}
+                    onClick={() => void openCenterManagement()}
                   >
                     <span>
                       {globalDefaultModel
@@ -3609,7 +3563,7 @@ export function HostPage({
                         key={item.modelRef}
                         type="button"
                         className={`grok-model-quick-chip${isSelected ? ' active' : ''}`}
-                        onClick={() => setEditModel(item.modelRef)}
+                        onClick={() => void openCenterManagement()}
                       >
                         {isStarred && <Star size={12} className="grok-chip-star" />}
                         <span>{item.modelId}</span>
@@ -5353,20 +5307,7 @@ function HubSettingsView({
       onRemoteUpdated();
     });
 
-  const toggleLocalConfig = () => {
-    if (showLocalConfig) {
-      setShowLocalConfig(false);
-      return;
-    }
-    void action.run(async () => {
-      const payload = await BotHost.settingsGet();
-      setHostSettings(payload);
-      setSettingsJson(JSON.stringify(payload.settings, null, 2));
-      const v = await BotHost.voiceSettings();
-      setVoice(v);
-      setShowLocalConfig(true);
-    });
-  };
+  const toggleLocalConfig = () => { void action.run(openCenterManagement); };
 
   const saveLocalSettings = (e: React.FormEvent) => {
     e.preventDefault();

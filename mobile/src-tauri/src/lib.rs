@@ -41,6 +41,7 @@ const ALLOWED_METHODS: &[&str] = &[
   "start",
   "stop",
   "openLegacy",
+  "openCenter",
   "reconnect",
   "hide",
   // Bot 屏幕：Kotlin 侧 UI-local 原生覆盖层（只观看/接管已有屏幕，不进 bridge 服务）

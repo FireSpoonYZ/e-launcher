@@ -8,7 +8,7 @@ import type {
   HindsightOptions as SharedHindsightOptions,
   RuntimeExtensionsConfig,
 } from '../../../host-core/index.js';
-import { createTauriBotHost } from './tauri-host';
+import { createTauriBotHost, mobileLocalRequest } from './tauri-host';
 
 export type ToolCall = { id: string; name: string; arguments: string };
 export type Attachment = { id: string; name: string; mimeType: string; kind: 'image'|'file'; size: number; path: string };
@@ -312,3 +312,14 @@ export interface BotHostPlugin {
 // M18: Tauri Android UI 走私有 Binder 适配器；Capacitor WebView（旧入口）行为不变。
 const inTauriUi = () => (globalThis as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ !== undefined;
 export const BotHost: BotHostPlugin = inTauriUi() ? createTauriBotHost() : registerPlugin<BotHostPlugin>('BotHost');
+
+export async function openCenterUrl(url: string): Promise<void> {
+  if (!url) throw new Error('请先配置中心地址');
+  if (inTauriUi()) await mobileLocalRequest('openCenter', { url });
+  else await Device.openUrl({ url });
+}
+
+export async function openCenterManagement(): Promise<void> {
+  const { url } = await BotHost.centerSettings();
+  await openCenterUrl(inTauriUi() ? localStorage.getItem('active-center-url') ?? url : url);
+}

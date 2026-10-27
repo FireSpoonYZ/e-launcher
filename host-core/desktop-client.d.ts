@@ -152,7 +152,27 @@ export type DesktopObservationEvent =
       error: DesktopErrorShape;
     };
 
+export interface DesktopCenterStatus {
+  state: 'disconnected' | 'connecting' | 'ready';
+  centerUrl: string;
+  appliedRevision: null;
+  error: null;
+  clientId: string;
+}
+
 export interface DesktopOperationMap {
+  center_connect: {
+    params: { url: string; deviceId: string; deviceToken: string; ca?: string };
+    result: DesktopCenterStatus;
+  };
+  center_status: {
+    params: Record<string, never>;
+    result: DesktopCenterStatus;
+  };
+  center_disconnect: {
+    params: Record<string, never>;
+    result: DesktopCenterStatus;
+  };
   connect: {
     params: { connection: DesktopConnectionInput };
     result: DesktopClientStatus;

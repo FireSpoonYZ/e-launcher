@@ -1173,6 +1173,7 @@ export function createAndroidBridge(options = {}) {
           dataRoot: init.dataRoot,
           token: init.token,
           center: init.center,
+          npmPath: init.npmPath,
           port: 0,
           initialSettings: init.initialSettings,
           nativeBridge: requestNativeBridge,

@@ -201,6 +201,7 @@ class BotHostTauriPlugin(private val hostActivity: Activity) : Plugin(hostActivi
             "stop" -> stopHost(invoke)
             "hide" -> hide(invoke)
             "openLegacy" -> openLegacy(invoke, params)
+            "openCenter" -> openCenter(invoke, params)
             "reconnect" -> reconnect(invoke)
             "screenOpen" -> screenOpen(invoke, params)
             "screenLayout" -> screenLayout(invoke, params)
@@ -269,6 +270,20 @@ class BotHostTauriPlugin(private val hostActivity: Activity) : Plugin(hostActivi
         try {
             // 只把任务移到后台：不关闭 Host、不销毁 WebView 状态。
             hostActivity.moveTaskToBack(true)
+            replyOk(invoke, JSObject())
+        } catch (t: Throwable) {
+            replyFailure(invoke, t)
+        }
+    }
+
+    private fun openCenter(invoke: Invoke, params: JSONObject) {
+        val uri = android.net.Uri.parse(params.optString("url"))
+        if (uri.scheme != "https" || uri.host.isNullOrEmpty() || uri.userInfo != null) {
+            replyInvalid(invoke, "INVALID_ARGS", "中心地址必须是 HTTPS")
+            return
+        }
+        try {
+            hostActivity.startActivity(Intent(Intent.ACTION_VIEW, uri))
             replyOk(invoke, JSObject())
         } catch (t: Throwable) {
             replyFailure(invoke, t)

@@ -1,5 +1,6 @@
 const APP_COMMANDS: &[&str] = &[
   "desktop_request",
+  "desktop_open_center",
   "desktop_observe",
   "desktop_unobserve",
   "desktop_pick_file",

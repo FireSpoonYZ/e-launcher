@@ -5,6 +5,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { BotExtensions, BotExtensionSnapshot, BotSoul } from '../../../host-core/index.js';
 import { toError } from './api';
+import { openCenterManagement } from './CenterGate';
 import type { DesktopIdentity, DesktopViewApi } from './types';
 
 /** 与 Host 的公开上限一致（UTF-8 字节）。 */
@@ -100,7 +101,7 @@ export function BotSettings({
   const [saving, setSaving] = useState<'extensions' | 'soul' | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const [studioTab, setStudioTab] = useState<'all' | 'soul' | 'extensions'>('all');
+  const [studioTab, setStudioTab] = useState<'all' | 'soul' | 'extensions'>('soul');
 
   const mountedRef = useRef(true);
   /** 读取代次：同一选择内只应用最后一次读取。 */
@@ -330,7 +331,7 @@ export function BotSettings({
     }
   }
 
-  const showExtPanel = studioTab === 'all' || studioTab === 'extensions';
+  const showExtPanel = false;
   const showSoulPanel = studioTab === 'all' || studioTab === 'soul';
 
   return (
@@ -362,13 +363,7 @@ export function BotSettings({
       <div className="raw-history-content soul-studio-body">
         <div className="soul-studio-topbar">
           <div className="studio-seg" role="tablist" aria-label="灵魂与扩展视图切换">
-            <button
-              type="button"
-              className={studioTab === 'all' ? 'active' : undefined}
-              onClick={() => setStudioTab('all')}
-            >
-              ⚡ 同屏工作台
-            </button>
+
             <button
               type="button"
               className={studioTab === 'soul' ? 'active' : undefined}
@@ -376,13 +371,7 @@ export function BotSettings({
             >
               {`🎭 灵魂文档 (SOUL.md)${soulDirty ? ' ●' : ''}`}
             </button>
-            <button
-              type="button"
-              className={studioTab === 'extensions' ? 'active' : undefined}
-              onClick={() => setStudioTab('extensions')}
-            >
-              {`🧩 插件与工具门控${extDirty ? ' ●' : ''}`}
-            </button>
+            <button type="button" onClick={() => void openCenterManagement()}>插件与模型在中心管理</button>
           </div>
           <div className="soul-studio-actions">
             <button type="button" onClick={() => void load(false)} disabled={!online || loading || busy}>

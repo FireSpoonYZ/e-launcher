@@ -166,7 +166,7 @@ function CreateBotForm({ api, catalog, onCreated }: {
         requestId,
         role: r,
         cwd: c,
-        modelRef: modelRef.trim() || null,
+        modelRef: null,
       });
       if (!mountedRef.current) return;
       setRole('');
@@ -192,15 +192,7 @@ function CreateBotForm({ api, catalog, onCreated }: {
         cwd（目标 Host 路径，由 Host 现场校验）
         <input value={cwd} onChange={(e) => setCwd(e.target.value)} placeholder="/path/to/workspace" disabled={busy} />
       </label>
-      <label className="field">
-        modelRef
-        <select value={modelRef} onChange={(e) => setModelRef(e.target.value)} disabled={busy}>
-          <option value="">（Host 默认模型）</option>
-          {(catalog?.models ?? []).map((m) => (
-            <option key={m.modelRef} value={m.modelRef}>{m.name} — {m.modelRef}</option>
-          ))}
-        </select>
-      </label>
+      <p>模型由中心管理，新 Bot 使用中心默认配置。</p>
       {error ? <div className="error-banner" role="alert">{error}</div> : null}
       <div className="form-actions">
         <button type="submit" disabled={busy || !identity || !api.transportConnected}>{busy ? '创建中…' : '创建 Bot'}</button>

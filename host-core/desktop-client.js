@@ -5,6 +5,7 @@
 // store (openDesktopUiStore). Never starts a Host, Runtime, or model loop;
 // close/disconnect aborts client transports and observations only.
 import path from 'node:path';
+import { connectCenter } from './center-client.js';
 import { createHash } from 'node:crypto';
 import { assertId, assertRevision, messageError } from './message-protocol.js';
 import { assertUuid } from './pending-store.js';
@@ -246,6 +247,85 @@ export function openDesktopClient(options) {
   let lastObservedAt = null;
   let errorCode = null;
   let activeSession = null; // { generation, kind, adapter?, remote?, localDeviceId?, connectController? }
+  let centerClient = null;
+  let centerGeneration = 0;
+  let centerState = 'disconnected';
+  let centerUrl = '';
+
+  async function opCenterConnect(params) {
+    rejectUnknownFields(params, new Set(['url', 'deviceId', 'deviceToken', 'ca']), 'center_connect params');
+    const myGeneration = ++centerGeneration;
+    const previous = centerClient;
+    centerClient = null;
+    centerState = 'connecting';
+    centerUrl = '';
+    try {
+      const parsed = new URL(params.url);
+      if (!parsed.username && !parsed.password && !parsed.search && !parsed.hash) centerUrl = parsed.origin;
+    } catch { /* connectCenter rejects invalid input */ }
+    dropTransportForCenter();
+    for (const rec of inflightRequests.values()) {
+      if (rec.op !== 'center_connect' && rec.op !== 'center_status') rec.controller.abort();
+    }
+    if (previous) await previous.close();
+    try {
+      const client = await connectCenter({ centerUrl: params.url, deviceId: params.deviceId,
+        deviceToken: params.deviceToken, ca: params.ca,
+        onDisconnect: () => {
+          if (myGeneration !== centerGeneration) return;
+          centerClient = null;
+          centerState = 'disconnected';
+          dropTransportForCenter();
+          for (const rec of inflightRequests.values()) {
+            if (rec.op !== 'center_connect' && rec.op !== 'center_status') rec.controller.abort();
+          }
+        }, onChange: () => {} });
+      if (closed || myGeneration !== centerGeneration || centerState !== 'connecting') {
+        await client.close();
+        throw brokerError('NOT_CONNECTED', 'not-sent', 'center connection superseded');
+      }
+      centerClient = client;
+      centerState = 'ready';
+      return centerStatus();
+    } catch {
+      if (myGeneration === centerGeneration) centerState = 'disconnected';
+      throw brokerError('NOT_CONNECTED', 'not-sent', 'center connection failed');
+    }
+  }
+
+  function centerStatus() {
+    return { state: centerState, centerUrl, appliedRevision: null, error: null, clientId };
+  }
+  async function opCenterStatus(params) {
+    rejectUnknownFields(params, new Set(), 'center_status params');
+    return centerStatus();
+  }
+  async function opCenterDisconnect(params) {
+    rejectUnknownFields(params, new Set(), 'center_disconnect params');
+    centerGeneration += 1;
+    centerState = 'disconnected';
+    dropTransportForCenter();
+    for (const rec of inflightRequests.values()) {
+      if (rec.op !== 'center_disconnect' && rec.op !== 'center_status') rec.controller.abort();
+    }
+    const previous = centerClient;
+    centerClient = null;
+    if (previous) await previous.close();
+    return centerStatus();
+  }
+  function requireCenter() {
+    if (centerState !== 'ready') throw brokerError('NOT_CONNECTED', 'not-sent', 'center is disconnected');
+  }
+  function dropTransportForCenter() {
+    generation += 1;
+    phase = 'disconnected';
+    redactedConn = null;
+    abortAllObservations();
+    if (activeSession) {
+      closeTransportSession(activeSession);
+      activeSession = null;
+    }
+  }
 
   // Synchronous connect/disconnect switch guard: overlapping lifecycle switches
   // fail fast with RPC_BUSY instead of interleaving session teardown.
@@ -320,9 +400,12 @@ export function openDesktopClient(options) {
   // when disconnected/connecting/failed so offline enqueue/get/list remain usable
   // and accidental offline send never mutates or hangs.
   async function pendingTransportCall(targetDeviceId, method, params, callOpts = {}) {
+    requireCenter();
     if (closed || phase !== 'connected' || !activeSession) {
       throw brokerError('NOT_CONNECTED', 'not-sent', 'desktop client is not connected');
     }
+    await requireTargetReady(targetDeviceId, callOpts.signal);
+    requireCenter();
     const session = activeSession;
     const sessionGen = session.generation;
     const timeout = withCallTimeout(callOpts.signal, controlBrokerTimeoutMs(method));
@@ -654,6 +737,8 @@ export function openDesktopClient(options) {
       const code = err && err.code === 'REQUEST_TOO_LARGE' ? 'REQUEST_TOO_LARGE' : 'INVALID_ARGUMENT';
       throw brokerError(code, 'not-sent', err.message);
     }
+    await requireTargetReady(params.targetDeviceId, reqSignal);
+    requireCenter();
     const session = requireConnectedSession();
     const sessionGen = session.generation;
     const timeout = withCallTimeout(reqSignal, controlBrokerTimeoutMs(normalized.method));
@@ -737,11 +822,14 @@ export function openDesktopClient(options) {
 
   async function opServiceStatus(params, reqSignal) {
     rejectUnknownFields(params, new Set(['targetDeviceId']), 'service_status params');
-    const session = requireLocalSession(params.targetDeviceId);
+    try { assertId(params.targetDeviceId, 'targetDeviceId'); } catch (err) { throw invalid(err.message); }
+    const session = requireConnectedSession();
     const sessionGen = session.generation;
     const timeout = withCallTimeout(reqSignal, DESKTOP_CALL_TIMEOUT_MS);
     try {
-      const res = await session.adapter.getServiceStatus(params.targetDeviceId, { signal: timeout.signal });
+      const res = session.kind === 'local'
+        ? await session.adapter.getServiceStatus(params.targetDeviceId, { signal: timeout.signal })
+        : await session.remote.call(params.targetDeviceId, 'getServiceStatus', {}, { signal: timeout.signal });
       markObserved(sessionGen);
       return res;
     } catch (err) {
@@ -753,6 +841,15 @@ export function openDesktopClient(options) {
     } finally {
       timeout.cleanup();
     }
+  }
+
+  async function requireTargetReady(targetDeviceId, signal) {
+    const status = await opServiceStatus({ targetDeviceId }, signal);
+    let matches = false;
+    try {
+      matches = status?.center?.state === 'ready' && new URL(status.center.centerUrl).origin === new URL(centerUrl).origin;
+    } catch { /* A malformed remote status cannot establish readiness. */ }
+    if (!matches) throw brokerError('NOT_CONNECTED', 'not-sent', 'target Host is not connected to this center');
   }
 
   async function opPendingEnqueue(params) {
@@ -882,6 +979,8 @@ export function openDesktopClient(options) {
       throw brokerError('RPC_BUSY', 'not-sent', 'maximum concurrent observations reached');
     }
 
+    await requireTargetReady(params.targetDeviceId);
+    requireCenter();
     const session = requireConnectedSession();
     const sessionGen = session.generation;
     const controller = new AbortController();
@@ -977,6 +1076,9 @@ export function openDesktopClient(options) {
   }
 
   const OP_HANDLERS = new Map([
+    ['center_connect', opCenterConnect],
+    ['center_status', opCenterStatus],
+    ['center_disconnect', opCenterDisconnect],
     ['connect', opConnect],
     ['disconnect', opDisconnect],
     ['status', opStatus],
@@ -1008,6 +1110,8 @@ export function openDesktopClient(options) {
     if (!isPlainObject(params)) {
       throw invalid(`${op} params must be a plain object`);
     }
+    if (!['center_connect', 'center_status', 'center_disconnect', 'status', 'disconnect', 'unobserve'].includes(op)) requireCenter();
+    if (op === 'settings_set') throw brokerError('NOT_CONNECTED', 'not-sent', 'settings are managed by the center');
     // unobserve only aborts a local subscription synchronously (no network, no wait): it must
     // never queue behind the 8 in-flight RPCs or a connect/disconnect switch (a switch already
     // aborts every client observation before its first await), or a cancelled client
@@ -1027,7 +1131,7 @@ export function openDesktopClient(options) {
     const handler = OP_HANDLERS.get(op);
     const internalId = nextInternalRequestId++;
     const controller = new AbortController();
-    const rec = { controller, promise: null };
+    const rec = { controller, promise: null, op };
     inflightRequests.set(internalId, rec);
 
     rec.promise = (async () => {
@@ -1045,6 +1149,9 @@ export function openDesktopClient(options) {
     if (!closePromise) {
       closePromise = (async () => {
         closed = true;
+        centerGeneration += 1;
+        centerState = 'disconnected';
+        if (centerClient) { await centerClient.close(); centerClient = null; }
         generation += 1;
         // Abort all in-flight broker requests and observations
         for (const rec of inflightRequests.values()) {

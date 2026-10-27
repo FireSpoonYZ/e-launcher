@@ -665,19 +665,28 @@ public final class BotHostManager {
         if ("uiScheduleTask".equals(method)) {
             return onControl(() -> {
                 Gen g = gen;
-                String devId = (g != null && !g.closed && g.deviceId != null) ? g.deviceId : lastDeviceId;
+                if (!running(g)) return failedFuture(new BridgeException("NOT_CONNECTED", "not-sent", "Host 未运行"));
                 JSONObject p = params != null ? params : new JSONObject();
-                String botId = p.optString("botId");
-                String convId = p.optString("conversationId");
-                JSONObject input = p.optJSONObject("input");
-                return BotHostSchedules.get(context).applyUi(devId, botId, convId, input)
-                        .thenApply(res -> {
-                            try {
-                                return new JSONObject().put("type", "result").put("id", "ui-schedule").put("result", res);
-                            } catch (JSONException e) {
-                                throw new IllegalStateException("响应构造失败");
-                            }
-                        });
+                return processRequest(g, "status", null).thenCompose(envelope -> {
+                    JSONObject status;
+                    try {
+                        status = requireObjectResult(envelope);
+                    } catch (IOException e) {
+                        return failedFuture(e);
+                    }
+                    JSONObject center = status.optJSONObject("center");
+                    if (!currentRunning(g) || center == null || !"ready".equals(center.optString("state"))) {
+                        return failedFuture(new BridgeException("NOT_CONNECTED", "not-sent", "中心未连接"));
+                    }
+                    return BotHostSchedules.get(context).applyUi(g.deviceId, p.optString("botId"),
+                            p.optString("conversationId"), p.optJSONObject("input")).thenApply(res -> {
+                        try {
+                            return new JSONObject().put("type", "result").put("id", "ui-schedule").put("result", res);
+                        } catch (JSONException e) {
+                            throw new IllegalStateException("响应构造失败");
+                        }
+                    });
+                });
             });
         }
         return onControl(() -> {
@@ -1565,12 +1574,22 @@ public final class BotHostManager {
     private JSONObject hostInit(Gen g) throws IOException {
         try {
             BotHostAssets assets = BotHostAssets.prepare(context);
+            String npmPath = null;
+            try {
+                synchronized (PiAgentBridge.class) {
+                    PiAgentBridge.prepareNpm(context, assets.home);
+                }
+                npmPath = new File(assets.home, "npm/11.6.2/bin/npm-cli.js").getAbsolutePath();
+            } catch (Exception ignored) {
+                // 安装器在收到部署计划时报告 NPM_UNAVAILABLE，不阻止普通 Host 启动。
+            }
             JSONObject init = new JSONObject()
                     .put("type", "init")
                     .put("protocol", 1)
                     .put("mode", "host")
                     .put("dataRoot", assets.state.getAbsolutePath())
                     .put("token", g.token);
+            if (npmPath != null) init.put("npmPath", npmPath);
             String centerUrl = credentialPrefs.getString(PREF_CENTER_URL, "");
             String deviceToken = credentialPrefs.getString(PREF_CENTER_TOKEN, "");
             if (centerUrl.isEmpty() || deviceToken.isEmpty()) throw new IOException("请先配置中心连接");

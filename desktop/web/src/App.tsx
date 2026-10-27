@@ -14,6 +14,7 @@ import { PendingPanel } from './PendingPanel';
 import { SettingsPanel } from './SettingsPanel';
 import { BotChats } from './BotChats';
 import { Scopes } from './Scopes';
+import { CenterGate, openCenterManagement } from './CenterGate';
 
 interface ProfileFormState {
   title: string;
@@ -467,12 +468,13 @@ export class App extends Component<AppProps, AppState> {
             </span>
           </div>
           <nav className="app-nav">
+            <button type="button" onClick={openCenterManagement}>中心管理</button>
             {(
               [
                 { key: 'chat', label: '聊天' },
                 { key: 'scopes', label: '群聊与Bot私聊' },
                 { key: 'pending', label: '待发送' },
-                { key: 'settings', label: 'Host设置' },
+
               ] as const
             ).map((item) => (
               <button
@@ -680,6 +682,11 @@ export class App extends Component<AppProps, AppState> {
 export class DesktopApp extends Component<{ api: DesktopPanelApi; pageActive?: boolean }, { failed: string | null }> {
   state = { failed: null as string | null };
 
+  private centerDisconnected = () => {
+    this.props.api.setTransportConnected(false);
+    this.props.api.setIdentity(null);
+  };
+
   static getDerivedStateFromError(error: unknown): { failed: string } {
     return { failed: error instanceof DesktopRemoteError ? error.message : String(error) };
   }
@@ -693,6 +700,6 @@ export class DesktopApp extends Component<{ api: DesktopPanelApi; pageActive?: b
         </div>
       );
     }
-    return <App api={this.props.api} pageActive={this.props.pageActive} />;
+    return <CenterGate onDisconnected={this.centerDisconnected}><App api={this.props.api} pageActive={this.props.pageActive} /></CenterGate>;
   }
 }

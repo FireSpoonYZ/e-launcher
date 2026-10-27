@@ -2,12 +2,12 @@ import { lazy, Suspense, useEffect, useState } from 'react';
 import { SystemBars, SystemBarsStyle } from '@capacitor/core';
 import { App as CapacitorApp } from '@capacitor/app';
 import { HashRouter, Navigate, Route, Routes, useLocation } from 'react-router-dom';
-import { Device, type DeviceState } from './native';
+import { Device, openCenterManagement, type DeviceState } from './native';
+import { CenterGate } from './native/CenterGate';
 import { Environment, Loading, useBack } from './ui';
-import { ArchivedPage, ChatPage, HistoryPage } from './Chat';
+import { ArchivedPage, HistoryPage } from './Chat';
 import { SettingsHome, GeneralPage, AppearancePage, DevicePage, AboutPage, VoicePage } from './Settings';
-import { ProvidersPage, ResourcesPage } from './Resources';
-import { AdvancedPage, EditorPage } from './Editor';
+
 import { SchedulesPage, ScheduleHistoryPage } from './Schedules';
 const TerminalsPage = lazy(() => import('./RemoteTerminal').then(module => ({default: module.TerminalsPage})));
 const TerminalPage = lazy(() => import('./RemoteTerminal').then(module => ({default: module.TerminalPage})));
@@ -69,8 +69,8 @@ function Shell({initialDevice}: {initialDevice: DeviceState}) {
     resize(); window.visualViewport?.addEventListener('resize', resize);
     return () => window.visualViewport?.removeEventListener('resize', resize);
   }, []);
-  return <Environment.Provider value={{device, refresh}}><Navigation/><Routes>
-    <Route path="/chat/:conversationId?" element={<ChatPage/>}/>
+  return <Environment.Provider value={{device, refresh}}><Navigation/><CenterGate><Routes>
+    <Route path="/chat/:conversationId?" element={<Suspense fallback={<Loading/>}><HostPage/></Suspense>}/>
     <Route path="/history/:conversationId" element={<HistoryPage/>}/>
     <Route path="/archived" element={<ArchivedPage/>}/>
     <Route path="/terminals" element={<Suspense fallback={<Loading/>}><TerminalsPage/></Suspense>}/>
@@ -81,14 +81,17 @@ function Shell({initialDevice}: {initialDevice: DeviceState}) {
     <Route path="/settings/general" element={<GeneralPage/>}/>
     <Route path="/settings/appearance" element={<AppearancePage/>}/>
     <Route path="/settings/device" element={<DevicePage/>}/>
-    <Route path="/settings/providers" element={<ProvidersPage/>}/>
+    <Route path="/settings/providers" element={<CenterManagement/>}/>
     <Route path="/settings/host" element={<Suspense fallback={<Loading/>}><HostPage/></Suspense>}/>
     <Route path="/settings/voice" element={<VoicePage/>}/>
-    <Route path="/settings/resources/:kind" element={<ResourcesPage/>}/>
-    <Route path="/settings/advanced" element={<AdvancedPage/>}/>
-    <Route path="/settings/editor" element={<EditorPage/>}/>
+    <Route path="/settings/resources/:kind" element={<CenterManagement/>}/>
+    <Route path="/settings/advanced" element={<CenterManagement/>}/>
+    <Route path="/settings/editor" element={<CenterManagement/>}/>
     <Route path="/settings/about" element={<AboutPage/>}/>
     <Route path="*" element={<Navigate to="/chat" replace/>}/>
-  </Routes></Environment.Provider>;
+  </Routes></CenterGate></Environment.Provider>;
+}
+function CenterManagement() {
+  return <main className="page"><h1>中心管理</h1><button className="button" onClick={() => void openCenterManagement()}>在浏览器中打开中心</button></main>;
 }
 export default function App({initialDevice}: {initialDevice: DeviceState}) { return <HashRouter><Shell initialDevice={initialDevice}/></HashRouter>; }

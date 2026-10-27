@@ -89,6 +89,9 @@ export const BRIDGE_ERROR_CODES = new Set([
 // operations. observe/unobserve stay separate (observe frame + cancel), so no
 // arbitrary method, JS or HTTP ever crosses this IPC.
 export const BRIDGE_CLIENT_OPERATIONS = new Set([
+  'center_connect',
+  'center_status',
+  'center_disconnect',
   'connect',
   'disconnect',
   'status',
@@ -207,7 +210,7 @@ export function normalizeInitFrame(parsed) {
     rejectUnknownFields(parsed, new Set(['type', 'protocol', 'mode', 'dataRoot']), `${parsed.mode} init frame`);
     return { mode: parsed.mode, dataRoot };
   }
-  rejectUnknownFields(parsed, new Set(['type', 'protocol', 'mode', 'dataRoot', 'token', 'credentials', 'initialSettings', 'center']), 'host init frame');
+  rejectUnknownFields(parsed, new Set(['type', 'protocol', 'mode', 'dataRoot', 'token', 'credentials', 'initialSettings', 'center', 'npmPath']), 'host init frame');
   if (typeof parsed.token !== 'string' || !TOKEN_PATTERN.test(parsed.token)) {
     throw invalid('INVALID_ARGUMENT', 'token must be a URL-safe opaque string of 32-512 characters');
   }
@@ -230,7 +233,11 @@ export function normalizeInitFrame(parsed) {
   }
   const center = { url: parsed.center.url, deviceToken: parsed.center.deviceToken,
     ...(parsed.center.ca !== undefined ? { ca: parsed.center.ca } : {}) };
-  const init = { mode: 'host', dataRoot, token: parsed.token, credentials, center };
+  if (parsed.npmPath !== undefined && (typeof parsed.npmPath !== 'string' || !path.isAbsolute(parsed.npmPath))) {
+    throw invalid('INVALID_ARGUMENT', 'npmPath must be an absolute path');
+  }
+  const init = { mode: 'host', dataRoot, token: parsed.token, credentials, center,
+    ...(parsed.npmPath !== undefined ? { npmPath: parsed.npmPath } : {}) };
   if (parsed.initialSettings !== undefined) {
     init.initialSettings = normalizeHostSettings(parsed.initialSettings);
   }

@@ -50,6 +50,9 @@ const SIDECAR_NAME: &str = "e-launcher-client-node";
 const CLIENT_SCRIPT_NAME: &str = "desktop-client.mjs";
 
 const PUBLIC_OPERATIONS: &[&str] = &[
+  "center_connect",
+  "center_status",
+  "center_disconnect",
   "connect",
   "disconnect",
   "status",

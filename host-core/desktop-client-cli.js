@@ -439,8 +439,8 @@ export function createDesktopClientCli(options = {}) {
           });
           initialized = true;
           stage(STAGE_MESSAGES.initialized);
-          const ui = await client.request('ui_get', {});
-          await sendOkResponse(req.id, { clientId: ui.clientId });
+          const status = await client.request('center_status', {});
+          await sendOkResponse(req.id, { clientId: status.clientId });
         } catch (err) {
           await sendErrorResponse(req.id, err, 'not-sent');
         } finally {

@@ -30,6 +30,21 @@ fn is_allowed_navigation(url: &tauri::Url) -> bool {
 }
 
 #[tauri::command]
+fn desktop_open_center(webview: Webview, url: String) -> Result<(), BridgeError> {
+  ensure_main_webview(&webview)?;
+  let parsed = tauri::Url::parse(&url).map_err(|_| BridgeError::new("INVALID_ARGUMENT", "invalid center URL", "not-sent"))?;
+  if parsed.scheme() != "https" || !parsed.username().is_empty() || parsed.password().is_some() {
+    return Err(BridgeError::new("INVALID_ARGUMENT", "center URL must use HTTPS", "not-sent"));
+  }
+  #[cfg(windows)]
+  let result = std::process::Command::new("rundll32.exe").args(["url.dll,FileProtocolHandler", parsed.as_str()]).spawn();
+  #[cfg(not(windows))]
+  let result = std::process::Command::new("xdg-open").arg(parsed.as_str()).spawn();
+  result.map_err(|_| BridgeError::new("INTERNAL", "could not open browser", "not-sent"))?;
+  Ok(())
+}
+
+#[tauri::command]
 async fn desktop_request(
   app: AppHandle,
   webview: Webview,
@@ -129,6 +144,7 @@ pub fn run() {
     })
     .invoke_handler(tauri::generate_handler![
       desktop_request,
+      desktop_open_center,
       desktop_observe,
       desktop_unobserve,
       desktop_pick_file,
