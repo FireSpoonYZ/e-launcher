@@ -198,7 +198,7 @@ export function createPluginManager({ host, registry, installer, services, isOnl
             }
           }
           const credentials = Object.create(null);
-          for (const ref of capability.credentialRefs ?? []) {
+          for (const ref of capability.target === 'host' ? capability.credentialRefs ?? [] : []) {
             if (typeof next.credentials[ref] !== 'string') throw error('CREDENTIAL_NOT_FOUND', 'capability credential is unavailable');
             credentials[ref] = next.credentials[ref];
           }
