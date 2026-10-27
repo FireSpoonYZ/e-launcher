@@ -22,6 +22,8 @@
 
 中心已更新为 e-launcher-center:a92c8ee，源码在 releases/20261028-a92c8ee；Linux Host 的 current 链接保持原版本。升级前备份在 backups/pre-k80-ui-a92c8ee。K80/K90 覆盖安装同一 APK，SHA-256 为 af6247fa8756a1c805e5e8a5ab39d7760f4a315c5a79e151852e0c7934a7916f。K90（myron / 25102RKBEC）安装前完整备份私有 files/shared_prefs/databases，安装及启动检查通过，当前停在首次连接中心页面，尚未配置中心身份或验收跨机聊天。
 
+后续按用户要求完成 K90 中心配置：沿用原设备身份 `392d392e-8481-4c21-8f0e-c8f79458422f` 和已迁入注册表的令牌，未重建数据库或轮换其他设备凭据；显示名称设为 Redmi K90。客户端与本机 Host 均连接 `https://relay.firespoon.cn:3000`。Host 为 running、中心 ready、中继 online；中心下发 77 个模型，主助手继承中心配置，真实回复记录为 antigravity/gemini-3.8-flash-high。通过手机页面分别向本机、Windows、Linux Bot 发送唯一标记并读到模型回复；Linux CLI 也读取到 K90 的原临时 Bot 和主助手。期间发生一次连接中断，Host 自动恢复，客户端从连接表单重连后继续通过；中断原因未定位。Host 连接配置已持久化，客户端令牌仍仅在当前客户端进程内保存，进程退出或中心连接断开后需重新认证。
+
 本轮截图、DOM 与私有备份在仓库外 e-launcher-k80-ui-1793129888940；目录包含凭据，禁止整体上传。
 
 ## 原有后端与分项验收
