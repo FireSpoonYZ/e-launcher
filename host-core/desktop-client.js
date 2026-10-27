@@ -253,7 +253,7 @@ export function openDesktopClient(options) {
   let centerState = 'disconnected';
   let centerUrl = '';
 
-  async function opCenterConnect(params) {
+  async function opCenterConnect(params, reqSignal, rec) {
     rejectUnknownFields(params, new Set(['url', 'deviceId', 'deviceToken', 'ca']), 'center_connect params');
     const myGeneration = ++centerGeneration;
     const previous = centerClient;
@@ -286,10 +286,27 @@ export function openDesktopClient(options) {
         throw brokerError('NOT_CONNECTED', 'not-sent', 'center connection superseded');
       }
       centerClient = client;
+      const { linkUrl } = await client.getConnection();
+      if (closed || myGeneration !== centerGeneration || centerClient !== client) {
+        await client.close();
+        throw brokerError('NOT_CONNECTED', 'not-sent', 'center connection superseded');
+      }
+      await opConnect({ connection: { kind: 'relay', url: linkUrl, deviceId: params.deviceId,
+        token: params.deviceToken, ...(params.ca ? { ca: params.ca } : {}) } }, reqSignal, rec);
+      if (closed || myGeneration !== centerGeneration || centerClient !== client) {
+        await client.close();
+        throw brokerError('NOT_CONNECTED', 'not-sent', 'center connection superseded');
+      }
       centerState = 'ready';
       return centerStatus();
     } catch {
-      if (myGeneration === centerGeneration) centerState = 'disconnected';
+      if (myGeneration === centerGeneration) {
+        centerState = 'disconnected';
+        dropTransportForCenter();
+        const failed = centerClient;
+        centerClient = null;
+        if (failed) await failed.close();
+      }
       throw brokerError('NOT_CONNECTED', 'not-sent', 'center connection failed');
     }
   }

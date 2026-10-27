@@ -904,13 +904,15 @@ export function HostPage({
     return () => { window.clearInterval(timer); };
   }, [active, syncLocalBots]);
 
-  // Initialize Remote Client only if user previously configured remote profiles or opens settings
+  // Adopt the center-connected client as well as explicitly configured remote profiles.
+  const remoteUnsubscribe = useRef<(() => void) | null>(null);
+  useEffect(() => () => { remoteUnsubscribe.current?.(); }, []);
   const ensureRemoteApi = useCallback(async (): Promise<DesktopPanelApi | null> => {
     if (!getOrCreateRemoteClient) return null;
     if (!remoteClientRef.current) {
       remoteClientRef.current = getOrCreateRemoteClient();
       const api = remoteClientRef.current.api;
-      api.subscribe(() => {
+      remoteUnsubscribe.current = api.subscribe(() => {
         const profiles = api.snapshot?.state.profiles ?? [];
         setRemoteProfiles(profiles);
         const hasAny = profiles.length > 0;
@@ -922,6 +924,8 @@ export function HostPage({
     }
     try {
       const snap = await remoteClientRef.current.api.init();
+      setRemoteIdentity(remoteClientRef.current.api.identity);
+      setRemoteConnected(remoteClientRef.current.api.transportConnected);
       const profiles = snap.state.profiles ?? [];
       setRemoteProfiles(profiles);
       const hasAny = profiles.length > 0;
@@ -934,10 +938,10 @@ export function HostPage({
   }, [getOrCreateRemoteClient]);
 
   useEffect(() => {
-    if (hasRemoteConfigured && getOrCreateRemoteClient) {
+    if ((activeCenter || hasRemoteConfigured) && getOrCreateRemoteClient) {
       void ensureRemoteApi();
     }
-  }, [hasRemoteConfigured, getOrCreateRemoteClient, ensureRemoteApi]);
+  }, [activeCenter, hasRemoteConfigured, getOrCreateRemoteClient, ensureRemoteApi]);
 
   const syncRemoteBots = useCallback(async () => {
     const api = remoteClientRef.current?.api;
@@ -4855,7 +4859,7 @@ function HubSettingsView({
   const t = useText();
   const action = useAction();
 
-  const [selectedProfileId, setSelectedProfileId] = useState<string | null>(null);
+  const [selectedProfileId, setSelectedProfileId] = useState<string | null>(remoteIdentity?.profileId ?? null);
   const [token, setToken] = useState('');
   const [ca, setCa] = useState('');
   const [addingRemote, setAddingRemote] = useState(false);

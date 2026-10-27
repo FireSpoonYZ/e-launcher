@@ -5,7 +5,7 @@ import { mobileClientRequest } from './tauri-host';
 type Status = { state: 'disconnected' | 'connecting' | 'ready'; centerUrl: string; clientId?: string };
 export const ActiveCenter = createContext('');
 
-export function CenterGate({ children, remoteClient = false, onDisconnected }: { children: ReactNode; remoteClient?: boolean; onDisconnected?: () => void }) {
+export function CenterGate({ children, remoteClient = false, onDisconnected, onReady }: { children: ReactNode; remoteClient?: boolean; onDisconnected?: () => void; onReady?: (centerUrl: string) => Promise<void> }) {
   const [url, setUrl] = useState('');
   const [deviceId, setDeviceId] = useState(() => localStorage.getItem('center-client-device-id') ?? '');
   const [token, setToken] = useState('');
@@ -16,6 +16,8 @@ export function CenterGate({ children, remoteClient = false, onDisconnected }: {
   const epoch = useRef(0);
   const wasReady = useRef(false);
   const [error, setError] = useState('');
+  const [preparedCenter, setPreparedCenter] = useState('');
+  const [preparing, setPreparing] = useState(false);
 
   useEffect(() => {
     let live = true;
@@ -44,11 +46,27 @@ export function CenterGate({ children, remoteClient = false, onDisconnected }: {
     wasReady.current = status?.state === 'ready';
   }, [status, onDisconnected]);
 
+  useEffect(() => {
+    let live = true;
+    setPreparedCenter('');
+    if (status?.state !== 'ready' || !onReady) { setPreparing(false); return; }
+    setPreparing(true);
+    onReady(status.centerUrl).then(() => {
+      if (live) { setPreparedCenter(status.centerUrl); setError(''); }
+    }, failure => {
+      if (live) setError(failure instanceof Error ? failure.message : '设备连接初始化失败，请重试');
+    }).finally(() => { if (live) setPreparing(false); });
+    return () => { live = false; };
+  }, [status?.state, status?.centerUrl, onReady]);
+
   const connect = async (event: FormEvent) => {
     event.preventDefault();
     epoch.current += 1;
     setBusy(true);
     setError('');
+    setPreparedCenter('');
+    setStatus(undefined);
+    onDisconnected?.();
     try {
       if (!remoteClient || hostToken.trim()) {
         const snapshot = await BotHost.snapshot();
@@ -79,7 +97,7 @@ export function CenterGate({ children, remoteClient = false, onDisconnected }: {
     }
   };
 
-  if (status?.state === 'ready') return <><button type="button" onClick={() => {
+  if (status?.state === 'ready' && (!onReady || preparedCenter === status.centerUrl)) return <><button type="button" onClick={() => {
     epoch.current += 1;
     if (remoteClient) void mobileClientRequest<Status>('center_disconnect', {}).then(setStatus);
     else void BotHost.stop().then(() => setStatus(undefined));
@@ -91,10 +109,10 @@ export function CenterGate({ children, remoteClient = false, onDisconnected }: {
     <form className="form" onSubmit={connect}>
       <label>中心 HTTPS 地址<input required type="url" value={url} onChange={e => setUrl(e.target.value)} /></label>
       {remoteClient && <label>客户端设备身份<input required value={deviceId} onChange={e => setDeviceId(e.target.value)} /></label>}
-      <label>{remoteClient ? '客户端设备令牌' : '本机 Host 设备令牌'}<input type="password" autoComplete="off" required={remoteClient} value={token} onChange={e => setToken(e.target.value)} placeholder="已保存时可留空" /></label>
+      <label>{remoteClient ? '客户端设备令牌' : '本机 Host 设备令牌'}<input type="password" autoComplete="off" required={remoteClient} value={token} onChange={e => setToken(e.target.value)} placeholder={remoteClient ? "仅本次连接使用，不保存" : "已保存时可留空"} /></label>
       {remoteClient && <label>本机 Host 设备令牌（可选，仅在配置本机 Host 时填写）<input type="password" autoComplete="off" value={hostToken} onChange={e => setHostToken(e.target.value)} /></label>}
       <label>CA 证书（可选）<textarea value={ca} onChange={e => setCa(e.target.value)} /></label>
-      <button className="button" disabled={busy} type="submit">{busy ? '连接中…' : '连接 / 重试'}</button>
+      <button className="button" disabled={busy || preparing} type="submit">{busy || preparing ? '连接设备中…' : '连接 / 重试'}</button>
     </form>
     <button className="button secondary-button" disabled={!url} onClick={() => void openCenterUrl(url.trim()).catch(() => setError('无法打开中心管理页面'))}>打开中心管理 / 登录</button>
     <button className="button secondary-button" onClick={() => void BotHost.stop()}>停止本机 Host 以修改连接</button>

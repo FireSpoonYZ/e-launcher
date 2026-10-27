@@ -101,6 +101,7 @@ export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, onDi
   }
   return {
     bootstrap: (bots) => request('/api/host/bootstrap', { method: 'POST', body: { deviceId, capabilityProtocol: 1, bots } }),
+    getConnection: () => request('/api/host/connection'),
     getSnapshot: () => request('/api/host/snapshot'),
     reportRuntime: (receipt) => request('/api/host/receipt', { method: 'POST', body: receipt }),
     getDeployments: () => request('/api/host/deployments'),

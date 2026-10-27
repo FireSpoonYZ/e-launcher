@@ -179,6 +179,7 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
     await packages.reconcileDevice(id);
     return { snapshot: snapshot(id) };
   });
+  host('GET', '/api/host/connection', req => ({ protocol: 1, deviceId: req.centerDevice.deviceId, linkUrl }));
   host('GET', '/api/host/snapshot', req => snapshot(req.centerDevice.deviceId));
   host('POST', '/api/host/receipt', (req, reply) => {
     const body = object(req.body);
