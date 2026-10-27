@@ -269,10 +269,10 @@ public final class BotHostManager {
                 CompletableFuture<JSONObject> existing = startFuture;
                 if (existing != null) return existing;
             }
-            if (phase == Phase.STOPPING) throw new IllegalStateException("Host 正在停止");
-            if (pendingCleanupGen != null) throw new IllegalStateException("上一代清理未完成，无法启动");
+            if (phase == Phase.STOPPING) return failedFuture(new IllegalStateException("Host 正在停止"));
+            if (pendingCleanupGen != null) return failedFuture(new IllegalStateException("上一代清理未完成，无法启动"));
         }
-        if (offlineCleanupBlocked()) throw new IllegalStateException("上一离线进程清理未完成，无法启动");
+        if (offlineCleanupBlocked()) return failedFuture(new IllegalStateException("上一离线进程清理未完成，无法启动"));
         final long e;
         synchronized (lock) {
             e = epoch;

@@ -389,24 +389,29 @@ final class BotScreenOverlay implements TextureView.SurfaceTextureListener {
                 phase = "connecting";
                 return;
             }
+            int initWidth = Math.max(1, state.optInt("width", 1));
+            int initHeight = Math.max(1, state.optInt("height", 1));
+            outputTexture.setDefaultBufferSize(initWidth, initHeight);
             surface = new Surface(outputTexture);
+            live = false;
+            userControl = false;
+            phase = "connecting";
+            message = "";
+            attached = true;
             JSONObject attachedState = new JSONObject(current.attach(target, surface, viewer));
             if (run != generation) {
                 current.detach(viewer);
                 releaseLocal();
                 return;
             }
-            int width = attachedState.optInt("width", 1);
-            int height = attachedState.optInt("height", 1);
-            outputTexture.setDefaultBufferSize(width, height);
-            attached = true;
+            int width = Math.max(1, attachedState.optInt("width", initWidth));
+            int height = Math.max(1, attachedState.optInt("height", initHeight));
+            if (width != initWidth || height != initHeight) {
+                outputTexture.setDefaultBufferSize(width, height);
+            }
             seenDisplay = true;
             displayWidth = width;
             displayHeight = height;
-            live = false;
-            userControl = false;
-            phase = "connecting";
-            message = "";
             main.post(this::refit);
         } catch (Exception failure) {
             releaseLocal();

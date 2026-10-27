@@ -1,41 +1,104 @@
-// Bot 屏幕面板（右抽屉）：预览该 Bot 的工作屏幕，右下角唯一的「接管操作」按钮。
-// 接管 = 先 interrupt 当前对话，再让执行器停止在途动作并接受人工操作；没有「交还」，
-// 之后 Bot 与用户可同时操作。画面本身由平台客户端负责（本机 Android 为原生覆盖层）。
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Hand, Maximize2, Minimize2, Monitor } from 'lucide-react';
+// Bot 电脑全屏视图（Grok Bot 风格）：全屏深色展示该 Bot 的虚拟工作屏幕。
+// 顶部为返回按钮、Bot 头像与名称、右上角状态/帮助按钮；中央为全幅画面；右下角为「接管控制」胶囊按钮。
+// 接管 = 先 interrupt 当前对话，再让执行器停止在途动作并接受人工操作；之后 Bot 与用户可同时操作。
+import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
+import { ChevronLeft, CircleHelp, Monitor, Play, RefreshCw, Trash2 } from 'lucide-react';
+import type { ShowerTarget } from '../../host-core/index.js';
+import { GrokBotAvatar, type GrokAvatarPreset } from './GrokBotAvatar';
+import { BotHost } from './native';
 import { resolveScreenClient, type ScreenViewState, type ScreenViewer } from './screen';
+import type { ShowerCall } from './ShowerPreview';
 import { errorText, useText } from './ui';
 
-/** 抽屉滑入/全屏切换动画时长之后才把原生画面贴上去，避免画面跟不上动画。 */
-const SETTLE_MS = 360;
+/** 页面转场动画结束后再贴原生画面，避免动画过程中原生 TextureView 位置跳动。 */
+const SETTLE_MS = 280;
 const POLL_MS = 800;
-const STAGE_RADIUS = 14;
+const STAGE_RADIUS = 0;
+const DEFAULT_WIDTH = 1080;
+const DEFAULT_HEIGHT = 1920;
+const SWIPE_THRESHOLD_PX = 18;
+const MIN_SWIPE_DURATION_MS = 120;
+const MAX_SWIPE_DURATION_MS = 1200;
+
+interface RpcStatusSnapshot {
+  live: boolean;
+  userControl: boolean;
+  width: number;
+  height: number;
+  sessionId: string;
+  phase: 'none' | 'connecting' | 'live' | 'ended' | 'unavailable' | 'error';
+  message?: string;
+}
 
 export type BotScreenPanelProps = {
   botId: string;
+  botName: string;
+  avatarPreset: GrokAvatarPreset;
+  isPrimary?: boolean;
   hostKind: 'local' | 'remote';
   open: boolean;
-  fullscreen: boolean;
-  onFullscreenChange(next: boolean): void;
+  onBack(): void;
   /** 中断该 Bot 当前对话（已有 interrupt/abort）；失败不阻止执行器侧接管。 */
   onInterrupt(): Promise<void>;
+  /** 非原生覆盖层环境（如远程节点或 Web 预览）使用的 RPC 调用桥与目标。 */
+  showerTarget?: ShowerTarget | null;
+  showerCall?: ShowerCall;
+  showerConnected?: boolean;
 };
 
-export function BotScreenPanel({ botId, hostKind, open, fullscreen, onFullscreenChange, onInterrupt }: BotScreenPanelProps) {
+export function BotScreenPanel({
+  botId,
+  botName,
+  avatarPreset,
+  isPrimary,
+  hostKind,
+  open,
+  onBack,
+  onInterrupt,
+  showerTarget,
+  showerCall,
+  showerConnected = true,
+}: BotScreenPanelProps) {
   const t = useText();
   const resolution = useMemo(() => resolveScreenClient({ botId, hostKind }), [botId, hostKind]);
+  const isNativeClient = resolution.kind === 'client';
+
+  const rpcCall = useMemo<ShowerCall | null>(() => {
+    if (hostKind === 'remote') return showerCall ?? null;
+    return async (method, params) => (await BotHost.call({ method, params })).result;
+  }, [hostKind, showerCall]);
+
+  const baseParams = useMemo<Record<string, unknown> | null>(() => {
+    if (!showerTarget || !showerTarget.botId) return null;
+    const p: Record<string, unknown> = { botId: showerTarget.botId };
+    if (showerTarget.scopeId) p.scopeId = showerTarget.scopeId;
+    return p;
+  }, [showerTarget]);
+
+  const canUseRpcFallback = Boolean(!isNativeClient && baseParams && rpcCall && showerConnected);
+  const canControlSession = Boolean(baseParams && rpcCall && showerConnected && botId && !botId.startsWith('__'));
+
   const [state, setState] = useState<ScreenViewState | null>(null);
+  const [rpcState, setRpcState] = useState<RpcStatusSnapshot | null>(null);
+  const [rpcFrameSrc, setRpcFrameSrc] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [helpOpen, setHelpOpen] = useState(false);
+
   const stageRef = useRef<HTMLDivElement>(null);
+  const imgRef = useRef<HTMLImageElement>(null);
   const viewerRef = useRef<ScreenViewer | null>(null);
   const settledRef = useRef(false);
+  const helpOpenRef = useRef(helpOpen);
+  helpOpenRef.current = helpOpen;
+  const gestureStartRef = useRef<{ x: number; y: number; at: number; pointerId: number } | null>(null);
 
   const pushLayout = useCallback(() => {
     const viewer = viewerRef.current;
     if (!viewer) return;
     const rect = stageRef.current?.getBoundingClientRect();
-    const visible = settledRef.current && !!rect && rect.width > 0 && rect.height > 0;
+    // 打开顶部帮助浮层时暂时隐藏原生 TextureView，避免原生视图遮挡 HTML 浮层。
+    const visible = settledRef.current && !helpOpenRef.current && !!rect && rect.width > 0 && rect.height > 0;
     const viewport = visible && rect
       ? { x: rect.left, y: rect.top, width: rect.width, height: rect.height, radius: STAGE_RADIUS }
       : null;
@@ -44,7 +107,7 @@ export function BotScreenPanel({ botId, hostKind, open, fullscreen, onFullscreen
     }).catch(() => {});
   }, []);
 
-  // 打开/关闭观看：只在抽屉打开且有可用客户端时连接；关闭预览不销毁工作屏幕。
+  // 原生客户端模式：连接并轮询状态；关闭页面不销毁虚拟屏幕。
   useEffect(() => {
     setState(null);
     setError('');
@@ -77,6 +140,71 @@ export function BotScreenPanel({ botId, hostKind, open, fullscreen, onFullscreen
     };
   }, [open, botId, resolution, pushLayout]);
 
+  const lastSessionIdRef = useRef<string>('');
+  const takeoverSessionIdRef = useRef<string>('');
+
+  // RPC 画面回退模式（远程节点或非 Tauri WebView）：轮询 getShowerStatus 与 getShowerFrame
+  const refreshRpcStatus = useCallback(async () => {
+    if (!canUseRpcFallback || !rpcCall || !baseParams) return;
+    try {
+      const raw = (await rpcCall('getShowerStatus', baseParams)) as Record<string, unknown> | null;
+      const sessPhase = typeof raw?.phase === 'string' ? raw.phase : '';
+      const sessionId = typeof raw?.sessionId === 'string' ? raw.sessionId : '';
+      if (sessionId) lastSessionIdRef.current = sessionId;
+      const width = typeof raw?.width === 'number' && raw.width > 0 ? raw.width : DEFAULT_WIDTH;
+      const height = typeof raw?.height === 'number' && raw.height > 0 ? raw.height : DEFAULT_HEIGHT;
+      const userControl = Boolean(sessionId && takeoverSessionIdRef.current === sessionId);
+      const live = sessPhase === 'ready';
+      const phase: RpcStatusSnapshot['phase'] =
+        sessPhase === 'ready'
+          ? 'live'
+          : sessPhase === 'starting' || sessPhase === 'authentication-required'
+            ? 'connecting'
+            : sessPhase === 'closed'
+              ? 'ended'
+              : sessPhase === 'error'
+                ? 'error'
+                : sessPhase === 'unavailable'
+                  ? 'unavailable'
+                  : 'none';
+      const errObj = raw && typeof raw.error === 'object' && raw.error ? (raw.error as Record<string, unknown>) : null;
+      const message = typeof errObj?.message === 'string' ? errObj.message : undefined;
+      setRpcState({ live, userControl, width, height, sessionId, phase, message });
+
+      if (live && sessionId) {
+        const frameRes = (await rpcCall('getShowerFrame', {
+          ...baseParams,
+          sessionId,
+        })) as Record<string, unknown> | null;
+        if (frameRes && typeof frameRes.data === 'string' && frameRes.data) {
+          const mime = typeof frameRes.mimeType === 'string' && frameRes.mimeType ? frameRes.mimeType : 'image/png';
+          setRpcFrameSrc(`data:${mime};base64,${frameRes.data}`);
+        }
+      }
+    } catch (failure) {
+      setRpcState(prev => ({
+        live: false,
+        userControl: false,
+        width: prev?.width ?? DEFAULT_WIDTH,
+        height: prev?.height ?? DEFAULT_HEIGHT,
+        sessionId: prev?.sessionId ?? '',
+        phase: 'error',
+        message: errorText(failure),
+      }));
+    }
+  }, [canUseRpcFallback, rpcCall, baseParams]);
+
+  useEffect(() => {
+    setRpcState(null);
+    setRpcFrameSrc('');
+    if (!open || !canUseRpcFallback) return;
+    void refreshRpcStatus();
+    const poll = window.setInterval(() => {
+      void refreshRpcStatus();
+    }, POLL_MS);
+    return () => window.clearInterval(poll);
+  }, [open, canUseRpcFallback, refreshRpcStatus]);
+
   // 动画期间隐藏原生画面，稳定后再按占位元素位置贴上。
   useEffect(() => {
     settledRef.current = false;
@@ -87,7 +215,11 @@ export function BotScreenPanel({ botId, hostKind, open, fullscreen, onFullscreen
       pushLayout();
     }, SETTLE_MS);
     return () => window.clearTimeout(timer);
-  }, [open, fullscreen, pushLayout]);
+  }, [open, pushLayout]);
+
+  useEffect(() => {
+    pushLayout();
+  }, [helpOpen, pushLayout]);
 
   useEffect(() => {
     const stage = stageRef.current;
@@ -101,9 +233,20 @@ export function BotScreenPanel({ botId, hostKind, open, fullscreen, onFullscreen
     };
   }, [open, pushLayout]);
 
+  const resolveCurrentSessionId = async (): Promise<string> => {
+    if (rpcState?.sessionId) return rpcState.sessionId;
+    if (lastSessionIdRef.current) return lastSessionIdRef.current;
+    if (rpcCall && baseParams) {
+      const raw = (await rpcCall('getShowerStatus', baseParams)) as Record<string, unknown> | null;
+      const sid = typeof raw?.sessionId === 'string' ? raw.sessionId : '';
+      if (sid) lastSessionIdRef.current = sid;
+      return sid;
+    }
+    return '';
+  };
+
   const takeover = async () => {
-    const viewer = viewerRef.current;
-    if (!viewer || busy) return;
+    if (busy) return;
     setBusy(true);
     setError('');
     try {
@@ -112,8 +255,21 @@ export function BotScreenPanel({ botId, hostKind, open, fullscreen, onFullscreen
       } catch (failure) {
         setError(t('中断对话失败：', 'Interrupt failed: ') + errorText(failure));
       }
-      const next = await viewer.takeover();
-      if (viewerRef.current === viewer) setState(next);
+      if (isNativeClient) {
+        const viewer = viewerRef.current;
+        if (!viewer) return;
+        const next = await viewer.takeover();
+        if (viewerRef.current === viewer) setState(next);
+      } else if (canUseRpcFallback && rpcCall && baseParams) {
+        const sid = await resolveCurrentSessionId();
+        if (!sid) throw new Error(t('还没有活跃的虚拟屏幕会话', 'No active virtual screen session'));
+        await rpcCall('takeoverShower', {
+          ...baseParams,
+          sessionId: sid,
+        });
+        takeoverSessionIdRef.current = sid;
+        await refreshRpcStatus();
+      }
     } catch (failure) {
       setError(errorText(failure));
     } finally {
@@ -121,68 +277,314 @@ export function BotScreenPanel({ botId, hostKind, open, fullscreen, onFullscreen
     }
   };
 
-  const supported = resolution.kind === 'client';
-  const phase = supported ? state?.phase ?? 'connecting' : 'unsupported';
-  const live = supported && phase === 'live' && state?.live === true;
-  const userControl = live && state?.userControl === true;
+  const handleCreateRpcScreen = async () => {
+    if (!canControlSession || !rpcCall || !baseParams || busy) return;
+    setBusy(true);
+    setError('');
+    try {
+      if (hostKind === 'local') {
+        await BotHost.start().catch(() => {});
+        for (let i = 0; i < 15; i++) {
+          const st = await BotHost.status().catch(() => null);
+          if (st?.phase === 'running') break;
+          await new Promise(r => setTimeout(r, 350));
+        }
+      }
+      const created = (await rpcCall('createShowerSession', {
+        ...baseParams,
+        input: { width: DEFAULT_WIDTH, height: DEFAULT_HEIGHT },
+      })) as Record<string, unknown> | null;
+      if (typeof created?.sessionId === 'string' && created.sessionId) {
+        lastSessionIdRef.current = created.sessionId;
+      }
+      if (isNativeClient) {
+        const viewer = viewerRef.current;
+        if (viewer) {
+          const next = await viewer.status().catch(() => null);
+          if (next && viewerRef.current === viewer) setState(next);
+        }
+        pushLayout();
+      } else {
+        await refreshRpcStatus();
+      }
+      setHelpOpen(false);
+    } catch (failure) {
+      setError(errorText(failure));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleReleaseRpcScreen = async () => {
+    if (!canControlSession || !rpcCall || !baseParams || busy) return;
+    setBusy(true);
+    setError('');
+    try {
+      const sid = await resolveCurrentSessionId();
+      if (sid) {
+        await rpcCall('releaseShowerSession', {
+          ...baseParams,
+          sessionId: sid,
+        });
+      }
+      lastSessionIdRef.current = '';
+      takeoverSessionIdRef.current = '';
+      setRpcFrameSrc('');
+      if (isNativeClient) {
+        const viewer = viewerRef.current;
+        if (viewer) {
+          const next = await viewer.status().catch(() => null);
+          if (next && viewerRef.current === viewer) setState(next);
+        }
+        pushLayout();
+      } else {
+        await refreshRpcStatus();
+      }
+      setHelpOpen(false);
+    } catch (failure) {
+      setError(errorText(failure));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const mapPointerToDevice = (e: ReactPointerEvent<HTMLImageElement>): { x: number; y: number } | null => {
+    const el = imgRef.current;
+    if (!el) return null;
+    const rect = el.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return null;
+    const w = rpcState?.width || DEFAULT_WIDTH;
+    const h = rpcState?.height || DEFAULT_HEIGHT;
+    const relX = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
+    const relY = Math.min(1, Math.max(0, (e.clientY - rect.top) / rect.height));
+    return {
+      x: Math.min(w - 1, Math.max(0, Math.round(relX * w))),
+      y: Math.min(h - 1, Math.max(0, Math.round(relY * h))),
+    };
+  };
+
+  const onRpcPointerDown = (e: ReactPointerEvent<HTMLImageElement>) => {
+    if (!rpcState?.live || !rpcState?.userControl || busy) return;
+    const pt = mapPointerToDevice(e);
+    if (!pt) return;
+    e.currentTarget.setPointerCapture?.(e.pointerId);
+    gestureStartRef.current = { ...pt, at: Date.now(), pointerId: e.pointerId };
+  };
+
+  const onRpcPointerUp = (e: ReactPointerEvent<HTMLImageElement>) => {
+    const start = gestureStartRef.current;
+    gestureStartRef.current = null;
+    if (!start || start.pointerId !== e.pointerId || !canUseRpcFallback || !rpcCall || !baseParams) return;
+    const sid = rpcState?.sessionId || lastSessionIdRef.current;
+    if (!sid) return;
+    const end = mapPointerToDevice(e) ?? { x: start.x, y: start.y };
+    const dist = Math.hypot(end.x - start.x, end.y - start.y);
+    const durationMs = Math.min(MAX_SWIPE_DURATION_MS, Math.max(MIN_SWIPE_DURATION_MS, Date.now() - start.at));
+    void (async () => {
+      try {
+        if (dist < SWIPE_THRESHOLD_PX) {
+          await rpcCall('sendShowerInput', {
+            ...baseParams,
+            sessionId: sid,
+            input: { type: 'click', x: end.x, y: end.y },
+          });
+        } else {
+          await rpcCall('sendShowerInput', {
+            ...baseParams,
+            sessionId: sid,
+            input: {
+              type: 'drag',
+              x1: start.x,
+              y1: start.y,
+              x2: end.x,
+              y2: end.y,
+              durationMs,
+            },
+          });
+        }
+        await refreshRpcStatus();
+      } catch (failure) {
+        setError(errorText(failure));
+      }
+    })();
+  };
+
+  const activeState = isNativeClient ? state : rpcState;
+  const supported = isNativeClient || canUseRpcFallback;
+  const phase = supported ? activeState?.phase ?? 'connecting' : 'unsupported';
+  const live = supported && phase === 'live' && activeState?.live === true;
+  const userControl = live && activeState?.userControl === true;
 
   let statusText = '';
-  if (resolution.kind === 'unsupported') {
-    statusText = resolution.reason === 'remote'
-      ? t('远端 Bot 的屏幕预览将在后续版本支持', 'Screen preview for remote Bots is coming later')
-      : resolution.reason === 'not-created'
-        ? t('这个 Bot 还没有屏幕', 'This Bot has no screen yet')
-        : t('当前界面不支持屏幕预览', 'Screen preview is not available in this interface');
+  if (!supported) {
+    if (resolution.kind === 'unsupported' && resolution.reason === 'not-created') {
+      statusText = t('这个 Bot 还没有屏幕，用到屏幕时会自动创建', 'This Bot has no screen yet. It is created automatically when needed');
+    } else if (hostKind === 'remote' && !showerConnected) {
+      statusText = t('远程节点未连接，请先在设置中连接节点', 'Remote host disconnected');
+    } else {
+      statusText = t('当前环境暂无活跃屏幕', 'No active screen in this environment');
+    }
   } else if (phase === 'none') {
-    statusText = t('这个 Bot 还没有屏幕，它用到屏幕时会自动创建', 'This Bot has no screen yet. It is created when the Bot needs one');
+    statusText = t('当前空闲，Bot 用到电脑屏幕时会自动开启', 'Idle. The screen starts automatically when the Bot needs it');
   } else if (phase === 'ended') {
-    statusText = t('屏幕已关闭（已释放或空闲回收），Bot 下次用到时会重新创建', 'The screen was closed (released or idle). The Bot will create a new one when needed');
+    statusText = t('屏幕已关闭，Bot 下次用到时会自动重新开启', 'Screen closed. It will reopen automatically when needed');
   } else if (phase === 'error' || phase === 'unavailable') {
-    statusText = state?.message || t('画面连接失败，正在重试', 'Connection failed, retrying');
+    statusText = activeState?.message || t('画面连接失败，正在重试…', 'Connection failed, retrying…');
   } else if (!live) {
-    statusText = t('正在连接画面…', 'Connecting…');
+    statusText = t('正在连接电脑画面…', 'Connecting to screen…');
   }
 
   const metaText = !live
-    ? ''
+    ? t('空闲', 'Idle')
     : userControl
-      ? t('你可以直接操作，Bot 也可能同时操作', 'You can operate now; the Bot may act at the same time')
-      : t(`实时 · ${state?.width ?? 0}×${state?.height ?? 0}`, `Live · ${state?.width ?? 0}×${state?.height ?? 0}`);
+      ? t('人工接管中 · 可直接触控屏幕', 'In control · Touch screen directly')
+      : t(`实时 · ${activeState?.width ?? 0}×${activeState?.height ?? 0}`, `Live · ${activeState?.width ?? 0}×${activeState?.height ?? 0}`);
 
   return (
-    <section className={`bot-screen-panel${fullscreen ? ' fullscreen' : ''}`}>
-      <div className="bot-screen-stage" ref={stageRef}>
+    <main className="grok-computer-screen grok-page-enter" aria-label={t('Bot 电脑屏幕', 'Bot Computer Screen')}>
+      {/* Top Bar (15859.jpg) */}
+      <header className="grok-computer-topbar">
+        <button
+          type="button"
+          className="grok-computer-circle-btn"
+          aria-label={t('返回', 'Back')}
+          onClick={onBack}
+        >
+          <ChevronLeft size={22} />
+        </button>
+
+        <div className="grok-computer-bot-id">
+          <GrokBotAvatar preset={avatarPreset} isPrimary={isPrimary} size={32} />
+          <span className="grok-computer-bot-name">{botName}</span>
+        </div>
+
+        <button
+          type="button"
+          className={`grok-computer-circle-btn${helpOpen ? ' active' : ''}`}
+          aria-label={t('屏幕信息与选项', 'Screen info & options')}
+          aria-expanded={helpOpen}
+          onClick={() => setHelpOpen(v => !v)}
+        >
+          <CircleHelp size={20} />
+        </button>
+
+        {helpOpen && (
+          <>
+            <div className="grok-computer-popover-backdrop" onClick={() => setHelpOpen(false)} />
+            <div className="grok-computer-help-popover" role="dialog" aria-label={t('电脑屏幕状态', 'Computer Status')}>
+              <div className="grok-computer-help-title">
+                <span>{t('虚拟电脑状态', 'Virtual Screen Status')}</span>
+                <span className={`grok-computer-status-pill${live ? ' live' : ''}`}>{metaText}</span>
+              </div>
+              <p className="grok-computer-help-desc">
+                {t(
+                  'Bot 在后台执行应用任务时会在此虚拟屏幕中运行。点击右下角「接管控制」可中断当前任务并由你直接触控操作。',
+                  'The Bot operates apps inside this virtual screen. Tap "Take over" at the bottom-right to interrupt the Bot and interact directly.',
+                )}
+              </p>
+              {canControlSession && (
+                <div className="grok-computer-help-actions">
+                  <button
+                    type="button"
+                    className="grok-computer-action-chip"
+                    disabled={busy}
+                    onClick={() => void handleCreateRpcScreen()}
+                  >
+                    <Play size={14} />
+                    <span>{live ? t('重置屏幕', 'Reset') : t('启动屏幕', 'Start Screen')}</span>
+                  </button>
+                  <button
+                    type="button"
+                    className="grok-computer-action-chip"
+                    disabled={busy}
+                    onClick={() => {
+                      if (isNativeClient) pushLayout();
+                      else void refreshRpcStatus();
+                      setHelpOpen(false);
+                    }}
+                  >
+                    <RefreshCw size={14} />
+                    <span>{t('刷新画面', 'Refresh')}</span>
+                  </button>
+                  {live && (
+                    <button
+                      type="button"
+                      className="grok-computer-action-chip danger"
+                      disabled={busy}
+                      onClick={() => void handleReleaseRpcScreen()}
+                    >
+                      <Trash2 size={14} />
+                      <span>{t('关闭屏幕', 'Close Screen')}</span>
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
+          </>
+        )}
+      </header>
+
+      {/* Full-Screen Center Stage (15859.jpg) */}
+      <div className="grok-computer-stage" ref={stageRef}>
+        {!isNativeClient && live && rpcFrameSrc ? (
+          <img
+            ref={imgRef}
+            className={`grok-computer-frame-img${userControl ? ' interactive' : ''}`}
+            src={rpcFrameSrc}
+            alt={t('Bot 虚拟屏幕画面', 'Bot virtual screen')}
+            draggable={false}
+            onPointerDown={onRpcPointerDown}
+            onPointerUp={onRpcPointerUp}
+          />
+        ) : null}
+
         {!live && (
-          <div className="bot-screen-status" role="status">
-            <Monitor size={28} />
+          <div className="grok-computer-empty-status" role="status">
+            <div className="grok-computer-empty-icon">
+              <Monitor size={30} />
+            </div>
             <p>{statusText}</p>
+            {canControlSession && (phase === 'none' || phase === 'ended') && (
+              <button
+                type="button"
+                className="grok-computer-start-pill"
+                disabled={busy}
+                onClick={() => void handleCreateRpcScreen()}
+              >
+                <Play size={15} />
+                <span>{busy ? t('正在启动…', 'Starting…') : t('启动虚拟屏幕', 'Start Virtual Screen')}</span>
+              </button>
+            )}
           </div>
         )}
       </div>
-      {error && <p className="bot-screen-error" role="alert">{error}</p>}
-      <footer className="bot-screen-toolbar">
-        <span className="bot-screen-meta">{metaText}</span>
+
+      {error && (
+        <p className="grok-computer-error" role="alert">
+          {error}
+        </p>
+      )}
+
+      {/* Bottom Bar with Right-Aligned Takeover Pill (15859.jpg) */}
+      <footer className="grok-computer-bottombar">
+        <span className="grok-computer-bottom-meta">
+          {userControl ? t('你可以直接触控屏幕，Bot 也可能同时操作', 'Direct touch active') : ''}
+        </span>
         <button
           type="button"
-          className="bot-chat-icon-btn"
-          aria-label={fullscreen ? t('退出全屏', 'Exit full screen') : t('全屏', 'Full screen')}
-          disabled={!supported}
-          onClick={() => onFullscreenChange(!fullscreen)}
-        >
-          {fullscreen ? <Minimize2 size={18} /> : <Maximize2 size={18} />}
-        </button>
-        <button
-          type="button"
-          className={`bot-screen-takeover${userControl ? ' active' : ''}`}
+          className={`grok-computer-takeover-pill${userControl ? ' active' : ''}`}
           disabled={!live || userControl || busy}
           onClick={() => void takeover()}
         >
-          <Hand size={16} />
           <span>
-            {userControl ? t('操作中', 'In control') : busy ? t('正在接管…', 'Taking over…') : t('接管操作', 'Take over')}
+            {userControl
+              ? t('已接管控制', 'In Control')
+              : busy
+                ? t('正在接管…', 'Taking over…')
+                : t('接管控制', 'Take over')}
           </span>
         </button>
       </footer>
-    </section>
+    </main>
   );
 }
