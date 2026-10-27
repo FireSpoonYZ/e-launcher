@@ -1,4 +1,5 @@
 import path from 'node:path';
+import os from 'node:os';
 import { createRequire } from 'node:module';
 import { openHost } from './host.js';
 import { openHostSettings, normalizeHostSettings } from './host-settings.js';
@@ -15,7 +16,7 @@ function offlineError() { return Object.assign(new Error('center is disconnected
 
 export async function openHostService(options) {
   for (const key of Object.keys(options ?? {})) {
-    if (!new Set(['dataRoot', 'token', 'port', 'initialSettings', 'nativeBridge', 'center', 'npmPath']).has(key)) throw invalidArgument(`unknown option: ${key}`);
+    if (!new Set(['dataRoot', 'token', 'port', 'initialSettings', 'nativeBridge', 'center', 'npmPath', 'displayName', 'platform']).has(key)) throw invalidArgument(`unknown option: ${key}`);
   }
   const { dataRoot, token, port, initialSettings, nativeBridge, center, npmPath } = options ?? {};
   if (typeof dataRoot !== 'string' || !path.isAbsolute(dataRoot)) throw invalidArgument('dataRoot must be an absolute path');
@@ -27,10 +28,13 @@ export async function openHostService(options) {
   assertDeviceToken(center.deviceToken);
   if (center.deviceToken === token) throw invalidArgument('device token must differ from control token');
   if (initialSettings !== undefined) normalizeHostSettings(initialSettings);
+  const platform = options.platform ?? process.platform;
+  if (typeof platform !== 'string' || !platform.trim() || (options.displayName !== undefined && typeof options.displayName !== 'string')) throw invalidArgument('displayName and platform must be strings');
 
   const probe = openHost({ dataRoot });
   const deviceId = probe.deviceId;
   probe.close();
+  const displayName = options.displayName?.trim() || (platform !== 'android' && os.hostname().trim()) || `${platform}-${deviceId.slice(0, 8)}`;
   function readBots() {
     const host = openHost({ dataRoot });
     try { return host.listBots().map((bot) => ({ deviceId, botId: bot.botId, name: bot.role })); }
@@ -71,7 +75,7 @@ export async function openHostService(options) {
     const timeout = setTimeout(() => rejectReady(offlineError()), 15000);
     let next;
     try {
-      next = await openDeviceLink({ dataRoot, url, token: center.deviceToken, ca: center.ca, control: { url: control.url, token }, onStatus: (status) => {
+      next = await openDeviceLink({ dataRoot, url, token: center.deviceToken, ca: center.ca, displayName, platform, control: { url: control.url, token }, onStatus: (status) => {
         if (status.phase === 'online') resolveReady();
         else if (status.phase === 'blocked') rejectReady(offlineError());
       } });
@@ -216,6 +220,7 @@ export async function openHostService(options) {
       settings: { store: settingsStore, activeRevision }, getServiceStatus: () => getStatus(),
       deferResume: true,
       centerRuntime: { snapshot, getClient: () => client ?? null, installer },
+      collaboration: { displayName, platform, relay: { url: snapshot.linkUrl, token: center.deviceToken, ...(center.ca ? { ca: center.ca } : {}) } },
       onBotsChanged: () => {
         generation++;
         state = { ...state, state: 'connecting', appliedRevision: null };

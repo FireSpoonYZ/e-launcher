@@ -1,14 +1,14 @@
-// 模块 8：Host 设备注册表（relay.sqlite）。只存 device_id、SHA-256 token 哈希与
-// 凭据版本/时间戳；绝不返回或记录 token/哈希。注册/旋转/撤销/认证均为本地所有者
-// CLI 决定，无网络端点，不在 Host/Bot 状态上落任何数据。
+// 中央设备注册表（relay.sqlite）：凭据只保存 SHA-256 哈希，名称和平台也在此持久化。
+// 注册/旋转/撤销仍由本地所有者决定；认证客户端可为已注册设备改名。
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { isAbsolute, join, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { messageError, assertId } from './message-protocol.js';
 import { assertDeviceToken } from './relay-protocol.js';
+import { normalizeDeviceName, normalizeDevicePlatform } from './device-metadata.js';
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 const DB_FILE = 'relay.sqlite';
 // 设备未知时与等长假哈希比较，避免通过认证耗时探知设备是否存在。
 const DUMMY_HASH = Buffer.alloc(32);
@@ -20,7 +20,9 @@ const SCHEMA_SQL = `
     credential_version INTEGER NOT NULL,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    revoked_at TEXT
+    revoked_at TEXT,
+    display_name TEXT,
+    platform TEXT
   );
 `;
 
@@ -41,6 +43,11 @@ function initSchema(db) {
       }
       db.exec(SCHEMA_SQL);
       db.exec('PRAGMA user_version = ' + SCHEMA_VERSION);
+    }
+    if (version === 1) {
+      db.exec('ALTER TABLE relay_devices ADD COLUMN display_name TEXT');
+      db.exec('ALTER TABLE relay_devices ADD COLUMN platform TEXT');
+      db.exec('PRAGMA user_version = 2');
     }
     db.exec('COMMIT');
     committed = true;
@@ -77,6 +84,8 @@ function toDevice(row) {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     revokedAt: row.revoked_at,
+    displayName: row.display_name,
+    platform: row.platform,
   };
 }
 
@@ -84,7 +93,7 @@ function normalizeCredentialInput(input, label) {
   if (typeof input !== 'object' || input === null || Array.isArray(input)) {
     throw messageError('INVALID_ARGUMENT', `${label} input must be an object`);
   }
-  const allowed = new Set(['deviceId', 'token']);
+  const allowed = new Set(label === 'register' ? ['deviceId', 'token', 'displayName'] : ['deviceId', 'token']);
   for (const key of Object.keys(input)) {
     if (!allowed.has(key)) {
       throw messageError('INVALID_ARGUMENT', `${label} input has unknown field: ${key}`);
@@ -92,7 +101,8 @@ function normalizeCredentialInput(input, label) {
   }
   assertId(input.deviceId, 'deviceId');
   assertDeviceToken(input.token);
-  return { deviceId: input.deviceId, tokenHash: sha256Hex(input.token) };
+  return { deviceId: input.deviceId, tokenHash: sha256Hex(input.token),
+    displayName: input.displayName === undefined ? null : normalizeDeviceName(input.displayName) };
 }
 
 export function openRelayRegistry(options) {
@@ -124,18 +134,21 @@ export function openRelayRegistry(options) {
     const stmtRevoke = db.prepare(
       'UPDATE relay_devices SET credential_version = ?, updated_at = ?, revoked_at = ? WHERE device_id = ?'
     );
+    const stmtName = db.prepare('UPDATE relay_devices SET display_name = ?, updated_at = ? WHERE device_id = ?');
+    const stmtMetadata = db.prepare('UPDATE relay_devices SET display_name = COALESCE(display_name, ?), platform = COALESCE(?, platform) WHERE device_id = ?');
     // Active-only UTF-8 BINARY keyset page; cursor is {afterDeviceId} or null.
     const stmtListActive = db.prepare(
       'SELECT * FROM relay_devices WHERE revoked_at IS NULL AND device_id COLLATE BINARY > ? ORDER BY device_id COLLATE BINARY LIMIT ?'
     );
 
     const register = (input) => {
-      const { deviceId, tokenHash } = normalizeCredentialInput(input, 'register');
+      const { deviceId, tokenHash, displayName } = normalizeCredentialInput(input, 'register');
       return inTransaction(db, () => {
         const row = stmtGet.get(deviceId);
         if (!row) {
           const now = new Date().toISOString();
           stmtInsert.run(deviceId, tokenHash, 1, now, now, null);
+          if (displayName !== null) stmtName.run(displayName, now, deviceId);
           return toDevice(stmtGet.get(deviceId));
         }
         if (row.revoked_at !== null) {
@@ -143,6 +156,10 @@ export function openRelayRegistry(options) {
         }
         if (row.token_hash !== tokenHash) {
           throw messageError('REQUEST_CONFLICT', 'device already registered with a different credential');
+        }
+        if (displayName !== null && row.display_name === null) {
+          stmtName.run(displayName, new Date().toISOString(), deviceId);
+          return toDevice(stmtGet.get(deviceId));
         }
         return toDevice(row);
       });
@@ -179,6 +196,29 @@ export function openRelayRegistry(options) {
         }
         const now = new Date().toISOString();
         stmtRevoke.run(row.credential_version + 1, now, now, deviceId);
+        return toDevice(stmtGet.get(deviceId));
+      });
+    };
+
+    const rename = (deviceId, displayName) => {
+      assertId(deviceId, 'deviceId');
+      const name = normalizeDeviceName(displayName);
+      return inTransaction(db, () => {
+        const row = stmtGet.get(deviceId);
+        if (!row || row.revoked_at !== null) throw messageError('DEVICE_NOT_FOUND', 'active device not registered');
+        stmtName.run(name, new Date().toISOString(), deviceId);
+        return toDevice(stmtGet.get(deviceId));
+      });
+    };
+
+    const updateMetadata = (deviceId, metadata) => {
+      assertId(deviceId, 'deviceId');
+      const name = metadata.displayName === undefined ? null : normalizeDeviceName(metadata.displayName);
+      const platform = metadata.platform === undefined ? null : normalizeDevicePlatform(metadata.platform);
+      return inTransaction(db, () => {
+        const row = stmtGet.get(deviceId);
+        if (!row || row.revoked_at !== null) throw messageError('DEVICE_NOT_FOUND', 'active device not registered');
+        stmtMetadata.run(name, platform, deviceId);
         return toDevice(stmtGet.get(deviceId));
       });
     };
@@ -250,6 +290,8 @@ export function openRelayRegistry(options) {
       register,
       rotate,
       revoke,
+      rename,
+      updateMetadata,
       get,
       list,
       listActive,

@@ -104,6 +104,7 @@ export const CONTROL_V1_METHODS = Object.freeze([
 // the unified Shower six).
 const CONTROL_V2_METHODS = Object.freeze([
   'getServiceStatus',
+  'updateBotProfile',
   'getModelCatalog',
   'getWorkContext',
   'syncWorkContext',
@@ -284,16 +285,24 @@ function normalizeControlParams(method, params) {
       return {};
     }
     case 'createBot': {
-      rejectUnknownFields(params, new Set(['requestId', 'role', 'cwd', 'modelRef']), 'params');
+      rejectUnknownFields(params, new Set(['requestId', 'role', 'cwd', 'modelRef', 'description']), 'params');
       assertId(params.requestId, 'requestId');
       assertNonEmptyString(params.role, 'role');
-      assertNonEmptyString(params.cwd, 'cwd');
+      if (params.cwd !== undefined) assertNonEmptyString(params.cwd, 'cwd');
+      if (params.description !== undefined && (typeof params.description !== 'string' || params.description.length > 2000)) throw invalid('description must be a string of at most 2000 characters');
       let modelRef = null;
       if (params.modelRef !== undefined && params.modelRef !== null) {
         assertNonEmptyString(params.modelRef, 'modelRef');
         modelRef = params.modelRef;
       }
-      return { requestId: params.requestId, role: params.role, cwd: params.cwd, modelRef };
+      return { requestId: params.requestId, role: params.role, cwd: params.cwd, modelRef, description: params.description };
+    }
+    case 'updateBotProfile': {
+      rejectUnknownFields(params, new Set(['botId', 'name', 'description']), 'params');
+      assertId(params.botId, 'botId');
+      if (params.name !== undefined && (typeof params.name !== 'string' || params.name.trim().length < 1 || params.name.trim().length > 120)) throw invalid('name must be 1 to 120 non-blank characters');
+      if (params.description !== undefined && (typeof params.description !== 'string' || params.description.length > 2000)) throw invalid('description must be a string of at most 2000 characters');
+      return { botId: params.botId, name: params.name, description: params.description };
     }
     case 'getBot':
     case 'abort':

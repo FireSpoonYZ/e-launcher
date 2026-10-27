@@ -650,6 +650,35 @@ export async function openRelayServer(options = {}) {
     sendLiveEnd(record.client, record.watchId, record.targetDeviceId, frame.reason, frame.code);
   }
 
+  function directoryItem(device, includeNames) {
+    const host = deviceMap.get(device.deviceId);
+    const online = host !== undefined && peerUsable(host);
+    return {
+      deviceId: device.deviceId,
+      online,
+      controlProtocol: online ? host.controlProtocol : 0,
+      scopeProtocol: online ? host.scopeProtocol : 0,
+      ...(includeNames ? {
+        displayName: device.displayName ?? device.deviceId,
+        ...(device.platform !== null ? { platform: device.platform } : {})
+      } : {})
+    };
+  }
+
+  function routeDeviceRename(conn, frame) {
+    let result;
+    try {
+      const device = registry.rename(frame.deviceId, frame.displayName);
+      result = { type: 'device-renamed', callId: frame.callId, ok: true, item: directoryItem(device, true) };
+    } catch (err) {
+      result = { type: 'device-renamed', callId: frame.callId, ok: false,
+        code: err?.code === 'DEVICE_NOT_FOUND' ? 'DEVICE_NOT_FOUND' : 'INTERNAL' };
+    }
+    if (!writeFrame(conn.ws, result, noop)) {
+      try { conn.ws.terminate(); } catch { /* socket gone */ }
+    }
+  }
+
   function routeDevicesList(conn, frame) {
     let page;
     try {
@@ -660,26 +689,7 @@ export async function openRelayServer(options = {}) {
     } catch {
       return sendDevicesResult(conn, frame.callId, { ok: false, code: 'INTERNAL' });
     }
-    const items = [];
-    for (const device of page.items) {
-      const host = deviceMap.get(device.deviceId);
-      const online = host !== undefined && peerUsable(host);
-      if (online) {
-        items.push({
-          deviceId: device.deviceId,
-          online: true,
-          controlProtocol: host.controlProtocol,
-          scopeProtocol: host.scopeProtocol
-        });
-      } else {
-        items.push({
-          deviceId: device.deviceId,
-          online: false,
-          controlProtocol: 0,
-          scopeProtocol: 0
-        });
-      }
-    }
+    const items = page.items.map((device) => directoryItem(device, frame.names === 1));
     sendDevicesResult(conn, frame.callId, { ok: true, items, nextCursor: page.nextCursor });
   }
 
@@ -751,6 +761,13 @@ export async function openRelayServer(options = {}) {
       if (device === null) {
         return closeWith(conn, RELAY_CLOSE.UNAUTHORIZED);
       }
+      if ((frame.role ?? 'host') === 'host' && (frame.displayName !== undefined || frame.platform !== undefined)) {
+        try {
+          device = registry.updateMetadata(device.deviceId, frame);
+        } catch {
+          return closeWith(conn, RELAY_CLOSE.REVOKED);
+        }
+      }
       conn.deviceId = device.deviceId;
       conn.version = device.credentialVersion;
       conn.alive = true;
@@ -810,7 +827,7 @@ export async function openRelayServer(options = {}) {
       if (frame.type === 'control-call' || frame.type === 'control-cancel') {
         // v1 control: any authenticated client
       } else if (
-        (frame.type === 'live-open' || frame.type === 'live-cancel' || frame.type === 'devices-list') &&
+        (frame.type === 'live-open' || frame.type === 'live-cancel' || frame.type === 'devices-list' || frame.type === 'device-rename') &&
         conn.controlProtocol === 2
       ) {
         // v2 live client frames
@@ -822,7 +839,7 @@ export async function openRelayServer(options = {}) {
         return closeWith(conn, RELAY_CLOSE.REVOKED);
       }
     } else if (frame.type === 'control-call' || frame.type === 'control-cancel' ||
-               frame.type === 'live-open' || frame.type === 'live-cancel' || frame.type === 'devices-list') {
+               frame.type === 'live-open' || frame.type === 'live-cancel' || frame.type === 'devices-list' || frame.type === 'device-rename') {
       return closeWith(conn, RELAY_CLOSE.REVOKED);
     } else if ((frame.type === 'live-frame' || frame.type === 'live-end') && conn.controlProtocol !== 2) {
       return closeWith(conn, RELAY_CLOSE.REVOKED);
@@ -875,6 +892,8 @@ export async function openRelayServer(options = {}) {
         return routeLiveCancel(conn, frame);
       case 'devices-list':
         return routeDevicesList(conn, frame);
+      case 'device-rename':
+        return routeDeviceRename(conn, frame);
       case 'live-frame':
         return routeLiveFrame(conn, frame);
       case 'live-end':

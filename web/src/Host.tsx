@@ -48,6 +48,9 @@ import {
 } from './native';
 import { onMobileStreamFailure } from './native/tauri-host';
 import { ActiveCenter } from './native/CenterGate';
+import { useDrafts } from '../../desktop/web/src/drafts';
+import { PendingPanel } from '../../desktop/web/src/PendingPanel';
+import { Scopes } from '../../desktop/web/src/Scopes';
 import type { DesktopIdentity, DesktopPanelApi } from '../../desktop/web/src/types';
 import type { DesktopConnectionInput, DesktopUiProfile } from '../../host-core/desktop-client.js';
 import type { DevicesDirectoryItem, ShowerTarget } from '../../host-core/index.js';
@@ -62,6 +65,7 @@ import {
   GrokBotAvatar,
   JARVIS_AVATAR_PRESET,
   getDefaultBotAvatarPreset,
+  getSavedAvatarConfigMap,
   resetBotAvatarConfig,
   resolveBotAvatarPreset,
   saveBotAvatarConfig,
@@ -79,6 +83,7 @@ const BOT_CLEAR_MAP_KEY = 'bot-hub-cleared-v1';
 const REMOTE_PROFILES_FLAG_KEY = 'bot-hub-has-remote-v1';
 const PRIMARY_ROLE_OVERRIDE_KEY = 'bot-hub-primary-name-v2';
 const DEFAULT_PRIMARY_ROLE = '主助手';
+const CREATE_ATTEMPT_KEY = 'bot-hub-create-attempt-v1';
 
 const SOUL_MAX_BYTES = 65536;
 const SOUL_SNIPPETS: { zh: string; en: string; text: string }[] = [
@@ -183,7 +188,9 @@ export type HubScreen =
   | 'bot-schedules'
   | 'bot-screen'
   | 'bot-model'
-  | 'settings';
+  | 'settings'
+  | 'scopes'
+  | 'pending';
 
 export interface UnifiedBotItem {
   /** Unique composite key: `${hostKind}:${hostId}:${botId}` */
@@ -191,6 +198,7 @@ export interface UnifiedBotItem {
   botId: string;
   primaryConversationId?: string;
   role: string;
+  description?: string;
   cwd: string;
   modelRef: string | null;
   createdAt: string;
@@ -674,6 +682,7 @@ export function HostPage({
   // Local Host state (managed transparently in background)
   const [localHost, setLocalHost] = useState<HostSnapshot>();
   const [localBots, setLocalBots] = useState<HostBot[]>([]);
+  const localBotsGeneration = useRef(0);
   const startingLocalRef = useRef<Promise<HostSnapshot | undefined> | null>(null);
 
   // Remote Host state
@@ -681,7 +690,21 @@ export function HostPage({
   const [remoteProfiles, setRemoteProfiles] = useState<DesktopUiProfile[]>([]);
   const [remoteIdentity, setRemoteIdentity] = useState<DesktopIdentity | null>(null);
   const [remoteConnected, setRemoteConnected] = useState(false);
-  const [remoteBots, setRemoteBots] = useState<HostBot[]>([]);
+  const [remoteBots, setRemoteBots] = useState<Array<HostBot & { deviceName: string; platform?: string; description?: string }>>([]);
+  const [directoryError, setDirectoryError] = useState('');
+  const directoryFlight = useRef(false);
+  const directoryGeneration = useRef(0);
+  const chatLoadGeneration = useRef(0);
+  const profileLoadGeneration = useRef(0);
+  const scheduleLoadGeneration = useRef(0);
+  const [createAttempt, setCreateAttemptState] = useState<{ requestId: string; target: string; profileId?: string } | null>(() => {
+    try { return JSON.parse(localStorage.getItem(CREATE_ATTEMPT_KEY) || 'null'); } catch { return null; }
+  });
+  const setCreateAttempt = (attempt: { requestId: string; target: string; profileId?: string } | null) => {
+    if (attempt) localStorage.setItem(CREATE_ATTEMPT_KEY, JSON.stringify(attempt));
+    else localStorage.removeItem(CREATE_ATTEMPT_KEY);
+    setCreateAttemptState(attempt);
+  };
   const [remoteDevices, setRemoteDevices] = useState<DevicesDirectoryItem[]>([]);
   const remoteClientRef = useRef<{ api: DesktopPanelApi; invalidate(): void; dispose(): void } | null>(null);
 
@@ -710,7 +733,7 @@ export function HostPage({
   const [editSubtitle, setEditSubtitle] = useState('');
   const [editCwd, setEditCwd] = useState('');
   const [editModel, setEditModel] = useState('');
-  const [editTargetHost, setEditTargetHost] = useState<'local' | 'remote'>('local');
+  const [editTargetHost, setEditTargetHost] = useState('local');
   const [editAvatarPreset, setEditAvatarPreset] = useState<GrokAvatarPreset>(GROK_AVATAR_PRESETS[0]);
   const [editInitialSoul, setEditInitialSoul] = useState('');
   const [editVoiceTone, setEditVoiceTone] = useState('未设置');
@@ -792,8 +815,10 @@ export function HostPage({
 
   // Transparently sync local bots
   const syncLocalBots = useCallback(async (snap?: HostSnapshot): Promise<HostBot[]> => {
+    const generation = ++localBotsGeneration.current;
     try {
       const currentSnap = snap ?? (await BotHost.snapshot());
+      if (generation !== localBotsGeneration.current) return [];
       setLocalHost(currentSnap);
       if (currentSnap.phase !== 'running') { setLocalBots([]); return []; }
       const status = await BotHost.status();
@@ -803,6 +828,7 @@ export function HostPage({
       }
       const envelope = await BotHost.call({ method: 'listBots', params: {} });
       const list = array<HostBot>(envelope.result);
+      if (generation !== localBotsGeneration.current) return [];
       setLocalBots(list);
       return list;
     } catch {
@@ -860,7 +886,6 @@ export function HostPage({
         const snap = await BotHost.snapshot();
         if (!alive) return;
         setLocalHost(snap);
-        if (snap.workspace && !editCwd) setEditCwd(snap.workspace);
         if (snap.phase === 'running') {
           await syncLocalBots(snap);
         }
@@ -872,6 +897,12 @@ export function HostPage({
       alive = false;
     };
   }, [active, connectionEpoch, syncLocalBots]);
+
+  useEffect(() => {
+    if (!active) return;
+    const timer = window.setInterval(() => { if (!document.hidden) void syncLocalBots(); }, 5000);
+    return () => { window.clearInterval(timer); };
+  }, [active, syncLocalBots]);
 
   // Initialize Remote Client only if user previously configured remote profiles or opens settings
   const ensureRemoteApi = useCallback(async (): Promise<DesktopPanelApi | null> => {
@@ -911,71 +942,86 @@ export function HostPage({
   const syncRemoteBots = useCallback(async () => {
     const api = remoteClientRef.current?.api;
     const identity = api?.identity;
-    if (!api || !identity || !api.transportConnected || !identity.targetDeviceId) {
-      setRemoteBots([]);
-      return;
-    }
+    if (!api || !identity || !api.transportConnected || directoryFlight.current) return;
+    const generation = directoryGeneration.current;
+    directoryFlight.current = true;
     try {
-      const list = await api.call(identity, 'listBots', {});
-      setRemoteBots(Array.isArray(list) ? (list as HostBot[]) : []);
-    } catch {
-      // Keep existing remote bots on transient error
+      const directory = await api.broker(identity, 'bot_directory', {});
+      if (generation !== directoryGeneration.current || api.identity?.generation !== identity.generation) return;
+      setRemoteDevices(directory.devices);
+      setRemoteBots(previous => {
+        const failed = new Set(directory.errors.map(error => error.deviceId));
+        return [...directory.bots, ...previous.filter(bot => failed.has(bot.deviceId))];
+      });
+      setDirectoryError(directory.errors.map(error => `${error.deviceId}: ${error.message || error.code}`).join(' · '));
+    } catch (error) {
+      if (generation === directoryGeneration.current) setDirectoryError(errorText(error));
+    } finally {
+      directoryFlight.current = false;
     }
   }, []);
 
   useEffect(() => {
-    if (remoteConnected && remoteIdentity?.targetDeviceId) {
-      void syncRemoteBots();
-    } else {
-      setRemoteBots([]);
+    directoryGeneration.current += 1;
+    if (!active || !remoteConnected || !remoteIdentity) return;
+    void syncRemoteBots();
+    const timer = window.setInterval(() => { if (!document.hidden) void syncRemoteBots(); }, 5000);
+    return () => { window.clearInterval(timer); directoryGeneration.current += 1; };
+  }, [active, remoteConnected, remoteIdentity?.profileId, remoteIdentity?.generation, syncRemoteBots]);
+
+  useEffect(() => {
+    if (!remoteIdentity?.targetDeviceId) return;
+    const avatars = getSavedAvatarConfigMap();
+    for (const bot of remoteBots) {
+      if (bot.deviceId !== remoteIdentity.targetDeviceId || remoteBots.filter(item => item.botId === bot.botId).length !== 1) continue;
+      const oldKey = `remote:${remoteIdentity.profileId}:${bot.botId}`;
+      const newKey = `remote:${remoteIdentity.profileId}:${bot.deviceId}:${bot.botId}`;
+      if (avatars[oldKey] && !avatars[newKey]) saveBotAvatarConfig(newKey, avatars[oldKey]);
+      if (botMetaMap[oldKey] && !botMetaMap[newKey]) updateBotMeta(newKey, botMetaMap[oldKey]);
     }
-  }, [remoteConnected, remoteIdentity?.profileId, remoteIdentity?.targetDeviceId, remoteIdentity?.generation, syncRemoteBots]);
+  }, [remoteBots, remoteIdentity, botMetaMap, updateBotMeta]);
 
   // Build unified Bot list (Primary Jarvis + Local Bots + Remote Bots)
   const { primaryBot, listBotItems } = useMemo(() => {
     void avatarVersion;
-    const remoteProfileTitle =
-      remoteProfiles.find(p => p.id === remoteIdentity?.profileId)?.title ||
-      remoteIdentity?.targetDeviceId ||
-      t('远程节点', 'Remote');
-
-    const allLocal: UnifiedBotItem[] = localBots.map(b => {
+    const localByIdentity = new Map(localBots.map(bot => [JSON.stringify([bot.deviceId, bot.botId]), bot] as const));
+    for (const bot of remoteBots) {
+      if (bot.deviceId !== localHost?.deviceId) continue;
+      const key = JSON.stringify([bot.deviceId, bot.botId]);
+      if (!localByIdentity.has(key)) localByIdentity.set(key, bot);
+    }
+    const allLocal: UnifiedBotItem[] = [...localByIdentity.values()].map(b => {
       const key = `local:local:${b.botId}`;
-      const customName = botMetaMap[key]?.customName;
       return {
         key,
         botId: b.botId,
         primaryConversationId: b.primaryConversationId,
-        role: customName || b.role,
+        role: b.role,
+        description: (b as HostBot & {description?: string}).description ?? '',
         cwd: b.cwd,
         modelRef: b.modelRef,
         createdAt: b.createdAt,
         hostKind: 'local',
         hostId: 'local',
-        hostLabel: t('本机', 'Local'),
+        hostLabel: [t('本机', 'Local'), remoteDevices.find(device => device.deviceId === b.deviceId)?.displayName, remoteDevices.find(device => device.deviceId === b.deviceId)?.platform].filter(Boolean).join(' · '),
       };
     });
 
-    const allRemote: UnifiedBotItem[] =
-      remoteConnected && remoteIdentity && remoteIdentity.targetDeviceId
-        ? remoteBots.map(b => {
-            const key = `remote:${remoteIdentity.profileId}:${b.botId}`;
-            const customName = botMetaMap[key]?.customName;
-            return {
-              key,
-              botId: b.botId,
-              primaryConversationId: b.primaryConversationId,
-              role: customName || b.role,
-              cwd: b.cwd,
-              modelRef: b.modelRef,
-              createdAt: b.createdAt,
-              hostKind: 'remote',
-              hostId: remoteIdentity.profileId,
-              hostLabel: remoteProfileTitle,
-              remoteIdentity,
-            };
-          })
-        : [];
+    const api = remoteClientRef.current?.api;
+    const remoteByIdentity = new Map(remoteBots
+      .filter(bot => bot.deviceId !== localHost?.deviceId && !localByIdentity.has(JSON.stringify([bot.deviceId, bot.botId])))
+      .map(bot => [JSON.stringify([bot.deviceId, bot.botId]), bot] as const));
+    const allRemote: UnifiedBotItem[] = remoteIdentity && api
+      ? [...remoteByIdentity.values()].map(b => {
+          const key = `remote:${remoteIdentity.profileId}:${b.deviceId}:${b.botId}`;
+          return {
+            key, botId: b.botId, primaryConversationId: b.primaryConversationId,
+            role: b.role, description: b.description ?? '', cwd: b.cwd, modelRef: b.modelRef,
+            createdAt: b.createdAt, hostKind: 'remote' as const, hostId: b.deviceId,
+            hostLabel: [b.deviceName || b.deviceId, b.platform, !remoteConnected || !remoteDevices.some(device => device.deviceId === b.deviceId && device.online) ? t('离线', 'Offline') : ''].filter(Boolean).join(' · '),
+            remoteIdentity: api.identityForTarget(b.deviceId),
+          };
+        }) : [];
 
     const jarvisIdx = allLocal.findIndex(
       b =>
@@ -987,7 +1033,7 @@ export function HostPage({
     const restLocal = [...allLocal];
 
     if (jarvisIdx >= 0) {
-      primary = { ...restLocal[jarvisIdx], role: primaryRoleName, isPrimary: true };
+      primary = { ...restLocal[jarvisIdx], isPrimary: true };
       restLocal.splice(jarvisIdx, 1);
     } else {
       const jarvisKey = 'local:local:__jarvis__';
@@ -1007,7 +1053,7 @@ export function HostPage({
 
     const combined = [...restLocal, ...allRemote];
     return { primaryBot: primary, listBotItems: combined };
-  }, [localBots, remoteBots, remoteConnected, remoteIdentity, remoteProfiles, localHost?.workspace, primaryRoleName, botMetaMap, avatarVersion, t]);
+  }, [localBots, remoteBots, remoteDevices, remoteConnected, remoteIdentity, localHost?.deviceId, localHost?.workspace, primaryRoleName, botMetaMap, avatarVersion, t]);
 
   const activeBot = useMemo<UnifiedBotItem | null>(() => {
     if (!activeBotKey) return null;
@@ -1024,7 +1070,7 @@ export function HostPage({
         item.role.toLowerCase().includes(q) ||
         item.hostLabel.toLowerCase().includes(q) ||
         (meta?.lastText ?? '').toLowerCase().includes(q) ||
-        (meta?.subtitle ?? '').toLowerCase().includes(q)
+        (item.description ?? '').toLowerCase().includes(q)
       );
     });
   }, [listBotItems, searchQuery, botMetaMap]);
@@ -1090,11 +1136,12 @@ export function HostPage({
     };
   }, [connectionEpoch]);
 
-  useEffect(() => onMobileStreamFailure(() => cancelActiveObservation()), [cancelActiveObservation]);
+  useEffect(() => onMobileStreamFailure(() => { chatLoadGeneration.current += 1; profileLoadGeneration.current += 1; cancelActiveObservation(); }), [cancelActiveObservation]);
 
   // Load per-Bot Scheduled Tasks
   const loadBotSchedules = useCallback(
     async (bot: UnifiedBotItem) => {
+      const generation = ++scheduleLoadGeneration.current;
       if (bot.hostKind !== 'local') {
         setBotScheduleState({
           tasks: [],
@@ -1130,6 +1177,7 @@ export function HostPage({
             input: { action: 'list', limit: 50 },
           },
         });
+        if (generation !== scheduleLoadGeneration.current) return;
         const raw = record(env.result);
         const tasks = array<BotScheduleTask>(raw.tasks);
         const nextState: BotScheduleState = {
@@ -1155,6 +1203,8 @@ export function HostPage({
   // Load SOUL for the active Bot when entering profile or edit
   const loadBotSoul = useCallback(
     async (bot: UnifiedBotItem) => {
+      const generation = ++profileLoadGeneration.current;
+      const current = () => generation === profileLoadGeneration.current;
       if (bot.botId === '__jarvis__') {
         setBotSoul({
           botId: '__jarvis__',
@@ -1171,6 +1221,7 @@ export function HostPage({
         if (!snap || snap.phase !== 'running') return;
         try {
           const soulEnv = await BotHost.call({ method: 'getBotSoul', params: { botId: bot.botId } });
+          if (!current()) return;
           const parsedSoul = parseBotSoul(soulEnv.result);
           if (parsedSoul) {
             setBotSoul(parsedSoul);
@@ -1184,6 +1235,7 @@ export function HostPage({
         const api = remoteClientRef.current.api;
         try {
           const soulRes = await api.call(bot.remoteIdentity, 'getBotSoul', { botId: bot.botId });
+          if (!current()) return;
           const parsedSoul = parseBotSoul(soulRes);
           if (parsedSoul) {
             setBotSoul(parsedSoul);
@@ -1202,6 +1254,8 @@ export function HostPage({
   const loadBotHistoryAndObserve = useCallback(
     async (bot: UnifiedBotItem) => {
       cancelActiveObservation();
+      const generation = ++chatLoadGeneration.current;
+      const current = () => generation === chatLoadGeneration.current;
       chatSubmissionRef.current = undefined;
       setChatLive(undefined);
       setChatReceipt(undefined);
@@ -1215,6 +1269,7 @@ export function HostPage({
         if (!snap || snap.phase !== 'running') return;
         try {
           const histEnv = await BotHost.call({ method: 'history', params: { botId: bot.botId, limit: 50 } });
+          if (!current()) return;
           const page = histEnv.result as HostHistoryPage;
           const items = page?.items ?? [];
           setChatHistory(items);
@@ -1226,18 +1281,22 @@ export function HostPage({
         } catch {
           // Ignore
         }
+        if (!current()) return;
         try {
           const obsId = uuid();
           observeIdRef.current = obsId;
           await BotHost.observe({ observationId: obsId, target: { kind: 'primary', botId: bot.botId } });
+          if (!current()) void BotHost.cancelObservation({ observationId: obsId }).catch(() => {});
         } catch {
-          observeIdRef.current = undefined;
+          if (current()) observeIdRef.current = undefined;
         }
       } else if (bot.hostKind === 'remote' && bot.remoteIdentity && remoteClientRef.current) {
         const api = remoteClientRef.current.api;
+        if (!api.transportConnected) return;
         const identity = bot.remoteIdentity;
         try {
           const page = await api.call(identity, 'history', { botId: bot.botId, limit: 50 });
+          if (!current()) return;
           const items = (page?.items ?? []) as unknown as Array<Record<string, unknown>>;
           setChatHistory(items);
           const turns = parseHistoryEntries(items, clearedMap[bot.key] ?? 0);
@@ -1248,9 +1307,10 @@ export function HostPage({
         } catch {
           // Ignore
         }
+        if (!current()) return;
         try {
           const handle = api.observe(identity, { kind: 'primary', botId: bot.botId }, ev => {
-            if ('error' in ev) return;
+            if (!current() || 'error' in ev) return;
             const frame = ev.frame as unknown as HostLiveFrame;
             if (frame.type === 'snapshot') setChatLive(frame);
             else if (frame.type === 'update') {
@@ -1372,6 +1432,8 @@ export function HostPage({
   ]);
 
   const openBotChat = (bot: UnifiedBotItem) => {
+    profileLoadGeneration.current += 1;
+    scheduleLoadGeneration.current += 1;
     chatSubmissionRef.current = undefined;
     setActiveBotKey(bot.key);
     setChatHistory([]);
@@ -1411,7 +1473,7 @@ export function HostPage({
     const preset = resolveBotAvatarPreset(bot.key, bot.role, bot.isPrimary);
     setEditMode('edit');
     setEditName(bot.role);
-    setEditSubtitle(meta?.subtitle ?? '');
+    setEditSubtitle(bot.description ?? '');
     setEditCwd(bot.cwd || localHost?.workspace || '');
     setEditModel(bot.modelRef ?? '');
     setEditAvatarPreset(preset);
@@ -1427,7 +1489,7 @@ export function HostPage({
     setEditMode('create');
     setEditName('');
     setEditSubtitle('');
-    setEditCwd(localHost?.workspace ?? '');
+    setEditCwd('');
     setEditModel('');
     setEditTargetHost('local');
     setEditAvatarPreset(nextPreset);
@@ -1570,20 +1632,7 @@ export function HostPage({
             observeIdRef.current = undefined;
           });
         }
-      } else if (activeBot.hostKind === 'remote' && activeBot.remoteIdentity && remoteClientRef.current) {
-        const api = remoteClientRef.current.api;
-        const identity = activeBot.remoteIdentity;
-        updateBotMeta(activeBot.key, { lastText: trimmed, updatedAt: Date.now(), unread: false });
-        const receipt = await api.call(identity, 'submit', {
-          botId: activeBot.botId,
-          requestId: submission.requestId,
-          text: trimmed,
-        });
-        if (chatSubmissionRef.current !== submission) return;
-        setChatReceipt(receipt as unknown as HostSubmission);
-        const page = await api.call(identity, 'history', { botId: activeBot.botId, limit: 50 });
-        if (chatSubmissionRef.current !== submission) return;
-        if (page?.items) setChatHistory(page.items as unknown as Array<Record<string, unknown>>);
+
       }
     });
 
@@ -1594,25 +1643,32 @@ export function HostPage({
       if (!roleName) return;
 
       if (editMode === 'create') {
-        const targetHost =
-          hasRemoteConfigured && remoteConnected && remoteIdentity?.targetDeviceId ? editTargetHost : 'local';
+        const targetHost = editTargetHost;
+        if (targetHost !== 'local' && (!remoteConnected || !remoteIdentity || !remoteClientRef.current || !remoteDevices.some(device => device.deviceId === targetHost && device.online))) throw new Error(t('所选设备不可用，未创建 Bot', 'Selected device unavailable; bot was not created'));
+        if (createAttempt) throw new Error(t('创建回执未确认，请在待发送中按原 ID 对账', 'Creation unconfirmed; reconcile the original ID in Pending'));
+        if (targetHost === 'local') {
+          const snap = await ensureLocalHostRunning();
+          if (!snap || snap.phase !== 'running') throw new Error(t('正在初始化运行环境，请稍后再试', 'Initializing runtime, please try again shortly'));
+        }
+        const requestId = uuid();
+        setCreateAttempt({ requestId, target: targetHost, ...(targetHost !== 'local' ? { profileId: remoteIdentity?.profileId } : {}) });
 
         if (targetHost === 'local') {
           const snap = await ensureLocalHostRunning();
           if (!snap || snap.phase !== 'running') {
             throw new Error(t('正在初始化运行环境，请稍后再试', 'Initializing runtime, please try again shortly'));
           }
-          const cwdToUse =
-            editCwd.trim() || snap.workspace || '/data/user/0/com.example.launcherprobe/files/bot-host/workspace';
           const env = await BotHost.call({
             method: 'createBot',
             params: {
-              requestId: uuid(),
+              requestId,
               role: roleName,
-              cwd: cwdToUse,
+              description: editSubtitle.trim(),
+              ...(editCwd.trim() ? { cwd: editCwd.trim() } : {}),
               modelRef: null,
             },
-          });
+          }).catch(error => { if (error?.outcome === 'not-sent') setCreateAttempt(null); throw error; });
+          setCreateAttempt(null);
           const created = env.result as HostBot;
           const key = `local:local:${created.botId}`;
           saveBotAvatarConfig(key, editAvatarPreset);
@@ -1655,14 +1711,16 @@ export function HostPage({
           });
         } else if (remoteIdentity && remoteClientRef.current) {
           const api = remoteClientRef.current.api;
-          const cwdToUse = editCwd.trim() || '/tmp';
-          const created = (await api.mutateIntent(remoteIdentity, 'createBot', {
-            requestId: uuid(),
+          const targetIdentity = api.identityForTarget(targetHost);
+          const created = (await api.mutateIntent(targetIdentity, 'createBot', {
+            requestId,
             role: roleName,
-            cwd: cwdToUse,
+            description: editSubtitle.trim(),
+            ...(editCwd.trim() ? { cwd: editCwd.trim() } : {}),
             modelRef: null,
-          })) as unknown as HostBot;
-          const key = `remote:${remoteIdentity.profileId}:${created.botId}`;
+          }).catch(error => { if (error?.outcome === 'not-sent') setCreateAttempt(null); throw error; })) as unknown as HostBot;
+          setCreateAttempt(null);
+          const key = `remote:${remoteIdentity.profileId}:${targetHost}:${created.botId}`;
           saveBotAvatarConfig(key, editAvatarPreset);
           setAvatarVersion(v => v + 1);
           updateBotMeta(key, {
@@ -1679,7 +1737,19 @@ export function HostPage({
           setScreen('hub');
         }
       } else if (activeBot) {
-        // Editing existing Bot (or Primary Jarvis)
+        // Editing an existing Bot updates the authoritative shared profile.
+        if (activeBot.botId === '__jarvis__') {
+          const snap = await ensureLocalHostRunning();
+          if (!snap || snap.phase !== 'running') throw new Error('Host unavailable');
+          const materialized = await materializeJarvisIfNeeded(snap);
+          await BotHost.call({ method: 'updateBotProfile', params: { botId: materialized.botId, name: roleName, description: editSubtitle.trim() } });
+          await syncLocalBots(snap);
+        } else if (activeBot.hostKind === 'local') {
+          await BotHost.call({ method: 'updateBotProfile', params: { botId: activeBot.botId, name: roleName, description: editSubtitle.trim() } });
+          await syncLocalBots();
+        } else if (activeBot.remoteIdentity && remoteClientRef.current) {
+          await remoteClientRef.current.api.call(activeBot.remoteIdentity, 'updateBotProfile', { botId: activeBot.botId, name: roleName, description: editSubtitle.trim() });
+        } else throw new Error('Remote target unavailable');
         if (activeBot.isPrimary) {
           setPrimaryRoleName(roleName);
           writePrimaryRoleOverride(roleName);
@@ -2439,7 +2509,6 @@ export function HostPage({
       showerIdentity &&
       remoteIdentity &&
       showerIdentity.profileId === remoteIdentity.profileId &&
-      showerIdentity.targetDeviceId === remoteIdentity.targetDeviceId &&
       showerIdentity.generation === remoteIdentity.generation,
   );
   // 复用既有 remote 面板 call（与 Host 其它调用同源），绝不发给本机 BotHost；
@@ -2504,6 +2573,8 @@ export function HostPage({
 
             {/* Unified Bot List (Local + Remote) */}
             <section className="hub-bot-list" aria-label={t('智能体列表', 'Bots')}>
+              <button type="button" className="hub-outline-btn" onClick={() => { void syncLocalBots(); void syncRemoteBots(); }}>{t('刷新节点与 Bot', 'Refresh devices and bots')}</button>
+              <ErrorNotice error={directoryError} />
               {filteredBotItems.length === 0 ? (
                 <div className="hub-empty-list">
                   <p>
@@ -2516,8 +2587,8 @@ export function HostPage({
                 filteredBotItems.map(item => {
                   const meta = botMetaMap[item.key];
                   const snippet =
+                    item.description ||
                     meta?.lastText ||
-                    meta?.subtitle ||
                     t('点击开始文字对话…', 'Tap to start chatting…');
                   const timeLabel = formatBotListTime(meta?.updatedAt, item.createdAt, t);
                   const preset = resolveBotAvatarPreset(item.key, item.role);
@@ -2601,6 +2672,9 @@ export function HostPage({
               className="grok-floating-circle-btn"
               aria-label={t('返回主页', 'Back')}
               onClick={() => {
+                chatLoadGeneration.current += 1;
+                profileLoadGeneration.current += 1;
+                scheduleLoadGeneration.current += 1;
                 cancelActiveObservation();
                 setChatTopMenuOpen(false);
                 setScreen('hub');
@@ -2724,7 +2798,7 @@ export function HostPage({
                 </button>
                 <h2>{activeBot.role}</h2>
                 <p>
-                  {botMetaMap[activeBot.key]?.subtitle ||
+                  {activeBot.description ||
                     t(
                       '点击顶部名称可管理头像、人设、定时任务与电脑屏幕。',
                       'Tap the top pill to manage avatar, persona, schedules, and computer screen.',
@@ -2773,6 +2847,17 @@ export function HostPage({
 
           {/* 15845.jpg / 15866.jpg Bottom Composer Bar */}
           <footer className="grok-chat-composer-area">
+            {activeBot.hostKind === 'remote' && activeBot.remoteIdentity && remoteClientRef.current ? (
+              <RemotePendingComposer key={activeBot.key} api={remoteClientRef.current.api} identity={activeBot.remoteIdentity} botId={activeBot.botId} onAccepted={() => {
+                const generation = chatLoadGeneration.current;
+                const api = remoteClientRef.current?.api;
+                const identity = activeBot.remoteIdentity;
+                if (!api || !identity) return;
+                void api.call(identity, 'history', { botId: activeBot.botId, limit: 50 }).then(page => {
+                  if (generation === chatLoadGeneration.current) setChatHistory(page.items as unknown as Array<Record<string, unknown>>);
+                }).catch(() => {});
+              }} />
+            ) : <>
             <ErrorNotice error={action.error} />
 
             {showSlashHints && (
@@ -2922,6 +3007,7 @@ export function HostPage({
                 )}
               </div>
             </div>
+            </>}
           </footer>
         </main>
       )}
@@ -2971,8 +3057,8 @@ export function HostPage({
                 />
               </button>
               <h1 className="grok-profile-title">{activeBot.role}</h1>
-              {botMetaMap[activeBot.key]?.subtitle && (
-                <p className="grok-profile-subtitle">{botMetaMap[activeBot.key]?.subtitle}</p>
+              {activeBot.description && (
+                <p className="grok-profile-subtitle">{activeBot.description}</p>
               )}
               <button
                 type="button"
@@ -3149,6 +3235,26 @@ export function HostPage({
           </header>
 
           <div className="grok-subpage-scroll">
+            {editMode === 'create' && createAttempt && <div className="grok-card-group">
+              <p>{t('创建回执未确认，原请求', 'Creation unconfirmed, original request')}: {createAttempt.requestId}</p>
+              <button type="button" className="hub-outline-btn" onClick={() => void action.run(async () => {
+                let found: unknown;
+                if (createAttempt.target === 'local') {
+                  const snap = await ensureLocalHostRunning();
+                  if (!snap || snap.phase !== 'running') throw new Error('Host unavailable');
+                  found = (await BotHost.call({ method: 'findByRequest', params: { requestId: createAttempt.requestId } })).result;
+                  if (found) await syncLocalBots(snap);
+                } else {
+                  const api = remoteClientRef.current?.api;
+                  if (!api || !api.transportConnected || api.identity?.profileId !== createAttempt.profileId) throw new Error('Original connection unavailable');
+                  found = await api.call(api.identityForTarget(createAttempt.target), 'findByRequest', { requestId: createAttempt.requestId });
+                  if (found) await syncRemoteBots();
+                }
+                if (!found) throw new Error(t('尚未找到原请求，保持原 ID，不能重新创建', 'Original request not found; retain its ID and do not recreate'));
+                setCreateAttempt(null);
+                setScreen('hub');
+              })}>{t('按原 ID 对账', 'Reconcile original ID')}</button>
+            </div>}
             {/* Hero Avatar with Pencil Badge (15847.jpg) */}
             <section className="grok-profile-hero compact">
               <button
@@ -3212,15 +3318,14 @@ export function HostPage({
                     <select
                       className="grok-inline-select"
                       value={editTargetHost}
-                      onChange={e => setEditTargetHost(e.target.value as 'local' | 'remote')}
+                      onChange={e => { setEditTargetHost(e.target.value); setEditCwd(''); }}
                     >
                       <option value="local">{t('本机', 'Local')}</option>
-                      {remoteConnected && remoteIdentity?.targetDeviceId && (
-                        <option value="remote">
-                          {remoteProfiles.find(p => p.id === remoteIdentity.profileId)?.title ||
-                            remoteIdentity.targetDeviceId}
+                      {remoteDevices.filter(device => device.deviceId !== localHost?.deviceId).map(device => (
+                        <option key={device.deviceId} value={device.deviceId} disabled={!device.online}>
+                          {device.displayName || device.deviceId}{device.platform ? ` · ${device.platform}` : ''}{device.online ? '' : ' · offline'}
                         </option>
-                      )}
+                      ))}
                     </select>
                   </div>
                 </div>
@@ -4108,6 +4213,21 @@ export function HostPage({
         </main>
       )}
 
+      {(screen === 'scopes' || screen === 'pending') && (
+        <main className="grok-subpage grok-page-enter">
+          <header className="grok-subpage-topbar"><button type="button" className="grok-floating-circle-btn" onClick={() => setScreen('hub')} aria-label={t('返回', 'Back')}><ArrowLeft size={20} /></button><h2>{screen === 'scopes' ? t('群聊与 Bot 私聊', 'Rooms and DMs') : t('待发送', 'Pending')}</h2></header>
+          <div className="grok-subpage-scroll">
+            {remoteClientRef.current && remoteIdentity ? <>
+              <label>{t('目标设备', 'Target device')} <select value={remoteIdentity.targetDeviceId} onChange={e => { const api = remoteClientRef.current!.api; api.setIdentity({ profileId: remoteIdentity.profileId, kind: remoteIdentity.kind, targetDeviceId: e.target.value }); }}>
+                <option value="">{t('请选择设备', 'Select device')}</option>
+                {remoteDevices.map(device => <option key={device.deviceId} value={device.deviceId}>{device.displayName || device.deviceId}</option>)}
+              </select></label>
+              {remoteIdentity.targetDeviceId && (screen === 'scopes' ? <Scopes key={`${remoteIdentity.profileId}|${remoteIdentity.kind}|${remoteIdentity.targetDeviceId}`} api={remoteClientRef.current.api} pageActive={active} /> : <PendingPanel key={`${remoteIdentity.profileId}|${remoteIdentity.kind}|${remoteIdentity.targetDeviceId}`} api={remoteClientRef.current.api} identity={remoteIdentity} transportConnected={remoteConnected} />)}
+            </> : <p>{t('请先连接远程节点', 'Connect a remote node first')}</p>}
+          </div>
+        </main>
+      )}
+
       {/* ==================== SCREEN 8: SETTINGS VIEW ==================== */}
       {screen === 'settings' && (
         <HubSettingsView
@@ -4617,6 +4737,8 @@ export function HostPage({
           onClick={e => e.stopPropagation()}
         >
           <div className="hub-left-drawer-spacer" />
+          <button type="button" className="hub-left-settings-btn" onClick={() => { setLeftDrawerOpen(false); setScreen('scopes'); }}>{t('群聊与 Bot 私聊', 'Rooms and DMs')}</button>
+          <button type="button" className="hub-left-settings-btn" onClick={() => { setLeftDrawerOpen(false); setScreen('pending'); }}>{t('待发送', 'Pending')}</button>
           <footer className="hub-left-drawer-footer">
             <button
               type="button"
@@ -4634,6 +4756,77 @@ export function HostPage({
       </div>
     </div>
   );
+}
+
+function RemotePendingComposer({ api, identity, botId, onAccepted }: { api: DesktopPanelApi; identity: DesktopIdentity; botId: string; onAccepted(): void }) {
+  const t = useText();
+  const target = useMemo(() => ({ kind: 'primary' as const, id: botId }), [botId]);
+  const drafts = useDrafts({ api, identity, target });
+  const [notice, setNotice] = useState('');
+  const sending = useRef(false);
+  const send = async () => {
+    if (sending.current || !drafts.text.trim()) return;
+    const text = drafts.text.trim() + (drafts.files.length ? '\n' + drafts.files.map(file => `[文件路径引用，未上传] ${file.path}`).join('\n') : '');
+    const started = drafts.beginSend({ kind: 'primary', targetDeviceId: identity.targetDeviceId, botId, requestId: uuid(), text });
+    if (!started) return;
+    sending.current = true;
+    setNotice('');
+    try {
+      await drafts.waitQuiet(started.handle);
+      let pending;
+      try {
+        pending = await api.pending(identity, 'pending_enqueue', { input: started.attempt.input });
+      } catch (error) {
+        const message = errorText(error);
+        if ((error as { outcome?: string })?.outcome === 'not-sent') drafts.markNotSent(started.handle, message);
+        else drafts.markUnconfirmed(started.handle);
+        setNotice(`${message} · requestId ${started.attempt.input.kind === 'primary' ? started.attempt.input.requestId : ''}`);
+        return;
+      }
+      drafts.setPending(started.handle, pending.id);
+      const cleared = await drafts.confirmCleared(started.handle);
+      if (cleared !== 'cleared') {
+        const message = t('草稿未清空，队列未发送；请对账并保留新版草稿。', 'Draft not cleared; queued item not sent. Reconcile before continuing.');
+        drafts.markFailed(started.handle, message);
+        setNotice(message);
+        return;
+      }
+      if (!api.transportConnected) {
+        drafts.finishSend(started.handle);
+        setNotice(t('已入队，请连接后在待发送中显式发送。', 'Queued; send explicitly from Pending after reconnecting.'));
+        return;
+      }
+      try {
+        const sent = await api.pending(identity, 'pending_send', { id: pending.id });
+        if (sent.state === 'unconfirmed' || sent.state === 'sending') drafts.markUnconfirmed(started.handle);
+        else drafts.finishSend(started.handle);
+        setNotice(`${sent.state} · ${pending.id}`);
+        if (sent.state === 'accepted') onAccepted();
+      } catch (error) {
+        drafts.markUnconfirmed(started.handle);
+        setNotice(`${t('回执未确认，请按原 ID 对账', 'Receipt unconfirmed; reconcile the original ID')} · ${pending.id} · ${errorText(error)}`);
+      }
+    } finally { sending.current = false; }
+  };
+  const handle = drafts.key && drafts.attempt ? { key: drafts.key, attemptId: drafts.attempt.id } : null;
+  return <>
+    <ErrorNotice error={drafts.error || notice} />
+    {drafts.attempt && <div className="bot-chat-system-notice">
+      {t('发送已冻结', 'Send frozen')} · {drafts.attempt.phase} · {drafts.attempt.pendingId || ''}
+      {handle && <>
+        <button type="button" onClick={() => void drafts.reconcile(handle).then(result => setNotice(result.note || `${result.action} · ${result.recordId || ''}`))}>{t('按原 ID 对账', 'Reconcile original ID')}</button>
+        <button type="button" onClick={() => { const result = drafts.releaseIfNotSent(handle); setNotice(result.error || ''); }}>{t('释放未入队草稿', 'Release not-sent draft')}</button>
+        <button type="button" onClick={() => void drafts.retryClearAfterVerify(handle).then(result => setNotice(result))}>{t('核实后重试清稿', 'Retry clear after verification')}</button>
+        <button type="button" onClick={() => { const result = drafts.adoptNewerDraftAndFinish(handle); setNotice(result.error || ''); }}>{t('保留新版草稿', 'Keep newer draft')}</button>
+      </>}
+    </div>}
+    {drafts.files.map((file, index) => <div key={`${file.path}:${index}`}>{file.name} <button type="button" disabled={Boolean(drafts.attempt)} onClick={() => drafts.removeFile(index)}>{t('移除', 'Remove')}</button></div>)}
+    {drafts.savePaused && <button type="button" onClick={drafts.retrySave}>{t('重试保存草稿', 'Retry draft save')}</button>}
+    <div className="grok-composer-row"><div className="grok-composer-pill">
+      <textarea rows={1} value={drafts.text} disabled={Boolean(drafts.attempt)} onChange={event => drafts.editText(event.target.value)} aria-label={t('消息', 'Message')} placeholder={t('发消息…', 'Message…')} />
+      <button type="button" className="grok-composer-action-pill send" disabled={!drafts.text.trim() || Boolean(drafts.attempt)} onClick={() => void send()} aria-label={t('发送', 'Send')}><ArrowUp size={18} /></button>
+    </div></div>
+  </>;
 }
 
 function HubSettingsView({
@@ -5036,32 +5229,20 @@ function HubSettingsView({
                   </button>
                 </div>
 
-                {remoteConnected && remoteIdentity?.kind === 'relay' && remoteDevices.length > 0 && (
-                  <div className="grok-card-row no-active" style={{ flexWrap: 'wrap', gap: 8 }}>
-                    <span className="grok-row-label">{t('目标设备', 'Target Device')}</span>
-                    <div className="grok-model-quick-chips" style={{ padding: 0, borderBottom: 0 }}>
-                      {remoteDevices.map(dev => (
-                        <button
-                          key={dev.deviceId}
-                          type="button"
-                          className={`grok-model-quick-chip${remoteIdentity.targetDeviceId === dev.deviceId ? ' active' : ''}`}
-                          onClick={async () => {
-                            const api = await ensureRemoteApi();
-                            if (!api) return;
-                            api.setIdentity({
-                              profileId: remoteIdentity.profileId,
-                              targetDeviceId: dev.deviceId,
-                              kind: 'relay',
-                            });
-                            onRemoteUpdated();
-                          }}
-                        >
-                          <span>{`${dev.deviceId} ${dev.online ? '🟢' : '⚪'}`}</span>
-                        </button>
-                      ))}
-                    </div>
+                {remoteConnected && remoteIdentity?.kind === 'relay' && remoteDevices.map(dev => (
+                  <div className="grok-card-row no-active" key={dev.deviceId}>
+                    <span className="grok-row-label">{dev.displayName || dev.deviceId} · {dev.platform || dev.deviceId} {dev.online ? '🟢' : '⚪'}</span>
+                    <button type="button" className="hub-outline-btn" onClick={() => void action.run(async () => {
+                      const name = window.prompt(t('中央节点名称', 'Central device name'), dev.displayName || dev.deviceId);
+                      if (name === null) return;
+                      const api = await ensureRemoteApi();
+                      if (!api || !api.identity) throw new Error('Not connected');
+                      await api.broker(api.identity, 'rename_device', { deviceId: dev.deviceId, displayName: name.trim() });
+                      onRemoteUpdated();
+                    })}>{t('改名', 'Rename')}</button>
                   </div>
-                )}
+                ))}
+
               </>
             )}
           </section>

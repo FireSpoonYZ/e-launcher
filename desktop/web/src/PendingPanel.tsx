@@ -49,6 +49,15 @@ export class PendingPanel extends Component<Props, State> {
 
   private unsub: (() => void) | null = null;
   private mounted = false;
+  private identityEpoch = 0;
+  private loadEpoch = 0;
+
+  private isCurrent(identity: DesktopIdentity, epoch: number): boolean {
+    const current = this.props.identity;
+    return this.mounted && this.identityEpoch === epoch && !!current &&
+      current.profileId === identity.profileId && current.targetDeviceId === identity.targetDeviceId &&
+      current.kind === identity.kind && current.generation === identity.generation;
+  }
   /** 同步在途标记：state.busyId 在重渲染前不能防双击。 */
   private inFlight = false;
 
@@ -65,6 +74,8 @@ export class PendingPanel extends Component<Props, State> {
 
   componentWillUnmount(): void {
     this.mounted = false;
+    this.identityEpoch += 1;
+    this.loadEpoch += 1;
     if (this.unsub) this.unsub();
   }
 
@@ -77,6 +88,8 @@ export class PendingPanel extends Component<Props, State> {
       a?.kind !== b?.kind ||
       a?.targetDeviceId !== b?.targetDeviceId
     ) {
+      this.identityEpoch += 1;
+      this.loadEpoch += 1;
       this.setState({ items: [], cursor: null, error: null, busyId: null });
       void this.load();
     }
@@ -85,14 +98,15 @@ export class PendingPanel extends Component<Props, State> {
   private async load(): Promise<void> {
     const identity = this.props.identity;
     if (!identity) return;
-    const gen = identity.generation;
+    const epoch = this.identityEpoch;
+    const loadEpoch = ++this.loadEpoch;
     const filter = this.state.filter;
     try {
       const page = await this.props.api.pending(identity, 'pending_list', {
         options: { ...(filter ? { state: filter } : {}), limit: 50, cursor: null },
       });
       // 旧请求结果不得覆盖新目标/新筛选。
-      if (!this.mounted || this.props.identity?.generation !== gen || this.state.filter !== filter) {
+      if (!this.isCurrent(identity, epoch) || this.loadEpoch !== loadEpoch || this.state.filter !== filter) {
         return;
       }
       this.setState({
@@ -101,7 +115,7 @@ export class PendingPanel extends Component<Props, State> {
         error: null,
       });
     } catch (e) {
-      if (!this.mounted || this.props.identity?.generation !== gen || this.state.filter !== filter) {
+      if (!this.isCurrent(identity, epoch) || this.loadEpoch !== loadEpoch || this.state.filter !== filter) {
         return;
       }
       this.setState({ error: toError(e).message });
@@ -111,14 +125,15 @@ export class PendingPanel extends Component<Props, State> {
   private async loadMore(): Promise<void> {
     const identity = this.props.identity;
     if (!identity || !this.state.cursor) return;
-    const gen = identity.generation;
+    const epoch = this.identityEpoch;
+    const loadEpoch = ++this.loadEpoch;
     const filter = this.state.filter;
     try {
       // 保留完整 PendingCursor 原样回传，不手工伪造。
       const page = await this.props.api.pending(identity, 'pending_list', {
         options: { ...(filter ? { state: filter } : {}), limit: 50, cursor: this.state.cursor },
       });
-      if (!this.mounted || this.props.identity?.generation !== gen || this.state.filter !== filter) {
+      if (!this.isCurrent(identity, epoch) || this.loadEpoch !== loadEpoch || this.state.filter !== filter) {
         return;
       }
       this.setState((s) => ({
@@ -126,7 +141,7 @@ export class PendingPanel extends Component<Props, State> {
         cursor: page.nextCursor,
       }));
     } catch (e) {
-      if (!this.mounted || this.props.identity?.generation !== gen || this.state.filter !== filter) {
+      if (!this.isCurrent(identity, epoch) || this.loadEpoch !== loadEpoch || this.state.filter !== filter) {
         return;
       }
       this.setState({ error: toError(e).message });
@@ -143,18 +158,18 @@ export class PendingPanel extends Component<Props, State> {
       this.setState({ error: '客户端未连接：发送/对账需先重新连接；本地取消仍可用' });
       return;
     }
-    const gen = identity.generation;
+    const epoch = this.identityEpoch;
     this.inFlight = true;
     this.setState({ busyId: id, error: null });
     try {
       const updated = await this.props.api.pending(identity, op, { id });
-      if (!this.mounted || this.props.identity?.generation !== gen) return;
+      if (!this.isCurrent(identity, epoch)) return;
       this.setState((s) => ({
         items: s.items.map((it) => (it.id === id ? updated : it)),
         busyId: null,
       }));
     } catch (e) {
-      if (!this.mounted || this.props.identity?.generation !== gen) return;
+      if (!this.isCurrent(identity, epoch)) return;
       this.setState({ busyId: null, error: toError(e).message });
     } finally {
       this.inFlight = false;
@@ -164,20 +179,21 @@ export class PendingPanel extends Component<Props, State> {
   private async reconcileBotIntent(intent: DesktopUiIntent): Promise<void> {
     const identity = this.props.identity;
     if (!identity || !this.canReconcile(intent) || this.inFlight || !this.props.transportConnected) return;
-    const gen = identity.generation;
+    const epoch = this.identityEpoch;
     this.inFlight = true;
     this.setState({ busyId: intent.id, error: null });
     try {
       // Bot create 只读 findByRequest，使用原 requestId/原目标；查到才保存结果，null 保持未确认。
       const params = intent.params as { requestId: string };
       const bot = await this.props.api.call(identity, 'findByRequest', { requestId: params.requestId });
-      if (!this.mounted || this.props.identity?.generation !== gen) return;
+      if (!this.isCurrent(identity, epoch)) return;
       if (bot) {
         await this.props.api.updateIntent(intent.id, { outcome: 'responded', result: bot });
       }
+      if (!this.isCurrent(identity, epoch)) return;
       this.setState({ busyId: null });
     } catch (e) {
-      if (!this.mounted || this.props.identity?.generation !== gen) return;
+      if (!this.isCurrent(identity, epoch)) return;
       this.setState({ busyId: null, error: toError(e).message });
     } finally {
       this.inFlight = false;

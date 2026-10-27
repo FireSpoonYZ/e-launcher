@@ -168,6 +168,10 @@ export function createControlClient({ url, token, fetch: fetchImpl = globalThis.
     createBot(input, options) {
       return request('POST', ['v1', 'bots'], { ...callOptions(options), body: input });
     },
+    updateBotProfile(input, options) {
+      const { botId, ...profile } = input;
+      return request('PUT', ['v1', 'bots', botId, 'profile'], { ...callOptions(options), body: profile });
+    },
     getBot(botId, options) {
       return request('GET', ['v1', 'bots', botId], callOptions(options));
     },

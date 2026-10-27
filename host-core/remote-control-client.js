@@ -17,6 +17,7 @@ import {
   RELAY_HEARTBEAT_MS,
   RELAY_CLOSE,
 } from './relay-protocol.js';
+import { normalizeDeviceName } from './device-metadata.js';
 import { messageError, assertId } from './message-protocol.js';
 import {
   CONTROL_MAX_CLIENT_CALLS,
@@ -72,6 +73,7 @@ export async function openRemoteControl(options) {
   let token;
   let ca;
   let signal;
+  let onCloseCallback;
   try {
     if (!options || typeof options !== 'object') throw invalid('options must be an object');
     deviceId = options.deviceId;
@@ -83,6 +85,8 @@ export async function openRemoteControl(options) {
       ca = options.ca;
       validateCa(ca);
     }
+    onCloseCallback = options.onClose;
+    if (onCloseCallback !== undefined && typeof onCloseCallback !== 'function') throw invalid('onClose must be a function');
     signal = options.signal;
     if (signal !== undefined && !isAbortSignal(signal)) throw invalid('signal must be an AbortSignal');
   } catch {
@@ -366,9 +370,46 @@ export async function openRemoteControl(options) {
       dirSignal.addEventListener('abort', record.onAbort, { once: true });
     }
 
-    const frame = { type: 'devices-list', callId, limit };
+    const frame = { type: 'devices-list', callId, limit, names: 1 };
     if (cursor) frame.cursor = cursor;
     const sent = sendFrame(frame);
+    if (!sent.ok) {
+      settle(record, () => ({ kind: 'reject', error: new RemoteControlError(sent.code, 'not-sent') }));
+      return record.promise;
+    }
+    record.sent = true;
+    record.timer = setTimeout(() => handleDirTimeout(record), CONTROL_CLIENT_TIMEOUT_MS);
+    return record.promise;
+  }
+
+  async function renameDevice(input, options) {
+    if (client.closed || client.violated) throw new RemoteControlError('NOT_CONNECTED', 'not-sent');
+    let displayName;
+    let renameSignal;
+    try {
+      if (!isPlainObject(input) || Object.keys(input).some((key) => key !== 'deviceId' && key !== 'displayName')) throw invalid('invalid rename input');
+      assertId(input.deviceId, 'deviceId');
+      displayName = normalizeDeviceName(input.displayName);
+      if (options !== undefined) {
+        if (!isPlainObject(options) || Object.keys(options).some((key) => key !== 'signal')) throw invalid('invalid rename options');
+        renameSignal = options.signal;
+        if (renameSignal !== undefined && !isAbortSignal(renameSignal)) throw invalid('invalid signal');
+      }
+    } catch {
+      throw new RemoteControlError('INVALID_ARGUMENT', 'not-sent');
+    }
+    if (renameSignal?.aborted) throw new RemoteControlError('CANCELLED', 'not-sent');
+    if (client.pending.size >= CONTROL_MAX_CLIENT_CALLS) throw new RemoteControlError('RPC_BUSY', 'not-sent');
+    const callId = randomUUID();
+    const record = { kind: 'rename', callId, targetDeviceId: input.deviceId, signal: renameSignal,
+      timer: null, onAbort: null, sent: false, settled: false };
+    record.promise = new Promise((resolve, reject) => { record.resolve = resolve; record.reject = reject; });
+    client.pending.set(callId, record);
+    if (renameSignal) {
+      record.onAbort = () => handleDirAbort(record);
+      renameSignal.addEventListener('abort', record.onAbort, { once: true });
+    }
+    const sent = sendFrame({ type: 'device-rename', callId, deviceId: input.deviceId, displayName });
     if (!sent.ok) {
       settle(record, () => ({ kind: 'reject', error: new RemoteControlError(sent.code, 'not-sent') }));
       return record.promise;
@@ -389,7 +430,7 @@ export async function openRemoteControl(options) {
     if (client.opened) return;
     client.opened = true;
     removeStartAbort();
-    client.openResolve({ deviceId: client.deviceId, call, close, listDevices, live: liveManager.live });
+    client.openResolve({ deviceId: client.deviceId, call, close, listDevices, renameDevice, live: liveManager.live });
   }
 
   function rejectPending(error) {
@@ -470,6 +511,18 @@ export async function openRemoteControl(options) {
       });
       return;
     }
+    if (frame.type === 'device-renamed') {
+      const record = client.pending.get(frame.callId);
+      if (!record || record.kind !== 'rename') return;
+      if (frame.ok && frame.item.deviceId !== record.targetDeviceId) {
+        protocolViolation();
+        return;
+      }
+      settle(record, () => frame.ok
+        ? { kind: 'resolve', value: frame.item }
+        : { kind: 'reject', error: new RemoteControlError(frame.code, 'responded') });
+      return;
+    }
     if (frame.type === 'devices-result') {
       handleDevicesResult(frame);
       return;
@@ -509,6 +562,9 @@ export async function openRemoteControl(options) {
     }
     failOpenOrPending(error);
     liveManager.terminateAll(error);
+    if (client.ready && onCloseCallback) {
+      try { onCloseCallback(error); } catch { /* consumer exceptions do not affect transport cleanup */ }
+    }
   }
 
   function connect() {

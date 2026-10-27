@@ -6,6 +6,7 @@
 // raw docs/task memory/thinking/arguments/signatures are rejected here.
 
 import { messageError, assertId } from './message-protocol.js';
+import { normalizeDeviceName, normalizeDevicePlatform } from './device-metadata.js';
 import { CONTROL_ERROR_CODES } from './remote-control-protocol.js';
 
 const INVALID_ARGUMENT = 'INVALID_ARGUMENT';
@@ -264,6 +265,17 @@ function compareDeviceIdAsc(a, b) {
   return Buffer.compare(Buffer.from(a, 'utf8'), Buffer.from(b, 'utf8'));
 }
 
+function normalizeDirectoryItem(item) {
+  if (!isPlainObject(item)) throw invalid('device item must be an object');
+  rejectUnknownFields(item, new Set(['deviceId', 'online', 'controlProtocol', 'scopeProtocol', 'displayName', 'platform']), 'device item');
+  assertId(item.deviceId, 'item.deviceId');
+  if (typeof item.online !== 'boolean') throw invalid('item online must be a boolean');
+  if (![0, 1, 2].includes(item.controlProtocol) || ![0, 1].includes(item.scopeProtocol)) throw invalid('invalid device protocol');
+  if (item.displayName !== undefined && item.displayName !== item.deviceId) normalizeDeviceName(item.displayName);
+  if (item.platform !== undefined) normalizeDevicePlatform(item.platform);
+  return { ...item, displayName: item.displayName ?? item.deviceId };
+}
+
 function normalizeDevicesResult(frame) {
   if (frame.ok === true) {
     rejectUnknownFields(frame, new Set(['type', 'callId', 'ok', 'items', 'nextCursor']), 'devices-result frame');
@@ -272,16 +284,7 @@ function normalizeDevicesResult(frame) {
       throw invalid('devices-result items must be an array of at most 200 devices');
     }
     for (const item of frame.items) {
-      if (!isPlainObject(item)) throw invalid('devices-result items must be plain objects');
-      rejectUnknownFields(item, new Set(['deviceId', 'online', 'controlProtocol', 'scopeProtocol']), 'devices-result item');
-      assertId(item.deviceId, 'item.deviceId');
-      if (typeof item.online !== 'boolean') throw invalid('item online must be a boolean');
-      if (item.controlProtocol !== 0 && item.controlProtocol !== 1 && item.controlProtocol !== 2) {
-        throw invalid('item controlProtocol must be 0, 1 or 2');
-      }
-      if (item.scopeProtocol !== 0 && item.scopeProtocol !== 1) {
-        throw invalid('item scopeProtocol must be 0 or 1');
-      }
+      normalizeDirectoryItem(item);
     }
     for (let i = 1; i < frame.items.length; i += 1) {
       if (compareDeviceIdAsc(frame.items[i - 1].deviceId, frame.items[i].deviceId) >= 0) {
@@ -303,7 +306,7 @@ function normalizeDevicesResult(frame) {
       }
       nextCursor = { afterDeviceId: frame.nextCursor.afterDeviceId };
     }
-    return { type: 'devices-result', callId: frame.callId, ok: true, items: frame.items, nextCursor };
+    return { type: 'devices-result', callId: frame.callId, ok: true, items: frame.items.map(normalizeDirectoryItem), nextCursor };
   }
   if (frame.ok === false) {
     rejectUnknownFields(frame, new Set(['type', 'callId', 'ok', 'code']), 'devices-result frame');
@@ -340,10 +343,17 @@ export function readLiveClientFrame(parsed) {
       return { type: 'live-cancel', watchId: parsed.watchId };
     }
     case 'devices-list': {
-      rejectUnknownFields(parsed, new Set(['type', 'callId', 'limit', 'cursor']), 'devices-list frame');
+      rejectUnknownFields(parsed, new Set(['type', 'callId', 'limit', 'cursor', 'names']), 'devices-list frame');
       assertId(parsed.callId, 'callId');
       const { limit, cursor } = normalizeDevicesListOptions(parsed);
-      return { type: 'devices-list', callId: parsed.callId, limit, cursor };
+      if (parsed.names !== undefined && parsed.names !== 1) throw invalid('names must be 1');
+      return { type: 'devices-list', callId: parsed.callId, limit, cursor, names: parsed.names };
+    }
+    case 'device-rename': {
+      rejectUnknownFields(parsed, new Set(['type', 'callId', 'deviceId', 'displayName']), 'device-rename frame');
+      assertId(parsed.callId, 'callId');
+      assertId(parsed.deviceId, 'deviceId');
+      return { type: 'device-rename', callId: parsed.callId, deviceId: parsed.deviceId, displayName: normalizeDeviceName(parsed.displayName) };
     }
     default:
       throw invalid('unknown live client frame type');
@@ -420,6 +430,16 @@ export function readLiveServerFrame(parsed) {
     }
     case 'devices-result':
       return normalizeDevicesResult(parsed);
+    case 'device-renamed': {
+      assertId(parsed.callId, 'callId');
+      if (parsed.ok === true) {
+        rejectUnknownFields(parsed, new Set(['type', 'callId', 'ok', 'item']), 'device-renamed frame');
+        return { type: parsed.type, callId: parsed.callId, ok: true, item: normalizeDirectoryItem(parsed.item) };
+      }
+      rejectUnknownFields(parsed, new Set(['type', 'callId', 'ok', 'code']), 'device-renamed frame');
+      if (parsed.ok !== false || (parsed.code !== 'DEVICE_NOT_FOUND' && !CONTROL_ERROR_CODES.has(parsed.code))) throw invalid('invalid device-renamed failure');
+      return { type: parsed.type, callId: parsed.callId, ok: false, code: parsed.code };
+    }
     default:
       throw invalid('unknown live server frame type');
   }

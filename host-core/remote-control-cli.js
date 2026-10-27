@@ -7,6 +7,7 @@
 import { parseArgs } from 'node:util';
 import { pathToFileURL } from 'node:url';
 import { once } from 'node:events';
+import { normalizeDeviceName } from './device-metadata.js';
 import { assertId } from './message-protocol.js';
 import { CONTROL_METHODS, normalizeControlCall } from './remote-control-protocol.js';
 import { normalizeLiveTarget } from './remote-live-protocol.js';
@@ -15,12 +16,13 @@ import { invalid, readTextFile, readInputObject } from './cli-input.js';
 
 const METHODS_LIST = CONTROL_METHODS.map((m) => `  ${m}`).join('\n');
 
-const USAGE = `usage: node host-core/remote-control-cli.js <METHOD|listDevices|live> --device-id <id> [--target-device-id <id>] --url <ws(s)://.../v1/link> --token-env <name> [--input <file>] [--ca <file>]
+const USAGE = `usage: node host-core/remote-control-cli.js <METHOD|listDevices|renameDevice|live> --device-id <id> [--target-device-id <id>] --url <ws(s)://.../v1/link> --token-env <name> [--input <file>] [--ca <file>]
 
 methods (params come from --input):
 ${METHODS_LIST}
 
 reserved commands:
+  renameDevice      rename device; --input {deviceId,displayName}; no --target-device-id
   listDevices       list registered relay devices; --input {limit?,cursor?} optional; no --target-device-id
   live              stream live snapshot frames, one JSON line per frame (snapshot or unique end);
                     requires --target-device-id and --input {kind:'primary',botId}|{kind:'work',botId,scopeId}
@@ -143,19 +145,19 @@ async function main() {
     throw invalid('exactly one command is required');
   }
   const command = positionals[0];
-  const reserved = command === 'listDevices' || command === 'live';
+  const reserved = command === 'listDevices' || command === 'renameDevice' || command === 'live';
   if (!reserved && !CONTROL_METHODS.includes(command)) {
     throw invalid(`unknown command: ${command}`);
   }
   if (values['device-id'] === undefined) throw invalid('missing required option --device-id');
   if (values.url === undefined) throw invalid('missing required option --url');
   if (values['token-env'] === undefined) throw invalid('missing required option --token-env');
-  if (command === 'listDevices') {
-    if (values['target-device-id'] !== undefined) throw invalid('listDevices does not take --target-device-id');
+  if (command === 'listDevices' || command === 'renameDevice') {
+    if (values['target-device-id'] !== undefined) throw invalid(`${command} does not take --target-device-id`);
   } else if (values['target-device-id'] === undefined) {
     throw invalid('missing required option --target-device-id');
   }
-  if (command === 'live' && values.input === undefined) throw invalid('missing required option --input');
+  if ((command === 'live' || command === 'renameDevice') && values.input === undefined) throw invalid('missing required option --input');
   assertId(values['device-id'], 'deviceId');
   if (values['target-device-id'] !== undefined) assertId(values['target-device-id'], 'targetDeviceId');
   // token 仅来自环境变量，绝不作为 flag 值、绝不输出。
@@ -167,6 +169,11 @@ async function main() {
   if (reserved) {
     if (command === 'listDevices') {
       call = { method: null, query: normalizeDevicesOptions(values.input === undefined ? {} : readInputObject(values.input)) };
+    } else if (command === 'renameDevice') {
+      const input = readInputObject(values.input);
+      rejectUnknownFields(input, new Set(['deviceId', 'displayName']), '--input');
+      assertId(input.deviceId, 'deviceId');
+      call = { input: { deviceId: input.deviceId, displayName: normalizeDeviceName(input.displayName) } };
     } else {
       call = { method: null, target: normalizeLiveTarget(readInputObject(values.input)) };
     }
@@ -206,6 +213,12 @@ async function main() {
     if (stdoutError?.code === 'EPIPE') return 0;
     if (command === 'listDevices') {
       const result = await client.listDevices({ ...call.query, signal: ac.signal });
+      if (signalCode !== null) return signalCode;
+      process.stdout.write(JSON.stringify(result) + '\n');
+      return 0;
+    }
+    if (command === 'renameDevice') {
+      const result = await client.renameDevice(call.input, { signal: ac.signal });
       if (signalCode !== null) return signalCode;
       process.stdout.write(JSON.stringify(result) + '\n');
       return 0;

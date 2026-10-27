@@ -834,12 +834,14 @@ export function createAndroidBridge(options = {}) {
       void fire(sendError(cmd.id, messageError('INVALID_ARGUMENT', 'client observe target must be {targetDeviceId, target}')));
       return;
     }
-    if (observers.size >= BRIDGE_MAX_OBSERVERS || !broker) {
+    const connection = liveTarget.kind === 'connection';
+    if (!broker || (connection ? [...observers.values()].some((rec) => rec.connection)
+      : [...observers.values()].filter((rec) => !rec.connection).length >= BRIDGE_MAX_OBSERVERS)) {
       void busyError(cmd.id);
       return;
     }
     const controller = new AbortController();
-    const rec = { controller, done: false, op: null, terminal: null };
+    const rec = { controller, done: false, op: null, terminal: null, connection };
     // Register before dispatch so an immediate snapshot cannot arrive unrouted.
     observers.set(cmd.id, rec);
     rec.op = (async () => {
@@ -1177,6 +1179,8 @@ export function createAndroidBridge(options = {}) {
           port: 0,
           initialSettings: init.initialSettings,
           nativeBridge: requestNativeBridge,
+          displayName: init.displayName,
+          platform: 'android',
         });
       } catch (err) {
         await failStartup(err);

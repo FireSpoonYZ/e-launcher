@@ -72,7 +72,7 @@ export type {
   ScopeUpdateInput,
 } from '../../../host-core/index.js';
 
-/** 前端冻结的操作身份：profile/连接/目标设备变化即增 generation。 */
+/** 前端冻结的操作身份：generation 标识连接，目标设备独立路由。 */
 export interface DesktopIdentity {
   profileId: string;
   targetDeviceId: string;
@@ -113,6 +113,7 @@ export type PendingOperation =
 /** 共享给功能组件（BotChats/Scopes）的视图 API。 */
 export interface DesktopViewApi {
   readonly identity: DesktopIdentity | null;
+  identityForTarget(targetDeviceId: string): DesktopIdentity;
   readonly snapshot: DesktopUiSnapshot | null;
   /** 仅表示客户端 transport 连接；不表示目标 Host 在线或 Agent 就绪。 */
   readonly transportConnected: boolean;

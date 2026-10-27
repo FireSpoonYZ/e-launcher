@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { defineTool } from '@earendil-works/pi-durable';
 import { resolveBotIdentity } from './bot-identity.js';
-import { digest, messageError } from './message-protocol.js';
+import { assertId, digest, messageError } from './message-protocol.js';
 import { inboxQueryKey } from './message-queries.js';
 
 const MAX_OUTPUT_BYTES = 50 * 1024;
@@ -12,9 +12,17 @@ const TOOL_ERROR_CODES = new Set([
   'INVALID_ARGUMENT', 'BOT_NOT_FOUND', 'BOT_CONTEXT_REQUIRED',
   'SCOPE_NOT_FOUND', 'SCOPE_FORBIDDEN', 'MESSAGE_NOT_FOUND', 'REQUEST_CONFLICT',
   'STALE_INPUT', 'WORK_STOPPED', 'WORK_CONTEXT_INACTIVE', 'RESPONSE_TOO_LARGE',
+  'SCOPE_UNMANAGED', 'SCOPE_AUTHORITY_REQUIRED',
 ]);
 const ID_SCHEMA = { type: 'string', minLength: 1 };
 const LIMIT_SCHEMA = { type: 'integer', minimum: 1, maximum: 200 };
+const MEMBER_SCHEMA = {
+  type: 'object',
+  properties: { deviceId: ID_SCHEMA, botId: ID_SCHEMA },
+  required: ['deviceId', 'botId'],
+  additionalProperties: false,
+};
+const MEMBERS_SCHEMA = { type: 'array', items: MEMBER_SCHEMA, maxItems: 64 };
 const CURSOR_SCHEMA = {
   anyOf: [
     {
@@ -93,7 +101,7 @@ function replyPage(identity, page, status) {
   return previewPage(metadata, page, 'reply:' + digest([identity.botId, page.requestMessageId]));
 }
 
-export function createCommunicationTools({ host, getHarness, getMessageLog, publishWork }) {
+export function createCommunicationTools({ host, getHarness, getMessageLog, publishWork, collaboration }) {
   function tool({ name, description, properties, required = [], run }) {
     return defineTool({
       name,
@@ -109,6 +117,15 @@ export function createCommunicationTools({ host, getHarness, getMessageLog, publ
           return output(await run(args, identity, getMessageLog(), api, context));
         } catch (error) {
           context.abortSignal?.throwIfAborted();
+          if (error?.requestId) {
+            return { ...output({
+              code: error.code ?? 'CREATE_BOT_FAILED',
+              message: 'Bot creation failed or its outcome is unknown; reconcile using this requestId on the target device before retrying.',
+              requestId: error.requestId,
+              deviceId: error.deviceId,
+              outcome: error.outcome ?? 'unconfirmed',
+            }), isError: true };
+          }
           if (!TOOL_ERROR_CODES.has(error?.code)) throw error;
           return { ...output({ code: error.code, message: error.message }), isError: true };
         }
@@ -151,7 +168,144 @@ export function createCommunicationTools({ host, getHarness, getMessageLog, publ
     };
   }
 
+  async function memoRequestId(api, context) {
+    let requestId = await api.memo('host.collaboration-request-id', context);
+    if (requestId === undefined) requestId = await api.memo('host.collaboration-request-id', randomUUID(), context);
+    return requestId;
+  }
+
+  const isMember = (member, identity) =>
+    member.deviceId === identity.deviceId && member.botId === identity.botId;
+
   return [
+    ...(collaboration ? [
+      tool({
+        name: 'list_bots',
+        description: 'List the network device and Bot directory. Pages are best effort if the directory changes; errors identify devices whose Bots could not be read.',
+        properties: { offset: { type: 'integer', minimum: 0 }, limit: LIMIT_SCHEMA },
+        async run(args) {
+          const snapshot = await collaboration.listBots();
+          const entries = [
+            ...snapshot.devices.map((device) => ({ type: 'device', device })),
+            ...snapshot.bots.map((bot) => ({ type: 'bot', bot: {
+              botId: bot.botId, name: bot.role, description: bot.description ?? '',
+              deviceId: bot.deviceId, deviceName: bot.deviceName, platform: bot.platform, online: bot.online,
+            } })),
+            ...snapshot.errors.map((error) => ({ type: 'error', error })),
+          ];
+          const offset = args.offset ?? 0;
+          const limit = args.limit ?? 50;
+          const result = { items: [], nextOffset: null };
+          for (let index = offset; index < Math.min(entries.length, offset + limit); index += 1) {
+            result.items.push(entries[index]);
+            result.nextOffset = index + 1 < entries.length ? index + 1 : null;
+            if (!fits(result)) {
+              result.items.pop();
+              if (result.items.length === 0) throw messageError('RESPONSE_TOO_LARGE', 'a directory item exceeds the tool response size limit');
+              result.nextOffset = index;
+              break;
+            }
+          }
+          return result;
+        },
+      }),
+      tool({
+        name: 'create_bot',
+        description: 'Create a normal, user-manageable Bot on the specified device. Omit cwd to use that device\'s default workspace. A receipt does not start a task.',
+        properties: {
+          deviceId: ID_SCHEMA, name: { type: 'string', minLength: 1 },
+          description: { type: 'string', maxLength: 2000 }, modelRef: { type: 'string' }, cwd: { type: 'string' },
+        },
+        required: ['deviceId', 'name', 'description'],
+        async run(args, identity, log, api, context) {
+          const requestId = await memoRequestId(api, context);
+          try {
+            const bot = await collaboration.createBot({ ...args, requestId });
+            return { ...bot, requestId };
+          } catch (error) {
+            context.abortSignal?.throwIfAborted();
+            const failure = new Error('Bot creation failed');
+            failure.code = error?.code;
+            failure.outcome = error?.outcome;
+            failure.requestId = requestId;
+            failure.deviceId = args.deviceId;
+            throw failure;
+          }
+        },
+      }),
+    ] : []),
+    tool({
+      name: 'ensure_dm',
+      description: 'Reuse an installed DM with this peer, or create a managed DM including this Bot. The scope receipt is not proof of remote delivery or work.',
+      properties: { peer: MEMBER_SCHEMA },
+      required: ['peer'],
+      async run(args, identity, log, api, context) {
+        assertId(args.peer.deviceId, 'peer.deviceId');
+        assertId(args.peer.botId, 'peer.botId');
+        if (args.peer.botId === identity.botId) throw messageError('INVALID_ARGUMENT', 'peer must be a different Bot');
+        const requestId = await memoRequestId(api, context);
+        return api.commit(() => {
+          context.abortSignal?.throwIfAborted();
+          const existing = log.listScopes().find((scope) => scope.kind === 'dm' &&
+            scope.members.some((member) => isMember(member, identity)) &&
+            scope.members.some((member) => member.deviceId === args.peer.deviceId && member.botId === args.peer.botId));
+          if (existing) return log.getScopeState(existing.scopeId);
+          return log.createScope({ requestId, kind: 'dm', members: [
+            { deviceId: identity.deviceId, botId: identity.botId }, args.peer,
+          ] });
+        }, context);
+      },
+    }),
+    tool({
+      name: 'create_room',
+      description: 'Create a managed room including this Bot and the specified members. This only creates a scope; use send_room to hand off work.',
+      properties: { members: MEMBERS_SCHEMA },
+      required: ['members'],
+      async run(args, identity, log, api, context) {
+        const requestId = await memoRequestId(api, context);
+        const members = [
+          { deviceId: identity.deviceId, botId: identity.botId },
+          ...args.members.filter((member) => !isMember(member, identity)),
+        ];
+        return api.commit(() => {
+          context.abortSignal?.throwIfAborted();
+          return log.createScope({ requestId, kind: 'room', members });
+        }, context);
+      },
+    }),
+    tool({
+      name: 'add_room_members',
+      description: 'Add members to a room where this Bot is a current member and this device is the authority. A concurrent revision change returns a conflict.',
+      properties: { scopeId: ID_SCHEMA, members: MEMBERS_SCHEMA },
+      required: ['scopeId', 'members'],
+      async run(args, identity, log, api, context) {
+        const requestId = await memoRequestId(api, context);
+        let input = await api.memo('host.room-update-input', context);
+        if (input === undefined) {
+          const state = log.getScopeState(args.scopeId);
+          if (state.scope.kind !== 'room' || !state.scope.members.some((member) => isMember(member, identity))) {
+            throw messageError('SCOPE_FORBIDDEN', 'current Bot must be a room member');
+          }
+          if (!state.isAuthority) throw messageError('SCOPE_AUTHORITY_REQUIRED', 'only the scope authority may update');
+          const members = [...state.scope.members];
+          for (const member of args.members) {
+            if (!members.some((current) => current.deviceId === member.deviceId && current.botId === member.botId)) members.push(member);
+          }
+          input = await api.memo('host.room-update-input', {
+            requestId, expectedRevision: state.scope.revision, members,
+          }, context);
+        }
+        return api.commit(() => {
+          context.abortSignal?.throwIfAborted();
+          const state = log.getScopeState(args.scopeId);
+          if (state.scope.kind !== 'room' || !state.scope.members.some((member) => isMember(member, identity))) {
+            throw messageError('SCOPE_FORBIDDEN', 'current Bot must be a room member');
+          }
+          if (!state.isAuthority) throw messageError('SCOPE_AUTHORITY_REQUIRED', 'only the scope authority may update');
+          return log.updateScope(args.scopeId, input);
+        }, context);
+      },
+    }),
     tool({
       name: 'list_scopes',
       description: 'List installed scopes containing this Bot as a current member. Offsets are best effort when membership changes.',

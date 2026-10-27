@@ -21,7 +21,7 @@ import { ShowerPreview } from './ShowerPreview';
 type AnyRawEntry = { id: unknown; kind: string; model?: unknown; data?: unknown };
 
 function sessionKey(id: DesktopIdentity | null): string {
-  return id ? `${id.profileId}|${id.generation}|${id.targetDeviceId}` : '';
+  return id ? `${id.profileId}|${id.kind}|${id.generation}|${id.targetDeviceId}` : '';
 }
 
 function errText(e: unknown): string {
@@ -1159,33 +1159,37 @@ export function Scopes({ api, pageActive = true }: { api: DesktopViewApi; pageAc
   const [showCreate, setShowCreate] = useState(false);
   const [bots, setBots] = useState<BotRecord[]>([]);
   const cursorRef = useRef<ScopeListCursor | null>(null);
+  const scopesSeqRef = useRef(0);
   const botsSessRef = useRef('');
   const targetKeyRef = useRef<string | null>(null);
-  const targetKey = identity ? `${identity.profileId}|${identity.targetDeviceId}` : null;
+  const targetKey = identity ? `${identity.profileId}|${identity.kind}|${identity.targetDeviceId}` : null;
 
   const loadScopes = useCallback(async (reset: boolean) => {
     if (!identity || !api.transportConnected) return;
     const localSess = sess;
+    const seq = ++scopesSeqRef.current;
     setLoading(true);
     try {
       const page = await api.call(identity, 'listScopeStates', {
         limit: 20,
         cursor: reset ? null : cursorRef.current,
       });
-      if (sessionKey(api.identity) !== localSess) return;
+      if (seq !== scopesSeqRef.current || sessionKey(api.identity) !== localSess) return;
       setItems((prev) => (reset ? [...page.items] : [...prev, ...page.items]));
       cursorRef.current = page.nextCursor;
       setNextCursor(page.nextCursor);
       setError(null);
     } catch (e) {
-      if (sessionKey(api.identity) === localSess) {
+      if (seq === scopesSeqRef.current && sessionKey(api.identity) === localSess) {
         setError(errText(e));
         api.reportError(e);
       }
     } finally {
-      if (sessionKey(api.identity) === localSess) setLoading(false);
+      if (seq === scopesSeqRef.current && sessionKey(api.identity) === localSess) setLoading(false);
     }
   }, [api, sess, identity]);
+
+  useEffect(() => () => { scopesSeqRef.current += 1; }, []);
 
   useEffect(() => {
     // 断开（generation 变化）保留同 profile+target 已加载列表/选择，供离线草稿与入队；

@@ -27,6 +27,7 @@ export interface MobileRemoteClient {
 interface OwnedObservation {
   readonly observationId: string;
   readonly epoch: number;
+  readonly connection: boolean;
   readonly emit: (event: DesktopObservationEvent) => void;
   stopListener: () => Promise<void>;
   /** 按 id 合并的取消完成 Promise（在途或已失败待再次关闭）。 */
@@ -89,7 +90,9 @@ export function createMobileRemoteClient(): MobileRemoteClient {
     },
     async observe(observationId, targetDeviceId, target, onEvent) {
       // 任何 await 之前预占 8 槽之一：opening/已关闭未确认都算，满则明确未派发。
-      if (sinks.size >= MAX_OWNED_OBSERVATIONS || sinks.has(observationId)) {
+      const connection = target.kind === 'connection';
+      if ((connection ? [...sinks.values()].some((sink) => sink.connection)
+        : [...sinks.values()].filter((sink) => !sink.connection).length >= MAX_OWNED_OBSERVATIONS) || sinks.has(observationId)) {
         throw new DesktopRemoteError({
           code: 'RPC_BUSY',
           message: '远端观察数已达上限',
@@ -98,7 +101,7 @@ export function createMobileRemoteClient(): MobileRemoteClient {
       }
       const epoch = sessionEpoch;
       const record: OwnedObservation = {
-        observationId, epoch, emit: onEvent, stopListener: () => Promise.resolve(), closing: null,
+        observationId, epoch, connection, emit: onEvent, stopListener: () => Promise.resolve(), closing: null,
       };
       sinks.set(observationId, record);
       const owned = (): boolean => epoch === sessionEpoch && sinks.get(observationId) === record;
@@ -153,7 +156,6 @@ export function createMobileRemoteClient(): MobileRemoteClient {
     // 旧会话已被拆除/作废：其清理责任随之结束（原生在会话关闭/EOF 时释放 client child）。
     sinks.clear();
     api.setTransportConnected(false);
-    api.setIdentity(null);
   };
 
   // 流失败后旧身份立即失效：只做只读收束，要求用户显式重新连接；不重连、不重发观察、不重放变更。

@@ -6,6 +6,8 @@ import type {
   RemoteControlMethodMap,
   RemoteControlOutcome,
   DevicesDirectoryPage,
+  DevicesDirectoryItem,
+  BotDirectorySnapshot,
   LocalSettingsSnapshot,
   SettingsUpdate,
   HostServiceStatus,
@@ -189,6 +191,8 @@ export interface DesktopOperationMap {
     params: { limit?: number; cursor?: { afterDeviceId: string } | null };
     result: DevicesDirectoryPage;
   };
+  bot_directory: { params: Record<string, never>; result: BotDirectorySnapshot };
+  rename_device: { params: { deviceId: string; displayName: string }; result: DevicesDirectoryItem };
   call: {
     params: {
       [K in keyof RemoteControlMethodMap]: {

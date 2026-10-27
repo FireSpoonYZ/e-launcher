@@ -40,6 +40,7 @@ const routes = [
   { method: 'GET', key: '/v1/bots', pattern: /^\/v1\/bots\/?$/, params: [], hasBody: false, handler: listBots },
   { method: 'POST', key: '/v1/bots', pattern: /^\/v1\/bots\/?$/, params: [], hasBody: true, handler: createBot },
   { method: 'GET', key: '/v1/bots/:botId', pattern: /^\/v1\/bots\/([^/]+)\/?$/, params: ['botId'], hasBody: false, handler: getBot },
+  { method: 'PUT', key: '/v1/bots/:botId/profile', pattern: /^\/v1\/bots\/([^/]+)\/profile\/?$/, params: ['botId'], hasBody: true, handler: updateBotProfile },
   { method: 'GET', key: '/v1/bots/:botId/live', pattern: /^\/v1\/bots\/([^/]+)\/live\/?$/, params: ['botId'], hasBody: false, handler: live },
   { method: 'GET', key: '/v1/bot-requests/:requestId', pattern: /^\/v1\/bot-requests\/([^/]+)\/?$/, params: ['requestId'], hasBody: false, handler: findByRequest },
   { method: 'POST', key: '/v1/bots/:botId/submissions', pattern: /^\/v1\/bots\/([^/]+)\/submissions\/?$/, params: ['botId'], hasBody: true, handler: submit },
@@ -159,7 +160,7 @@ export async function openControlServer(options) {
   const host = openHost({ dataRoot: runtimeOptions.dataRoot });
   let runtime;
   try {
-    runtime = await openRuntime(runtimeOptions);
+    runtime = await openRuntime({ ...runtimeOptions, onBotsChanged });
   } catch (err) {
     try { host.close(); } catch { /* 打开失败清理不掩盖原错误 */ }
     throw err;
@@ -309,11 +310,14 @@ async function centerAction(host, runtime, params, body, req, res) {
 }
 
 async function getHostInfo(host, runtime, params, body, req, res) {
+  const device = await runtime.getCurrentDevice();
   writeControlJson(res, 200, {
     protocolVersion: PROTOCOL_VERSION,
     deviceId: host.deviceId,
-    platform: process.platform,
-    arch: process.arch,
+    defaultWorkspace: host.defaultWorkspace,
+    displayName: device.displayName,
+    platform: device.platform,
+    arch: device.arch,
   });
 }
 
@@ -321,15 +325,15 @@ async function listBots(host, runtime, params, body, req, res) {
   writeControlJson(res, 200, host.listBots());
 }
 
-async function createBot(host, runtime, params, body, req, res, ctx) {
-  if (ctx.centerManaged && body?.modelRef != null) {
-    throw new ControlHttpError(403, 'INVALID_ARGUMENT', 'bot models are managed by the center');
-  }
-  const bot = host.createBot(body);
-  if (ctx.onBotsChanged) await ctx.onBotsChanged();
-  // 去重重试也重跑幂等初始化：登记记录先落地，初始化失败可重试完成。
-  await runtime.initializeBot(bot.botId);
+async function createBot(host, runtime, params, body, req, res) {
+  const bot = await runtime.createBot(body);
   writeControlJson(res, 201, bot);
+}
+
+async function updateBotProfile(host, runtime, params, body, req, res, ctx) {
+  const bot = host.updateBotProfile({ ...body, botId: params.botId });
+  if (ctx.onBotsChanged) await ctx.onBotsChanged();
+  writeControlJson(res, 200, bot);
 }
 
 async function getBot(host, runtime, params, body, req, res) {

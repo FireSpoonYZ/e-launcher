@@ -64,6 +64,8 @@ export function toError(e: unknown): DesktopRemoteError {
 /** 需要 transport 连接的远程 broker op（本地/仅会话 op 除外；pending_send/reconcile 在 pending() 内单独校验）。 */
 const REMOTE_BROKER_OPS = new Set<string>([
   'devices',
+  'bot_directory',
+  'rename_device',
   'call',
   'settings_get',
   'settings_set',
@@ -90,7 +92,7 @@ type WireEvent = DesktopObservationEvent & { deliveryId?: string };
 interface ObserveInvokeArgs {
   observationId: string;
   targetDeviceId: string;
-  target: LiveTarget;
+  target: LiveTarget | { kind: 'connection' };
   onEvent: Channel<WireEvent>;
 }
 
@@ -104,7 +106,7 @@ export interface DesktopTransport {
   observe(
     observationId: string,
     targetDeviceId: string,
-    target: LiveTarget,
+    target: LiveTarget | { kind: 'connection' },
     onEvent: (event: WireEvent) => void,
   ): Promise<void>;
   unobserve(observationId: string): Promise<void>;
@@ -170,6 +172,7 @@ export class DesktopViewApiImpl implements DesktopPanelApi {
   private snapshotValue: DesktopUiSnapshot | null = null;
   private generation = 0;
   private transportConnectedValue = false;
+  private connectionWatch: { id: string; generation: number } | null = null;
   private uiChain: Promise<unknown> = Promise.resolve();
   private loadPromise: Promise<DesktopUiSnapshot> | null = null;
   private listeners = new Set<() => void>();
@@ -222,14 +225,46 @@ export class DesktopViewApiImpl implements DesktopPanelApi {
   setTransportConnected(connected: boolean): void {
     if (this.transportConnectedValue === connected) return;
     this.transportConnectedValue = connected;
+    if (!connected) {
+      const watch = this.connectionWatch;
+      this.connectionWatch = null;
+      if (watch) void this.transport.unobserve(watch.id).catch(() => {});
+      if (this.identityValue) {
+        this.generation += 1;
+        this.identityValue = { ...this.identityValue, generation: this.generation };
+      }
+    } else if (this.identityValue?.kind === 'relay') {
+      const watch = { id: crypto.randomUUID(), generation: this.identityValue.generation };
+      this.connectionWatch = watch;
+      const fail = (): void => {
+        if (this.connectionWatch !== watch || this.identityValue?.generation !== watch.generation) return;
+        this.setTransportConnected(false);
+      };
+      void this.transport.observe(watch.id, this.identityValue.targetDeviceId || this.identityValue.profileId,
+        { kind: 'connection' }, (event) => {
+          if (event.deliveryId) void this.transport.request('observe_ack', {
+            observationId: watch.id, deliveryId: event.deliveryId,
+          }).catch(fail);
+          if ('error' in event) fail();
+        }).then(() => {
+          if (this.connectionWatch !== watch) void this.transport.unobserve(watch.id).catch(() => {});
+        }, fail);
+    }
     this.emit();
   }
 
-  /** generation 单调递增并通知订阅者；profile/连接/目标设备变化即调用本方法。 */
+  /** 同一 relay 会话的目标切换不改变连接代次。 */
   setIdentity(
     base: { profileId: string; targetDeviceId: string; kind: 'local' | 'relay' } | null,
   ): DesktopIdentity | null {
-    this.generation += 1;
+    const current = this.identityValue;
+    if (!base || !current || base.profileId !== current.profileId || base.kind !== current.kind) {
+      this.setTransportConnected(false);
+    }
+    if (!base || !current || base.profileId !== current.profileId || base.kind !== current.kind ||
+        base.kind === 'local' && base.targetDeviceId !== current.targetDeviceId) {
+      this.generation += 1;
+    }
     if (base === null) {
       this.identityValue = null;
       this.emit();
@@ -239,6 +274,15 @@ export class DesktopViewApiImpl implements DesktopPanelApi {
     this.identityValue = identity;
     this.emit();
     return identity;
+  }
+
+  identityForTarget(targetDeviceId: string): DesktopIdentity {
+    const current = this.identityValue;
+    if (!current || typeof targetDeviceId !== 'string' || !targetDeviceId.trim() ||
+        (current.kind === 'local' && targetDeviceId !== current.targetDeviceId)) {
+      throw new DesktopRemoteError({ code: 'IDENTITY_CHANGED', message: '目标设备与当前连接不匹配', outcome: 'not-sent' });
+    }
+    return { ...current, targetDeviceId };
   }
 
   async init(): Promise<DesktopUiSnapshot> {
@@ -281,7 +325,8 @@ export class DesktopViewApiImpl implements DesktopPanelApi {
     if (
       !cur ||
       cur.profileId !== identity.profileId ||
-      cur.targetDeviceId !== identity.targetDeviceId ||
+      cur.kind !== identity.kind ||
+      (cur.kind === 'local' && cur.targetDeviceId !== identity.targetDeviceId) ||
       cur.generation !== identity.generation
     ) {
       throw new DesktopRemoteError({
@@ -375,7 +420,25 @@ export class DesktopViewApiImpl implements DesktopPanelApi {
     if (op === 'pending_send' || op === 'pending_reconcile') {
       this.assertTransport();
     }
-    return this.transport.request(op, params);
+    if (op === 'pending_enqueue') {
+      const input = (params as DesktopOperationMap['pending_enqueue']['params']).input;
+      if (input.targetDeviceId !== identity.targetDeviceId) {
+        throw new DesktopRemoteError({ code: 'IDENTITY_CHANGED', message: '待发送目标不匹配', outcome: 'not-sent' });
+      }
+    } else if (op === 'pending_get' || op === 'pending_send' || op === 'pending_reconcile' || op === 'pending_cancel') {
+      const id = (params as DesktopOperationMap['pending_get']['params']).id;
+      const record = await this.transport.request('pending_get', { id });
+      this.assertCurrent(identity);
+      if (record && record.targetDeviceId !== identity.targetDeviceId) {
+        throw new DesktopRemoteError({ code: 'IDENTITY_CHANGED', message: '待发送目标不匹配', outcome: 'not-sent' });
+      }
+    }
+    const result = await this.transport.request(op, params);
+    if (op === 'pending_list') {
+      const page = result as DesktopOperationMap['pending_list']['result'];
+      return { ...page, items: page.items.filter((item) => item.targetDeviceId === identity.targetDeviceId) } as DesktopOperationMap[K]['result'];
+    }
+    return result;
   }
 
   async broker<K extends PublicBrokerOperation>(
@@ -383,6 +446,11 @@ export class DesktopViewApiImpl implements DesktopPanelApi {
     op: K,
     params: BrokerOpParams<K>,
   ): Promise<BrokerOpResult<K>> {
+    // 每次新连接都废止旧代身份，不能复用旧会话的目标或观察。
+    if (op === 'connect') {
+      this.setTransportConnected(false);
+      this.setIdentity(null);
+    }
     // connect/ui_set 是会话建立/本地状态操作，无既存连接可核对；其余 op 一律核对。
     if (op !== 'connect' && op !== 'ui_set') {
       this.assertCurrent(identity);
