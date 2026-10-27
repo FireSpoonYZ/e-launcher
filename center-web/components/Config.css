@@ -1,0 +1,12 @@
+.config-page { max-width: 70rem; margin: 0 auto; padding: 1.5rem; }
+.config-page section, .config-form fieldset, .config-operation { margin: 1rem 0; padding: 1rem; border: 1px solid #9996; border-radius: .5rem; }
+.config-page label, .config-form label { display: block; margin: .6rem 0; }
+.config-page input:not([type=checkbox]), .config-page select, .config-page textarea, .config-form input:not([type=checkbox]), .config-form select, .config-form textarea { max-width: 100%; padding: .4rem; }
+.config-page button, .config-form button { margin: .3rem; padding: .4rem .7rem; cursor: pointer; }
+.config-page button:disabled, .config-form button:disabled { cursor: default; opacity: .6; }
+.config-override { display: inline-flex !important; gap: .4rem; margin-right: 1rem !important; }
+.config-form small { display: block; }
+.config-tabs { display: flex; flex-wrap: wrap; gap: .3rem; }
+.config-error { color: #b3261e; white-space: pre-wrap; }
+.config-list { padding: 0; list-style: none; }
+.config-list li { padding: .7rem 0; border-bottom: 1px solid #9996; }
