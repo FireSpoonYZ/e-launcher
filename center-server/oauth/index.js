@@ -55,7 +55,7 @@ export function openMcpOAuth({ store, publicUrl }) {
     const key = JSON.stringify([identity.installationId, identity.deviceId, identity.botId, url]);
     let entry = entries.get(key);
     if (entry) return entry;
-    const credentialId = 'mcp-oauth-' + createHash('sha256').update(key).digest('hex');
+    const credentialId = 'center-internal-mcp-oauth-' + createHash('sha256').update(key).digest('hex');
     entry = { key, credentialId, url, identity, revoked: false, queue: Promise.resolve(), abort: new AbortController() };
     const stateStore = {
       load() {

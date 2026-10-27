@@ -133,7 +133,7 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
   app.get('/api/oauth/mcp/callback', async (req, reply) => {
     reply.header('Cache-Control', 'no-store').header('Referrer-Policy', 'no-referrer');
     const state = text(req.query?.state, 'state');
-    await oauth.complete({ state, code: req.query?.code, error: req.query?.error });
+    await oauth.complete({ state, code: req.query?.code, error: req.query?.error, iss: req.query?.iss });
     return reply.type('text/plain; charset=utf-8').send(req.query?.error ? 'Authorization was not completed. You may close this window.' : 'Authorization complete. You may close this window.');
   });
   function snapshot(deviceId) {

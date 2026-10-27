@@ -5,6 +5,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { isDeepStrictEqual } from 'node:util';
 import Ajv from 'ajv';
 import deepmerge from 'deepmerge';
+import { assertPublicCredentialId } from '../auth.js';
 
 function error(code, message, details) {
   const result = new Error(message);
@@ -34,7 +35,7 @@ function assertRevision(expected, actual) {
 function collectCredentialRefs(schema, value, refs) {
   if (!schema || typeof schema !== 'object' || value == null) return;
   if (schema.type === 'string' && schema.format === 'credential-ref' && typeof value === 'string') {
-    refs.add(value);
+    refs.add(assertPublicCredentialId(value));
     return;
   }
   if (Array.isArray(value) && schema.items) {
@@ -81,13 +82,15 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
     } catch {
       throw error('VALIDATION_FAILED', 'Invalid configuration schema');
     }
-    if (validator(value)) return;
-    const errors = validator.errors.filter((entry) => !allowMissing || entry.keyword !== 'required');
-    if (errors.length) {
-      throw error('VALIDATION_FAILED', 'Configuration is invalid', errors.map((entry) => ({
-        path: entry.instancePath, keyword: entry.keyword,
-      })));
+    if (!validator(value)) {
+      const errors = validator.errors.filter((entry) => !allowMissing || entry.keyword !== 'required');
+      if (errors.length) {
+        throw error('VALIDATION_FAILED', 'Configuration is invalid', errors.map((entry) => ({
+          path: entry.instancePath, keyword: entry.keyword,
+        })));
+      }
     }
+    collectCredentialRefs(schema, value, new Set());
   }
   function get(table, id) {
     return parse(db.prepare('SELECT json FROM ' + table + ' WHERE id = ?').get(id));
@@ -198,6 +201,7 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
       getProvider: (id) => get('providers', id),
       putProvider(provider, expectedRevision) {
         assertObject(provider);
+        assertPublicCredentialId(provider.credentialRef);
         let url;
         try { url = new URL(provider.baseUrl); } catch { throw error('INVALID_ARGUMENT', 'Invalid provider URL'); }
         if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) throw error('INVALID_ARGUMENT', 'Invalid provider URL');
@@ -463,6 +467,7 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
         assertId(deviceId);
         return transaction(() => {
           const providers = store.listProviders();
+          for (const provider of providers) assertPublicCredentialId(provider.credentialRef);
           const models = Object.fromEntries(providers.map((provider) => [provider.id, store.listModels(provider.id)]));
           const installations = store.listInstallations();
           const refs = new Set();
@@ -491,7 +496,7 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
             });
             return { botId: bot.botId, model, capabilities };
           });
-          const credentials = Object.fromEntries([...refs].map((id) => [id, resolveCredential(id)]));
+          const credentials = Object.fromEntries([...refs].map((id) => [id, resolveCredential(assertPublicCredentialId(id))]));
           const revision = db.prepare('SELECT revision FROM metadata WHERE id = 1').get().revision;
           return { protocol: 1, deviceId, revision, linkUrl, providers, models, bots, credentials };
         }, 'DEFERRED');
