@@ -23,7 +23,7 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs';
-import { access, cp, mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { access, mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import { parseArgs, promisify } from 'node:util';
@@ -45,7 +45,6 @@ const ICON_SVG = path.join(DESKTOP_DIR, 'icon.svg');
 const BROKER_ENTRY = path.join(HERE, 'desktop-client-cli.js');
 const BROKER_OUTFILE = path.join(DESKTOP_BUILD, 'desktop-client.mjs');
 const NOTICES_OUTFILE = path.join(DESKTOP_BUILD, 'THIRD_PARTY_NOTICES.txt');
-const MANAGED_NPM_DIR = path.join(DESKTOP_BUILD, 'npm');
 const CARGO_TOML = path.join(DESKTOP_DIR, 'src-tauri', 'Cargo.toml');
 const PI_RUNTIME = path.join(ROOT, 'pi-runtime');
 
@@ -486,24 +485,6 @@ async function prepareNodeSidecar() {
     };
   } finally {
     rmSync(extractDir, { recursive: true, force: true });
-  }
-}
-
-async function prepareManagedNpm() {
-  const source = path.join(HERE, 'node_modules', 'npm');
-  const pkg = JSON.parse(await readFile(path.join(source, 'package.json'), 'utf8'));
-  if (pkg.name !== 'npm' || pkg.version !== '11.6.2') {
-    throw fail('desktop managed npm must be the installed npm 11.6.2');
-  }
-  assertStrictlyRegularFile(path.join(source, 'bin', 'npm-cli.js'), 'managed npm CLI');
-  assertStrictlyRegularFile(path.join(source, 'LICENSE'), 'managed npm license');
-  const temporary = tempSibling(DESKTOP_BUILD, 'npm');
-  try {
-    await cp(source, temporary, { recursive: true, dereference: true });
-    await rm(MANAGED_NPM_DIR, { recursive: true, force: true });
-    renameSync(temporary, MANAGED_NPM_DIR);
-  } finally {
-    await rm(temporary, { recursive: true, force: true });
   }
 }
 
@@ -948,7 +929,6 @@ async function writeThirdPartyNotices(nodeInfo, metafile) {
 export async function prepareDesktop() {
   await mkdir(DESKTOP_BUILD, { recursive: true });
   const nodeInfo = await prepareNodeSidecar();
-  await prepareManagedNpm();
   const iconsInfo = await prepareIcons();
   const bundleInfo = await bundleDesktopClient();
   const noticesInfo = await writeThirdPartyNotices(nodeInfo, bundleInfo.metafile);

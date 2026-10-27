@@ -42,7 +42,6 @@
     ],
     "resources": {
       "../build/desktop-client.mjs": "desktop-client.mjs",
-      "../build/npm/": "npm/",
       "../build/THIRD_PARTY_NOTICES.txt": "THIRD_PARTY_NOTICES.txt"
     }
   }

@@ -209,10 +209,10 @@ The same license applies to `@earendil-works/pi-mcp` 1.3.0; the Android
 and desktop packagers use that exact-version fallback if its archive has no
 license file. These attributions do not alter this project's AGPL-3.0 license.
 
-The desktop Host build copies the complete npm 11.6.2 distribution from its
-locked `host-core` dependency to the Tauri resource `npm/`, including its
-Artistic-2.0 license and bundled dependency notices. Android reuses the
-versioned npm asset described above; it does not package another npm copy.
+The desktop application runs a client broker, not a Host, and does not package
+another npm distribution. Android reuses the versioned npm asset described
+above. An independent Node Host can use its locked npm 11.6.2 dependency, whose
+Artistic-2.0 license and bundled dependency notices accompany that distribution.
 The Host's `tar` 7.5.22 is by Isaac Z. Schlueter and contributors,
 under the Blue Oak Model License 1.0.0; its full text is retained in
 [`licenses/tar-7.5.22-BlueOak-1.0.0.md`](licenses/tar-7.5.22-BlueOak-1.0.0.md).
