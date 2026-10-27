@@ -597,9 +597,11 @@ function parseHistoryEntries(items: Array<Record<string, unknown>>, clearedAfter
     if (clearedAfterEntryId > 0 && Number.isFinite(numericId) && numericId <= clearedAfterEntryId) {
       continue;
     }
+    // raw 条目用 model 块（含工具/思考）；Host live 投影条目只有 messages:[{role,text,truncated}]。
     const model = array<unknown>(item.model);
-    for (let mIdx = 0; mIdx < model.length; mIdx++) {
-      const raw = model[mIdx];
+    const blocks = model.length > 0 ? model : array<unknown>(item.messages);
+    for (let mIdx = 0; mIdx < blocks.length; mIdx++) {
+      const raw = blocks[mIdx];
       if (!raw || typeof raw !== 'object') continue;
       const entry = record(raw);
       const role = entry.role;
@@ -610,6 +612,8 @@ function parseHistoryEntries(items: Array<Record<string, unknown>>, clearedAfter
       const toolParts: string[] = [];
       if (typeof content === 'string') {
         textParts.push(content);
+      } else if (typeof entry.text === 'string') {
+        textParts.push(entry.text);
       } else if (Array.isArray(content)) {
         for (const block of content) {
           if (typeof block === 'string') {
@@ -1415,36 +1419,56 @@ export function HostPage({
     [cancelActiveObservation, clearedMap, ensureLocalHostRunning, updateBotMeta],
   );
 
-  // Poll submission receipt until complete
+  // Poll submission receipt until complete（本机 BotHost.call 与远端 api.call 共用同一处理）
   useEffect(() => {
     if (screen !== 'chat' || !activeBot) return;
     if (!chatReceipt || (chatReceipt.status !== 'queued' && chatReceipt.status !== 'placed')) return;
+    const bot = activeBot;
+    const requestId = chatReceipt.requestId;
+    const remoteTarget =
+      bot.hostKind === 'remote' && bot.remoteIdentity && remoteClientRef.current
+        ? { api: remoteClientRef.current.api, identity: bot.remoteIdentity }
+        : null;
+    if (bot.hostKind === 'remote' && !remoteTarget) return;
+    if (bot.hostKind === 'local' && bot.botId === '__jarvis__') return;
+
+    const readSubmission = async (): Promise<HostSubmission | null> => {
+      if (bot.hostKind === 'local') {
+        const env = await BotHost.call({ method: 'getSubmission', params: { botId: bot.botId, requestId } });
+        return env.result as HostSubmission;
+      }
+      if (!remoteTarget) return null;
+      return (await remoteTarget.api.call(remoteTarget.identity, 'getSubmission', {
+        botId: bot.botId,
+        requestId,
+      })) as unknown as HostSubmission | null;
+    };
+    const readHistory = async (): Promise<Array<Record<string, unknown>> | null> => {
+      if (bot.hostKind === 'local') {
+        const env = await BotHost.call({ method: 'history', params: { botId: bot.botId, limit: 50 } });
+        return (env.result as HostHistoryPage)?.items ?? null;
+      }
+      if (!remoteTarget) return null;
+      const page = await remoteTarget.api.call(remoteTarget.identity, 'history', { botId: bot.botId, limit: 50 });
+      return ((page as unknown as HostHistoryPage)?.items as Array<Record<string, unknown>>) ?? null;
+    };
+
     let alive = true;
     const timer = window.setInterval(async () => {
       if (!alive || document.hidden) return;
       try {
-        if (activeBot.hostKind === 'local' && activeBot.botId !== '__jarvis__') {
-          const env = await BotHost.call({
-            method: 'getSubmission',
-            params: { botId: activeBot.botId, requestId: chatReceipt.requestId },
-          });
-          const next = env.result as HostSubmission;
-          if (!alive) return;
-          if (next && next.requestId === chatReceipt.requestId) {
-            setChatReceipt(next);
-            if (next.status === 'done' || next.status === 'unanswered') {
-              const histEnv = await BotHost.call({ method: 'history', params: { botId: activeBot.botId, limit: 50 } });
-              const page = histEnv.result as HostHistoryPage;
-              if (alive && page?.items) {
-                setChatHistory(page.items);
-                const turns = parseHistoryEntries(page.items, clearedMap[activeBot.key] ?? 0);
-                const last = turns.at(-1);
-                if (last?.text) {
-                  updateBotMeta(activeBot.key, { lastText: last.text, updatedAt: Date.now(), unread: false });
-                }
-              }
-            }
-          }
+        const next = await readSubmission();
+        if (!alive || !next || next.requestId !== requestId) return;
+        setChatReceipt(next);
+        if (next.status !== 'done' && next.status !== 'unanswered') return;
+        // 终态：回读该 Bot 的 Host 历史与摘要，不跨 Bot/身份更新。
+        const items = await readHistory();
+        if (!alive || !items) return;
+        setChatHistory(items);
+        const turns = parseHistoryEntries(items, clearedMap[bot.key] ?? 0);
+        const last = turns.at(-1);
+        if (last?.text) {
+          updateBotMeta(bot.key, { lastText: last.text, updatedAt: Date.now(), unread: false });
         }
       } catch {
         // Ignore transient poll error
@@ -1537,7 +1561,12 @@ export function HostPage({
 
   const clearCurrentBotHistory = useCallback(() => {
     if (!activeBot) return;
-    const maxId = maxHistoryEntryId(chatHistory);
+    // 水位同时覆盖 raw 历史与 live 投影（lastEntryId 是最新可显示条目），避免新投影又回来。
+    const liveLastEntryId = Number(chatLive?.state?.lastEntryId);
+    const maxId = Math.max(
+      maxHistoryEntryId(chatHistory),
+      Number.isFinite(liveLastEntryId) ? liveLastEntryId : 0,
+    );
     const nextCutoff = Math.max(maxId, clearedMap[activeBot.key] ?? 0, 1);
     setClearedMap(prev => {
       const updated = { ...prev, [activeBot.key]: nextCutoff };
@@ -1553,7 +1582,7 @@ export function HostPage({
     updateBotMeta(activeBot.key, { lastText: t('对话已清空', 'History cleared'), updatedAt: Date.now(), unread: false });
     setClearNotice(t('已清空当前对话历史', 'Conversation history cleared'));
     window.setTimeout(() => setClearNotice(''), 2500);
-  }, [activeBot, chatHistory, clearedMap, t, updateBotMeta]);
+  }, [activeBot, chatHistory, chatLive, clearedMap, t, updateBotMeta]);
 
   // Materialize virtual Jarvis into a real Bot when needed
   const materializeJarvisIfNeeded = async (snap: HostSnapshot): Promise<{ botId: string; key: string }> => {
@@ -2599,33 +2628,31 @@ export function HostPage({
 
   const visibleTurns = useMemo(() => {
     if (!activeBot) return [];
-    const all = parseHistoryEntries(chatHistory, clearedMap[activeBot.key] ?? 0);
+    const clearedAfter = clearedMap[activeBot.key] ?? 0;
+    // raw history 是旧页，live 投影是新窗口：按 entry id 去重排序；同 id 保留 raw（工具/思考细节更全）。
+    const byId = new Map<string, Record<string, unknown>>();
+    for (const item of array<Record<string, unknown>>(chatLive?.state?.history)) {
+      byId.set(String(item.id), item);
+    }
+    for (const item of chatHistory) byId.set(String(item.id), item);
+    const numericId = (item: Record<string, unknown>) => {
+      const id = Number(item.id);
+      return Number.isFinite(id) ? id : 0;
+    };
+    const all = parseHistoryEntries(
+      [...byId.values()].sort((a, b) => numericId(a) - numericId(b)),
+      clearedAfter,
+    );
     const q = chatSearchQuery.trim().toLowerCase();
     if (!chatSearchOpen || !q) return all;
     return all.filter(turn => turn.text.toLowerCase().includes(q));
-  }, [chatHistory, activeBot, clearedMap, chatSearchOpen, chatSearchQuery]);
+  }, [chatHistory, chatLive, activeBot, clearedMap, chatSearchOpen, chatSearchQuery]);
 
-  const liveGeneratingText = useMemo(() => {
-    if (!chatLive?.state) return '';
-    const st = record(chatLive.state);
-    if (st.phase === 'idle') return '';
-    const msg = record(st.message);
-    const content = msg.content;
-    if (typeof content === 'string') return content;
-    if (Array.isArray(content)) {
-      return content
-        .map(c => {
-          const r = record(c);
-          return typeof r.text === 'string' ? r.text : '';
-        })
-        .filter(Boolean)
-        .join('\n');
-    }
-    return '';
-  }, [chatLive]);
+  const liveGeneratingText = chatLive?.state?.generation?.text ?? '';
 
   const isBotBusy = Boolean(
-    (chatLive?.state && record(chatLive.state).phase && record(chatLive.state).phase !== 'idle') ||
+    chatLive?.state?.busy ||
+      (chatLive?.state?.queuedCount ?? 0) > 0 ||
       (chatReceipt && (chatReceipt.status === 'queued' || chatReceipt.status === 'placed')),
   );
 
