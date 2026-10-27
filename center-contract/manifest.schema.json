@@ -24,9 +24,22 @@
     "configSchema": { "type": "string", "minLength": 1 },
     "uiSchema": { "type": "string", "minLength": 1 },
     "stateVersion": { "type": "integer", "minimum": 1 },
+    "skills": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
+    "actions": { "type": "array", "items": { "$ref": "#/definitions/action" } },
     "contributions": { "type": "array", "items": { "enum": ["tools", "context", "background", "actions"] }, "uniqueItems": true }
   },
   "definitions": {
+    "action": {
+      "type": "object",
+      "required": ["id", "title", "inputSchema"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "title": { "type": "string", "minLength": 1 },
+        "inputSchema": { "type": ["object", "boolean"] },
+        "outputSchema": { "type": ["object", "boolean"] }
+      },
+      "additionalProperties": false
+    },
     "component": {
       "type": "object",
       "required": ["entry"],

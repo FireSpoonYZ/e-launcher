@@ -42,6 +42,12 @@ export interface Model {
 export interface ModelSelection { modelRef?: string | null; thinkingLevel?: string | null }
 export interface ModelConfig { global: ModelSelection; revision: number }
 export interface BotModelConfig { global: ModelSelection; overrides: ModelSelection; effective: ModelSelection; revision: number }
+export interface ActionDescriptor {
+  id: string;
+  title: string;
+  inputSchema: JsonSchema;
+  outputSchema?: JsonSchema;
+}
 export interface NativeManifest {
   manifestVersion: 1;
   id: string;
@@ -55,6 +61,8 @@ export interface NativeManifest {
   configSchema: string;
   uiSchema?: string;
   stateVersion?: number;
+  skills?: string[];
+  actions?: ActionDescriptor[];
   contributions?: ('tools' | 'context' | 'background' | 'actions')[];
 }
 export interface PackageVersion {
@@ -108,6 +116,7 @@ export interface DeploymentReceipt {
   deviceId: string | null;
   installationId: string;
   operationId: string;
+  planId: string;
   desiredRevision: number;
   appliedRevision: number | null;
   actualVersion: string | null;
@@ -118,7 +127,7 @@ export interface DeploymentReceipt {
 export interface Operation {
   operationId: string;
   requestId: string;
-  action: 'install' | 'update' | 'disable' | 'uninstall' | 'rollback';
+  action: 'install' | 'update' | 'enable' | 'disable' | 'uninstall' | 'rollback';
   installationId: string;
   /** Empty for center; Host-targeted operations may have multiple device receipts. */
   deviceIds: string[];
@@ -138,7 +147,11 @@ export interface DeploymentPlan {
   target: 'center' | 'host';
   deviceId: string | null;
   operationId: string;
+  planId: string;
+  desiredRevision: number;
   installationId: string;
+  packageId: string;
+  manifest: JsonObject;
   kind: CapabilityKind;
   targetVersion: string;
   artifactRef: string | null;
@@ -147,7 +160,7 @@ export interface DeploymentPlan {
   integrity: string | null;
   /** npm lockfile contents when target-platform dependency installation is required. */
   lockfile: JsonObject | null;
-  action: 'install' | 'update' | 'disable' | 'uninstall' | 'rollback';
+  action: 'install' | 'update' | 'enable' | 'disable' | 'uninstall' | 'rollback';
 }
 export interface EffectiveCapability {
   installationId: string;
@@ -157,6 +170,8 @@ export interface EffectiveCapability {
   enabled: boolean;
   revision: number;
   effectiveConfig: JsonObject;
+  /** Credential IDs referenced by this Bot's effective capability config. */
+  credentialRefs: string[];
 }
 export interface RuntimeBot {
   botId: string;
@@ -198,6 +213,12 @@ export interface SessionInfo { authenticated: boolean; csrfToken: string | null 
 export interface LoginRequest { password: string }
 export interface CredentialWrite { value: string; expectedRevision: number | null }
 export interface ProviderCheckRequest { deviceId: string }
+/** Trusted owner-initiated Host probe; credential is transient and never persisted. */
+export interface ProviderProbeRequest { provider: Provider; models: Model[]; credential?: string }
+export interface InstallationCheckRequest { deviceId: string; botId: string }
+export interface OAuthStartRequest { deviceId: string; botId: string }
+export interface OAuthStartResponse { flowId: string; authorizationUrl: string }
+export interface OAuthFlowState { status: 'pending' | 'complete' | 'failed'; error?: string }
 export interface ProviderCheckResult { ok: boolean; message: string }
 export interface DiscoveryResult { models: Model[] }
 export interface ActionRequest { requestId: string; deviceId: string; botId: string; input: JsonValue }
