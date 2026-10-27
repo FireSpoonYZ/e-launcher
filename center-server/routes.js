@@ -205,7 +205,6 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
       if (matched.some(receipt => receipt?.phase === 'failed')) store.updateOperation(operation.operationId, { phase: 'failed', error: { code: 'INTERNAL_ERROR', message: 'Deployment failed' } });
       else if (matched.every(receipt => receipt && ['applied', 'removed'].includes(receipt.phase))) store.updateOperation(operation.operationId, { phase: operation.action === 'uninstall' ? 'removed' : 'applied', error: null });
     }
-    notify(deviceId);
     return reply.code(204).send();
   });
   host('GET', '/api/host/artifacts/:artifactRef', async (req, reply) => { const plans = store.listDeploymentPlans(req.centerDevice.deviceId); if (!plans.some(plan => plan.artifactRef === req.params.artifactRef)) fail('FORBIDDEN', 'Artifact not assigned'); return reply.type('application/octet-stream').send(Buffer.from(await packages.readArtifact(req.params.artifactRef))); });
