@@ -24,7 +24,7 @@ function discoverSkills(packageRoot) {
   const direct = join(root, 'SKILL.md');
   let paths;
   if (existsSync(direct)) {
-    paths = [root];
+    paths = ['.'];
   } else {
     const manifest = readOptionalJson(join(root, 'capability.json'));
     const pkg = readOptionalJson(join(root, 'package.json'));
