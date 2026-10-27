@@ -22,6 +22,7 @@ NUL
 pi-runtime/node_modules/
 node_modules/
 web/dist/
+center-web/dist/
 app/src/main/assets/public/
 app/src/main/assets/pi-runtime.mjs
 app/src/main/assets/pi-runtime.cjs

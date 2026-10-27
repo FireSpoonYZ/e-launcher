@@ -6,6 +6,8 @@
   "scripts": {
     "test": "node --test web/test/*.test.mjs",
     "build": "tsc -p web/tsconfig.json --noEmit && vite build",
+    "center:build": "npm --prefix center-web run build",
+    "center:start": "npm --prefix center-server start",
     "mobile:web": "node host-core/build-mobile.js --web",
     "mobile:build": "node host-core/build-mobile.js",
     "sync:android": "cap sync android",
