@@ -73,8 +73,11 @@ export async function createSkillDriver({ installationId, packageRoot, host }) {
       let closed = false;
       let skills = [];
       const key = 'skill-' + createHash('sha256').update(JSON.stringify([installationId, botId])).digest('hex').slice(0, 32);
-      const check = () => {
+      const checkOpen = () => {
         if (closed) throw fail('Skill capability is closed.');
+      };
+      const check = () => {
+        checkOpen();
         host.assertCapabilityAllowed(botId, installationId);
       };
       const bot = {
@@ -90,8 +93,8 @@ export async function createSkillDriver({ installationId, packageRoot, host }) {
         },
         requestContributions: {},
         actions: {},
-        async prepare() { check(); skills = discoverSkills(packageRoot); check(); },
-        async activate() { check(); active = true; },
+        async prepare() { checkOpen(); skills = discoverSkills(packageRoot); checkOpen(); },
+        async activate() { checkOpen(); active = true; },
         async quiesce() { active = false; closed = true; },
         async close() { await bot.quiesce(); bots.delete(bot); },
       };

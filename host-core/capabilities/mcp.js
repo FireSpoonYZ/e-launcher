@@ -82,8 +82,11 @@ export async function createMcpDriver({ installationId, version, target, package
       let active = false;
       let closed = false;
       const abort = new AbortController();
-      const check = () => {
+      const checkOpen = () => {
         if (closed) throw fail('MCP_CLOSED', 'MCP capability is closed.');
+      };
+      const check = () => {
+        checkOpen();
         host.assertCapabilityAllowed(botId, installationId);
       };
       const bot = {
@@ -91,7 +94,7 @@ export async function createMcpDriver({ installationId, version, target, package
         requestContributions: {},
         actions: {},
         async prepare() {
-          check();
+          checkOpen();
           let tools;
           try {
             if (target === 'center') {
@@ -102,11 +105,11 @@ export async function createMcpDriver({ installationId, version, target, package
               await client.connect(transport);
               tools = await client.listTools();
             }
-            check();
+            checkOpen();
           } catch (error) {
             await client?.close();
             client = undefined;
-            check();
+            checkOpen();
             if (error?.code === 'MCP_OAUTH_CENTER_REQUIRED' || error?.code === 'MCP_CREDENTIAL_MISSING' ||
                 error?.code === 'MCP_BIN_REQUIRED' || error?.code === 'MCP_BIN_UNSUPPORTED' ||
                 error?.code === 'INVALID_ARGUMENT') throw error;
@@ -141,7 +144,7 @@ export async function createMcpDriver({ installationId, version, target, package
             },
           }));
         },
-        async activate() { check(); active = true; },
+        async activate() { checkOpen(); active = true; },
         async quiesce() { active = false; closed = true; abort.abort(); await client?.close(); },
         async close() { await bot.quiesce(); bots.delete(bot); },
       };
