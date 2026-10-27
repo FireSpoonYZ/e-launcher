@@ -1036,7 +1036,7 @@ export function openDesktopClient(options) {
       throw brokerError('RPC_BUSY', 'not-sent', 'maximum concurrent observations reached');
     }
 
-    await requireTargetReady(params.targetDeviceId);
+    if (!connection) await requireTargetReady(params.targetDeviceId);
     requireCenter();
     const session = requireConnectedSession();
     const sessionGen = session.generation;
