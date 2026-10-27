@@ -6,6 +6,7 @@
 // and delegates managed-scope sync frames to scope-wire.js helpers.
 // Module 14 adds controlProtocol 1/2 negotiation and delegates live-* frames
 // to remote-live-protocol.js helpers.
+import { normalizeDeviceName, normalizeDevicePlatform } from './device-metadata.js';
 import { messageError, assertId, normalizeEnvelope, normalizeAck } from './message-protocol.js';
 import { readControlClientFrame, readControlHostFrame, readControlServerFrame } from './remote-control-protocol.js';
 import { readLiveClientFrame, readLiveHostFrame, readLiveServerFrame } from './remote-live-protocol.js';
@@ -148,7 +149,7 @@ function parseFrame(data) {
 }
 
 function readHello(frame) {
-  rejectUnknownFields(frame, new Set(['type', 'protocolVersion', 'deviceId', 'token', 'role', 'controlProtocol', 'scopeProtocol']), 'hello frame');
+  rejectUnknownFields(frame, new Set(['type', 'protocolVersion', 'deviceId', 'token', 'role', 'controlProtocol', 'scopeProtocol', 'displayName', 'platform']), 'hello frame');
   if (frame.protocolVersion !== 1) throw invalid('hello.protocolVersion must be 1');
   assertId(frame.deviceId, 'deviceId');
   assertDeviceToken(frame.token);
@@ -176,6 +177,11 @@ function readHello(frame) {
       throw invalid('hello.scopeProtocol is allowed only for the host role');
     }
     normalized.scopeProtocol = 1;
+  }
+  if (frame.displayName !== undefined || frame.platform !== undefined) {
+    if (normalized.role === 'client') throw invalid('hello metadata is host-only');
+    if (frame.displayName !== undefined) normalized.displayName = normalizeDeviceName(frame.displayName);
+    if (frame.platform !== undefined) normalized.platform = normalizeDevicePlatform(frame.platform);
   }
   return normalized;
 }
@@ -338,6 +344,7 @@ export function readClientFrame(data, isBinary = false) {
     case 'live-open':
     case 'live-cancel':
     case 'devices-list':
+    case 'device-rename':
       return readLiveClientFrame(frame);
     case 'live-frame':
     case 'live-end':
@@ -377,6 +384,7 @@ export function readServerFrame(data, isBinary = false) {
     case 'live-frame':
     case 'live-end':
     case 'devices-result':
+    case 'device-renamed':
       return readLiveServerFrame(frame);
     default:
       throw invalid('unknown relay frame type');

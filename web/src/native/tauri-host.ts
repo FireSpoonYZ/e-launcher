@@ -503,7 +503,7 @@ export async function mobileClientRequest<T>(op: string, params: unknown): Promi
 export function mobileClientObserve(input: {
   observationId: string;
   targetDeviceId: string;
-  target: LiveTarget;
+  target: LiveTarget | { kind: 'connection' };
 }): Promise<{ observationId: string }> {
   return request('clientObserve', input);
 }

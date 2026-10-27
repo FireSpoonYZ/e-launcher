@@ -619,7 +619,7 @@ export function useDrafts(opts: {
     if (
       !current ||
       current.profileId !== owner.profileId ||
-      current.targetDeviceId !== owner.targetDeviceId ||
+      (current.kind === 'local' && current.targetDeviceId !== owner.targetDeviceId) ||
       current.kind !== owner.kind
     ) {
       // 冻结 owner 的 generation 在断开/重连后必然过期；先核对同 profile/target/kind，不匹配保持锁。
@@ -629,7 +629,7 @@ export function useDrafts(opts: {
       };
     }
     // 只读查询用当前 generation，冻结 owner/input 不变。
-    const queryIdentity: DesktopIdentity = { ...current };
+    const queryIdentity: DesktopIdentity = api.identityForTarget(owner.targetDeviceId);
     const pendingId = started.attempt.pendingId;
     let found: PendingRecord | null = null;
     let queryError: string | null = null;

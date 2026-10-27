@@ -1,6 +1,7 @@
 import type {
   BotRecord,
   CreateBotInput,
+  UpdateBotProfileInput,
   PrimarySubmission,
   SubmissionInput,
   HistoryOptions,
@@ -110,6 +111,7 @@ export interface ControlClient {
   getHostInfo(options?: ControlClientCallOptions): Promise<ControlHostInfo>;
   listBots(options?: ControlClientCallOptions): Promise<BotRecord[]>;
   createBot(input: CreateBotInput, options?: ControlClientCallOptions): Promise<BotRecord>;
+  updateBotProfile(input: UpdateBotProfileInput, options?: ControlClientCallOptions): Promise<BotRecord>;
   getBot(botId: string, options?: ControlClientCallOptions): Promise<BotRecord>;
   findByRequest(requestId: string, options?: ControlClientCallOptions): Promise<BotRecord>;
   submit(botId: string, input: SubmissionInput, options?: ControlClientCallOptions): Promise<PrimarySubmission>;

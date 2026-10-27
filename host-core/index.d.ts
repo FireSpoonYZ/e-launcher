@@ -14,6 +14,7 @@ export interface BotRecord {
   botId: string;
   deviceId: string;
   role: string;
+  description: string;
   cwd: string;
   modelRef: string | null;
   primaryConversationId: string;
@@ -23,14 +24,23 @@ export interface BotRecord {
 export interface CreateBotInput {
   requestId: string;
   role: string;
-  cwd: string;
+  description?: string;
+  cwd?: string;
   modelRef?: string | null;
+}
+
+export interface UpdateBotProfileInput {
+  botId: string;
+  name?: string;
+  description?: string;
 }
 
 export interface Host {
   readonly deviceId: string;
   readonly dataRoot: string;
+  readonly defaultWorkspace: string;
   createBot(input: CreateBotInput): BotRecord;
+  updateBotProfile(input: UpdateBotProfileInput): BotRecord;
   getBot(botId: string): BotRecord | null;
   findByRequest(requestId: string): BotRecord | null;
   listBots(): BotRecord[];
@@ -599,6 +609,8 @@ export interface OpenRuntimeOptions {
 }
 
 export interface Runtime {
+  getCurrentDevice(): Promise<{ deviceId: string; displayName: string; platform: string; arch: string }>;
+  createBot(input: CreateBotInput): Promise<BotRecord>;
   submit(botId: string, input: SubmissionInput): Promise<PrimarySubmission>;
   wait(botId: string, requestId: string): Promise<PrimarySubmission>;
   getSubmission(botId: string, requestId: string): Promise<PrimarySubmission | null>;
@@ -841,8 +853,10 @@ export interface ModelCatalog {
 }
 
 export interface ControlHostInfo {
+  displayName: string;
   protocolVersion: 1;
   deviceId: string;
+  defaultWorkspace: string;
   platform: string;
   arch: string;
 }
@@ -916,6 +930,8 @@ export interface HostServiceOptions {
   token: string;
   port?: number;
   initialSettings?: HostSettings;
+  displayName?: string;
+  platform?: string;
   /** Optional trusted JS native bridge for Android tools; never persisted as a settings field. */
   nativeBridge?: NativeBridge;
 }
@@ -1522,6 +1538,8 @@ export interface RelayDevice {
   createdAt: string;
   updatedAt: string;
   revokedAt: string | null;
+  displayName: string | null;
+  platform: string | null;
 }
 
 export interface RelayListActiveOptions {
@@ -1541,9 +1559,11 @@ export interface RelayRegistryInput {
 
 export interface RelayRegistry {
   readonly dataRoot: string;
-  register(input: RelayRegistryInput): RelayDevice;
+  register(input: RelayRegistryInput & { displayName?: string }): RelayDevice;
   rotate(input: RelayRegistryInput): RelayDevice;
   revoke(deviceId: string): RelayDevice;
+  rename(deviceId: string, displayName: string): RelayDevice;
+  updateMetadata(deviceId: string, metadata: { displayName?: string; platform?: string }): RelayDevice;
   get(deviceId: string): RelayDevice | null;
   list(): RelayDevice[];
   /** Active registrations only, keyset-paged by UTF-8 BINARY deviceId. */
@@ -1614,6 +1634,8 @@ export interface DeviceLinkStatus {
 }
 
 export interface OpenDeviceLinkOptions {
+  displayName?: string;
+  platform?: string;
   dataRoot: string;
   url: string;
   token: string;
@@ -1652,6 +1674,7 @@ export interface RemoteControlMethodMap {
   getHostInfo: { params: Record<string, never>; result: ControlHostInfo };
   listBots: { params: Record<string, never>; result: BotRecord[] };
   createBot: { params: CreateBotInput; result: BotRecord };
+  updateBotProfile: { params: UpdateBotProfileInput; result: BotRecord };
   getBot: { params: { botId: string }; result: BotRecord };
   findByRequest: { params: { requestId: string }; result: BotRecord };
   submit: { params: { botId: string; requestId: string; text: string }; result: PrimarySubmission };
@@ -1735,14 +1758,35 @@ export interface OpenRemoteControlOptions {
   ca?: string;
   /** Startup AbortSignal; applies only until open() resolves. */
   signal?: AbortSignal;
+  /** Called once after an established connection ends unexpectedly. */
+  onClose?: (error: RemoteControlError) => void;
 }
 
 export interface DevicesDirectoryItem {
   deviceId: string;
+  displayName: string;
+  platform?: string;
   online: boolean;
   controlProtocol: 0 | 1 | 2;
   scopeProtocol: 0 | 1;
 }
+
+export interface BotDirectoryEntry extends BotRecord {
+  deviceName: string;
+  platform?: string;
+  online: boolean;
+}
+
+export interface BotDirectorySnapshot {
+  devices: DevicesDirectoryItem[];
+  bots: BotDirectoryEntry[];
+  errors: Array<{ deviceId: string; code: string; message?: string }>;
+}
+
+export function collectBotDirectory(options: {
+  listDevices(options: { limit?: number; cursor?: { afterDeviceId: string } | null }): Promise<DevicesDirectoryPage>;
+  listBots(deviceId: string): Promise<BotRecord[]>;
+}): Promise<BotDirectorySnapshot>;
 
 export interface DevicesDirectoryPage {
   items: DevicesDirectoryItem[];
@@ -1776,6 +1820,7 @@ export interface RemoteControl {
   ): Promise<RemoteControlMethodMap[K]['result']>;
   /** Active device directory over the same authenticated relay connection; reads only. */
   listDevices(options?: { limit?: number; cursor?: { afterDeviceId: string } | null; signal?: AbortSignal }): Promise<DevicesDirectoryPage>;
+  renameDevice(input: { deviceId: string; displayName: string }, options?: { signal?: AbortSignal }): Promise<DevicesDirectoryItem>;
   /** Live preview subscription; error ends throw RemoteControlError instead of being yielded. */
   live(targetDeviceId: string, target: LiveTarget, options?: { signal?: AbortSignal }): AsyncIterable<RemoteLiveSnapshot | RemoteLiveEnd>;
   close(): void;

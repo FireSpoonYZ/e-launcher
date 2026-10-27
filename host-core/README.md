@@ -1145,8 +1145,9 @@ scopeKey/messageKey 固定 `~` 前缀再逐段编码，保护 `.`/`..`/Unicode/�
 - relay 协议不变：protocolVersion 1；scopeProtocol 仅 host 侧 1。Host hello controlProtocol 可为 1 或 2，client hello 可省略（legacy）或声明 2（client 声明 1 无效）。ready 可带 controlProtocol:2，省略即 legacy。**v2 client/link 必须要求 ready 回显 2**；旧 client/host 经 v1 方法兼容。
 - 控制方法表 `CONTROL_METHODS` 共 40 个：旧 v1 十方法（getHostInfo/listBots/createBot/getBot/findByRequest/submit/getSubmission/history/abort/contextStatus）+ v2 30 个 = M14 原 25 个（getModelCatalog/getWorkContext/syncWorkContext/workHistory/workContextStatus/getWorkActivity/stopWork/resumeWork/listScopeStates/createScope/getScopeState/updateScope/publishUserMessage/listScopeReplicas/scopeHistory/getScopeMessage/getScopeMessageDelivery/memoryStatus/recallMemory/reflectMemory/retainMemory/getMemory/getMemorySource/correctMemory/retryMemory）不变 + 扩展/SOUL 5 个（getExtensionCatalog/getBotExtensions/setBotExtensions/getBotSoul/setBotSoul）。memory 方法 wire params 均为 `{botId,input}`；分页/scope 参数提取 limit/cursor；扩展 setter 也是 `{botId,input}`，input 分别带 `expectedRevision` 数字/`expectedRevision` SHA-256/`extensions`/`text`。
 - 能力门控：legacy client（省略 controlProtocol）只能 v1 方法；v2 client 可用 v1/v2，但目标 host.controlProtocol 必须 ≥ controlMethodVersion。无 capability 回 CONTROL_UNAVAILABLE/not-sent；离线 OFFLINE/not-sent；不转发不支持的方法、不创建中央邮箱。settings/status 不加入远端表，无通用代理。结果三态（not-sent/unconfirmed/responded）沿用。
-- 阶段澄清：M10–M13 历史验收记录的“远端仅十方法/远程 work 不可用”在该时间点成立；M14 v2 起远端已是固定方法表（M14 交付时 35 个，含扩展/SOUL 增量现为 40 个），支持固定 work/memory RPC；各模块历史验收文字中的“35 方法”是该次验收时的方法数，不是当前契约。relay 仅有界瞬时转发业务，不持久保存业务正文/工作上下文/模型与 Hindsight API 凭证，也不运行推理；中心仅持久保存设备登记与认证校验信息（设备 token 哈希/credentialVersion），设备认证校验数据不与模型/Hindsight 业务凭证混同。无通用代理、中心变更邮箱、自动重放或 E2E 作者签名/加密声明。
-- 设备目录：`devices-list` 是中继自有帧，绝不作为 Host 方法转发；registry 内部 `listActive` 只返回既有 RelayDevice DTO。remote `listDevices`/`devices-list` wire 投影仅四字段白名单 `{deviceId, online, controlProtocol:0|1|2, scopeProtocol:0|1}`（最多 200 条升序，keyset cursor `{afterDeviceId}`），online 仅有效 Host 连接，离线能力全 0，client socket 不算 Host online；无 token/hash/credentialVersion/时间戳。注册/轮换/撤销仍是本地 `relay-registry-cli` 特权动作，中心不新增自助注册端点。
+- 阶段澄清：M10–M13 历史验收记录的“远端仅十方法/远程 work 不可用”在该时间点成立；M14 v2 起远端已是固定方法表（M14 交付时 35 个，含扩展/SOUL 增量现为 40 个），支持固定 work/memory RPC；各模块历史验收文字中的“35 方法”是该次验收时的方法数，不是当前契约。relay 仅有界瞬时转发业务，不持久保存业务正文/工作上下文/模型与 Hindsight API 凭证，也不运行推理；中心仅持久保存设备登记、名称/平台与认证校验信息（设备 token 哈希/credentialVersion），设备认证校验数据不与模型/Hindsight 业务凭证混同。无通用代理、中心变更邮箱、自动重放或 E2E 作者签名/加密声明。
+- 设备目录：`devices-list` 是中继自有帧，不转发给 Host；新客户端请求 `names:1` 后返回持久化的 `displayName` 和可选 `platform`，旧请求仍仅返回原四个字段。未命名设备回退 deviceId，离线设备也保留名称；`deviceId` 始终是路由键。认证的 controlProtocol 2 client 可调用 `renameDevice({deviceId, displayName})`（CLI 用 `renameDevice --input`），只能改名有效注册的设备；Host 重连只填首次默认名，不覆盖已有名称。注册可选 `--display-name`，凭据仍只从环境变量读取。注册/轮换/撤销仍是本地特权动作。
+- **升级顺序：先中继，再 Host 和客户端。** 新 Host hello 和新客户端设备目录请求使用扩展字段，旧中继会拒绝并断开，不能把该错误当成功；旧 Host/客户端仍可连接新版中继。中继数据库在事务中从版本 1 添加名称/平台字段，不改变设备凭据或撤销状态。
 
 ### 远端实时预览（remote live）
 
@@ -1239,7 +1240,7 @@ node host-core/pending-cli.js reconcile --data-root "$CLIENT_STATE" --device-id 
 - 真实交互式 Windows/Linux 控制台 SIGINT/SIGTERM 矩阵未穷尽。
 - 类型检查：skipLibCheck 通过；完整检查仍有既有 genai 声明缺 `@modelcontextprotocol/sdk/client/index.js`（TS2307），不宣称全量第三方类型检查通过。
 - 统一长驻服务不是操作系统服务安装器，也不保证始终在线；Android/Tauri/TUI、迁移与既有原生兼容属于后续模块。
-- TLS+认证通道 peer 不等于原始作者的端到端签名/加密；relay 仅有界瞬时转发业务，不持久保存业务正文/工作上下文/模型与 Hindsight API 凭证或运行推理；中心仅持久保存设备登记与认证校验信息（设备 token 哈希/credentialVersion）。模块 13 的记忆接线与限制保留，不改路线 M15–M20。
+- TLS+认证通道 peer 不等于原始作者的端到端签名/加密；relay 仅有界瞬时转发业务，不持久保存业务正文/工作上下文/模型与 Hindsight API 凭证或运行推理；中心仅持久保存设备登记、名称/平台与认证校验信息（设备 token 哈希/credentialVersion）。模块 13 的记忆接线与限制保留，不改路线 M15–M20。
 
 ## 模块 15：Android 本机 Host 与原生能力桥
 

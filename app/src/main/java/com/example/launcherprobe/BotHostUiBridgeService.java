@@ -422,10 +422,18 @@ public final class BotHostUiBridgeService extends Service {
             if (!OBSERVATION_ID.matcher(observationId).matches()) {
                 throw new BridgeException("INVALID_ARGUMENT", "not-sent", "observationId 须为 UUID");
             }
+            boolean connection = "connection".equals(target.optString("kind"));
             Observation record = new Observation(observationId, true);
+            record.connection = connection;
             synchronized (resources) {
                 ensureOpen();
-                if (observations.size() >= MAX_OBSERVATIONS) throw new IllegalStateException("观察数已达上限");
+                int business = 0;
+                boolean watch = false;
+                for (Observation item : observations.values()) {
+                    if (item.connection) watch = true;
+                    else business++;
+                }
+                if (connection ? watch : business >= MAX_OBSERVATIONS) throw new IllegalStateException("观察数已达上限");
                 if (observations.containsKey(observationId)) throw new IllegalArgumentException("observationId 已存在");
                 observations.put(observationId, record);
             }
@@ -477,6 +485,7 @@ public final class BotHostUiBridgeService extends Service {
         private final class Observation {
             final String id;
             final boolean client;
+            boolean connection;
             volatile boolean closed;
             volatile BotHostManager.Observation handle;
 

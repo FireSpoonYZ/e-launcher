@@ -207,6 +207,7 @@ function showerTarget(params) {
 const METHOD_HANDLERS = new Map([
   ['listBots', (control, params, signal) => control.listBots({ signal })],
   ['createBot', (control, params, signal) => control.createBot(params, { signal })],
+  ['updateBotProfile', (control, params, signal) => control.updateBotProfile(params, { signal })],
   ['getBot', (control, params, signal) => control.getBot(params.botId, { signal })],
   ['findByRequest', (control, params, signal) => control.findByRequest(params.requestId, { signal })],
   ['submit', (control, params, signal) =>

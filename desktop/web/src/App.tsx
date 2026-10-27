@@ -14,6 +14,8 @@ import { PendingPanel } from './PendingPanel';
 import { SettingsPanel } from './SettingsPanel';
 import { BotChats } from './BotChats';
 import { Scopes } from './Scopes';
+import { targetApi } from './targetApi';
+import type { DesktopViewApi } from './types';
 
 interface ProfileFormState {
   title: string;
@@ -39,6 +41,7 @@ interface AppState {
   globalError: string | null;
   bannerError: string | null;
   sidebarCollapsed: boolean;
+  selectedDeviceId: string;
 }
 
 interface AppProps {
@@ -75,6 +78,8 @@ interface DevicesSectionProps {
   identity: DesktopIdentity | null;
   transportConnected: boolean;
   lastObservedAt: string | null;
+  selectedDeviceId: string;
+  onSelect: (deviceId: string) => void;
 }
 
 /** 设备目录（core-owned）：local/relay 均调用真实 broker devices；失败/加载中明确展示。 */
@@ -100,40 +105,38 @@ class DevicesSection extends Component<DevicesSectionProps, DevicesSectionState>
   }
 
   componentDidUpdate(prev: DevicesSectionProps): void {
-    // 只按 props 旧值比较；目标选择（同一连接内新代次）不丢弃已加载分页。
     const a = prev.identity;
     const b = this.props.identity;
-    const reconnect =
-      prev.transportConnected !== this.props.transportConnected ||
-      a?.profileId !== b?.profileId ||
-      a?.kind !== b?.kind;
-    if (!reconnect) return;
-    this.setState({ items: [], nextCursor: null, error: null, busy: false, loadedAt: null, loaded: false });
-    void this.load();
+    if (a?.profileId !== b?.profileId || a?.kind !== b?.kind) {
+      this.setState({ items: [], nextCursor: null, error: null, busy: false, loadedAt: null, loaded: false });
+      void this.load();
+    } else if (!prev.transportConnected && this.props.transportConnected) {
+      void this.load();
+    } else if (prev.transportConnected && !this.props.transportConnected) {
+      this.setState({ busy: false });
+    }
   }
 
   /** 目录只属于一个连接（profile+kind+transport）；generation 变化不影响已读分页。 */
-  private sameConnection(profileId: string, kind: 'local' | 'relay'): boolean {
+  private sameConnection(profileId: string, kind: 'local' | 'relay', generation: number): boolean {
     const identity = this.props.identity;
     return (
       !!identity &&
       this.props.transportConnected &&
       identity.profileId === profileId &&
-      identity.kind === kind
+      identity.kind === kind &&
+      identity.generation === generation
     );
   }
 
   private async load(): Promise<void> {
     const identity = this.props.identity;
-    if (!identity || !this.props.transportConnected) {
-      this.setState({ items: [], nextCursor: null, error: null, busy: false, loadedAt: null, loaded: false });
-      return;
-    }
-    const { profileId, kind } = identity;
+    if (!identity || !this.props.transportConnected) return;
+    const { profileId, kind, generation } = identity;
     this.setState({ busy: true, error: null });
     try {
       const page = await this.props.api.broker(identity, 'devices', { limit: 20, cursor: null });
-      if (!this.mounted || !this.sameConnection(profileId, kind)) return;
+      if (!this.mounted || !this.sameConnection(profileId, kind, generation)) return;
       this.setState({
         items: page.items,
         nextCursor: page.nextCursor,
@@ -142,7 +145,7 @@ class DevicesSection extends Component<DevicesSectionProps, DevicesSectionState>
         loadedAt: new Date().toISOString(),
       });
     } catch (e) {
-      if (!this.mounted || !this.sameConnection(profileId, kind)) return;
+      if (!this.mounted || !this.sameConnection(profileId, kind, generation)) return;
       // 同一连接内换目标产生的迟到身份错误不作目录失败展示。
       const err = toError(e);
       this.setState({ error: err.code === 'IDENTITY_CHANGED' ? null : err.message, busy: false });
@@ -152,14 +155,14 @@ class DevicesSection extends Component<DevicesSectionProps, DevicesSectionState>
   private async loadMore(): Promise<void> {
     const identity = this.props.identity;
     if (!identity || !this.props.transportConnected || !this.state.nextCursor) return;
-    const { profileId, kind } = identity;
+    const { profileId, kind, generation } = identity;
     this.setState({ busy: true });
     try {
       const page = await this.props.api.broker(identity, 'devices', {
         limit: 20,
         cursor: this.state.nextCursor,
       });
-      if (!this.mounted || !this.sameConnection(profileId, kind)) return;
+      if (!this.mounted || !this.sameConnection(profileId, kind, generation)) return;
       this.setState((s) => ({
         items: [...s.items, ...page.items],
         nextCursor: page.nextCursor,
@@ -167,21 +170,30 @@ class DevicesSection extends Component<DevicesSectionProps, DevicesSectionState>
         loadedAt: new Date().toISOString(),
       }));
     } catch (e) {
-      if (!this.mounted || !this.sameConnection(profileId, kind)) return;
+      if (!this.mounted || !this.sameConnection(profileId, kind, generation)) return;
       const err = toError(e);
       this.setState({ error: err.code === 'IDENTITY_CHANGED' ? null : err.message, busy: false });
     }
   }
 
-  private select(deviceId: string): void {
+  private async rename(item: DevicesDirectoryItem): Promise<void> {
     const identity = this.props.identity;
-    if (!identity || identity.kind !== 'relay' || identity.targetDeviceId === deviceId) return;
-    // 目标设备选择：切换即新代次，阻止迟到动作发送到新目标。
-    this.props.api.setIdentity({
-      profileId: identity.profileId,
-      targetDeviceId: deviceId,
-      kind: 'relay',
-    });
+    if (!identity || identity.kind !== 'relay' || !this.props.transportConnected || this.state.busy) return;
+    const name = window.prompt('中央设备名称', item.displayName || item.deviceId);
+    if (name === null) return;
+    if (!name.trim() || name.trim().length > 120) {
+      this.setState({ error: '设备名称须为 1–120 字符。' });
+      return;
+    }
+    this.setState({ busy: true, error: null });
+    try {
+      await this.props.api.broker(identity, 'rename_device', { deviceId: item.deviceId, displayName: name.trim() });
+      if (!this.mounted || !this.sameConnection(identity.profileId, identity.kind, identity.generation)) return;
+      await this.load();
+    } catch (e) {
+      if (!this.mounted || !this.sameConnection(identity.profileId, identity.kind, identity.generation)) return;
+      this.setState({ busy: false, error: `改名失败或结果未确认：${toError(e).message}；请刷新目录核对。` });
+    }
   }
 
   render(): ReactNode {
@@ -209,14 +221,14 @@ class DevicesSection extends Component<DevicesSectionProps, DevicesSectionState>
             {items.map((item) => (
               <li
                 key={item.deviceId}
-                className={item.deviceId === identity.targetDeviceId ? 'selected' : undefined}
+                className={item.deviceId === this.props.selectedDeviceId ? 'selected' : undefined}
               >
                 <button
                   className="profile-row"
-                  disabled={!isRelay}
-                  onClick={() => this.select(item.deviceId)}
+                  onClick={() => this.props.onSelect(item.deviceId)}
                 >
-                  <span className="profile-title">{item.deviceId}</span>
+                  <span className="profile-title">{item.displayName || item.deviceId}</span>
+                  <span className="metadata">{item.deviceId}</span>
                   <span className="status">{item.online ? '在线' : '离线'}</span>
                   {isRelay && (
                     <span className="metadata">
@@ -229,6 +241,7 @@ class DevicesSection extends Component<DevicesSectionProps, DevicesSectionState>
                     </span>
                   )}
                 </button>
+                {isRelay && <button type="button" disabled={busy || !this.props.transportConnected} onClick={() => void this.rename(item)}>重命名</button>}
               </li>
             ))}
           </ul>
@@ -238,9 +251,8 @@ class DevicesSection extends Component<DevicesSectionProps, DevicesSectionState>
             加载更多
           </button>
         )}
-        {isRelay && !identity.targetDeviceId && (
-          <p className="empty-state">Relay 连接成功不等于目标在线；请从目录显式选择目标设备。</p>
-        )}
+        {!this.props.transportConnected && loaded && <p className="status">离线：显示上次读取的设备目录。</p>}
+        <p className="metadata">选择设备用于群聊与待发送；Bot 聊天按各自设备路由。</p>
       </section>
     );
   }
@@ -251,6 +263,8 @@ export class App extends Component<AppProps, AppState> {
   private unsubErrors: (() => void) | null = null;
   /** 同步在途标记：state.busy 在重渲染前不能防双击。 */
   private actionInFlight = false;
+  private scopedKey = '';
+  private scopedApi: DesktopViewApi | null = null;
 
   constructor(props: AppProps) {
     super(props);
@@ -269,6 +283,7 @@ export class App extends Component<AppProps, AppState> {
       globalError: null,
       bannerError: null,
       sidebarCollapsed: false,
+      selectedDeviceId: '',
     };
   }
 
@@ -312,6 +327,8 @@ export class App extends Component<AppProps, AppState> {
   private async connect(): Promise<void> {
     const profile = this.state.profiles.find((p) => p.id === this.state.selectedProfileId);
     const token = this.state.token;
+    const previousIdentity = this.state.identity;
+    const previousDeviceId = this.state.selectedDeviceId;
     if (this.actionInFlight || !profile || !token) return;
     let input: DesktopConnectionInput;
     if (profile.kind === 'local') {
@@ -343,7 +360,7 @@ export class App extends Component<AppProps, AppState> {
       });
       // transport 连接以 status.phase === 'connected' 为准；不代表目标 Host 在线。
       this.props.api.setTransportConnected(status.phase === 'connected');
-      this.setState({ busy: false, status, bannerError: null });
+      this.setState({ busy: false, status, bannerError: null, selectedDeviceId: targetDeviceId || (previousIdentity?.profileId === profile.id ? previousDeviceId : '') });
     } catch (e) {
       this.setState({ busy: false, globalError: `连接失败：${toError(e).message}` });
     } finally {
@@ -444,6 +461,8 @@ export class App extends Component<AppProps, AppState> {
             identity={identity}
             transportConnected={transportConnected}
             lastObservedAt={status?.lastObservedAt ?? null}
+            selectedDeviceId={this.state.selectedDeviceId}
+            onSelect={(deviceId) => this.setState({ selectedDeviceId: deviceId })}
           />
         </aside>
         <main className="app-workspace">
@@ -458,7 +477,7 @@ export class App extends Component<AppProps, AppState> {
             </button>
             <span className={`conn-dot ${transportConnected ? 'online' : 'offline'}`} />
             <span>{phaseLabel}</span>
-            {identity && <span className="status">{identity.targetDeviceId || '未选目标'}</span>}
+            {identity && <span className="status">{this.state.selectedDeviceId || '群聊/待发送未选设备'}</span>}
             {connection && (
               <span className="metadata">{`${connection.kind} · ${connection.url}`}</span>
             )}
@@ -643,37 +662,21 @@ export class App extends Component<AppProps, AppState> {
     if (view === 'settings') {
       return <SettingsPanel api={api} identity={identity} transportConnected={transportConnected} />;
     }
+    if (!identity || !snapshot) return <div className="empty-state">请先连接 Host 或中继。</div>;
+    if (view === 'chat') return <BotChats api={api} pageActive={pageActive} />;
+    const deviceId = this.state.selectedDeviceId;
+    if (!deviceId) return <div className="empty-state">请从设备目录选择群聊或待发送所属设备。</div>;
+    const key = `${identity.profileId}|${identity.kind}|${identity.generation}|${deviceId}`;
+    if (this.scopedKey !== key) {
+      this.scopedKey = key;
+      this.scopedApi = targetApi(api, deviceId);
+    }
     if (view === 'pending') {
-      return <PendingPanel api={api} identity={identity} transportConnected={transportConnected} />;
+      return <PendingPanel key={key} api={api} identity={this.scopedApi!.identity} transportConnected={transportConnected} />;
     }
-    // relay 已连接但未从设备目录选目标时，业务面板的空 target 请求只会得到错误；先要求选目标。
-    // 待发送（离线入队）与 Host 设置（自带未连接/relay 只读提示）保持原逻辑。
-    if (identity && identity.targetDeviceId === '') {
-      return (
-        <div className="workspace-body">
-          <p className="empty-state">请从设备目录选择目标Host</p>
-        </div>
-      );
-    }
-    if (view === 'scopes') {
-      if (!identity || !snapshot) {
-        return (
-          <div className="workspace-body">
-            <p className="empty-state">请先连接目标 Host</p>
-          </div>
-        );
-      }
-      return <Scopes api={api} pageActive={pageActive} />;
-    }
-    if (!identity || !snapshot) {
-      return (
-        <div className="workspace-body">
-          <p className="empty-state">请先连接目标 Host</p>
-        </div>
-      );
-    }
-    return <BotChats api={api} pageActive={pageActive} />;
+    return <Scopes key={key} api={this.scopedApi!} pageActive={pageActive} />;
   }
+
 }
 
 /** 应用装配 ErrorBoundary：加载失败显示明确错误，提供只读重试。 */

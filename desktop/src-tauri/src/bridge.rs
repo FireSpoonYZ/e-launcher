@@ -54,6 +54,8 @@ const PUBLIC_OPERATIONS: &[&str] = &[
   "disconnect",
   "status",
   "devices",
+  "bot_directory",
+  "rename_device",
   "call",
   "settings_get",
   "settings_set",
@@ -151,6 +153,7 @@ struct InflightObservationEvent {
 }
 
 struct ObserverState {
+  connection: bool,
   channel: Channel<Value>,
   fifo: VecDeque<ObserverFrame>,
   fifo_bytes: usize,
@@ -161,8 +164,9 @@ struct ObserverState {
 }
 
 impl ObserverState {
-  fn new(channel: Channel<Value>, generation: u64, instance_nonce: u64) -> Self {
+  fn new(channel: Channel<Value>, generation: u64, instance_nonce: u64, connection: bool) -> Self {
     Self {
+      connection,
       channel,
       fifo: VecDeque::new(),
       fifo_bytes: 0,
@@ -301,6 +305,7 @@ impl DesktopBridge {
       ));
     }
 
+    let connection = target.get("kind").and_then(Value::as_str) == Some("connection");
     let session = self.ensure_session(app).await?;
     {
       let mut guard = session.lock().unwrap();
@@ -319,7 +324,8 @@ impl DesktopBridge {
           "not-sent",
         ));
       }
-      if guard.observers.len() >= MAX_OBSERVERS {
+      if (connection && guard.observers.values().any(|o| o.connection))
+        || (!connection && guard.observers.values().filter(|o| !o.connection).count() >= MAX_OBSERVERS) {
         return Err(BridgeError::new(
           "RPC_BUSY",
           "maximum active observations reached",
@@ -336,7 +342,7 @@ impl DesktopBridge {
       let session_generation = guard.generation;
       guard.observers.insert(
         observation_id.clone(),
-        ObserverState::new(on_event, session_generation, instance_nonce),
+        ObserverState::new(on_event, session_generation, instance_nonce, connection),
       );
     }
 

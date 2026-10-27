@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 const DB_FILE = 'host.sqlite';
 const PRIMARY_KIND = 'primary';
 
@@ -35,6 +35,7 @@ function toBot(row) {
     botId: row.bot_id,
     deviceId: row.device_id,
     role: row.role,
+    description: row.description ?? '',
     cwd: row.cwd,
     modelRef: row.model_ref,
     primaryConversationId: row.primary_conversation_id,
@@ -80,8 +81,8 @@ function initSchema(db) {
   let committed = false;
   try {
     const version = db.prepare('PRAGMA user_version').get().user_version;
-    // 仅接受 0/1/2/3；负数/未知版本一律拒绝，不迁移。
-    if (version !== 0 && version !== 1 && version !== 2 && version !== SCHEMA_VERSION) {
+    // 仅接受已知版本；负数/未知版本一律拒绝，不迁移。
+    if (version !== 0 && version !== 1 && version !== 2 && version !== 3 && version !== SCHEMA_VERSION) {
       throw errWithCode('database schema version is not supported', 'UNSUPPORTED_SCHEMA');
     }
     if (version === 0) {
@@ -94,6 +95,7 @@ function initSchema(db) {
           bot_id TEXT PRIMARY KEY,
           device_id TEXT NOT NULL,
           role TEXT NOT NULL,
+          description TEXT NOT NULL DEFAULT '',
           cwd TEXT NOT NULL,
           model_ref TEXT,
           primary_conversation_id TEXT NOT NULL UNIQUE,
@@ -108,6 +110,7 @@ function initSchema(db) {
           request_id TEXT PRIMARY KEY,
           bot_id TEXT NOT NULL REFERENCES bots(bot_id),
           role TEXT NOT NULL,
+          description TEXT NOT NULL DEFAULT '',
           cwd TEXT NOT NULL,
           model_ref TEXT
         );
@@ -132,6 +135,12 @@ function initSchema(db) {
       // 逐版本只追加本版本的表，不重建既有表、不删行。
       if (version < 2) db.exec(LEGACY_IMPORTS_DDL);
       if (version < 3) db.exec(BOT_EXTENSION_SETTINGS_DDL);
+      if (version < 4) {
+        db.exec("ALTER TABLE bots ADD COLUMN description TEXT NOT NULL DEFAULT ''; ALTER TABLE bot_create_requests ADD COLUMN description TEXT NOT NULL DEFAULT '';");
+      } else {
+        db.prepare('SELECT description FROM bots LIMIT 0').all();
+        db.prepare('SELECT description FROM bot_create_requests LIMIT 0').all();
+      }
       if (version < SCHEMA_VERSION) db.exec('PRAGMA user_version = ' + SCHEMA_VERSION);
     }
     db.exec('COMMIT');
@@ -169,7 +178,7 @@ export function openStore(dataRoot) {
       'INSERT INTO conversations (conversation_id, bot_id, kind) VALUES (?, ?, ?)'
     );
     const stmtInsertRequest = db.prepare(
-      'INSERT INTO bot_create_requests (request_id, bot_id, role, cwd, model_ref) VALUES (?, ?, ?, ?, ?)'
+      'INSERT INTO bot_create_requests (request_id, bot_id, role, cwd, model_ref, description) VALUES (?, ?, ?, ?, ?, ?)'
     );
     const stmtGetLegacyImport = db.prepare('SELECT * FROM legacy_imports WHERE source_key = ?');
     const stmtInsertLegacyImport = db.prepare(
@@ -185,9 +194,14 @@ export function openStore(dataRoot) {
     );
 
     const stmtUpdateBotModel = db.prepare('UPDATE bots SET model_ref = ? WHERE bot_id = ?');
+    const stmtUpdateBotProfile = db.prepare('UPDATE bots SET role = COALESCE(?, role), description = COALESCE(?, description) WHERE bot_id = ?');
     const getBot = (botId) => toBot(stmtGetBot.get(botId));
     const setBotModel = (botId, modelRef) => {
       stmtUpdateBotModel.run(modelRef == null ? null : modelRef, botId);
+      return getBot(botId);
+    };
+    const updateBotProfile = (botId, name, description) => {
+      stmtUpdateBotProfile.run(name ?? null, description ?? null, botId);
       return getBot(botId);
     };
     const findByRequest = (requestId) => {
@@ -201,6 +215,7 @@ export function openStore(dataRoot) {
       const role = input.role;
       const cwd = input.cwd;
       const modelRef = input.modelRef == null ? null : input.modelRef;
+      const description = input.description ?? '';
 
       db.exec('BEGIN IMMEDIATE');
       let committed = false;
@@ -208,7 +223,7 @@ export function openStore(dataRoot) {
         // 事务内查重：并发同 requestId 串行化后在此看到已受理记录
         const existing = stmtGetRequest.get(requestId);
         if (existing) {
-          if (existing.role === role && existing.cwd === cwd && existing.model_ref === modelRef) {
+          if (existing.role === role && existing.cwd === cwd && existing.model_ref === modelRef && existing.description === description) {
             return getBot(existing.bot_id);
           }
           throw errWithCode('requestId already used with different definition', 'REQUEST_CONFLICT');
@@ -216,9 +231,10 @@ export function openStore(dataRoot) {
         const botId = randomUUID();
         const conversationId = randomUUID();
         const createdAt = new Date().toISOString();
-        stmtInsertBot.run(botId, deviceId, role, cwd, modelRef, conversationId, createdAt);
+        stmtInsertBot.run(botId, deviceId, input.persistedRole ?? role, cwd, modelRef, conversationId, createdAt);
+        stmtUpdateBotProfile.run(null, description, botId);
         stmtInsertConversation.run(conversationId, botId, PRIMARY_KIND);
-        stmtInsertRequest.run(requestId, botId, role, cwd, modelRef);
+        stmtInsertRequest.run(requestId, botId, role, cwd, modelRef, description);
         db.exec('COMMIT');
         committed = true;
         return getBot(botId);
@@ -331,7 +347,7 @@ export function openStore(dataRoot) {
     };
 
     return {
-      deviceId, createBot, getBot, setBotModel, findByRequest, listBots,
+      deviceId, createBot, getBot, setBotModel, updateBotProfile, findByRequest, listBots,
       ensureBotExtensionSettings, getBotExtensionSettings, updateBotExtensionSettings,
       reserveLegacyImport, getLegacyImport, completeLegacyImport, close,
     };

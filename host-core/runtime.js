@@ -27,6 +27,9 @@ import { WorkDecisionState } from './work-decision-state.js';
 import { createWorkDecisionRuntime } from './runtime-work-decisions.js';
 import { normalizeUserMessage } from './scope-protocol.js';
 import { createCommunicationTools } from './communication-tools.js';
+import { resolveBotIdentity } from './bot-identity.js';
+import { createCollaborationService } from './collaboration-service.js';
+import { renderCollaborationPrompt } from './collaboration-prompt.js';
 import {
   previewLegacyImport as corePreviewLegacyImport,
   getLegacyImportStatus as coreGetLegacyImportStatus,
@@ -128,6 +131,12 @@ export async function openRuntime(options) {
   let harness = null;
   let workContexts = null;
   let memory = null;
+  let runtime;
+  const collaboration = createCollaborationService({
+    host,
+    ...options?.collaboration,
+    createLocalBot: (input) => runtime.createBot(input),
+  });
 
   // 每 conversationId+cwd 一个执行环境；绝不 process.chdir 或默认 process.cwd，缺 cwd 明确报错。
   const envCache = new Map();
@@ -215,7 +224,13 @@ export async function openRuntime(options) {
       getHarness: () => harness,
       getMessageLog: () => workContexts.getMessageLog(),
       publishWork: decisions.publishWork,
+      collaboration,
     }),
+    sections: [section('host-collaboration', async (input, context) => renderCollaborationPrompt({
+      device: await collaboration.getCurrentDevice(),
+      botId: (await resolveBotIdentity(host, input.read, input.conversationId, context)).botId,
+      cwd: input.env?.cwd ?? input.agent.cwd,
+    }))],
   }));
   // 原生桥接工具仅显式注入时注册：主会话与 work 身份共享同一 registry，二者均可见。
   if (nativeBridge) {
@@ -288,6 +303,7 @@ export async function openRuntime(options) {
       try { await extensions.close(); } catch { /* close 失败不掩盖原错误 */ }
     }
     try { await shower.close(); } catch { /* close 失败不掩盖原错误 */ }
+    try { await collaboration.close(); } catch { /* close 失败不掩盖原错误 */ }
     try { await cleanupEnvs(); } catch { /* open 失败清理不掩盖原错误 */ }
     try { releaseOwner?.(); } catch { /* release 失败不掩盖原错误 */ }
     host.close();
@@ -308,7 +324,7 @@ export async function openRuntime(options) {
     // sync 提交成功后附着等待中的 work watch（事务外，观察失败不影响导入）。
     onBound: (botId, scopeId, binding) => live.bindWork(botId, scopeId, binding),
   });
-  const runtime = createRuntime({
+  runtime = createRuntime({
     host,
     harness,
     models,
@@ -324,6 +340,7 @@ export async function openRuntime(options) {
     extensions,
     hindsightTools,
     botAdmissions: bots,
+    collaboration,
     shower,
   });
   try {
@@ -366,7 +383,7 @@ function parseBindingKey(key) {
   }
 }
 
-function createRuntime({ host, harness, models, defaultModel: initialDefaultModel, thinking, releaseOwner, manager, cleanupEnvs, live, workContexts, decisions, memory, extensions, hindsightTools, botAdmissions, shower }) {
+function createRuntime({ host, harness, models, defaultModel: initialDefaultModel, thinking, releaseOwner, manager, cleanupEnvs, live, workContexts, decisions, memory, extensions, hindsightTools, botAdmissions, collaboration, shower }) {
   let defaultModel = initialDefaultModel;
   let closePromise = null;
   let closing = false;
@@ -407,6 +424,7 @@ function createRuntime({ host, harness, models, defaultModel: initialDefaultMode
       // 排空已接纳导入，但共享消息账本须保留到原生工具退出。
       try { await workContexts.quiesce(); } catch (err) { errors.push(err); }
       try { await live.close(); } catch (err) { errors.push(err); }
+      try { await collaboration.close(); } catch (err) { errors.push(err); }
       // Seal Durable first so memory cancellation cannot turn shutdown into a persistent task abort.
       const nativeClose = harness.close(CTX);
       const memoryQuiesce = extensions.quiesce();
@@ -484,6 +502,13 @@ function createRuntime({ host, harness, models, defaultModel: initialDefaultMode
     return extensions.getBotExtensions(botId);
   }
 
+  async function createRuntimeBot(input) {
+    if (closing) throw errWithCode('host is closing', 'NOT_CONNECTED');
+    const bot = host.createBot(input);
+    await initializeBot(bot.botId);
+    return bot;
+  }
+
   /** 编辑准入：Bot 的任一已映射会话有 queued/placed 提交或挂起工作决策则忙。 */
   async function assertBotIdle(bot) {
     const nativeIds = await botConversations(bot);
@@ -527,6 +552,8 @@ function createRuntime({ host, harness, models, defaultModel: initialDefaultMode
 
   // Hindsight 8 方法先在 Bot 就绪后转发（read 方法直传，retain/correct 显式双参包装，内部 actor 不暴露）。
   return {
+    getCurrentDevice: collaboration.getCurrentDevice,
+    createBot: createRuntimeBot,
     initializeBot,
 
     async initializeBots() {

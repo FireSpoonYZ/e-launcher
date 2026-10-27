@@ -6,6 +6,7 @@ import { pathToFileURL } from 'node:url';
 import { openRelayRegistry } from './relay-registry.js';
 import { assertId } from './message-protocol.js';
 import { assertDeviceToken } from './relay-protocol.js';
+import { normalizeDeviceName } from './device-metadata.js';
 
 const USAGE = `usage: node host-core/relay-registry-cli.js <init|list|get|register|rotate|revoke> [options]
 
@@ -20,6 +21,7 @@ commands:
 options:
   --data-root <dir>   verified absolute data directory (required, except help)
   --device-id <id>     device identifier
+  --display-name <name>  initial display name for register (optional)
   --token-env <name>   environment variable holding the device token (never a flag value)
   -h, --help           show this help
 `;
@@ -28,6 +30,7 @@ const OPTIONS = {
   'data-root': { type: 'string' },
   'device-id': { type: 'string' },
   'token-env': { type: 'string' },
+  'display-name': { type: 'string' },
   help: { type: 'boolean', short: 'h' },
 };
 
@@ -81,6 +84,7 @@ function main() {
     }
   }
   const allowed = new Set(REQUIRED[command]);
+  if (command === 'register') allowed.add('display-name');
   for (const key of Object.keys(values)) {
     if (key !== 'help' && values[key] !== undefined && !allowed.has(key)) {
       throw invalid(`${command} does not take --${key}`);
@@ -92,6 +96,7 @@ function main() {
   if (deviceId !== undefined) {
     assertId(deviceId, 'deviceId');
   }
+  if (values['display-name'] !== undefined) normalizeDeviceName(values['display-name']);
   let token = null;
   if (values['token-env'] !== undefined) {
     const name = values['token-env'];
@@ -121,7 +126,7 @@ function main() {
         result = registry.get(deviceId);
         break;
       case 'register':
-        result = registry.register({ deviceId, token });
+        result = registry.register({ deviceId, token, ...(values['display-name'] !== undefined ? { displayName: values['display-name'] } : {}) });
         break;
       case 'rotate':
         result = registry.rotate({ deviceId, token });

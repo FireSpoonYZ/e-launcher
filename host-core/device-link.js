@@ -5,6 +5,8 @@
 // message-delivery.js 承担；本文件只负责 socket 生命周期、认证顺序、分帧
 // 限制、断线退避与阻塞判定，绝不读写 runtime 或模型状态。
 import { mkdirSync } from 'node:fs';
+import { hostname } from 'node:os';
+import { normalizeDeviceName, normalizeDevicePlatform } from './device-metadata.js';
 import { join, isAbsolute } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import WebSocket from 'ws';
@@ -114,6 +116,8 @@ export async function openDeviceLink(options) {
   assertDeviceToken(token);
   const ca = options.ca === undefined || options.ca === null ? undefined : options.ca;
   if (ca !== undefined) validateCa(ca);
+  const displayName = options.displayName === undefined ? undefined : normalizeDeviceName(options.displayName);
+  const platform = normalizeDevicePlatform(options.platform ?? process.platform);
   const onStatus = options.onStatus;
   if (onStatus !== undefined && typeof onStatus !== 'function') {
     throw messageError('INVALID_ARGUMENT', 'onStatus must be a function');
@@ -254,6 +258,10 @@ export async function openDeviceLink(options) {
       const frame = { type: 'hello', protocolVersion: 1, deviceId: log.deviceId, token };
       // Module 12：scope 协议独立于 M9 control，恒发送 scopeProtocol:1（host-only）。
       frame.scopeProtocol = 1;
+      const defaultName = process.platform === 'android' ? '' : hostname().trim();
+      frame.displayName = displayName ?? (defaultName && defaultName.length <= 120 && defaultName.isWellFormed()
+        ? defaultName : `${Array.from(platform).slice(0, 90).join('')}-${Array.from(log.deviceId).slice(0, 8).join('')}`);
+      frame.platform = platform;
       if (control) {
         frame.role = 'host';
         frame.controlProtocol = 2;

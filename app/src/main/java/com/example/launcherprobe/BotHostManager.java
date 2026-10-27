@@ -4,6 +4,7 @@ import com.example.launcherprobe.BotHostProcess.BridgeException;
 
 import android.content.Context;
 import android.content.SharedPreferences;
+import android.os.Build;
 
 import org.json.JSONException;
 import org.json.JSONObject;
@@ -1522,6 +1523,7 @@ public final class BotHostManager {
                     .put("type", "init")
                     .put("protocol", 1)
                     .put("mode", "host")
+                    .put("displayName", (Build.MANUFACTURER + " " + Build.MODEL).trim())
                     .put("dataRoot", assets.state.getAbsolutePath())
                     .put("token", g.token);
             JSONObject credentials = loadCredentials();

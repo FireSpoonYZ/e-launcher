@@ -6,6 +6,7 @@ export { openRelayRegistry } from './relay-registry.js';
 export { openRelayServer } from './relay-server.js';
 export { openDeviceLink } from './device-link.js';
 export { openRemoteControl, RemoteControlError } from './remote-control-client.js';
+export { collectBotDirectory } from './bot-directory.js';
 export { openHostService } from './host-service.js';
 export { openPendingClient } from './pending-client.js';
 export { openHostSettings, normalizeHostSettings } from './host-settings.js';

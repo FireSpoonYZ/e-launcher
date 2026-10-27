@@ -9,6 +9,7 @@ import { createHash } from 'node:crypto';
 import { assertId, assertRevision, messageError } from './message-protocol.js';
 import { assertUuid } from './pending-store.js';
 import { openPendingClient } from './pending-client.js';
+import { collectBotDirectory } from './bot-directory.js';
 import { createLocalControlAdapter } from './local-control-adapter.js';
 import { openRemoteControl } from './remote-control-client.js';
 import {
@@ -499,6 +500,20 @@ export function openDesktopClient(options) {
             token: conn.token,
             ...(conn.ca !== undefined ? { ca: conn.ca } : {}),
             signal: timeout.signal,
+            onClose: (err) => {
+              if (activeSession !== session || myGen !== generation || closed) return;
+              const error = normalizeDesktopError(err, 'unconfirmed');
+              session.terminalError = error;
+              phase = 'failed';
+              errorCode = error.code;
+              for (const record of observations.values()) {
+                if (record.connection && record.generation === myGen) {
+                  record.settled = true;
+                  void Promise.resolve(emitEvent({ type: 'event', observationId: record.id, error })).catch(() => {});
+                  record.controller.abort();
+                }
+              }
+            },
           });
         } catch (err) {
           if (timeout.wasTimedOut() && !connectController.signal.aborted) {
@@ -514,6 +529,10 @@ export function openDesktopClient(options) {
           throw brokerError('CANCELLED', 'not-sent', 'connect superseded or cancelled');
         }
 
+        if (session.terminalError) {
+          remote.close();
+          throw brokerError(session.terminalError.code, session.terminalError.outcome, session.terminalError.message);
+        }
         session.remote = remote;
         session.connectController = null;
         phase = 'connected';
@@ -605,6 +624,8 @@ export function openDesktopClient(options) {
         markObserved(sessionGen);
         const row = {
           deviceId: info.deviceId,
+          displayName: info.displayName || info.deviceId,
+          ...(info.platform ? { platform: info.platform } : {}),
           online: true,
           controlProtocol: 2,
           scopeProtocol: 1,
@@ -634,6 +655,36 @@ export function openDesktopClient(options) {
         phase = 'failed';
         errorCode = norm.code;
       }
+      throw brokerError(norm.code, norm.outcome, norm.message);
+    } finally {
+      timeout.cleanup();
+    }
+  }
+
+  async function opBotDirectory(params, reqSignal) {
+    rejectUnknownFields(params, new Set(), 'bot_directory params');
+    return collectBotDirectory({
+      listDevices: (options) => opDevices(options, reqSignal),
+      listBots: (deviceId) => opCall({ targetDeviceId: deviceId, method: 'listBots', params: {} }, reqSignal),
+    });
+  }
+
+  async function opRenameDevice(params, reqSignal) {
+    rejectUnknownFields(params, new Set(['deviceId', 'displayName']), 'rename_device params');
+    const session = requireConnectedSession();
+    if (session.kind !== 'relay') throw invalid('central device rename requires a relay connection');
+    const timeout = withCallTimeout(reqSignal, DESKTOP_CALL_TIMEOUT_MS);
+    try {
+      const result = await session.remote.renameDevice(
+        { deviceId: params.deviceId, displayName: params.displayName }, { signal: timeout.signal },
+      );
+      markObserved(session.generation);
+      return result;
+    } catch (err) {
+      if (timeout.wasTimedOut() && !(reqSignal && reqSignal.aborted)) {
+        throw brokerError('TIMEOUT', 'unconfirmed', 'device rename timed out');
+      }
+      const norm = normalizeDesktopError(err, 'unconfirmed');
       throw brokerError(norm.code, norm.outcome, norm.message);
     } finally {
       timeout.cleanup();
@@ -869,16 +920,22 @@ export function openDesktopClient(options) {
     } catch (err) {
       throw invalid(err.message);
     }
+    const connection = isPlainObject(params.target) && params.target.kind === 'connection';
     let normTarget;
-    try {
-      normTarget = normalizeLiveTarget(params.target);
-    } catch (err) {
-      throw invalid(err.message);
+    if (connection) {
+      rejectUnknownFields(params.target, new Set(['kind']), 'connection observation target');
+    } else {
+      try {
+        normTarget = normalizeLiveTarget(params.target);
+      } catch (err) {
+        throw invalid(err.message);
+      }
     }
     if (observations.has(params.observationId)) {
       throw invalid(`observationId already active: ${params.observationId}`);
     }
-    if (observations.size >= DESKTOP_MAX_OBSERVATIONS) {
+    if (connection ? [...observations.values()].some((obs) => obs.connection)
+      : [...observations.values()].filter((obs) => !obs.connection).length >= DESKTOP_MAX_OBSERVATIONS) {
       throw brokerError('RPC_BUSY', 'not-sent', 'maximum concurrent observations reached');
     }
 
@@ -897,6 +954,16 @@ export function openDesktopClient(options) {
       settled: false,
     };
     observations.set(observationId, record);
+    if (connection) {
+      record.connection = true;
+      record.promise = new Promise((resolve) => {
+        controller.signal.addEventListener('abort', () => {
+          if (observations.get(observationId) === record) observations.delete(observationId);
+          resolve();
+        }, { once: true });
+      });
+      return { observationId };
+    }
 
     let iterable;
     try {
@@ -981,6 +1048,8 @@ export function openDesktopClient(options) {
     ['disconnect', opDisconnect],
     ['status', opStatus],
     ['devices', opDevices],
+    ['bot_directory', opBotDirectory],
+    ['rename_device', opRenameDevice],
     ['call', opCall],
     ['settings_get', opSettingsGet],
     ['settings_set', opSettingsSet],

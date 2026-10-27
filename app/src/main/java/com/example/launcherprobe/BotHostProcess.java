@@ -564,10 +564,11 @@ final class BotHostProcess {
             live = inner;
         }
         String kind = live.optString("kind");
-        if (!"primary".equals(kind) && !"work".equals(kind)) {
+        boolean connection = "client".equals(initMode) && "connection".equals(kind);
+        if (!connection && !"primary".equals(kind) && !"work".equals(kind)) {
             throw new BridgeException("INVALID_FRAME", "not-sent", "观察目标类型无效");
         }
-        if (live.optString("botId").isEmpty()) {
+        if (!connection && live.optString("botId").isEmpty()) {
             throw new BridgeException("INVALID_FRAME", "not-sent", "观察目标缺 botId");
         }
         if ("work".equals(kind) && live.optString("scopeId").isEmpty()) {
@@ -585,9 +586,19 @@ final class BotHostProcess {
             throw new BridgeException("TOO_LARGE", "not-sent", "观察帧超限");
         }
         Pending entry = new Pending(id, true, null, new Observer(onFrame, onError));
+        entry.connection = connection;
         synchronized (lock) {
             if (finished || closeRequested) throw new BridgeException("CLOSED", "not-sent", "Host 已关闭");
-            if (activeObservers >= MAX_OBSERVERS) throw new BridgeException("BUSY", "not-sent", "观察并发已满");
+            int business = 0;
+            boolean watch = false;
+            for (Pending item : pending.values()) {
+                if (item.observer) {
+                    if (item.connection) watch = true;
+                    else business++;
+                }
+            }
+            if (connection ? watch : business >= MAX_OBSERVERS)
+                throw new BridgeException("BUSY", "not-sent", "观察并发已满");
             if (pending.containsKey(id)) throw new BridgeException("INVALID_FRAME", "not-sent", "观察 id 冲突");
             activeObservers++;
             pending.put(id, entry);
@@ -1123,6 +1134,7 @@ final class BotHostProcess {
     private static final class Pending {
         final String id;
         final boolean observer;
+        boolean connection;
         final CompletableFuture<JSONObject> future;
         final Observer callback;
         volatile boolean sent;

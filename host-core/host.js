@@ -17,6 +17,7 @@ export function openHost(options) {
   }
   const root = path.resolve(dataRoot);
   const store = openStore(root);
+  const defaultWorkspace = path.resolve(root, 'workspaces');
 
   // 未知 Bot 抛 BOT_NOT_FOUND；SOUL 路径只在此校验过存在性后由 bot-soul.js 内部生成。
   const requireBot = (botId) => {
@@ -29,20 +30,22 @@ export function openHost(options) {
   return {
     deviceId: store.deviceId,
     dataRoot: root,
+    defaultWorkspace,
     createBot(input) {
       if (typeof input !== 'object' || input === null) throw invalidArgument('input must be an object');
-      const { requestId, role, cwd, modelRef } = input;
+      const { requestId, role, cwd, modelRef, description = '' } = input;
       if (typeof requestId !== 'string' || requestId.trim() === '') throw invalidArgument('requestId must be a non-empty string');
       if (typeof role !== 'string' || role.trim() === '') throw invalidArgument('role must be non-blank text');
-      if (typeof cwd !== 'string' || !path.isAbsolute(cwd)) throw invalidArgument('cwd must be an absolute path');
+      if (cwd !== undefined && (typeof cwd !== 'string' || !path.isAbsolute(cwd))) throw invalidArgument('cwd must be an absolute path');
+      if (typeof description !== 'string' || description.length > 2000) throw invalidArgument('description must be a string of at most 2000 characters');
       let resolvedModelRef = null;
       if (modelRef !== undefined && modelRef !== null) {
         if (typeof modelRef !== 'string' || modelRef.trim() === '') throw invalidArgument('modelRef must be null or a non-blank string');
         resolvedModelRef = modelRef;
       }
-      const normalizedCwd = path.resolve(cwd);
+      const normalizedCwd = cwd === undefined ? defaultWorkspace : path.resolve(cwd);
 
-      const request = { requestId, role, cwd: normalizedCwd, modelRef: resolvedModelRef };
+      const request = { requestId, role, cwd: normalizedCwd, modelRef: resolvedModelRef, description };
       // Retries for an already-accepted request must not fail when the original
       // cwd has since disappeared; store.createBot does the consistency check.
       if (store.findByRequest(requestId) !== null) {
@@ -52,6 +55,10 @@ export function openHost(options) {
         return retried;
       }
 
+      const name = role.trim();
+      if (name.length > 120) throw invalidArgument('role must be at most 120 characters');
+      request.persistedRole = name;
+      if (cwd === undefined) fs.mkdirSync(defaultWorkspace, { recursive: true });
       let stat;
       try {
         stat = fs.statSync(normalizedCwd);
@@ -65,6 +72,21 @@ export function openHost(options) {
       // 注册记录与 SOUL 文件分两步：文件失败不回滚已受理记录，重试可完成初始化。
       ensureSoul(root, created.botId, created.role);
       return created;
+    },
+    updateBotProfile(input) {
+      if (typeof input !== 'object' || input === null) throw invalidArgument('input must be an object');
+      requireBot(input.botId);
+      let name;
+      if (input.name !== undefined) {
+        if (typeof input.name !== 'string' || input.name.trim().length < 1 || input.name.trim().length > 120) {
+          throw invalidArgument('name must be 1 to 120 non-blank characters');
+        }
+        name = input.name.trim();
+      }
+      if (input.description !== undefined && (typeof input.description !== 'string' || input.description.length > 2000)) {
+        throw invalidArgument('description must be a string of at most 2000 characters');
+      }
+      return store.updateBotProfile(input.botId, name, input.description);
     },
     getBot(botId) {
       assertId(botId, 'botId');

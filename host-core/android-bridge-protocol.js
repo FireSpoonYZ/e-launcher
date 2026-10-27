@@ -9,6 +9,7 @@ import { messageError, assertId } from './message-protocol.js';
 import { CONTROL_ERROR_CODES, CONTROL_OUTCOMES } from './remote-control-protocol.js';
 import { SHOWER_ERROR_CODES } from './shower-protocol.js';
 import { normalizeHostSettings } from './host-settings.js';
+import { normalizeDeviceName } from './device-metadata.js';
 
 export const BRIDGE_PROTOCOL_VERSION = 1;
 export const BRIDGE_MAX_FRAME_BYTES = 20971520; // 20 MiB hard frame cap (UTF-8 bytes)
@@ -93,6 +94,8 @@ export const BRIDGE_CLIENT_OPERATIONS = new Set([
   'disconnect',
   'status',
   'devices',
+  'bot_directory',
+  'rename_device',
   'call',
   'settings_get',
   'settings_set',
@@ -187,7 +190,7 @@ function normalizeCredentials(value) {
 /**
  * Validate the single init frame. Everything here is pure validation before
  * any resource is opened; any violation fails the connection. Host mode
- * carries dataRoot/token/optional credentials/initialSettings; settings and
+ * carries dataRoot/token/optional credentials/initialSettings/displayName; settings and
  * client modes carry only dataRoot. initialSettings passes through
  * normalizeHostSettings (canonical config + 512KiB budget) so no malformed
  * settings ever reach the store.
@@ -207,7 +210,7 @@ export function normalizeInitFrame(parsed) {
     rejectUnknownFields(parsed, new Set(['type', 'protocol', 'mode', 'dataRoot']), `${parsed.mode} init frame`);
     return { mode: parsed.mode, dataRoot };
   }
-  rejectUnknownFields(parsed, new Set(['type', 'protocol', 'mode', 'dataRoot', 'token', 'credentials', 'initialSettings']), 'host init frame');
+  rejectUnknownFields(parsed, new Set(['type', 'protocol', 'mode', 'dataRoot', 'token', 'credentials', 'initialSettings', 'displayName']), 'host init frame');
   if (typeof parsed.token !== 'string' || !TOKEN_PATTERN.test(parsed.token)) {
     throw invalid('INVALID_ARGUMENT', 'token must be a URL-safe opaque string of 32-512 characters');
   }
@@ -216,6 +219,7 @@ export function normalizeInitFrame(parsed) {
     credentials = normalizeCredentials(parsed.credentials); // explicit null is invalid
   }
   const init = { mode: 'host', dataRoot, token: parsed.token, credentials };
+  if (parsed.displayName !== undefined) init.displayName = normalizeDeviceName(parsed.displayName);
   if (parsed.initialSettings !== undefined) {
     init.initialSettings = normalizeHostSettings(parsed.initialSettings);
   }

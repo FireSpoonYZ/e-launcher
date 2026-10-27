@@ -1,6 +1,7 @@
 // 模块 14：统一 Host 服务入口。组装 settings 库、控制服务器与本机设备链路；
 // 只管理生命周期与状态聚合，不做模型/凭证/网络细节。
 import path from 'node:path';
+import os from 'node:os';
 import { openHost } from './host.js';
 import { openHostSettings, normalizeHostSettings } from './host-settings.js';
 import { parseRuntimeConfig } from './runtime-models.js';
@@ -11,7 +12,7 @@ import { readTextFile } from './cli-input.js';
 
 const TOKEN_PATTERN = /^[A-Za-z0-9_-]{32,512}$/;
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
-const ALLOWED_OPTIONS = new Set(['dataRoot', 'token', 'port', 'initialSettings', 'nativeBridge']);
+const ALLOWED_OPTIONS = new Set(['dataRoot', 'token', 'port', 'initialSettings', 'nativeBridge', 'displayName', 'platform']);
 
 function invalidArgument(message) {
   const err = new Error(message);
@@ -46,6 +47,8 @@ export async function openHostService(options) {
   const port = options?.port;
   const initialSettings = options?.initialSettings;
   const nativeBridge = options?.nativeBridge;
+  const platform = options?.platform ?? process.platform;
+  const providedDisplayName = options?.displayName;
 
   if (typeof dataRoot !== 'string' || dataRoot.trim() === '' || !path.isAbsolute(dataRoot)) {
     throw invalidArgument('dataRoot must be a non-empty absolute path');
@@ -62,6 +65,9 @@ export async function openHostService(options) {
   if (nativeBridge !== undefined && typeof nativeBridge !== 'function') {
     throw invalidArgument('nativeBridge must be a function');
   }
+  if (typeof platform !== 'string' || !platform.trim() || (providedDisplayName !== undefined && typeof providedDisplayName !== 'string')) {
+    throw invalidArgument('displayName and platform must be strings');
+  }
 
   // 探针登记连接取 deviceId，随即关闭；不持有额外 Host。
   let deviceId;
@@ -73,6 +79,8 @@ export async function openHostService(options) {
       probe.close();
     }
   }
+
+  const displayName = providedDisplayName?.trim() || (platform !== 'android' && os.hostname().trim()) || `${platform}-${deviceId.slice(0, 8)}`;
 
   let settingsStore = null;
   let control = null;
@@ -130,6 +138,7 @@ export async function openHostService(options) {
       settings: { store: settingsStore, activeRevision },
       getServiceStatus: () => getStatus(),
       nativeBridge,
+      collaboration: { displayName, platform, ...(relay ? { relay: { url: relay.url, token: relayToken, ...(ca ? { ca } : {}) } } : {}) },
     });
     listening = true;
     phase = 'running';
@@ -140,6 +149,8 @@ export async function openHostService(options) {
         url: relay.url,
         token: relayToken,
         ca,
+        displayName,
+        platform,
         control: { url: control.url, token },
       });
     }
