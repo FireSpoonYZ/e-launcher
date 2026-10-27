@@ -32,8 +32,6 @@ import {
 import {
   BotHost,
   openCenterManagement,
-  type BotExtensionSnapshot,
-  type BotExtensions,
   type BotSoul,
   type HostBot,
   type HostFrameEvent,
@@ -83,18 +81,6 @@ const PRIMARY_ROLE_OVERRIDE_KEY = 'bot-hub-primary-name-v2';
 const DEFAULT_PRIMARY_ROLE = '主助手';
 
 const SOUL_MAX_BYTES = 65536;
-const HINDSIGHT_READ_TOOLS = [
-  'hindsight_recall',
-  'hindsight_reflect',
-  'hindsight_get',
-  'hindsight_source',
-  'hindsight_status',
-] as const;
-const HINDSIGHT_WRITE_TOOLS = [
-  'hindsight_retain',
-  'hindsight_correct',
-  'hindsight_retry',
-] as const;
 const SOUL_SNIPPETS: { zh: string; en: string; text: string }[] = [
   {
     zh: '＋ 角色使命',
@@ -194,7 +180,6 @@ export type HubScreen =
   | 'bot-edit'
   | 'bot-avatar'
   | 'bot-soul'
-  | 'bot-extensions'
   | 'bot-schedules'
   | 'bot-screen'
   | 'bot-model'
@@ -334,15 +319,6 @@ function formatScheduleNextRun(
   } catch {
     return new Date(nextRunAt).toLocaleString();
   }
-}
-
-function syncTopicIntoSoulText(soulText: string, topic: string): string {
-  const cleanTopic = topic.trim();
-  const blockRegex = /\n*<!-- hindsight-topic-start -->[\s\S]*?<!-- hindsight-topic-end -->\n*/g;
-  const stripped = soulText.replace(blockRegex, '\n').trimEnd();
-  if (!cleanTopic) return stripped ? `${stripped}\n` : '';
-  const block = `\n\n<!-- hindsight-topic-start -->\n## 记忆主题 (Hindsight Topic)\n- 核心关注主题：${cleanTopic}\n- 调用 Hindsight 检索与留存长期记忆时，优先围绕上述主题组织上下文与标签。\n<!-- hindsight-topic-end -->\n`;
-  return stripped ? `${stripped}${block}` : block.trimStart();
 }
 
 interface ChatTurn {
@@ -662,34 +638,6 @@ function parseBotSoul(value: unknown): BotSoul | undefined {
     : undefined;
 }
 
-function parseBotExtensionSnapshot(value: unknown): BotExtensionSnapshot | undefined {
-  const raw = record(value);
-  const extRaw = record(record(raw.extensions).hindsight);
-  const effRaw = record(record(raw.effective).hindsight);
-  const mode1 = extRaw.mode === 'read-only' || extRaw.mode === 'read-write' ? extRaw.mode : undefined;
-  const mode2 = effRaw.mode === 'read-only' || effRaw.mode === 'read-write' ? effRaw.mode : undefined;
-  const reason =
-    effRaw.reason === 'bot-disabled' || effRaw.reason === 'host-disabled' || effRaw.reason === 'not-configured'
-      ? effRaw.reason
-      : null;
-  if (
-    typeof raw.botId !== 'string' ||
-    typeof raw.revision !== 'number' ||
-    typeof extRaw.enabled !== 'boolean' ||
-    !mode1 ||
-    typeof effRaw.enabled !== 'boolean' ||
-    !mode2
-  ) {
-    return undefined;
-  }
-  return {
-    botId: raw.botId,
-    revision: raw.revision,
-    extensions: { hindsight: { enabled: extRaw.enabled, mode: mode1 } },
-    effective: { hindsight: { enabled: effRaw.enabled, mode: mode2, reason } },
-  };
-}
-
 export interface HostPageProps {
   onBack?(): void;
   persistentPending?: boolean;
@@ -777,23 +725,7 @@ export function HostPage({
   const [botSoul, setBotSoul] = useState<BotSoul | null>(null);
   const [soulDraft, setSoulDraft] = useState('');
   const [soulDirty, setSoulDirty] = useState(false);
-  const [botExtSnap, setBotExtSnap] = useState<BotExtensionSnapshot | null>(null);
-  const [extDraft, setExtDraft] = useState<BotExtensions['hindsight']>({ enabled: false, mode: 'read-write' });
-  const [extDirty, setExtDirty] = useState(false);
-
-  // Hindsight Topic & Server Host configuration state
-  const [hindsightTopicDraft, setHindsightTopicDraft] = useState('');
-  const [hindsightHostUrl, setHindsightHostUrl] = useState('');
-  const [hindsightApiKeyEnv, setHindsightApiKeyEnv] = useState('HINDSIGHT_API_KEY');
-  const [hindsightApiKey, setHindsightApiKey] = useState('');
-  const [hindsightSharedMemory, setHindsightSharedMemory] = useState(false);
   const [hindsightSettingsPayload, setHindsightSettingsPayload] = useState<HostSettingsPayload | null>(null);
-  const [hindsightBankStatus, setHindsightBankStatus] = useState<{
-    bankId: string;
-    completed: number;
-    pending: number;
-    failed: number;
-  } | null>(null);
 
   // Per-Bot Scheduled Tasks state
   const [botScheduleState, setBotScheduleState] = useState<BotScheduleState>({
@@ -1220,29 +1152,9 @@ export function HostPage({
     [ensureLocalHostRunning, syncLocalBots, updateBotMeta],
   );
 
-  // Load Soul & Extensions (+ Hindsight Server Host & Topic) for activeBot when entering profile / edit / soul / extensions
-  const loadBotSoulAndExtensions = useCallback(
+  // Load SOUL for the active Bot when entering profile or edit
+  const loadBotSoul = useCallback(
     async (bot: UnifiedBotItem) => {
-      const savedTopic = botMetaMap[bot.key]?.hindsightTopic ?? '';
-      setHindsightTopicDraft(savedTopic);
-      setHindsightApiKey('');
-      setHindsightBankStatus(null);
-
-      if (bot.hostKind === 'local') {
-        try {
-          const payload = await BotHost.settingsGet();
-          setHindsightSettingsPayload(payload);
-          const hs = payload.settings?.runtime?.extensions?.hindsight;
-          const legacyCfg = payload.settings?.runtime?.hindsight;
-          const cfg = hs?.config ?? legacyCfg;
-          setHindsightHostUrl(cfg?.baseUrl ?? '');
-          setHindsightApiKeyEnv(cfg?.apiKeyEnv || 'HINDSIGHT_API_KEY');
-          setHindsightSharedMemory(Boolean(cfg?.sharedMemory));
-        } catch {
-          // Ignore cold settings error
-        }
-      }
-
       if (bot.botId === '__jarvis__') {
         setBotSoul({
           botId: '__jarvis__',
@@ -1252,7 +1164,6 @@ export function HostPage({
         });
         setSoulDraft(editInitialSoul);
         setSoulDirty(false);
-        setBotExtSnap(null);
         return;
       }
       if (bot.hostKind === 'local') {
@@ -1269,34 +1180,6 @@ export function HostPage({
         } catch {
           // Ignore
         }
-        try {
-          const extEnv = await BotHost.call({ method: 'getBotExtensions', params: { botId: bot.botId } });
-          const parsedExt = parseBotExtensionSnapshot(extEnv.result);
-          if (parsedExt) {
-            setBotExtSnap(parsedExt);
-            setExtDraft(parsedExt.extensions.hindsight);
-            setExtDirty(false);
-          }
-        } catch {
-          // Ignore
-        }
-        try {
-          const memEnv = await BotHost.call({
-            method: 'memoryStatus',
-            params: { botId: bot.botId, input: { target: { kind: 'primary' } } },
-          });
-          const mem = record(memEnv.result);
-          if (typeof mem.bankId === 'string') {
-            setHindsightBankStatus({
-              bankId: mem.bankId,
-              completed: typeof mem.completed === 'number' ? mem.completed : 0,
-              pending: typeof mem.pending === 'number' ? mem.pending : 0,
-              failed: typeof mem.failed === 'number' ? mem.failed : 0,
-            });
-          }
-        } catch {
-          // Hindsight server may not be configured or reachable yet
-        }
       } else if (bot.hostKind === 'remote' && bot.remoteIdentity && remoteClientRef.current) {
         const api = remoteClientRef.current.api;
         try {
@@ -1310,37 +1193,9 @@ export function HostPage({
         } catch {
           // Ignore
         }
-        try {
-          const extRes = await api.call(bot.remoteIdentity, 'getBotExtensions', { botId: bot.botId });
-          const parsedExt = parseBotExtensionSnapshot(extRes);
-          if (parsedExt) {
-            setBotExtSnap(parsedExt);
-            setExtDraft(parsedExt.extensions.hindsight);
-            setExtDirty(false);
-          }
-        } catch {
-          // Ignore
-        }
-        try {
-          const memRes = await api.call(bot.remoteIdentity, 'memoryStatus', {
-            botId: bot.botId,
-            input: { target: { kind: 'primary' } },
-          });
-          const mem = record(memRes);
-          if (typeof mem.bankId === 'string') {
-            setHindsightBankStatus({
-              bankId: mem.bankId,
-              completed: typeof mem.completed === 'number' ? mem.completed : 0,
-              pending: typeof mem.pending === 'number' ? mem.pending : 0,
-              failed: typeof mem.failed === 'number' ? mem.failed : 0,
-            });
-          }
-        } catch {
-          // Ignore
-        }
       }
     },
-    [botMetaMap, ensureLocalHostRunning, editInitialSoul],
+    [ensureLocalHostRunning, editInitialSoul],
   );
 
   // Load history and observe when entering Chat View
@@ -1537,7 +1392,7 @@ export function HostPage({
     setComposerMenuOpen(false);
     setActiveBotKey(bot.key);
     setScreen('bot-profile');
-    void loadBotSoulAndExtensions(bot);
+    void loadBotSoul(bot);
     void loadBotSchedules(bot);
   };
 
@@ -1564,7 +1419,7 @@ export function HostPage({
     setEditVoiceSpeed(meta?.voiceSpeed ?? '1x');
     setEditVoiceLang(meta?.voiceLang ?? '自动');
     setScreen('bot-edit');
-    void loadBotSoulAndExtensions(bot);
+    void loadBotSoul(bot);
   };
 
   const openCreateBotPage = () => {
@@ -1583,9 +1438,6 @@ export function HostPage({
     setEditVoiceSpeed('1x');
     setEditVoiceLang('自动');
     setScreen('bot-edit');
-    void BotHost.settingsGet()
-      .then(payload => setHindsightSettingsPayload(payload))
-      .catch(() => {});
   };
 
   const openAvatarPicker = (fromScreen: HubScreen, currentPreset: GrokAvatarPreset) => {
@@ -1919,22 +1771,7 @@ export function HostPage({
       setEditModel(cleanRef);
       setModelSheetOpen(false);
 
-      if (activeBot.hostKind === 'local') {
-        const snap = await BotHost.snapshot();
-        if (snap.phase === 'running' && activeBot.botId !== '__jarvis__') {
-          await BotHost.call({
-            method: 'setBotModel',
-            params: { botId: activeBot.botId, input: { modelRef: cleanRef || null } },
-          });
-          await syncLocalBots(snap);
-        }
-      } else if (activeBot.hostKind === 'remote' && activeBot.remoteIdentity && remoteClientRef.current) {
-        await remoteClientRef.current.api.call(activeBot.remoteIdentity, 'setBotModel', {
-          botId: activeBot.botId,
-          input: { modelRef: cleanRef || null },
-        });
-        await syncRemoteBots();
-      }
+      await openCenterManagement();
     });
 
   const applyProviderPreset = (presetId: string) => {
@@ -2300,149 +2137,6 @@ export function HostPage({
       setScreen(subPageReturnScreen);
     });
 
-  // Save Bot Extensions + Hindsight Topic & Server Host (CAS)
-  const handleSaveExtensions = () =>
-    action.run(async () => {
-      if (!activeBot) return;
-      const trimmedTopic = hindsightTopicDraft.trim();
-      const trimmedHostUrl = hindsightHostUrl.trim();
-      const trimmedApiKeyEnv = hindsightApiKeyEnv.trim() || 'HINDSIGHT_API_KEY';
-
-      updateBotMeta(activeBot.key, { hindsightTopic: trimmedTopic });
-
-      if (activeBot.hostKind === 'local') {
-        if (hindsightApiKey.trim()) {
-          await BotHost.saveCredentials({
-            aliases: { [trimmedApiKeyEnv]: hindsightApiKey.trim() },
-          });
-          setHindsightApiKey('');
-        }
-
-        const currentPayload = hindsightSettingsPayload ?? (await BotHost.settingsGet());
-        if (currentPayload && currentPayload.settings) {
-          const prevRuntime = currentPayload.settings.runtime ?? { providers: [] };
-          const prevHindsight = prevRuntime.extensions?.hindsight;
-          const nextSettings: HostSettings = {
-            ...currentPayload.settings,
-            runtime: {
-              ...prevRuntime,
-              extensions: {
-                ...(prevRuntime.extensions ?? {}),
-                hindsight: {
-                  enabled: Boolean(trimmedHostUrl) || extDraft.enabled || Boolean(prevHindsight?.enabled),
-                  defaultEnabled: prevHindsight?.defaultEnabled ?? true,
-                  ...(trimmedHostUrl
-                    ? {
-                        config: {
-                          baseUrl: trimmedHostUrl,
-                          apiKeyEnv: trimmedApiKeyEnv,
-                          sharedMemory: hindsightSharedMemory,
-                        },
-                      }
-                    : {}),
-                },
-              },
-            },
-          };
-          const updatedPayload = await BotHost.settingsSet({
-            input: {
-              expectedRevision: currentPayload.revision,
-              settings: nextSettings,
-            },
-          });
-          setHindsightSettingsPayload(updatedPayload);
-        }
-
-        const snap = await ensureLocalHostRunning();
-        if (!snap || snap.phase !== 'running') return;
-        let targetBotId = activeBot.botId;
-        if (targetBotId === '__jarvis__') {
-          const mat = await materializeJarvisIfNeeded(snap);
-          targetBotId = mat.botId;
-        }
-        const currentSnap =
-          botExtSnap && botExtSnap.botId === targetBotId
-            ? botExtSnap
-            : parseBotExtensionSnapshot(
-                (await BotHost.call({ method: 'getBotExtensions', params: { botId: targetBotId } })).result,
-              );
-        if (currentSnap) {
-          const savedEnv = await BotHost.call({
-            method: 'setBotExtensions',
-            params: {
-              botId: targetBotId,
-              input: { expectedRevision: currentSnap.revision, extensions: { hindsight: extDraft } },
-            },
-          });
-          const saved = parseBotExtensionSnapshot(savedEnv.result);
-          if (saved) {
-            setBotExtSnap(saved);
-            setExtDraft(saved.extensions.hindsight);
-          }
-        }
-
-        // Sync Hindsight Topic block into SOUL.md so the Bot focuses recall/retain on this topic
-        try {
-          const currentSoul =
-            botSoul && botSoul.botId === targetBotId
-              ? botSoul
-              : parseBotSoul((await BotHost.call({ method: 'getBotSoul', params: { botId: targetBotId } })).result);
-          if (currentSoul) {
-            const nextSoulText = syncTopicIntoSoulText(currentSoul.text, trimmedTopic);
-            if (nextSoulText !== currentSoul.text && soulBytes(nextSoulText) <= SOUL_MAX_BYTES) {
-              const savedSoulEnv = await BotHost.call({
-                method: 'setBotSoul',
-                params: {
-                  botId: targetBotId,
-                  input: { expectedRevision: currentSoul.revision, text: nextSoulText },
-                },
-              });
-              const savedSoul = parseBotSoul(savedSoulEnv.result);
-              if (savedSoul) {
-                setBotSoul(savedSoul);
-                setSoulDraft(savedSoul.text);
-              }
-            }
-          }
-        } catch {
-          // Ignore optional topic soul sync error
-        }
-        setExtDirty(false);
-      } else if (activeBot.hostKind === 'remote' && activeBot.remoteIdentity && remoteClientRef.current) {
-        const api = remoteClientRef.current.api;
-        if (botExtSnap) {
-          const res = await api.call(activeBot.remoteIdentity, 'setBotExtensions', {
-            botId: activeBot.botId,
-            input: { expectedRevision: botExtSnap.revision, extensions: { hindsight: extDraft } },
-          });
-          const saved = parseBotExtensionSnapshot(res);
-          if (saved) {
-            setBotExtSnap(saved);
-            setExtDraft(saved.extensions.hindsight);
-          }
-        }
-        if (botSoul) {
-          try {
-            const nextSoulText = syncTopicIntoSoulText(botSoul.text, trimmedTopic);
-            if (nextSoulText !== botSoul.text && soulBytes(nextSoulText) <= SOUL_MAX_BYTES) {
-              const savedSoulRes = await api.call(activeBot.remoteIdentity, 'setBotSoul', {
-                botId: activeBot.botId,
-                input: { expectedRevision: botSoul.revision, text: nextSoulText },
-              });
-              const savedSoul = parseBotSoul(savedSoulRes);
-              if (savedSoul) {
-                setBotSoul(savedSoul);
-                setSoulDraft(savedSoul.text);
-              }
-            }
-          } catch {
-            // Ignore optional remote soul sync error
-          }
-        }
-        setExtDirty(false);
-      }
-      setScreen(subPageReturnScreen);
-    });
 
   // Resolve targetBotId and primaryConversationId for Local Bot Schedule operations
   const resolveLocalBotScheduleOwner = async (): Promise<{
@@ -3349,13 +3043,7 @@ export function HostPage({
               >
                 <Puzzle size={20} className="grok-row-icon" />
                 <span className="grok-row-label">{t('长期记忆', 'Memory')}</span>
-                <span className="grok-row-value">
-                  {extDraft.enabled
-                    ? extDraft.mode === 'read-only'
-                      ? t('只读', 'Read-only')
-                      : t('已开启', 'On')
-                    : t('关闭', 'Off')}
-                </span>
+                <span className="grok-row-value">{t('中心管理', 'Center managed')}</span>
                 <ChevronRight size={18} className="grok-row-chevron" />
               </button>
 
@@ -3909,213 +3597,13 @@ export function HostPage({
                 <button
                   type="button"
                   className="grok-card-row"
-                  onClick={() => void loadBotSoulAndExtensions(activeBot)}
+                  onClick={() => void loadBotSoul(activeBot)}
                 >
                   <RefreshCw size={18} className="grok-row-icon" />
                   <span className="grok-row-label">{t('放弃未保存修改', 'Discard unsaved changes')}</span>
                 </button>
               </section>
             )}
-
-            <ErrorNotice error={action.error} />
-          </div>
-        </main>
-      )}
-
-      {/* ==================== SCREEN 7: BOT EXTENSIONS & MEMORY ==================== */}
-      {screen === 'bot-extensions' && activeBot && (
-        <main className="grok-subpage grok-page-enter">
-          <header className="grok-subpage-topbar">
-            <button
-              type="button"
-              className="grok-floating-circle-btn"
-              aria-label={t('返回', 'Back')}
-              onClick={() => setScreen(subPageReturnScreen)}
-            >
-              <ArrowLeft size={20} />
-            </button>
-            <h2 className="grok-subpage-header-title">{t('长期记忆', 'Memory')}</h2>
-            <button
-              type="button"
-              className="grok-done-pill-btn"
-              disabled={action.busy || !extDirty}
-              onClick={() => void handleSaveExtensions()}
-            >
-              {action.busy ? t('保存中', 'Saving') : t('保存', 'Save')}
-            </button>
-          </header>
-
-          <div className="grok-subpage-scroll">
-            <div className="grok-field-section">
-              <label className="grok-section-label">{t('记忆偏好', 'Memory Preferences')}</label>
-              <section className="grok-card-group">
-                <div className="grok-card-row no-active">
-                  <span className="grok-row-label">{t('启用长期记忆', 'Enable Long-Term Memory')}</span>
-                  <button
-                    type="button"
-                    role="switch"
-                    aria-checked={extDraft.enabled}
-                    className={`grok-toggle-switch${extDraft.enabled ? ' checked' : ''}`}
-                    onClick={() => {
-                      setExtDraft(prev => ({ ...prev, enabled: !prev.enabled }));
-                      setExtDirty(true);
-                    }}
-                  >
-                    <span className="grok-toggle-knob" />
-                  </button>
-                </div>
-
-                <div className="grok-card-row no-active">
-                  <span className="grok-row-label">{t('读写权限', 'Access Mode')}</span>
-                  <label className="grok-select-wrap">
-                    <select
-                      value={extDraft.mode}
-                      onChange={e => {
-                        setExtDraft(prev => ({
-                          ...prev,
-                          mode: e.target.value === 'read-only' ? 'read-only' : 'read-write',
-                        }));
-                        setExtDirty(true);
-                      }}
-                    >
-                      <option value="read-write">{t('读写', 'Read & Write')}</option>
-                      <option value="read-only">{t('仅读取', 'Read Only')}</option>
-                    </select>
-                    <ChevronsUpDown size={15} />
-                  </label>
-                </div>
-
-                <label className="grok-card-row grok-input-row">
-                  <span className="grok-input-label">{t('关注主题', 'Focus Topic')}</span>
-                  <input
-                    className="grok-inline-input"
-                    value={hindsightTopicDraft}
-                    onChange={e => {
-                      setHindsightTopicDraft(e.target.value);
-                      setExtDirty(true);
-                    }}
-                    placeholder={t('选填，如：日程偏好、项目上下文', 'Optional topic focus')}
-                  />
-                </label>
-
-                <div className="grok-card-row no-active">
-                  <span className="grok-row-label">{t('跨 Bot 共享记忆', 'Shared Across Bots')}</span>
-                  <button
-                    type="button"
-                    role="switch"
-                    aria-checked={hindsightSharedMemory}
-                    className={`grok-toggle-switch${hindsightSharedMemory ? ' checked' : ''}`}
-                    onClick={() => {
-                      setHindsightSharedMemory(prev => !prev);
-                      setExtDirty(true);
-                    }}
-                  >
-                    <span className="grok-toggle-knob" />
-                  </button>
-                </div>
-              </section>
-              <p className="grok-card-footnote">
-                {t(
-                  '开启后，Bot 会在对话中自动检索并记住关键事实与偏好。',
-                  'When enabled, the Bot automatically recalls and retains key facts across conversations.',
-                )}
-              </p>
-            </div>
-
-            <div className="grok-field-section">
-              <label className="grok-section-label">{t('记忆服务连接', 'Memory Server')}</label>
-              <section className="grok-card-group">
-                <label className="grok-card-row grok-input-row">
-                  <span className="grok-input-label">{t('服务地址', 'Server URL')}</span>
-                  <input
-                    className="grok-inline-input"
-                    value={hindsightHostUrl}
-                    onChange={e => {
-                      setHindsightHostUrl(e.target.value);
-                      setExtDirty(true);
-                    }}
-                    placeholder="http://127.0.0.1:8888"
-                  />
-                </label>
-
-                <label className="grok-card-row grok-input-row">
-                  <span className="grok-input-label">{t('访问密钥', 'API Key')}</span>
-                  <input
-                    type="password"
-                    className="grok-inline-input"
-                    value={hindsightApiKey}
-                    onChange={e => {
-                      setHindsightApiKey(e.target.value);
-                      setExtDirty(true);
-                    }}
-                    placeholder={
-                      (hindsightSettingsPayload as { credentialStatus?: Record<string, boolean> } | null)
-                        ?.credentialStatus?.[hindsightApiKeyEnv.trim() || 'HINDSIGHT_API_KEY']
-                        ? t('已保存（留空保持不变）', 'Saved (blank to keep)')
-                        : t('选填', 'Optional')
-                    }
-                  />
-                </label>
-
-                {hindsightBankStatus && (
-                  <div className="grok-card-row no-active">
-                    <span className="grok-row-label">{t('同步状态', 'Sync Status')}</span>
-                    <span className="grok-row-value grok-row-value-path">
-                      {`${hindsightBankStatus.bankId || 'default'} · ${t('已就绪', 'Done')} ${hindsightBankStatus.completed ?? 0}`}
-                    </span>
-                  </div>
-                )}
-              </section>
-            </div>
-
-            <details className="grok-advanced-details">
-              <summary>{t('高级参数与工具权限', 'Advanced & Tool Permissions')}</summary>
-              <div className="grok-advanced-body">
-                <section className="grok-card-group">
-                  <label className="grok-card-row grok-input-row">
-                    <span className="grok-input-label">{t('密钥环境变量', 'Key Env')}</span>
-                    <input
-                      className="grok-inline-input"
-                      value={hindsightApiKeyEnv}
-                      onChange={e => {
-                        setHindsightApiKeyEnv(e.target.value);
-                        setExtDirty(true);
-                      }}
-                      placeholder="HINDSIGHT_API_KEY"
-                    />
-                  </label>
-                </section>
-                <section className="grok-card-group" style={{ padding: 14 }}>
-                  <div className="tool-gating-row" style={{ marginBottom: 10 }}>
-                    <span className="tool-gating-label">
-                      {t(`读取工具 (${HINDSIGHT_READ_TOOLS.length})`, `Read tools (${HINDSIGHT_READ_TOOLS.length})`)}
-                    </span>
-                    <div className="tool-gating-chips">
-                      {HINDSIGHT_READ_TOOLS.map(name => (
-                        <code key={name} className={`gating-chip ${extDraft.enabled ? 'allowed' : 'gated'}`}>
-                          {`${extDraft.enabled ? '✓' : '🚫'} ${name}`}
-                        </code>
-                      ))}
-                    </div>
-                  </div>
-                  <div className="tool-gating-row">
-                    <span className="tool-gating-label">
-                      {t(`写入工具 (${HINDSIGHT_WRITE_TOOLS.length})`, `Write tools (${HINDSIGHT_WRITE_TOOLS.length})`)}
-                    </span>
-                    <div className="tool-gating-chips">
-                      {HINDSIGHT_WRITE_TOOLS.map(name => {
-                        const allowed = extDraft.enabled && extDraft.mode === 'read-write';
-                        return (
-                          <code key={name} className={`gating-chip ${allowed ? 'allowed' : 'gated'}`}>
-                            {`${allowed ? '✓' : '🚫'} ${name}`}
-                          </code>
-                        );
-                      })}
-                    </div>
-                  </div>
-                </section>
-              </div>
-            </details>
 
             <ErrorNotice error={action.error} />
           </div>

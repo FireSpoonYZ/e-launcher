@@ -643,7 +643,7 @@ export class App extends Component<AppProps, AppState> {
     const pageActive = this.props.pageActive !== false;
     const snapshot = api.snapshot;
     if (view === 'settings') {
-      return <SettingsPanel api={api} identity={identity} transportConnected={transportConnected} />;
+      return <SettingsPanel />;
     }
     if (view === 'pending') {
       return <PendingPanel api={api} identity={identity} transportConnected={transportConnected} />;

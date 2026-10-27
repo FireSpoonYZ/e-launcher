@@ -1,9 +1,9 @@
-// Bot 设置（desktop/远程页，lane H）：每 Bot 独立的 Hindsight 扩展开关/只读策略与 SOUL.md 编辑。
+// Bot 设置（desktop/远程页）：SOUL.md 编辑。
 // 显式读取 + CAS 保存：冲突/结果未确认只锁保存，只有显式“采用远端设置（丢弃本地修改）”才换基线；
 // 未保存草稿连同其原始基线（含 revision）按 profile+target+bot 保留，自动读取绝不替换 dirty 部分的基线，
 // 因此旧草稿不会拿到未看过的远端 revision 去覆盖远端；不自动重放、不跨 Host 串数据。
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { BotExtensions, BotExtensionSnapshot, BotSoul } from '../../../host-core/index.js';
+import type { BotSoul } from '../../../host-core/index.js';
 import { toError } from './api';
 import { openCenterManagement } from './CenterGate';
 import type { DesktopIdentity, DesktopViewApi } from './types';
@@ -30,25 +30,9 @@ const SOUL_SNIPPETS: { label: string; content: string }[] = [
   },
 ];
 
-const HINDSIGHT_READ_TOOLS = [
-  'hindsight_status',
-  'hindsight_recall',
-  'hindsight_reflect',
-  'hindsight_get',
-  'hindsight_source',
-] as const;
-
-const HINDSIGHT_WRITE_TOOLS = [
-  'hindsight_retain',
-  'hindsight_correct',
-  'hindsight_retry',
-] as const;
-
 /** 一个 Bot 的本地编辑状态：草稿与其原始基线成对保存，切走/重挂载后 CAS 仍指向同一远端版本。 */
 interface Cached {
-  snapshot: BotExtensionSnapshot | null;
   soul: BotSoul | null;
-  extDraft: BotExtensions | null;
   soulDraft: string | null;
   /** 上次保存冲突/结果未确认：锁定保存，直到用户显式采用远端。 */
   lock: boolean;
@@ -61,19 +45,8 @@ function cacheKey(identity: DesktopIdentity, botId: string): string {
   return `${identity.profileId}\u0000${identity.targetDeviceId}\u0000${botId}`;
 }
 
-function sameExtensions(a: BotExtensions, b: BotExtensions): boolean {
-  return a.hindsight.enabled === b.hindsight.enabled && a.hindsight.mode === b.hindsight.mode;
-}
-
 function soulBytes(text: string): number {
   return new TextEncoder().encode(text).length;
-}
-
-function reasonText(reason: BotExtensionSnapshot['effective']['hindsight']['reason']): string {
-  if (reason === 'bot-disabled') return '本 Bot 已关闭';
-  if (reason === 'host-disabled') return 'Host 全局关闭';
-  if (reason === 'not-configured') return 'Host 未配置 Hindsight';
-  return '生效';
 }
 
 export function BotSettings({
@@ -92,13 +65,11 @@ export function BotSettings({
   const key = identity ? cacheKey(identity, botId) : '';
   const cached = key ? draftCache.get(key) : undefined;
 
-  const [snapshot, setSnapshot] = useState<BotExtensionSnapshot | null>(cached?.snapshot ?? null);
   const [soul, setSoul] = useState<BotSoul | null>(cached?.soul ?? null);
-  const [extDraft, setExtDraft] = useState<BotExtensions | null>(cached?.extDraft ?? null);
   const [soulDraft, setSoulDraft] = useState<string | null>(cached?.soulDraft ?? null);
   const [locked, setLocked] = useState(!!cached?.lock);
   const [loading, setLoading] = useState(false);
-  const [saving, setSaving] = useState<'extensions' | 'soul' | null>(null);
+  const [saving, setSaving] = useState<'soul' | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [studioTab, setStudioTab] = useState<'all' | 'soul' | 'extensions'>('soul');
@@ -109,8 +80,8 @@ export function BotSettings({
   /** 写入代次：保存成功后作废发起更早的读取响应，避免把旧 revision 当基线。 */
   const writeSeqRef = useRef(0);
   /** 最近一次渲染的本地状态；响应应用时按“当前”状态判断该部分是否已被编辑。 */
-  const liveRef = useRef<Cached>({ snapshot: null, soul: null, extDraft: null, soulDraft: null, lock: false });
-  liveRef.current = { snapshot, soul, extDraft, soulDraft, lock: locked };
+  const liveRef = useRef<Cached>({ soul: null, soulDraft: null, lock: false });
+  liveRef.current = { soul, soulDraft, lock: locked };
 
   useEffect(() => {
     mountedRef.current = true;
@@ -129,16 +100,6 @@ export function BotSettings({
     if (!key) return;
     draftCache.set(key, { ...liveRef.current, ...patch });
   }, [key]);
-
-  /** 改回与当前基线一致即归一为无草稿：此时普通“重新读取”才能刷新基线与 revision。 */
-  function updateExt(next: BotExtensions | null): void {
-    const base = liveRef.current.snapshot;
-    const draft = next && base && sameExtensions(next, base.extensions) ? null : next;
-    setExtDraft(draft);
-    setNotice(null);
-    liveRef.current = { ...liveRef.current, extDraft: draft };
-    remember({ extDraft: draft });
-  }
 
   // SOUL 逐字节比较，不 trim：空内容与尾部空白都是有效文本。
   function updateSoul(next: string | null): void {
@@ -165,17 +126,12 @@ export function BotSettings({
     const writesAtStart = writeSeqRef.current;
     setLoading(true);
     try {
-      const [snap, doc] = await Promise.all([
-        api.call(id, 'getBotExtensions', { botId }),
-        api.call(id, 'getBotSoul', { botId }),
-      ]);
+      const doc = await api.call(id, 'getBotSoul', { botId });
       if (stale(sel) || seq !== seqRef.current || writesAtStart !== writeSeqRef.current) return;
       if (adoptRemote) {
         // 唯一允许更新基线并丢弃本地草稿的入口（显式动作）。
-        const adopted: Cached = { snapshot: snap, soul: doc, extDraft: null, soulDraft: null, lock: false };
-        setSnapshot(snap);
+        const adopted: Cached = { soul: doc, soulDraft: null, lock: false };
         setSoul(doc);
-        setExtDraft(null);
         setSoulDraft(null);
         setLocked(false);
         setError(null);
@@ -186,20 +142,16 @@ export function BotSettings({
       }
       // 普通读取：已编辑部分保持原基线（请求发起后用户才开始编辑也按当前状态判断）。
       const live = liveRef.current;
-      const extPinned = live.extDraft !== null;
       const soulPinned = live.soulDraft !== null;
-      const nextSnapshot = extPinned && live.snapshot ? live.snapshot : snap;
       const nextSoul = soulPinned && live.soul ? live.soul : doc;
-      setSnapshot(nextSnapshot);
       setSoul(nextSoul);
       if (!live.lock) setError(null);
       if (
-        (extPinned && live.snapshot && live.snapshot.revision !== snap.revision) ||
         (soulPinned && live.soul && live.soul.revision !== doc.revision)
       ) {
         setNotice('远端已更新：本地未保存草稿保持原基线，保存会得到冲突提示；需要远端内容请用“采用远端设置（丢弃本地修改）”。');
       }
-      remember({ snapshot: nextSnapshot, soul: nextSoul });
+      remember({ soul: nextSoul });
     } catch (e) {
       if (stale(sel) || seq !== seqRef.current) return;
       setError(`读取 Bot 设置失败：${toError(e).message}`);
@@ -212,9 +164,7 @@ export function BotSettings({
   // 首次/换 Bot：草稿与基线一起从缓存恢复后显式读取；不自动写回任何内容。
   useEffect(() => {
     const saved = key ? draftCache.get(key) : undefined;
-    setSnapshot(saved?.snapshot ?? null);
     setSoul(saved?.soul ?? null);
-    setExtDraft(saved?.extDraft ?? null);
     setSoulDraft(saved?.soulDraft ?? null);
     setLocked(!!saved?.lock);
     setError(null);
@@ -231,18 +181,13 @@ export function BotSettings({
     prevOnline.current = online;
   }, [online, key, load]);
 
-  const baseExtensions = snapshot ? snapshot.extensions : null;
-  const extValue = extDraft ?? baseExtensions;
-  const extDirty = !!extDraft && !!baseExtensions && !sameExtensions(extDraft, baseExtensions);
   const soulValue = soulDraft ?? soul?.text ?? '';
   const soulDirty = soulDraft !== null && !!soul && soulDraft !== soul.text;
   // 读取（含“采用远端”）在途时同样锁住编辑与保存：点击后才输入的内容不会被迟到的采用结果清掉。
   const busy = saving !== null || loading;
   const saveBusy = busy || !online;
-  const canSaveExt = !saveBusy && !!snapshot && extDirty && !locked;
   const canSaveSoul = !saveBusy && !!soul && soulDirty && !locked;
-  const dirty = extDirty || soulDirty;
-  const effective = snapshot ? snapshot.effective.hindsight : null;
+  const dirty = soulDirty;
   const currentBytes = soulBytes(soulValue);
   const bytePct = Math.min(100, Math.round((currentBytes / SOUL_MAX_BYTES) * 100));
   const byteOverLimit = currentBytes > SOUL_MAX_BYTES;
@@ -267,36 +212,6 @@ export function BotSettings({
     }
     // 其他确定性拒绝（未下发）：不锁保存，可修正后重试。
     setError(`${what}保存被拒绝（${err.code}）：${err.message}。草稿已保留，可修正后重试。`);
-  }
-
-  async function saveExtensions(): Promise<void> {
-    const id = api.identity;
-    if (!id || !snapshot || !extValue || busy || locked || !online) return;
-    if (!extDirty) {
-      updateExt(null);
-      return;
-    }
-    const sel = cacheKey(id, botId);
-    setSaving('extensions');
-    setError(null);
-    setNotice(null);
-    try {
-      const updated = await api.call(id, 'setBotExtensions', {
-        botId,
-        input: { expectedRevision: snapshot.revision, extensions: extValue },
-      });
-      if (stale(sel)) return;
-      writeSeqRef.current += 1;
-      liveRef.current = { ...liveRef.current, snapshot: updated, extDraft: null };
-      setSnapshot(updated);
-      setExtDraft(null);
-      remember({ snapshot: updated, extDraft: null });
-      setNotice('扩展设置已保存：下一请求生效，进行中的任务与历史不变。');
-    } catch (e) {
-      reportSaveFailure(e, sel, '扩展设置');
-    } finally {
-      if (mountedRef.current) setSaving(null);
-    }
   }
 
   async function saveSoul(): Promise<void> {
@@ -331,7 +246,6 @@ export function BotSettings({
     }
   }
 
-  const showExtPanel = false;
   const showSoulPanel = studioTab === 'all' || studioTab === 'soul';
 
   return (
@@ -344,13 +258,8 @@ export function BotSettings({
     >
       <summary className="soul-studio-summary">
         <div className="soul-studio-summary-main">
-          <h4>{`✨ Bot 设置（扩展 · SOUL）${dirty ? ' · 已修改' : ''}`}</h4>
+          <h4>{`✨ Bot 设置（SOUL）${dirty ? ' · 已修改' : ''}`}</h4>
           <span className="soul-studio-badges">
-            {effective ? (
-              <span className={`studio-pill ${effective.enabled ? (effective.mode === 'read-only' ? 'blue' : 'emerald') : 'muted'}`}>
-                {`Hindsight: ${effective.enabled ? (effective.mode === 'read-only' ? '只读' : '读写') : '关闭'}`}
-              </span>
-            ) : null}
             {soul ? (
               <span className={`studio-pill ${soulDirty ? 'amber' : 'purple'}`}>
                 {`SOUL.md · ${currentBytes} B`}
@@ -389,7 +298,7 @@ export function BotSettings({
         </div>
 
         {!online ? <div className="status">离线：显示最后读取的设置，保存已禁用。</div> : null}
-        {loading && !snapshot ? <div className="status">加载中…</div> : null}
+        {loading && !soul ? <div className="status">加载中…</div> : null}
         {error ? (
           <div className="error-banner" role="alert">
             {error}
@@ -405,157 +314,6 @@ export function BotSettings({
         ) : null}
 
         <div className={`form-grid soul-studio-grid ${studioTab !== 'all' ? 'single-col' : ''}`}>
-          {showExtPanel ? (
-            <div className="field studio-card">
-              <div className="studio-card-header">
-                <label>🧩 Hindsight 扩展策略与工具门控</label>
-                {snapshot ? <span className="studio-pill mono">{`CAS rev ${snapshot.revision}`}</span> : null}
-              </div>
-              {snapshot && extValue ? (
-                <>
-                  <div className="metadata">
-                    {`revision ${snapshot.revision}${extDirty ? '（本地草稿基线）' : ''} · 远端生效：${effective && effective.enabled ? effective.mode : '关闭'}（${effective ? reasonText(effective.reason) : '—'}）`}
-                  </div>
-
-                  {/* 三阶生效流水线可视化 */}
-                  <div className="effective-pipeline">
-                    <span className={`studio-pill ${effective?.reason === 'host-disabled' || effective?.reason === 'not-configured' ? 'amber' : 'emerald'}`}>
-                      {`1. Host: ${effective?.reason === 'host-disabled' ? '全局关闭' : effective?.reason === 'not-configured' ? '未配置' : '已就绪'}`}
-                    </span>
-                    <span className="pipeline-arrow">➔</span>
-                    <span className="studio-pill blue">
-                      {`2. Bot 策略: ${extValue.hindsight.enabled ? (extValue.hindsight.mode === 'read-only' ? '开启 · 只读' : '开启 · 读写') : '关闭'}`}
-                    </span>
-                    <span className="pipeline-arrow">➔</span>
-                    <span className={`studio-pill ${effective?.enabled ? 'emerald' : 'muted'}`}>
-                      {`⚡ 实际生效: ${effective && effective.enabled ? effective.mode : '关闭'}`}
-                    </span>
-                  </div>
-
-                  {/* 三态可视化档位选择（与下方标准 checkbox/radio 保持 100% 同步） */}
-                  <div className="policy-mode-grid">
-                    <button
-                      type="button"
-                      disabled={saveBusy}
-                      className={`policy-mode-btn ${!extValue.hindsight.enabled ? 'active' : ''}`}
-                      onClick={() => updateExt({ ...extValue, hindsight: { ...extValue.hindsight, enabled: false } })}
-                    >
-                      <strong>🚫 关闭 (Off)</strong>
-                      <span>隐藏全部 8 个工具，跳过自动召回与记录</span>
-                    </button>
-                    <button
-                      type="button"
-                      disabled={saveBusy}
-                      className={`policy-mode-btn ${extValue.hindsight.enabled && extValue.hindsight.mode === 'read-only' ? 'active' : ''}`}
-                      onClick={() => updateExt({ ...extValue, hindsight: { enabled: true, mode: 'read-only' } })}
-                    >
-                      <strong>👁️ 只读 (Read-Only)</strong>
-                      <span>开放 5 个查询工具；隐藏写入并暂停自动抽取</span>
-                    </button>
-                    <button
-                      type="button"
-                      disabled={saveBusy}
-                      className={`policy-mode-btn ${extValue.hindsight.enabled && extValue.hindsight.mode === 'read-write' ? 'active' : ''}`}
-                      onClick={() => updateExt({ ...extValue, hindsight: { enabled: true, mode: 'read-write' } })}
-                    >
-                      <strong>✍️ 读写 (Read-Write)</strong>
-                      <span>开放全部 8 个工具，开启自动召回与抽取写入</span>
-                    </button>
-                  </div>
-
-                  <label className="field checkbox-field">
-                    <input
-                      type="checkbox"
-                      checked={extValue.hindsight.enabled}
-                      disabled={saveBusy}
-                      onChange={(e) => {
-                        updateExt({ ...extValue, hindsight: { ...extValue.hindsight, enabled: e.target.checked } });
-                      }}
-                    />
-                    为该 Bot 启用 Hindsight
-                  </label>
-                  <div className="kind-row">
-                    <label>
-                      <input
-                        type="radio"
-                        name={`hindsight-mode-${botId}`}
-                        checked={extValue.hindsight.mode === 'read-write'}
-                        disabled={saveBusy || !extValue.hindsight.enabled}
-                        onChange={() => {
-                          updateExt({ ...extValue, hindsight: { ...extValue.hindsight, mode: 'read-write' } });
-                        }}
-                      />
-                      读写（read-write）
-                    </label>
-                    <label>
-                      <input
-                        type="radio"
-                        name={`hindsight-mode-${botId}`}
-                        checked={extValue.hindsight.mode === 'read-only'}
-                        disabled={saveBusy || !extValue.hindsight.enabled}
-                        onChange={() => {
-                          updateExt({ ...extValue, hindsight: { ...extValue.hindsight, mode: 'read-only' } });
-                        }}
-                      />
-                      只读（read-only）
-                    </label>
-                  </div>
-
-                  {/* 实时 8 工具门控预览矩阵 */}
-                  <div className="tool-gating-box">
-                    <div className="tool-gating-head">
-                      <span>🛠️ 工具门控实时预览 (disabledToolNames)</span>
-                      <span className="mono">
-                        {!extValue.hindsight.enabled
-                          ? '0 / 8 工具启用'
-                          : extValue.hindsight.mode === 'read-only'
-                            ? '5 查询启用 · 3 写入屏蔽'
-                            : '8 / 8 工具全部启用'}
-                      </span>
-                    </div>
-                    <div className="tool-gating-chips">
-                      {HINDSIGHT_READ_TOOLS.map((toolName) => {
-                        const allowed = extValue.hindsight.enabled;
-                        return (
-                          <span key={toolName} className={`gating-chip ${allowed ? 'allowed' : 'blocked'}`}>
-                            <code>{toolName}</code>
-                            <span>{allowed ? '✓ 允许' : '🚫 隐藏'}</span>
-                          </span>
-                        );
-                      })}
-                      {HINDSIGHT_WRITE_TOOLS.map((toolName) => {
-                        const allowed = extValue.hindsight.enabled && extValue.hindsight.mode === 'read-write';
-                        return (
-                          <span key={toolName} className={`gating-chip ${allowed ? 'allowed' : 'blocked'}`}>
-                            <code>{toolName}</code>
-                            <span>
-                              {allowed ? '✓ 允许' : extValue.hindsight.enabled ? '🔒 只读屏蔽' : '🚫 隐藏'}
-                            </span>
-                          </span>
-                        );
-                      })}
-                    </div>
-                  </div>
-
-                  <p className="hint">
-                    只读允许状态/回忆/反思/读取，拒绝写入并暂停自动写入；关闭会隐藏该 Bot 的全部 Hindsight 工具并跳过自动回忆/记录。
-                    不影响其他 Bot；关闭或只读期间完成的对话（推进 retentionFloor）不会在重新开启后补写。
-                  </p>
-                  <div className="form-actions">
-                    <button onClick={() => void saveExtensions()} disabled={!canSaveExt}>
-                      {saving === 'extensions' ? '保存中…' : '保存扩展设置（CAS）'}
-                    </button>
-                    <button onClick={() => updateExt(null)} disabled={!extDirty || busy}>
-                      放弃扩展修改
-                    </button>
-                  </div>
-                </>
-              ) : (
-                <div className="metadata">{loading ? '读取中…' : '尚未读取'}</div>
-              )}
-            </div>
-          ) : null}
-
           {showSoulPanel ? (
             <div className="field studio-card">
               <div className="studio-card-header">

@@ -5,7 +5,6 @@ import type {
   BotLiveState,
   BotRecord,
   LiveMessage,
-  ModelCatalog,
   PendingEnqueueInput,
   PendingRecord,
 } from '../../../host-core/index.js';
@@ -133,15 +132,13 @@ function RawHistoryPane({ items, loading, error, onLoadMore, hasMore, onRetry, o
   );
 }
 
-function CreateBotForm({ api, catalog, onCreated }: {
+function CreateBotForm({ api, onCreated }: {
   api: DesktopViewApi;
-  catalog: ModelCatalog | null;
   onCreated: (b: BotRecord) => void;
 }) {
   const identity = api.identity;
   const [role, setRole] = useState('');
   const [cwd, setCwd] = useState('');
-  const [modelRef, setModelRef] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const mountedRef = useRef(true);
@@ -171,7 +168,6 @@ function CreateBotForm({ api, catalog, onCreated }: {
       if (!mountedRef.current) return;
       setRole('');
       setCwd('');
-      setModelRef('');
       onCreated(bot);
     } catch (e) {
       if (!mountedRef.current) return;
@@ -768,7 +764,6 @@ export function BotChats({ api, pageActive = true }: { api: DesktopViewApi; page
   const online = api.transportConnected;
   const [bots, setBots] = useState<BotRecord[]>([]);
   const [botsError, setBotsError] = useState<string | null>(null);
-  const [catalog, setCatalog] = useState<ModelCatalog | null>(null);
   const [selectedBotId, setSelectedBotId] = useState<string | null>(null);
   const [showCreate, setShowCreate] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -782,13 +777,9 @@ export function BotChats({ api, pageActive = true }: { api: DesktopViewApi; page
     setLoading(true);
     void (async () => {
       try {
-        const [bs, cat] = await Promise.all([
-          api.call(identity, 'listBots', {}),
-          api.call(identity, 'getModelCatalog', {}),
-        ]);
+        const bs = await api.call(identity, 'listBots', {});
         if (!cancelled && sessionKey(api.identity) === localSess) {
           setBots(bs);
-          setCatalog(cat);
           setBotsError(null);
           setLoading(false);
         }
@@ -809,7 +800,6 @@ export function BotChats({ api, pageActive = true }: { api: DesktopViewApi; page
     if (targetKey === null) {
       targetKeyRef.current = null;
       setBots([]);
-      setCatalog(null);
       setBotsError(null);
       setSelectedBotId(null);
       setLoading(false);
@@ -818,7 +808,6 @@ export function BotChats({ api, pageActive = true }: { api: DesktopViewApi; page
     if (targetKeyRef.current !== targetKey) {
       targetKeyRef.current = targetKey;
       setBots([]);
-      setCatalog(null);
       setBotsError(null);
       setSelectedBotId(null);
     }
@@ -851,7 +840,6 @@ export function BotChats({ api, pageActive = true }: { api: DesktopViewApi; page
         {showCreate && identity ? (
           <CreateBotForm
             api={api}
-            catalog={catalog}
             onCreated={(bot) => {
               setSelectedBotId(bot.botId);
               setBots((prev) => (prev.some((b) => b.botId === bot.botId) ? prev : [...prev, bot]));
