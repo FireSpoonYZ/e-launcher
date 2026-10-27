@@ -1,5 +1,7 @@
 # 中心平台并行实施分工
 
+开始实现前必须读取 [父助手派发补充](center-platform-dispatch-addendum.md)，其中包含接口冻结后的最新文件职责，优先于首次任务消息中的旧路径列举。
+
 基线：c92a80dc5244be1df6d040494fe2366b094e0a33。集成目录：C:/Users/firespoon/orca/workspaces/e-launcher/center-platform-development。
 
 所有 worker 使用 openai/gpt-6.1-terra:xhigh，框架为每人创建独立 managed worktree。允许静态开发和提交自己的代码；禁止测试、构建、类型/语法检查、依赖安装、运行服务以及自行派发代理。父助手负责合并与全部运行验证。原工作区不写入。
