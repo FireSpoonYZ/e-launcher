@@ -206,6 +206,7 @@ function showerTarget(params) {
 // calls the local abort API. getHostInfo is handled separately after identity
 // verification. Map avoids inherited prototype keys being treated as methods.
 const METHOD_HANDLERS = new Map([
+  ['getServiceStatus', (control, params, signal) => control.getServiceStatus({ signal })],
   ['listBots', (control, params, signal) => control.listBots({ signal })],
   ['createBot', (control, params, signal) => control.createBot(params, { signal })],
   ['getBot', (control, params, signal) => control.getBot(params.botId, { signal })],

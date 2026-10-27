@@ -1094,12 +1094,6 @@ export interface HostExtensionManager {
   close(): Promise<void>;
 }
 
-export function createHostExtensionManager(options: {
-  host: Host;
-  extensions?: RuntimeExtensionsConfig;
-  hindsight?: HindsightOptions;
-}): HostExtensionManager;
-
 /**
  * Module 7 types: host-owned persistent message ledger (messages.sqlite) on
  * this Host. Local-only storage plus a privileged offline CLI; no network
@@ -1657,6 +1651,7 @@ export type RemoteControlOutcome = 'not-sent' | 'unconfirmed' | 'responded';
  */
 export interface RemoteControlMethodMap {
   getHostInfo: { params: Record<string, never>; result: ControlHostInfo };
+  getServiceStatus: { params: Record<string, never>; result: HostServiceStatus };
   listBots: { params: Record<string, never>; result: BotRecord[] };
   createBot: { params: CreateBotInput; result: BotRecord };
   getBot: { params: { botId: string }; result: BotRecord };

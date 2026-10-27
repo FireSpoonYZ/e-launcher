@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdir, rename, rm, writeFile } from 'node:fs/promises';
+import { access, mkdir, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { digest, extractArtifact, readJson } from './archive.js';
 
@@ -13,8 +13,13 @@ async function writeJson(file, value) {
   await rename(temp, file);
 }
 
-export function runNpm(npmPath, args, cwd) {
+export async function runNpm(npmPath, args, cwd) {
   if (!npmPath) throw Object.assign(new Error('npm CLI is unavailable'), { code: 'NPM_UNAVAILABLE' });
+  try { await access(npmPath); }
+  catch (error) {
+    if (error.code === 'ENOENT') throw Object.assign(new Error('npm CLI is unavailable'), { code: 'NPM_UNAVAILABLE' });
+    throw error;
+  }
   const script = /\.[cm]?js$/i.test(npmPath);
   return new Promise((resolve, reject) => {
     const child = spawn(script ? process.execPath : npmPath, script ? [npmPath, ...args] : args, {

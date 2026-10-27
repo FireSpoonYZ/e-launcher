@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { createRequire } from 'node:module';
 import { openHost } from './host.js';
 import { openHostSettings, normalizeHostSettings } from './host-settings.js';
 import { applyCenterModels, parseExecutionOptions } from './runtime-models.js';
@@ -42,6 +43,7 @@ export async function openHostService(options) {
   let state = { state: 'connecting', centerUrl: center.url, appliedRevision: null, error: null };
   let activeRevision, lastRevision, frozen, timer, deploymentTimer;
   let generation = 0;
+  let activationRevision = 0;
   let pendingChange = false;
   let serial = Promise.resolve();
   const enqueue = (fn) => {
@@ -54,7 +56,7 @@ export async function openHostService(options) {
     const previous = client;
     client = null;
     if (previous) void previous.close();
-    state = { ...state, state: 'disconnected', error: { code: 'CENTER_OFFLINE', message: 'center disconnected' } };
+    state = { ...state, state: 'disconnected', appliedRevision: null, error: { code: 'CENTER_OFFLINE', message: 'center disconnected' } };
     if (control) void control.setCenterOnline(false).catch(() => {});
     if (!closed) scheduleReconnect();
   }
@@ -93,10 +95,13 @@ export async function openHostService(options) {
         deploymentTimer = null;
         void enqueue(async () => {
           if (!client || closed) return;
-          try { if (!await applyPlans(client)) await refresh(); }
-          catch { disconnect(); }
+          try {
+            const before = activationRevision;
+            await applyPlans(client);
+            if (activationRevision !== before) await refresh(false, true);
+          } catch { disconnect(); }
         });
-      }, 5000);
+      }, 1000);
       deploymentTimer.unref?.();
     }
     return waiting;
@@ -120,14 +125,14 @@ export async function openHostService(options) {
     if (gen !== generation || current !== client) { await control.setCenterOnline(false); throw offlineError(); }
     state = { state: 'ready', centerUrl: center.url, appliedRevision: snapshot.revision, error: null };
   }
-  async function refresh(bootstrap = false) {
+  async function refresh(bootstrap = false, plansApplied = false) {
     const current = client;
     const gen = generation;
     if (!current) throw offlineError();
-    state = { ...state, state: 'connecting' };
+    state = { ...state, state: 'connecting', appliedRevision: null };
     await control.setCenterOnline(false);
     const snapshot = bootstrap ? (await current.bootstrap(readBots())).snapshot : await current.getSnapshot();
-    try { await apply(snapshot, current, gen); }
+    try { await apply(snapshot, current, gen, { plansApplied }); }
     catch (err) {
       if (current === client) {
         await control.setCenterOnline(false);
@@ -141,7 +146,7 @@ export async function openHostService(options) {
     generation++;
     pendingChange = true;
     if (control) {
-      state = { ...state, state: 'connecting' };
+      state = { ...state, state: 'connecting', appliedRevision: null };
       void control.setCenterOnline(false).catch(() => {});
       void enqueue(async () => {
         if (!pendingChange || !client || closed) return;
@@ -183,12 +188,22 @@ export async function openHostService(options) {
     const snapshot = (await current.bootstrap(readBots())).snapshot;
     if (snapshot.deviceId !== deviceId || snapshot.protocol !== 1) throw invalidArgument('invalid center snapshot');
     parseRelayUrl(snapshot.linkUrl);
+    let installedNpmPath = npmPath;
+    if (!installedNpmPath && !nativeBridge && !process.env.ANDROID_ROOT) {
+      try { installedNpmPath = path.join(path.dirname(createRequire(import.meta.url).resolve('npm/package.json')), 'bin', 'npm-cli.js'); }
+      catch (error) { if (error.code !== 'MODULE_NOT_FOUND') throw error; }
+    }
     installer = await openManagedInstaller({
-      dataRoot, npmPath,
+      dataRoot, npmPath: installedNpmPath,
       fetchArtifact: (ref) => { if (!client) throw offlineError(); return client.fetchArtifact(ref); },
       report: (receipt) => { if (!client) throw offlineError(); return client.reportDeployment(receipt); },
       withActivation: async (id, publish) => {
-        if (control) return control.withCapabilityActivation(id, publish);
+        if (control) return control.withCapabilityActivation(id, async () => {
+          state = { ...state, state: 'connecting', appliedRevision: null };
+          await control.setCenterOnline(false);
+          await publish();
+          activationRevision++;
+        });
         await publish();
         return true;
       },
@@ -203,7 +218,7 @@ export async function openHostService(options) {
       centerRuntime: { snapshot, getClient: () => client ?? null, installer },
       onBotsChanged: () => {
         generation++;
-        state = { ...state, state: 'connecting' };
+        state = { ...state, state: 'connecting', appliedRevision: null };
         void control.setCenterOnline(false).catch(() => {});
         return enqueue(async () => { try { await refresh(true); } catch (err) { disconnect(); throw err; } });
       },
@@ -229,7 +244,7 @@ export async function openHostService(options) {
     if (frozen) return structuredClone(frozen);
     const revision = settingsStore.get().revision;
     lastRevision = revision;
-    return { deviceId, phase, control: { url: control.url, listening: true }, relay: link.getStatus(), activeSettingsRevision: activeRevision, settingsRevision: revision, restartRequired: revision !== activeRevision, center: { ...state } };
+    return { deviceId, phase, control: { url: control.url, listening: true }, relay: link?.getStatus() ?? null, activeSettingsRevision: activeRevision, settingsRevision: revision, restartRequired: revision !== activeRevision, center: { ...state } };
   }
   let closePromise;
   return {

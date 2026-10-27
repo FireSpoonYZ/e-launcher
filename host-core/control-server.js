@@ -1,6 +1,8 @@
 // 模块 5：本机长期控制服务。认证与 HTTP IO 边界由 control-http.js 提供；
 // 本文件只负责路由、并发跟踪与生命周期/资源释放。
 import http from 'node:http';
+import { isDeepStrictEqual } from 'node:util';
+import { normalizeHostSettings } from './host-settings.js';
 import { openHost } from './host.js';
 import { openRuntime } from './runtime.js';
 import { validateCenterProvider, discoverCenterProviderModels } from './runtime-models.js';
@@ -134,6 +136,7 @@ export async function openControlServer(options) {
     settingsStore,
     activeRevision,
     getServiceStatus: getServiceStatus ?? null,
+    centerManaged: Boolean(runtimeOptions.centerRuntime),
     onBotsChanged,
   };
   assertPort(port);
@@ -319,6 +322,9 @@ async function listBots(host, runtime, params, body, req, res) {
 }
 
 async function createBot(host, runtime, params, body, req, res, ctx) {
+  if (ctx.centerManaged && body?.modelRef != null) {
+    throw new ControlHttpError(403, 'INVALID_ARGUMENT', 'bot models are managed by the center');
+  }
   const bot = host.createBot(body);
   if (ctx.onBotsChanged) await ctx.onBotsChanged();
   // 去重重试也重跑幂等初始化：登记记录先落地，初始化失败可重试完成。
@@ -569,8 +575,20 @@ async function getSettings(host, runtime, params, body, req, res, ctx) {
 async function putSettings(host, runtime, params, body, req, res, ctx) {
   assertNoQuery(req);
   if (!ctx.settingsStore) throw new ControlHttpError(503, 'CONTROL_UNAVAILABLE', 'settings store is not configured');
-  const snapshot = ctx.settingsStore.replace(validateSettingsUpdate(body));
-  try { runtime?.reloadModels?.(snapshot.settings?.runtime); } catch { /* ignore */ }
+  const update = validateSettingsUpdate(body);
+  if (ctx.centerManaged) {
+    const previous = ctx.settingsStore.get().settings.runtime;
+    const next = normalizeHostSettings(update.settings).runtime;
+    for (const field of ['providers', 'defaultModel', 'thinkingLevel', 'hindsight', 'extensions']) {
+      if (!isDeepStrictEqual(previous[field], next[field])) {
+        throw new ControlHttpError(403, 'INVALID_ARGUMENT', 'provider, model and extension settings are managed by the center');
+      }
+    }
+  }
+  const snapshot = ctx.settingsStore.replace(update);
+  if (!ctx.centerManaged) {
+    try { runtime?.reloadModels?.(snapshot.settings?.runtime); } catch { /* ignore */ }
+  }
   writeControlJson(res, 200, {
     ...snapshot,
     activeRevision: ctx.activeRevision,
@@ -611,8 +629,9 @@ async function getBotExtensions(host, runtime, params, body, req, res) {
   writeControlJson(res, 200, await runtime.getBotExtensions(params.botId));
 }
 
-async function setBotExtensions(host, runtime, params, body, req, res) {
+async function setBotExtensions(host, runtime, params, body, req, res, ctx) {
   assertNoQuery(req);
+  if (ctx.centerManaged) throw new ControlHttpError(403, 'INVALID_ARGUMENT', 'bot extensions are managed by the center');
   requireBot(host, params.botId);
   writeControlJson(res, 200, await runtime.setBotExtensions(params.botId, body));
 }
@@ -629,8 +648,9 @@ async function setBotSoul(host, runtime, params, body, req, res) {
   writeControlJson(res, 200, await runtime.setBotSoul(params.botId, body));
 }
 
-async function setBotModel(host, runtime, params, body, req, res) {
+async function setBotModel(host, runtime, params, body, req, res, ctx) {
   assertNoQuery(req);
+  if (ctx.centerManaged) throw new ControlHttpError(403, 'INVALID_ARGUMENT', 'bot models are managed by the center');
   requireBot(host, params.botId);
   writeControlJson(res, 200, await runtime.setBotModel(params.botId, body));
 }

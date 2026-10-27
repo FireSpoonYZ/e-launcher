@@ -103,6 +103,7 @@ export const CONTROL_V1_METHODS = Object.freeze([
 // Fixed v2 additions (module 14, plus the managed-extension/SOUL additions and
 // the unified Shower six).
 const CONTROL_V2_METHODS = Object.freeze([
+  'getServiceStatus',
   'getModelCatalog',
   'getWorkContext',
   'syncWorkContext',
@@ -277,6 +278,7 @@ function showerTargetParams(params) {
 function normalizeControlParams(method, params) {
   switch (method) {
     case 'getHostInfo':
+    case 'getServiceStatus':
     case 'listBots': {
       rejectUnknownFields(params, new Set(), 'params');
       return {};
