@@ -102,6 +102,7 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
     const declared = actions(id).find(item => item.id === name);
     if (!declared) fail('NOT_FOUND', 'Action not declared');
     object(input); text(input.deviceId, 'deviceId'); text(input.botId, 'botId'); text(input.requestId, 'requestId');
+    if (!store.getInstallation(id).enabled || !store.getBotCapability(input.deviceId, input.botId, id).enabled) fail('FORBIDDEN', 'Capability unavailable');
     if (!ajv.validate(declared.inputSchema, input.input)) fail('VALIDATION_FAILED', 'Invalid action input');
     const result = await bridge.call(input.deviceId, 'callCapabilityAction', { installationId: id, action: name, request: input });
     if (declared.outputSchema !== undefined && !ajv.validate(declared.outputSchema, result.result)) fail('INVALID_STATE', 'Invalid action output');

@@ -120,7 +120,9 @@ final class ShowerController {
 
     synchronized Preview openPreview(android.view.Surface surface) throws Exception {
         IShowerService service = activeService();
-        Preview next = new Preview(displayId, width, height, service);
+        int[] size = displaySize();
+        if (size == null) throw new IllegalStateException("虚拟屏已结束");
+        Preview next = new Preview(displayId, size[0], size[1], service);
         if (!service.setPreviewSurface(displayId, surface, next.token)) {
             throw new IllegalStateException("无法连接虚拟桌面画面");
         }
@@ -134,7 +136,8 @@ final class ShowerController {
     /** 当前虚拟屏 {width, height, dpi}；没有屏幕时返回 null。不创建屏幕，也不延长空闲时间。 */
     synchronized int[] displaySize() throws android.os.RemoteException {
         if (!hasDisplay()) return null;
-        return new int[] {width, height, dpi};
+        int[] size = manager.aliveService().getDisplaySize(displayId);
+        return size == null ? null : new int[] {size[0], size[1], dpi};
     }
 
     synchronized boolean keepPreviewAlive(Preview current) throws Exception {
@@ -259,12 +262,14 @@ final class ShowerController {
         return requestPng(maxWidth, maxHeight);
     }
 
-    synchronized int surfaceWidth() {
-        return width;
+    synchronized int surfaceWidth() throws android.os.RemoteException {
+        int[] size = displaySize();
+        return size == null ? 0 : size[0];
     }
 
-    synchronized int surfaceHeight() {
-        return height;
+    synchronized int surfaceHeight() throws android.os.RemoteException {
+        int[] size = displaySize();
+        return size == null ? 0 : size[1];
     }
 
     synchronized String surfaceSessionId() {
@@ -429,16 +434,18 @@ final class ShowerController {
         return service;
     }
 
-    private void requireCoordinate(int x, int y) {
-        if (displayId == null) throw new IllegalStateException("虚拟屏尚未创建；先调用 create");
-        if (x < 0 || y < 0 || x >= width || y >= height) {
-            throw new IllegalArgumentException("坐标超出虚拟屏 " + width + "x" + height);
+    private void requireCoordinate(int x, int y) throws android.os.RemoteException {
+        int[] size = displaySize();
+        if (size == null) throw new IllegalStateException("虚拟屏尚未创建；先调用 create");
+        if (x < 0 || y < 0 || x >= size[0] || y >= size[1]) {
+            throw new IllegalArgumentException("坐标超出虚拟屏 " + size[0] + "x" + size[1]);
         }
     }
 
     private JSONObject state(String action) throws Exception {
+        int[] size = displaySize();
         return new JSONObject().put("ok", true).put("action", action).put("displayId", displayId)
-                .put("width", width).put("height", height).put("dpi", dpi)
+                .put("width", size == null ? 0 : size[0]).put("height", size == null ? 0 : size[1]).put("dpi", dpi)
                 .put("idleTimeoutMs", 300_000);
     }
 
