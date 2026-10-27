@@ -166,28 +166,57 @@ window's minimize button is disabled.
 
 ### Bootstrap and cleanup
 
-The prior failure was `1314` (`SeAssignPrimaryToken` missing) when an elevated
-process copied the child explorer token. The bootstrap therefore uses a temporary
-elevated/SYSTEM one-shot helper (for example a task) that calls `WTSQueryUserToken`
-and `CreateProcessAsUser` on `winsta0\default` to start the child user's
-**non-elevated** executor. The helper accepts only a fixed executable and fixed
-arguments, verifies that the resulting child session belongs to the initiating
-parent/user, is deleted by name after use and is bounded in startup time. There is
-no permanent service, account or password collection.
+The first Windows screen in a Host lifetime requests administrator approval to
+enable child sessions and start an elevated guardian. The guardian accepts only
+fixed executor-launch requests for its own Host PID/start time, parent/child
+session and user. The existing temporary SYSTEM task performs token validation
+and starts the child's **non-elevated** executor. `WTSQueryUserToken` remains in
+that SYSTEM step; an administrator token alone is insufficient.
 
-`EnsureEnabled` records the initial child-enabled and TermService state, and a
-guardian restores it when the owning native host exits. NLA, Windows Hello,
-firewall and `RDP-Tcp` settings are not toggled.
+Successful `release` logs off the owned child synchronously and retains the native
+Host, ActiveX control and guardian. Subsequent creation reuses administrator
+approval. A failed release or Host shutdown terminates the native process; the
+guardian restores the original child-enabled and TermService state. NLA, Windows
+Hello, firewall and `RDP-Tcp` settings are not changed.
 
-### Login is not free
+### Local Windows credential enrollment
 
-Observed while developing this backend: the PIN bound to the parent, and the first
-enable needed authentication; a valid Microsoft password initially failed over NTLM;
-`runas` with the local password followed by the same password prompted explicitly
-succeeded. So a passwordless or silent child login is **not** guaranteed, and the
-`runas` comparison is not a general passwordless mechanism — it is a one-off
-observation on one machine. Never automate `runas` credential entry, and never
-claim that silent login works.
+Microsoft documents automatic parent-user logon for normal
+[child sessions](https://learn.microsoft.com/en-us/windows/win32/termserv/child-sessions).
+On the acceptance machine, the Microsoft-account/Hello session instead returned
+RDP error 2055 (`SSL_ERR_LOGON_FAILURE`). Changing account hints, removing
+CredSSP, or retaining only ActiveX memory did not provide unattended recreation.
+
+At the operator's explicit request, Windows credentials are now enrolled in a
+native `CredUIPromptForWindowsCredentialsW` dialog. Use the prefilled current
+Windows account and its account password. The password is committed **only after**
+RDP logon and the child-user ownership check succeed, via `CredWriteW` under the
+generic target **`e-launcher/Shower/localhost`**, with
+`CRED_PERSIST_LOCAL_MACHINE`. This is the current user's local credential vault,
+not a roaming credential, center setting or application JSON file. Each connection
+reads it with `CredReadW` and supplies it directly to the ActiveX password property.
+Temporary native buffers are cleared; no password is included in Node IPC, tool
+results, command arguments or logs.
+
+The vault follows Windows user-account permissions: it is not isolation from other
+processes running as the same user. Manage or remove the entry in Windows
+**Credential Manager → Windows Credentials → Generic Credentials**. Deleting it
+causes local enrollment on the next creation. A rejected or expired password is
+re-entered locally on a subsequent release/create and replaces the old value only
+after successful validation.
+
+After enrollment, creation and recreation within a running Host require neither a
+password prompt nor another UAC. A newly started Host still needs one administrator
+approval; its password is restored from the vault. An existing interactive Windows
+user session is required; a machine reboot left at the sign-in screen is a separate
+scenario. Desktop startup is probed for up to 30 seconds before reporting an
+unavailable/secure desktop, rather than treating the initial Winlogon transition
+as a new password requirement.
+
+API references: [Credential UI](https://learn.microsoft.com/en-us/windows/win32/api/wincred/nf-wincred-creduipromptforwindowscredentialsw),
+[CredWrite](https://learn.microsoft.com/en-us/windows/win32/api/wincred/nf-wincred-credwritew),
+[WTSQueryUserToken](https://learn.microsoft.com/en-us/windows/win32/api/wtsapi32/nf-wtsapi32-wtsqueryusertoken),
+[WTSLogoffSession](https://learn.microsoft.com/en-us/windows/win32/api/wtsapi32/nf-wtsapi32-wtslogoffsession).
 
 ## Linux provider
 

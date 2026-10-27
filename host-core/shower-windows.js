@@ -30,8 +30,8 @@ const MAX_DIMENSION = 4096;
 // 原生宿主自己等 agent 25 s；这里更早失败，好在 20 s 的控制 RPC 之前报告“未确认”。
 const REQUEST_TIMEOUT_MS = 15_000;
 const CANCEL_TIMEOUT_MS = 5_000;
-// 显式释放要快速失败：原生主线程可能卡在 RDP 登录弹窗，之后由强制关闭收尾。
-const RELEASE_TIMEOUT_MS = 5_000;
+// 给同步注销留出时间；超时后由强制关闭和 guardian 完成清理。
+const RELEASE_TIMEOUT_MS = 15_000;
 const SHUTDOWN_GRACE_MS = 2_000;
 const EXIT_WAIT_MS = SHUTDOWN_GRACE_MS + 1_000;
 const MAX_REQUEST_BYTES = 1024 * 1024;
@@ -840,9 +840,8 @@ export function createWindowsShowerBackend({ dataRoot } = {}) {
     } catch (error) {
       failure = error;
     } finally {
-      // 无论原生是否应答都必须关闭本后端 spawn 的宿主：否则它继续持有 MSTSCLib.dll，
-      // 后续构建被文件锁卡住，manager 的归属也只能永远挂着。
-      await shutdownHost();
+      // 成功释放屏幕后复用已授权的宿主；异常或 Host 退出时才终止进程并恢复系统原值。
+      if (failure) await shutdownHost();
       if (activeSessionId === sessionId) activeSessionId = null;
       hostFailure = null;
       teardownSessionId = sessionId;

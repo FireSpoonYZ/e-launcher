@@ -83,10 +83,13 @@ namespace ELauncher.Shower
         private readonly ManualResetEventSlim uiReady = new ManualResetEventSlim(false);
         private readonly ManualResetEventSlim uiExited = new ManualResetEventSlim(false);
         private readonly ManualResetEventSlim loginComplete = new ManualResetEventSlim(false);
+        private readonly ManualResetEventSlim rdpDisconnected = new ManualResetEventSlim(true);
 
         private Form ui;
         private RdpControl control;
         private IMsRdpClient9 client;
+        private ShowerCredentials pendingCredential;
+        private bool credentialRejected;
         private string uiFault;
         private volatile bool closingUi;
 
@@ -643,8 +646,8 @@ namespace ELauncher.Shower
                     agent = pending;
                 }
                 ConnectRdp(width, height);
-                SetPhaseFor(expectedGeneration, "authentication-required", null, null);
-                // 人工认证不占用 RPC；保持可取消等待，不能因用户暂时离开而拆掉登录窗口。
+                SetPhaseFor(expectedGeneration, "starting", null, null);
+                // 凭据输入由本机 UI 完成；自动登录在后台等待，不阻塞 RPC。
                 while (!loginComplete.Wait(500)) RequireCurrent(expectedGeneration);
                 RequireCurrent(expectedGeneration);
                 string fault;
@@ -663,15 +666,36 @@ namespace ELauncher.Shower
                     ownsChild = true;
                 }
                 HostLog.Info("child session " + child.ToString(CultureInfo.InvariantCulture) + " is logged on");
-                // Logon complete: hide the native preview but keep the session and its desktop alive.
+                // Logon complete: hide the native preview while the desktop and executor initialize.
+                SetPhaseFor(expectedGeneration, "starting", null, null);
                 ApplyPreview("hidden");
                 int launchedChild = child;
                 AgentLink launched = link;
                 RunBounded("agent launch", delegate { SessionBootstrap.LaunchAgent(launchedChild, parentSessionId, launched.PipeName, stateDir, exePath); }, BootstrapTimeoutMs);
+                RunOnUi(delegate
+                {
+                    RequireCurrent(expectedGeneration);
+                    if (pendingCredential != null)
+                    {
+                        pendingCredential.Commit();
+                        ClearPendingCredential();
+                    }
+                    credentialRejected = false;
+                });
                 RequireCurrent(expectedGeneration);
                 link.WaitForAgent(child, AgentConnectTimeoutMs);
                 RequireCurrent(expectedGeneration);
-                ProbeFrame(link, child);
+                var desktopWait = Stopwatch.StartNew();
+                for (;;)
+                {
+                    RequireCurrent(expectedGeneration);
+                    try { ProbeFrame(link, child); break; }
+                    catch (HostFault desktopFault)
+                    {
+                        if (desktopFault.Code != HostErrorCodes.AuthRequired || desktopWait.ElapsedMilliseconds >= 30000) throw;
+                        Thread.Sleep(500);
+                    }
+                }
                 SetPhaseFor(expectedGeneration, "ready", null, null);
                 HostLog.Info("child session " + child.ToString(CultureInfo.InvariantCulture) + " is ready");
             }
@@ -696,6 +720,7 @@ namespace ELauncher.Shower
         private void FailStart(int expectedGeneration, string code, string message, AgentLink link)
         {
             if (!IsCurrent(expectedGeneration)) return;
+            RunOnUi(ClearPendingCredential);
             HostLog.Warn("child session start failed: " + code + ": " + message);
             if (link != null)
             {
@@ -817,6 +842,20 @@ namespace ELauncher.Shower
             RunOnUi(delegate
             {
                 if (ui == null) throw new HostFault(HostErrorCodes.Unavailable, "the rdp window is not available");
+                // Recreating an AxHost while its parent is hidden leaves GetOcx() uninitialized.
+                ui.ShowInTaskbar = true;
+                ui.Visible = true;
+                if (client != null)
+                {
+                    // Reuse the initialized ActiveX control across child sessions.
+                    client.DesktopWidth = width > 0 ? width : DefaultDesktopWidth;
+                    client.DesktopHeight = height > 0 ? height : DefaultDesktopHeight;
+                    lock (stateLock) { loginFault = null; }
+                    PrepareCredentials(control.Ocx);
+                    rdpDisconnected.Reset();
+                    client.Connect();
+                    return;
+                }
                 control = new RdpControl();
                 control.Dock = DockStyle.Fill;
                 ui.Controls.Add(control);
@@ -840,8 +879,8 @@ namespace ELauncher.Shower
                 rdp.AdvancedSettings7.AuthenticationLevel = 0;
                 rdp.AdvancedSettings7.EnableAutoReconnect = false;
                 rdp.AdvancedSettings7.RedirectClipboard = false;
-                // Credentials only ever come from the local Windows prompt: nothing is supplied, stored or logged.
-                ((IMsRdpClientNonScriptable5)ocx).AllowPromptingForCredentials = true;
+                // The native credential setup replaces RDP's non-persistent fallback prompt.
+                ((IMsRdpClientNonScriptable5)ocx).AllowPromptingForCredentials = false;
                 ((IMsRdpClientNonScriptable3)ocx).PromptForCredentials = false;
                 ((IMsRdpClientNonScriptable4)ocx).AllowCredentialSaving = false;
                 object connectToChild = true;
@@ -850,12 +889,36 @@ namespace ELauncher.Shower
                 {
                     loginFault = null;
                 }
-                // The credential prompt and the fresh child desktop need a reachable local window.
-                ui.ShowInTaskbar = true;
-                ui.Visible = true;
+                PrepareCredentials(ocx);
+                rdpDisconnected.Reset();
                 rdp.Connect();
                 HostLog.Info("rdp connect requested against localhost with ConnectToChildSession");
             });
+        }
+
+        private void ClearPendingCredential()
+        {
+            if (pendingCredential == null) return;
+            pendingCredential.Dispose();
+            pendingCredential = null;
+        }
+
+        private void PrepareCredentials(object ocx)
+        {
+            ClearPendingCredential();
+            string user, domain;
+            HostNative.CurrentAccountHint(out user, out domain);
+            string account = string.IsNullOrEmpty(domain) ? user : domain + "\\" + user;
+            client.UserName = user;
+            client.Domain = domain;
+            pendingCredential = credentialRejected ? null : ShowerCredentials.Read(account);
+            if (pendingCredential == null)
+            {
+                SetPhase("authentication-required", HostErrorCodes.AuthRequired, "请在本机配置 Windows 虚拟屏凭据");
+                ui.Activate();
+                pendingCredential = ShowerCredentials.Prompt(ui.Handle, account, credentialRejected);
+            }
+            pendingCredential.Apply(ocx);
         }
 
         private void HandleLoginComplete()
@@ -868,6 +931,7 @@ namespace ELauncher.Shower
         private void HandleDisconnected(int reason)
         {
             if (control == null) return;
+            if (reason == 2055 || reason == 2567 || reason == 3847 || reason == 4615) credentialRejected = true;
             string description = null;
             try
             {
@@ -889,9 +953,12 @@ namespace ELauncher.Shower
                     && !string.Equals(phase, "authentication-required", StringComparison.Ordinal);
             }
             loginComplete.Set();
-            if (!report) return;
-            AbortAgent();
-            SetPhase("error", HostErrorCodes.BackendFailed, message);
+            if (report)
+            {
+                AbortAgent();
+                SetPhase("error", HostErrorCodes.BackendFailed, message);
+            }
+            rdpDisconnected.Set();
         }
 
         private void HandleFatal(int code)
@@ -959,46 +1026,20 @@ namespace ELauncher.Shower
 
         private void DisconnectRdp()
         {
-            try
+            bool waiting = false;
+            RunOnUi(delegate
             {
-                RunOnUi(delegate
+                ClearPendingCredential();
+                if (client != null && client.Connected != 0)
                 {
-                    IMsRdpClient9 rdp = client;
-                    if (rdp != null)
-                    {
-                        try
-                        {
-                            if (rdp.Connected != 0) rdp.Disconnect();
-                        }
-                        catch (Exception ex)
-                        {
-                            HostLog.Warn("rdp disconnect failed: " + ex.Message);
-                        }
-                    }
-                    client = null;
-                    if (control != null)
-                    {
-                        try
-                        {
-                            if (ui != null) ui.Controls.Remove(control);
-                            control.Dispose();
-                        }
-                        catch (Exception ex)
-                        {
-                            HostLog.Warn("rdp control dispose failed: " + ex.Message);
-                        }
-                        control = null;
-                    }
-                });
-            }
-            catch (HostFault fault)
-            {
-                HostLog.Warn("rdp cleanup skipped: " + fault.Message);
-            }
-            catch (Exception ex)
-            {
-                HostLog.Warn("rdp cleanup skipped: " + ex.Message);
-            }
+                    waiting = true;
+                    rdpDisconnected.Reset();
+                    client.Disconnect();
+                }
+            });
+            // The previous disconnect callback must finish before a new connection can reuse the control.
+            if (waiting && !rdpDisconnected.Wait(UiStopTimeoutMs))
+                throw new HostFault(HostErrorCodes.BackendFailed, "RDP disconnect did not complete");
         }
 
         // ---------------------------------------------------------------------------------- frame and input

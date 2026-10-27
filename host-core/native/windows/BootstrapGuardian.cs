@@ -26,6 +26,7 @@ namespace ELauncher.Shower
             internal bool TermServiceBeforeRunning;
             internal bool Applied;
             internal int GuardianPid;
+            internal bool GuardianElevated;
             internal int OwnedChildSessionId;
             internal string OwnedUserSid;
             internal string CreatedUtc;
@@ -67,6 +68,8 @@ namespace ELauncher.Shower
                 }
                 // 同一宿主可能随后绑定 owned child，必须跟着更新。
                 state = current;
+                if (state.GuardianElevated && BootstrapNative.IsElevated())
+                    SessionBootstrap.ProcessDelegatedLaunches(dir, state);
             }
 
             // 宿主已退出：再取一次最新同 PID/start 记录，避免读到旧快照。
@@ -113,6 +116,7 @@ namespace ELauncher.Shower
                 state.TermServiceBeforeRunning = BootstrapFile.GetBool(map, "termServiceBeforeRunning", false);
                 state.Applied = BootstrapFile.GetBool(map, "applied", false);
                 state.GuardianPid = BootstrapFile.GetInt(map, "guardianPid", 0);
+                state.GuardianElevated = BootstrapFile.GetBool(map, "guardianElevated", false);
                 state.ParentSessionId = BootstrapFile.GetInt(map, "parentSessionId", 0);
                 state.OwnedChildSessionId = BootstrapFile.GetInt(map, "ownedChildSessionId", 0);
                 state.OwnedUserSid = BootstrapFile.Get(map, "ownedUserSid");
@@ -139,6 +143,7 @@ namespace ELauncher.Shower
             BootstrapFile.Set(map, "termServiceBeforeRunning", state.TermServiceBeforeRunning ? "1" : "0");
             BootstrapFile.Set(map, "applied", state.Applied ? "1" : "0");
             BootstrapFile.SetInt(map, "guardianPid", state.GuardianPid);
+            BootstrapFile.Set(map, "guardianElevated", state.GuardianElevated ? "1" : "0");
             BootstrapFile.SetInt(map, "parentSessionId", state.ParentSessionId);
             BootstrapFile.SetInt(map, "ownedChildSessionId", state.OwnedChildSessionId);
             BootstrapFile.Set(map, "ownedUserSid", state.OwnedUserSid);
@@ -290,7 +295,7 @@ namespace ELauncher.Shower
             return state != null
                 && state.HostPid == hostPid
                 && state.HostStartTicks == hostStartTicks
-                && state.Applied;
+                && state.Applied && state.GuardianElevated && GuardianAlive(state.GuardianPid);
         }
 
         internal static void DeleteState(string dir)

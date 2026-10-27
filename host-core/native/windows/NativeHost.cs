@@ -130,7 +130,7 @@ namespace ELauncher.Shower
         {
             try
             {
-                return WTSLogoffSession(IntPtr.Zero, sessionId, false);
+                return WTSLogoffSession(IntPtr.Zero, sessionId, true);
             }
             catch (EntryPointNotFoundException)
             {

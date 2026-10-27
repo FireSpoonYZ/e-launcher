@@ -40,11 +40,13 @@ namespace ELauncher.Shower
             bool known = BootstrapNative.TryIsChildSessionsEnabled(out enabled);
             BootstrapGuardian.EnableState remainingOwner = BootstrapGuardian.ReadState(dir);
             bool currentOwner = remainingOwner == null || (remainingOwner.HostPid == hostPid && remainingOwner.HostStartTicks == hostStart);
-            if (known && enabled && BootstrapNative.TermServiceRunning() && currentOwner)
+            if (known && enabled && BootstrapNative.TermServiceRunning() && currentOwner && BootstrapNative.IsElevated())
             {
                 // 系统状态无需改动，但仍要登记 owner 并派无需额外授权的 guardian：
                 // 否则宿主被强杀时会遗留已登录的 child。基线为 enabled/running，guardian 不会改全局设置。
                 BootstrapGuardian.EnableState owner = BootstrapGuardian.EnsureOwnerRecord(dir, hostPid, hostStart, host.SessionId, true, true);
+                owner.GuardianElevated = true;
+                BootstrapGuardian.WriteState(dir, owner);
                 BootstrapGuardian.EnsureGuardian(dir, owner);
                 BootstrapLog.Write(dir, "子会话与 TermService 已就绪，只登记 owner 与 guardian");
                 return;
@@ -131,13 +133,19 @@ namespace ELauncher.Shower
             BootstrapFile.SetLong(request, "hostStartTicks", hostStart);
             BootstrapFile.SetInt(request, "hostSessionId", host.SessionId);
             BootstrapFile.Set(request, "createdUtc", DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture));
+            bool delegated = !BootstrapNative.IsElevated() && BootstrapGuardian.IsReadyForHost(dir, host.Id, hostStart);
+            BootstrapFile.Set(request, "guardian", delegated ? "1" : "0");
             BootstrapFile.Write(requestPath, request);
             BootstrapLog.Write(dir, "请求在子会话 " + childSessionId.ToString(CultureInfo.InvariantCulture) + " 启动 agent");
 
             string arguments = "--state-dir " + Quote(dir) + " --request " + Quote(requestPath);
             try
             {
-                if (BootstrapNative.CanActAsSystem())
+                if (delegated)
+                {
+                    BootstrapLog.Write(dir, "已提交给本宿主的提权 guardian，无需再次 UAC");
+                }
+                else if (BootstrapNative.CanActAsSystem())
                 {
                     RunSystemBootstrap(dir, requestPath, userSid);
                     DeleteLaunchFiles(requestPath);
@@ -274,6 +282,39 @@ namespace ELauncher.Shower
             return 0;
         }
 
+        // The elevated guardian only accepts fixed agent launches for the native Host it supervises.
+        internal static void ProcessDelegatedLaunches(string dir, BootstrapGuardian.EnableState owner)
+        {
+            foreach (string file in Directory.GetFiles(dir, BootstrapFile.LaunchPrefix + "*" + BootstrapFile.RequestSuffix))
+            {
+                if (file.EndsWith(BootstrapFile.ResultSuffix, StringComparison.OrdinalIgnoreCase)) continue;
+                bool delegated = false;
+                try
+                {
+                    Dictionary<string, string> map = BootstrapFile.Read(file);
+                    if (!BootstrapFile.GetBool(map, "guardian", false)) continue;
+                    delegated = true;
+                    LaunchRequest request = ParseLaunchRequest(dir, file);
+                    if (request.HostPid != owner.HostPid || request.HostStartTicks != owner.HostStartTicks)
+                        throw new InvalidOperationException("guardian 请求不属于当前宿主");
+                    if (request.ParentSessionId != owner.ParentSessionId || request.ChildSessionId != owner.OwnedChildSessionId
+                        || !string.Equals(request.UserSid, owner.OwnedUserSid, StringComparison.OrdinalIgnoreCase))
+                        throw new InvalidOperationException("guardian 请求的会话或用户不匹配");
+                    // WTSQueryUserToken validation remains in the existing LocalSystem worker.
+                    RunLaunchWorker(new string[] { "bootstrap-launch", "--state-dir", dir, "--request", file });
+                }
+                catch (Exception error)
+                {
+                    BootstrapLog.Write(dir, "guardian 启动失败: " + SanitizeMessage(error.Message));
+                }
+                finally
+                {
+                    // Never replay a launch whose result may already have taken effect.
+                    if (delegated) DeleteLaunchFiles(file);
+                }
+            }
+        }
+
         private static int RunLaunchWorker(string[] args)
         {
             Dictionary<string, string> options = ParseOptions(args, 1);
@@ -397,7 +438,8 @@ namespace ELauncher.Shower
                 record.CreatedUtc = adopted && state.CreatedUtc != null
                     ? state.CreatedUtc
                     : DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture);
-                record.GuardianPid = adopted && BootstrapGuardian.GuardianAlive(state.GuardianPid) ? state.GuardianPid : 0;
+                record.GuardianElevated = true;
+                record.GuardianPid = adopted && state.GuardianElevated && BootstrapGuardian.GuardianAlive(state.GuardianPid) ? state.GuardianPid : 0;
                 BootstrapGuardian.WriteState(dir, record);
 
                 if (record.GuardianPid <= 0)
