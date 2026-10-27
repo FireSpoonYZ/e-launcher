@@ -1,6 +1,6 @@
 # 中心部署与三端验收（2026-10-27）
 
-代码基线：中心分支 fe5d0ec，按用户选择合入 f5f7b74（本分支 d5a4af1），修复至 71d4420。父助手直接完成，未派子代理。下列结果均来自本轮实跑。
+代码基线：中心分支 fe5d0ec，按用户选择合入 f5f7b74（本分支 d5a4af1），中心修复至 71d4420；Windows 启动与凭据复用修复至 2cc9825。父助手直接完成，未派子代理。下列结果均来自本轮实跑。
 
 ## 部署
 
@@ -23,7 +23,7 @@
 | MCP | 中心托管既有 Grok HTTP MCP，配置凭据后列出 3 个工具；Linux 模型实际调用 grok_list_models 返回 7 个模型。Host 快照不包含该中心托管 MCP 密钥。 |
 | Skill | 既有 Ponytail SKILL.md 作为制品下发三端；Linux 模型读取实际受管路径并报告技能名称。 |
 | Windows 客户端 | 原生 Tauri 应用实际运行、中心登录、连接配置保存、三端设备/Bot 聚合列表通过；原生桥向 K80 提交任务通过。 |
-| 图形操作 | Linux 模型启动 zenity；K80→Linux 与 Windows→Linux 的文字输入截图通过。K80 模型启动设置；Windows→K80、Linux→K80 输入中文标记，独立截图确认。 |
+| 图形操作 | Linux 模型启动 zenity；K80→Linux、Windows→Linux 输入截图通过。K80 模型启动设置；Windows→K80、Linux→K80 输入截图通过。Linux→Windows、K80→Windows 的中文、键盘与点击也已读回验证；详见 Windows 补充报告。 |
 | Android 旋转 | 设置应用转为竖屏后，源尺寸返回 1440×3200，与截图方向一致；按返回尺寸换算点击并输入成功。 |
 | 断线恢复 | 停止中心，三端 Host 报告 CENTER_OFFLINE；重启中心后三端自动恢复 ready；Linux 另做一次停中心／启动中心复核，Host 无需重启。 |
 | 构建 | Android ARM64 APK、Web、Center Web、Windows Tauri release exe、Linux Center 容器构建通过。 |
@@ -45,7 +45,7 @@
 
 ## 未完成与限制
 
-- Windows 图形子会话需用户在原生窗口完成认证，本轮尚未完成 Linux/K80→Windows 的图形输入验收；不能将以往验收记录计入本轮。
+- Windows 图形输入和本机凭据自动复用已补充验收，见 [Windows 启动修复报告](windows-shower-startup-acceptance-20261027.md)。最终部署后的首次 UAC 尚需完成；Host 运行期间重建不再重复请求授权。
 - Linux 原生桌面客户端 GUI 未在本轮构建/运行；已验证真实 Linux Host、CLI、私有 Xvnc。
 - MCP OAuth、Node/stdio MCP、全版本回滚/卸载、长时间压力与物理触摸未覆盖。
 - 导入的 antigravity/gemini-3.8-flash-medium 实际上游返回 400 model_not_found；保留目录原项，未将目录全部模型标记可用。
