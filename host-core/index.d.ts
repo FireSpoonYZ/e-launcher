@@ -1,6 +1,14 @@
-import type { Models } from '@earendil-works/pi-ai';
+import type { Models, ModelCost, ModelInputLimits, ModelThinkingLevel, ThinkingLevelMap } from '@earendil-works/pi-ai';
 import type { EntryRecord } from '@earendil-works/pi-durable';
 import type { CompressionBlock, StatusReport } from 'acp-kernel';
+import type {
+  ShowerCreateOptions,
+  ShowerFrame,
+  ShowerFrameLimits,
+  ShowerInput,
+  ShowerSession,
+  ShowerTarget,
+} from './shower-protocol.js';
 
 export interface BotRecord {
   botId: string;
@@ -493,11 +501,22 @@ export interface ModelConfig {
   maxTokens?: number;
   /** Optional input modalities; omitted stays text-only, explicit arrays require text and may add image. */
   input?: ('text' | 'image')[];
+  /** Pi 计费费率；四档必填于 SDK，缺省补 0，可选按输入量分档。 */
+  cost?: ModelCost;
+  /** Pi 按 api 读取的兼容开关；只校验对象边界，原样交给 SDK。 */
+  compat?: Record<string, unknown>;
+  /** pi 思考档位到 provider 原生档位的映射；null 表示该档不受支持。 */
+  thinkingLevelMap?: ThinkingLevelMap;
+  /** 图像/请求输入上限与缓存安全预处理；原样交给 SDK 与原生工具。 */
+  inputLimits?: ModelInputLimits;
 }
 
 export interface ProviderConfig {
   id: string;
+  name?: string;
   baseUrl: string;
+  /** 该 provider 全部模型共用的 API；缺省 openai-completions，其他值显式拒绝。 */
+  api?: 'openai-completions' | 'openai-responses' | 'pi-messages' | 'anthropic-messages';
   apiKeyEnv?: string;
   models: ModelConfig[];
 }
@@ -505,6 +524,8 @@ export interface ProviderConfig {
 export interface RuntimeConfig {
   providers: ProviderConfig[];
   defaultModel?: string | null;
+  /** 默认思考档位；缺省/null 交给 SDK 默认值。 */
+  thinkingLevel?: ModelThinkingLevel | null;
   hindsight?: HindsightOptions;
   /** Canonical Host extension config; ambiguous with legacy hindsight, never both. */
   extensions?: RuntimeExtensionsConfig;
@@ -563,6 +584,8 @@ export interface OpenRuntimeOptions {
   dataRoot: string;
   models?: Models;
   defaultModel?: string | null;
+  /** 默认思考档位，与 runtime 配置同义；缺省/null 交给 SDK 默认值。 */
+  thinkingLevel?: ModelThinkingLevel | null;
   /** Optional explicit bash (Git Bash on Windows) executable; when omitted, HostEnv probes fixed Git install directories (Windows) or /bin/bash and /usr/bin/bash (Linux), never PATH. */
   bashPath?: string;
   /** Optional explicit search binaries for grep (rg) and find (fd); existence is checked at use. */
@@ -636,6 +659,15 @@ export interface Runtime {
   getBotSoul(botId: string): Promise<BotSoul>;
   /** CAS on the file SHA-256; conflict rejects REQUEST_CONFLICT without overwriting. */
   setBotSoul(botId: string, input: BotSoulUpdate): Promise<BotSoul>;
+  /* Unified Shower environment (host.shower): the same six methods on every platform. */
+  getShowerStatus(target: ShowerTarget): Promise<ShowerSession>;
+  createShowerSession(target: ShowerTarget, input?: ShowerCreateOptions): Promise<ShowerSession>;
+  getShowerFrame(target: ShowerTarget, sessionId: string, limits?: ShowerFrameLimits): Promise<ShowerFrame>;
+  /** Never retried automatically; the receipt reports the real outcome. */
+  sendShowerInput(target: ShowerTarget, sessionId: string, input: ShowerInput): Promise<Record<string, unknown>>;
+  /** Aborts the matching conversation, then returns the current session status. */
+  takeoverShower(target: ShowerTarget, sessionId: string): Promise<ShowerSession>;
+  releaseShowerSession(target: ShowerTarget, sessionId: string): Promise<Record<string, unknown>>;
   /** Idempotently resume native tasks AND activate automatic room/DM processing; may submit new work. */
   resume(): void;
   close(): Promise<void>;
@@ -643,6 +675,26 @@ export interface Runtime {
 
 /** Opens passively; automatic room/DM processing starts only through Runtime.resume(). */
 export function openRuntime(options: OpenRuntimeOptions): Promise<Runtime>;
+
+/**
+ * Unified Shower public data (identical on Android/Windows/Linux). The shapes
+ * and normalizers live in shower-protocol so UI/tool/backend code imports them
+ * once instead of copying the protocol.
+ */
+export type {
+  ShowerActor,
+  ShowerCapabilities,
+  ShowerCreateOptions,
+  ShowerErrorCode,
+  ShowerFrame,
+  ShowerFrameLimits,
+  ShowerInput,
+  ShowerLaunch,
+  ShowerPlatform,
+  ShowerPhase,
+  ShowerSession,
+  ShowerTarget,
+} from './shower-protocol.js';
 
 /**
  * Live preview types (module 6): bounded, non-durable projection frames for a
@@ -895,6 +947,7 @@ export function openHostService(options: HostServiceOptions): Promise<HostServic
 export interface ParsedRuntimeConfig {
   models: Models;
   defaultModel: string | null;
+  thinkingLevel?: ModelThinkingLevel;
   bashPath?: string;
   toolPaths?: { rg?: string; fd?: string };
   hindsight?: HindsightOptions;
@@ -1583,14 +1636,18 @@ export function openDeviceLink(options: OpenDeviceLinkOptions): Promise<DeviceLi
  * Module 9 types: authenticated remote Host JSON control over the module 8
  * relay. The Node client opens an explicit 'client' role connection; the
  * target Host remains the sole authority for Bot cwd/create, inference,
- * tools and history. Module 14 extends the fixed v1 ten with 25 v2 methods
+ * tools and history. Module 14 extends the fixed v1 ten with the v2 additions
  * (work-context, scope, memory, model catalog); the managed-extension/SOUL
- * methods are additive v2 on the same table.
+ * methods and the unified Shower six are additive v2 on the same table.
  */
 
 export type RemoteControlOutcome = 'not-sent' | 'unconfirmed' | 'responded';
 
-/** Fixed 40 JSON methods (10 legacy v1 + 30 v2 additions); params/results reuse the existing DTOs above. */
+/**
+ * Fixed JSON method table: the legacy v1 ten plus additive v2 methods (see
+ * CONTROL_METHODS in remote-control-protocol.js for the authoritative list and
+ * count); params/results reuse the DTOs above.
+ */
 export interface RemoteControlMethodMap {
   getHostInfo: { params: Record<string, never>; result: ControlHostInfo };
   listBots: { params: Record<string, never>; result: BotRecord[] };
@@ -1634,6 +1691,25 @@ export interface RemoteControlMethodMap {
   setBotExtensions: { params: { botId: string; input: BotExtensionsUpdate }; result: BotExtensionSnapshot };
   getBotSoul: { params: { botId: string }; result: BotSoul };
   setBotSoul: { params: { botId: string; input: BotSoulUpdate }; result: BotSoul };
+  /* Unified Shower: same names/shapes on every platform; no platform handles or credentials. */
+  getShowerStatus: { params: { botId: string; scopeId?: string }; result: ShowerSession };
+  createShowerSession: {
+    params: { botId: string; scopeId?: string; input?: ShowerCreateOptions };
+    result: ShowerSession;
+  };
+  getShowerFrame: {
+    params: { botId: string; scopeId?: string; sessionId: string; limits?: ShowerFrameLimits };
+    result: ShowerFrame;
+  };
+  sendShowerInput: {
+    params: { botId: string; scopeId?: string; sessionId: string; input: ShowerInput };
+    result: Record<string, unknown>;
+  };
+  takeoverShower: { params: { botId: string; scopeId?: string; sessionId: string }; result: ShowerSession };
+  releaseShowerSession: {
+    params: { botId: string; scopeId?: string; sessionId: string };
+    result: Record<string, unknown>;
+  };
   setBotCwd: { params: { botId: string; input: { cwd: string } }; result: BotRecord };
   setBotModel: { params: { botId: string; input: { modelRef?: string | null } }; result: BotRecord };
   discoverProviderModels: {

@@ -173,6 +173,8 @@ npm --prefix host-core ci --ignore-scripts --no-audit --no-fund
 
 `apiKeyEnv` 指定环境变量名，凭证仅在请求时从该变量读取，不写入 Bot、历史或中心；无密钥的本地服务可明确省略此字段。模块不扫描、迁移或覆盖旧 `models.json` / `auth.json`，不执行密钥命令，暂未迁移 OAuth。`modelRef` 已指定的 Bot 使用自身选择；为空时，首次主私聊采用配置中的默认值并持久保存，以后改变默认值不自动替换已有会话模型。配置可选包含 `bashPath` 与 `toolPaths`（见模块 4），解析后传给 `openRuntime`。
 
+`thinkingLevel` 可设置 `off/minimal/low/medium/high/xhigh/max`；省略或设为 `null` 使用 SDK 默认值。它应用于主会话和工作会话，设置热更新后在后续会话配置时生效。Provider 的 `api` 支持 `openai-completions`（缺省）、`openai-responses`、`anthropic-messages`、`pi-messages`，未知 API 显式拒绝。模型可提供 `input`、`cost`（含价格分档）、`compat`、`thinkingLevelMap` 和 `inputLimits`，保留原配置的视觉能力、兼容设置和预算。
+
 ### 命令与 API
 
 ```bash
@@ -185,7 +187,7 @@ node host-core/runtime-cli.js history --data-root "$DATA_ROOT" --bot-id "$BOT_ID
 node host-core/runtime-cli.js wait --data-root "$DATA_ROOT" --config "$CONFIG" --bot-id "$BOT_ID" --request-id message-001
 ```
 
-从仓库根 ESM 可导入 `openRuntime`。它接收 `{dataRoot, models?, defaultModel?, bashPath?, toolPaths?}`，其中 `models` 为 pi-ai 的 Models 集合；省略时为空集合，可用于不调用模型的历史和回执查询。`bashPath`/`toolPaths` 见模块 4。运行时提供：
+从仓库根 ESM 可导入 `openRuntime`。它接收 `{dataRoot, models?, defaultModel?, thinkingLevel?, bashPath?, toolPaths?}`，其中 `models` 为 pi-ai 的 Models 集合；省略时为空集合，可用于不调用模型的历史和回执查询。`bashPath`/`toolPaths` 见模块 4。运行时提供：
 
 | 方法 | 语义 |
 | --- | --- |

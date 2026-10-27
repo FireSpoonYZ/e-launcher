@@ -329,6 +329,26 @@ export function createControlClient({ url, token, fetch: fetchImpl = globalThis.
     },
     discoverProviderModels(input, options) {
       return request('POST', ['v1', 'models', 'discover'], { ...callOptions(options), body: input });
+    },
+    // Unified Shower：参数顺序与 Runtime/远端 v2 方法表一致，body 恰为
+    // {botId,scopeId?,...}；Actor/targetDeviceId 从不来自客户端。
+    getShowerStatus(target, options) {
+      return request('POST', ['v1', 'shower', 'status'], { ...callOptions(options), body: target });
+    },
+    createShowerSession(target, input, options) {
+      return request('POST', ['v1', 'shower', 'create'], { ...callOptions(options), body: { ...target, input } });
+    },
+    getShowerFrame(target, sessionId, limits, options) {
+      return request('POST', ['v1', 'shower', 'frame'], { ...callOptions(options), body: { ...target, sessionId, limits } });
+    },
+    sendShowerInput(target, sessionId, input, options) {
+      return request('POST', ['v1', 'shower', 'input'], { ...callOptions(options), body: { ...target, sessionId, input } });
+    },
+    takeoverShower(target, sessionId, options) {
+      return request('POST', ['v1', 'shower', 'takeover'], { ...callOptions(options), body: { ...target, sessionId } });
+    },
+    releaseShowerSession(target, sessionId, options) {
+      return request('POST', ['v1', 'shower', 'release'], { ...callOptions(options), body: { ...target, sessionId } });
     }
   };
 }

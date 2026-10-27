@@ -111,9 +111,10 @@ async function main() {
   try {
     const openOptions = { dataRoot: values['data-root'] };
     if (command === 'send' || command === 'wait') {
-      const { models, defaultModel, bashPath, toolPaths, hindsight, extensions } = await loadRuntimeConfig(values.config);
+      const { models, defaultModel, thinkingLevel, bashPath, toolPaths, hindsight, extensions } = await loadRuntimeConfig(values.config);
       openOptions.models = models;
       openOptions.defaultModel = defaultModel;
+      if (thinkingLevel !== undefined) openOptions.thinkingLevel = thinkingLevel;
       if (bashPath !== undefined) openOptions.bashPath = bashPath;
       if (toolPaths !== undefined) openOptions.toolPaths = toolPaths;
       if (hindsight !== undefined) openOptions.hindsight = hindsight;

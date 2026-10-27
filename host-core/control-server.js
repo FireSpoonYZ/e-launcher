@@ -14,6 +14,13 @@ import {
 import { serveBotLive, serveWorkLive } from './control-live.js';
 import { resolveRuntimeExtensions } from './extension-manager.js';
 import { MEMORY_HTTP_INACTIVITY_MS } from './remote-control-protocol.js';
+import {
+  normalizeShowerCreate,
+  normalizeShowerFrameLimits,
+  normalizeShowerInput,
+  normalizeShowerSessionId,
+  normalizeShowerTarget,
+} from './shower-protocol.js';
 
 const BIND_HOST = '127.0.0.1';
 const DEFAULT_PORT = 8787;
@@ -70,6 +77,13 @@ const routes = [
   { method: 'POST', key: '/v1/scopes/:scopeKey/members', pattern: /^\/v1\/scopes\/([^/]+)\/members\/?$/, params: ['scopeKey'], hasBody: true, handler: updateScopeMembers },
   { method: 'POST', key: '/v1/scopes/:scopeKey/messages', pattern: /^\/v1\/scopes\/([^/]+)\/messages\/?$/, params: ['scopeKey'], hasBody: true, handler: publishUserMessage },
   { method: 'GET', key: '/v1/scopes/:scopeKey/replicas', pattern: /^\/v1\/scopes\/([^/]+)\/replicas\/?$/, params: ['scopeKey'], hasBody: false, handler: listScopeReplicas },
+  // Unified Shower v2：body 恰为远端参数；认证/Origin 拒绝沿用全局 authorize。
+  { method: 'POST', key: '/v1/shower/status', pattern: /^\/v1\/shower\/status\/?$/, params: [], hasBody: true, handler: showerStatus },
+  { method: 'POST', key: '/v1/shower/create', pattern: /^\/v1\/shower\/create\/?$/, params: [], hasBody: true, handler: showerCreate },
+  { method: 'POST', key: '/v1/shower/frame', pattern: /^\/v1\/shower\/frame\/?$/, params: [], hasBody: true, handler: showerFrame },
+  { method: 'POST', key: '/v1/shower/input', pattern: /^\/v1\/shower\/input\/?$/, params: [], hasBody: true, handler: showerInput },
+  { method: 'POST', key: '/v1/shower/takeover', pattern: /^\/v1\/shower\/takeover\/?$/, params: [], hasBody: true, handler: showerTakeover },
+  { method: 'POST', key: '/v1/shower/release', pattern: /^\/v1\/shower\/release\/?$/, params: [], hasBody: true, handler: showerRelease },
 ];
 
 // The eight Hindsight routes may legitimately stay silent for up to the 120s
@@ -430,6 +444,60 @@ async function publishUserMessage(host, runtime, params, body, req, res) {
 async function listScopeReplicas(host, runtime, params, body, req, res) {
   const options = parseScopeQuery(new URL(req.url, 'http://' + BIND_HOST).searchParams, ['limit', 'cursor']);
   writeControlJson(res, 200, await runtime.listScopeReplicas(workScopeId(params.scopeKey), options));
+}
+
+// Shower body 是远端参数 {botId,scopeId?,...}：未知字段直接 400，target 只由
+// botId/scopeId 派生（模型不能给 Actor/targetDeviceId），其余值走同一套 normalizer。
+const SHOWER_TARGET_KEYS = ['botId', 'scopeId'];
+
+function showerTarget(body, extraKeys) {
+  for (const key of Object.keys(body)) {
+    if (!SHOWER_TARGET_KEYS.includes(key) && !extraKeys.includes(key)) {
+      throw invalidArgument('unknown shower request field: ' + key);
+    }
+  }
+  return normalizeShowerTarget({ botId: body.botId, scopeId: body.scopeId });
+}
+
+// create/frame 立即返回当前快照（starting/authentication-required 不阻塞），
+// 不延长控制请求的 20s 框架；帧大小上限由协议与 backend 保证 < 1MiB。
+async function showerStatus(host, runtime, params, body, req, res) {
+  assertNoQuery(req);
+  writeControlJson(res, 200, await runtime.getShowerStatus(showerTarget(body, [])));
+}
+
+async function showerCreate(host, runtime, params, body, req, res) {
+  assertNoQuery(req);
+  const target = showerTarget(body, ['input']);
+  const input = body.input === undefined ? undefined : normalizeShowerCreate(body.input);
+  writeControlJson(res, 200, await runtime.createShowerSession(target, input));
+}
+
+async function showerFrame(host, runtime, params, body, req, res) {
+  assertNoQuery(req);
+  const target = showerTarget(body, ['sessionId', 'limits']);
+  const sessionId = normalizeShowerSessionId(body.sessionId);
+  const limits = body.limits === undefined ? undefined : normalizeShowerFrameLimits(body.limits);
+  writeControlJson(res, 200, await runtime.getShowerFrame(target, sessionId, limits));
+}
+
+async function showerInput(host, runtime, params, body, req, res) {
+  assertNoQuery(req);
+  const target = showerTarget(body, ['sessionId', 'input']);
+  const sessionId = normalizeShowerSessionId(body.sessionId);
+  writeControlJson(res, 200, await runtime.sendShowerInput(target, sessionId, normalizeShowerInput(body.input)));
+}
+
+async function showerTakeover(host, runtime, params, body, req, res) {
+  assertNoQuery(req);
+  const target = showerTarget(body, ['sessionId']);
+  writeControlJson(res, 200, await runtime.takeoverShower(target, normalizeShowerSessionId(body.sessionId)));
+}
+
+async function showerRelease(host, runtime, params, body, req, res) {
+  assertNoQuery(req);
+  const target = showerTarget(body, ['sessionId']);
+  writeControlJson(res, 200, await runtime.releaseShowerSession(target, normalizeShowerSessionId(body.sessionId)));
 }
 
 async function models(host, runtime, params, body, req, res) {

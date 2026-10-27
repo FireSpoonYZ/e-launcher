@@ -20,8 +20,9 @@ import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BooleanSupplier;
+import java.util.regex.Pattern;
 
-/** 分发 Node Host 原生工具调用（android_apps/android_shower/android_speak）到本机资源。 */
+/** 分发 Node Host 原生工具调用（android_apps/android_shower/shower_surface/android_speak）到本机资源。 */
 final class BotHostNativeTools {
     private static final int MAX_ACCEPTED_WORK = 8;
     private static final int WORKER_THREADS = 4;
@@ -29,8 +30,16 @@ final class BotHostNativeTools {
     private static final int AUX_QUEUE_CAPACITY = 32;
     private static final long MAX_SAFE_INTEGER = 9007199254740991L;
     private static final int MAX_TEXT_OUTPUT_BYTES = 50 * 1024;
-    private static final Set<String> TOOLS = Set.of("android_apps", "android_shower", "android_speak", "schedule_task");
+    private static final Set<String> TOOLS = Set.of("android_apps", "android_shower", "android_speak",
+            "schedule_task", "shower_surface");
     private static final Set<String> KINDS = Set.of("primary", "room", "dm");
+    /** 人工操控没有 durable task：manager 传 'human:'+UUID；仅 shower_surface 允许，其他工具仍是正安全整数。 */
+    private static final Pattern HUMAN_TASK_ID = Pattern.compile("human:[0-9a-fA-F-]{8,64}");
+
+    /** 与 android-bridge-protocol.js、BotHostProcess 同一严格语义的人工 taskId 检查。 */
+    static boolean isHumanTaskId(Object value) {
+        return value instanceof String text && HUMAN_TASK_ID.matcher(text).matches();
+    }
 
     private final Context appContext;
     private final ShowerToolBridge showerTools;
@@ -141,6 +150,16 @@ final class BotHostNativeTools {
         }
         if ("schedule_task".equals(frame.optString("tool")) && !"primary".equals(kind)) {
             return "schedule_task 仅支持 primary";
+        }
+        if ("shower_surface".equals(frame.optString("tool"))) {
+            JSONObject showerArguments = frame.optJSONObject("arguments");
+            if (showerArguments == null || showerArguments.optString("action").isEmpty()
+                    || showerArguments.optString("source").isEmpty()) {
+                return "shower_surface 缺少 action 或 source";
+            }
+            if (context.opt("taskId") instanceof String) {
+                return isHumanTaskId(context.opt("taskId")) ? null : "taskId 无效";
+            }
         }
         if (!(context.opt("taskId") instanceof Number number)) return "taskId 必须是正整数";
         double value = number.doubleValue();
@@ -261,6 +280,8 @@ final class BotHostNativeTools {
         return switch (tool) {
             case "android_apps" -> apps(arguments);
             case "android_shower" -> shower(context, arguments, cancelled::get);
+            case "shower_surface" -> ShowerSurfaceBridge.execute(showerTools, context, arguments,
+                    cancelled::get);
             case "android_speak" -> speak(arguments);
             case "schedule_task" -> BotHostSchedules.get(appContext)
                     .applyTool(boundProcess, context, arguments, cancelled);
@@ -323,9 +344,16 @@ final class BotHostNativeTools {
         }
     }
 
-    /** 固定安全错误对象；不暴露任意 cause/凭据/正文文本。 */
+    /**
+     * 固定安全错误对象；不暴露任意 cause/凭据/正文文本。shower_surface 的已分类失败
+     * 保留共享协议错误码，后端才能区分 SHOWER_UNSUPPORTED / SHOWER_SESSION_MISMATCH 等。
+     */
     private static JSONObject fixedError(Throwable t) {
+        ShowerSurfaceBridge.Failure surface = surfaceFailure(t);
         try {
+            if (surface != null) {
+                return new JSONObject().put("code", surface.code).put("message", surface.getMessage());
+            }
             return new JSONObject().put("code", "ANDROID_NATIVE_ERROR").put("message", message(t));
         } catch (RuntimeException | JSONException exception) {
             try {
@@ -336,6 +364,16 @@ final class BotHostNativeTools {
                 return new JSONObject();
             }
         }
+    }
+
+    private static ShowerSurfaceBridge.Failure surfaceFailure(Throwable t) {
+        Throwable cause = t;
+        while (cause != null) {
+            if (cause instanceof ShowerSurfaceBridge.Failure failure) return failure;
+            if (cause.getCause() == cause) break;
+            cause = cause.getCause();
+        }
+        return null;
     }
 
     private static String message(Throwable t) {

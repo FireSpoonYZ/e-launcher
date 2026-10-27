@@ -64,6 +64,8 @@ export async function ensureWorkBinding(tx, deviceId, bot, scope, profile) {
   const nativeId = record.id;
   await configure(tx, nativeId, {
     cwd: bot.cwd,
+    // 与主会话一致：未配置时 null 即 SDK 默认档位。
+    thinkingLevel: profile.thinkingLevel ?? null,
     instructions: profile.instructions === undefined ? null : profile.instructions,
     tools: initialToolsChange(profile.removeTools),
   });

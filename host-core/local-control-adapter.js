@@ -10,6 +10,7 @@ import {
   normalizeControlCall,
 } from './remote-control-protocol.js';
 import { normalizeLiveTarget } from './remote-live-protocol.js';
+import { SHOWER_ERROR_CODES } from './shower-protocol.js';
 
 const TOKEN_PATTERN = /^[A-Za-z0-9_-]{32,512}$/;
 const LOOPBACK_HOSTNAMES = new Set(['127.0.0.1', '[::1]']);
@@ -63,6 +64,7 @@ const LOCAL_DOMAIN_CODES = new Set([
   'HINDSIGHT_BINDING_MISMATCH',
   'EXTENSION_DISABLED',
   'EXTENSION_READ_ONLY',
+  ...SHOWER_ERROR_CODES,
 ]);
 
 function controlError(code, outcome) {
@@ -191,6 +193,14 @@ function pageOptions(params, signal) {
   return options;
 }
 
+// Unified Shower control calls take the Runtime target object plus the HTTP
+// options arg last; the flat wire params are split into target/sessionId here.
+function showerTarget(params) {
+  return params.scopeId === undefined
+    ? { botId: params.botId }
+    : { botId: params.botId, scopeId: params.scopeId };
+}
+
 // Exact mapping to the native ControlClient surface; only method 'abort'
 // calls the local abort API. getHostInfo is handled separately after identity
 // verification. Map avoids inherited prototype keys being treated as methods.
@@ -245,6 +255,17 @@ const METHOD_HANDLERS = new Map([
   ['setBotSoul', (control, params, signal) => control.setBotSoul(params.botId, params.input, { signal })],
   ['setBotModel', (control, params, signal) => control.setBotModel(params.botId, params.input, { signal })],
   ['discoverProviderModels', (control, params, signal) => control.discoverProviderModels(params.input, { signal })],
+  ['getShowerStatus', (control, params, signal) => control.getShowerStatus(showerTarget(params), { signal })],
+  ['createShowerSession', (control, params, signal) =>
+    control.createShowerSession(showerTarget(params), params.input ?? {}, { signal })],
+  ['getShowerFrame', (control, params, signal) =>
+    control.getShowerFrame(showerTarget(params), params.sessionId, params.limits ?? {}, { signal })],
+  ['sendShowerInput', (control, params, signal) =>
+    control.sendShowerInput(showerTarget(params), params.sessionId, params.input, { signal })],
+  ['takeoverShower', (control, params, signal) =>
+    control.takeoverShower(showerTarget(params), params.sessionId, { signal })],
+  ['releaseShowerSession', (control, params, signal) =>
+    control.releaseShowerSession(showerTarget(params), params.sessionId, { signal })],
 ]);
 
 function requireValidId(value) {
@@ -285,7 +306,7 @@ function dispatchError(err, state, signal) {
 
 async function executeCall(config, expectedDeviceId, method, params, { signal } = {}) {
   requireValidId(expectedDeviceId);
-  // 先按协议表规范化（含 40 方法参数形状/未知键/1 MiB 限制）再映射。
+  // 先按协议表规范化（含 48 方法参数形状/未知键/1 MiB 限制）再映射。
   let normalized;
   try {
     normalized = normalizeControlCall(method, params);

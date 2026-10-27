@@ -4,6 +4,8 @@
 // surface; frame readers stay directional with no ws/network/Runtime/storage.
 // The managed-extension/SOUL methods are additive v2 and share the fixed
 // per-hop memory timeout budgets exported below.
+// The unified Shower six (status/create/frame/input/takeover/release) are also
+// additive v2 and normalize through shower-protocol so every platform agrees.
 
 import { messageError, assertId, normalizePageOptions } from './message-protocol.js';
 import {
@@ -22,6 +24,14 @@ import {
   normalizeMemoryCorrection,
   normalizeMemoryRetry,
 } from './hindsight-protocol.js';
+import {
+  SHOWER_ERROR_CODES,
+  normalizeShowerTarget,
+  normalizeShowerCreate,
+  normalizeShowerInput,
+  normalizeShowerFrameLimits,
+  normalizeShowerSessionId,
+} from './shower-protocol.js';
 
 const INVALID_ARGUMENT = 'INVALID_ARGUMENT';
 const SHA256_HEX_RE = /^[0-9a-f]{64}$/;
@@ -90,7 +100,8 @@ export const CONTROL_V1_METHODS = Object.freeze([
   'contextStatus',
 ]);
 
-// Fixed v2 additions (module 14, plus the managed-extension/SOUL additions).
+// Fixed v2 additions (module 14, plus the managed-extension/SOUL additions and
+// the unified Shower six).
 const CONTROL_V2_METHODS = Object.freeze([
   'getModelCatalog',
   'getWorkContext',
@@ -124,6 +135,12 @@ const CONTROL_V2_METHODS = Object.freeze([
   'setBotSoul',
   'setBotModel',
   'discoverProviderModels',
+  'getShowerStatus',
+  'createShowerSession',
+  'getShowerFrame',
+  'sendShowerInput',
+  'takeoverShower',
+  'releaseShowerSession',
 ]);
 
 export const CONTROL_METHODS = Object.freeze([...CONTROL_V1_METHODS, ...CONTROL_V2_METHODS]);
@@ -200,6 +217,7 @@ export const CONTROL_ERROR_CODES = new Set([
   'HINDSIGHT_BINDING_MISMATCH',
   'EXTENSION_DISABLED',
   'EXTENSION_READ_ONLY',
+  ...SHOWER_ERROR_CODES,
 ]);
 
 // Failure outcome semantics across the control protocol.
@@ -241,6 +259,12 @@ function normalizeBotExtensionsParams(value) {
     throw invalid('extensions.hindsight.mode must be read-write or read-only');
   }
   return { hindsight: { enabled: hindsight.enabled, mode: hindsight.mode } };
+}
+
+// Unified Shower wire params stay flat ({botId,scopeId?,...}) to match
+// RemoteControlMethodMap; shower-protocol owns every value check.
+function showerTargetParams(params) {
+  return normalizeShowerTarget({ botId: params.botId, scopeId: params.scopeId });
 }
 
 // Params normalize per method; unknown keys, missing required fields and
@@ -522,6 +546,35 @@ function normalizeControlParams(method, params) {
       return {
         input: out,
       };
+    }
+    case 'getShowerStatus': {
+      rejectUnknownFields(params, new Set(['botId', 'scopeId']), 'params');
+      return showerTargetParams(params);
+    }
+    case 'createShowerSession': {
+      rejectUnknownFields(params, new Set(['botId', 'scopeId', 'input']), 'params');
+      return { ...showerTargetParams(params), input: normalizeShowerCreate(params.input) };
+    }
+    case 'getShowerFrame': {
+      rejectUnknownFields(params, new Set(['botId', 'scopeId', 'sessionId', 'limits']), 'params');
+      return {
+        ...showerTargetParams(params),
+        sessionId: normalizeShowerSessionId(params.sessionId),
+        limits: normalizeShowerFrameLimits(params.limits),
+      };
+    }
+    case 'sendShowerInput': {
+      rejectUnknownFields(params, new Set(['botId', 'scopeId', 'sessionId', 'input']), 'params');
+      return {
+        ...showerTargetParams(params),
+        sessionId: normalizeShowerSessionId(params.sessionId),
+        input: normalizeShowerInput(params.input),
+      };
+    }
+    case 'takeoverShower':
+    case 'releaseShowerSession': {
+      rejectUnknownFields(params, new Set(['botId', 'scopeId', 'sessionId']), 'params');
+      return { ...showerTargetParams(params), sessionId: normalizeShowerSessionId(params.sessionId) };
     }
     default:
       throw invalid('unknown control method');

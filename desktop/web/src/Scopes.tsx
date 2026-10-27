@@ -16,6 +16,7 @@ import type {
   WorkLiveSnapshot,
 } from '../../../host-core/index.js';
 import { useDrafts } from './drafts';
+import { ShowerPreview } from './ShowerPreview';
 
 type AnyRawEntry = { id: unknown; kind: string; model?: unknown; data?: unknown };
 
@@ -149,6 +150,20 @@ function MemberWorkPane({ api, scopeId, member, active, pageActive = true }: {
   const [activityError, setActivityError] = useState<string | null>(null);
   const [activityLoading, setActivityLoading] = useState(false);
   const [workBusy, setWorkBusy] = useState(false);
+  const [showerOpen, setShowerOpen] = useState(false);
+  /** 统一 Shower 面板的平台无关 RPC 适配：目标为当前 scope 内的该 Bot（work 会话）。 */
+  const callShower = useCallback(
+    (method: string, params: Record<string, unknown>): Promise<unknown> => {
+      const current = api.identity;
+      if (!current) return Promise.reject(new Error('NOT_CONNECTED: 没有活动连接身份'));
+      // 直接从 api 调用同一方法（保留 this 绑定）；方法名由面板限定为六个 Shower 控制方法。
+      const rawApi = api as unknown as {
+        call: (identity: DesktopIdentity, method: string, params: Record<string, unknown>) => Promise<unknown>;
+      };
+      return rawApi.call(current, method, params);
+    },
+    [api],
+  );
   /** 只读查询序号：旧查询结果不得覆盖新请求。 */
   const querySeqRef = useRef(0);
   /** 显式 stop/resume 序号：显式结果优先于任何在途/后来的只读查询。 */
@@ -373,7 +388,23 @@ function MemberWorkPane({ api, scopeId, member, active, pageActive = true }: {
       <div className="member-work-head">
         <span className="entity-title">{member.botId}</span>
         <span className="entity-sub">device {member.deviceId}</span>
+        <button
+          type="button"
+          className={`toolbar-btn ${showerOpen ? 'active' : ''}`}
+          onClick={() => setShowerOpen((v) => !v)}
+        >
+          {showerOpen ? '收起桌面环境' : '桌面环境'}
+        </button>
       </div>
+      {/* 页面不可见时等同断开：停止轮询与输入，避免后台轮询（面板只有 4 个契约 props）。 */}
+      {showerOpen ? (
+        <ShowerPreview
+          call={callShower}
+          target={{ botId: member.botId, scopeId }}
+          connected={api.transportConnected && pageActive}
+          onClose={() => setShowerOpen(false)}
+        />
+      ) : null}
       <div className="status" aria-live="polite">
         {!online ? <span>离线：显示最后读取的数据，不自动请求。</span>
           : liveError ? <span className="error-text">{liveError}</span>

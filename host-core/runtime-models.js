@@ -3,6 +3,7 @@ import { createModels, createProvider } from '@earendil-works/pi-ai/models';
 import { openAICompletionsApi } from '@earendil-works/pi-ai/api/openai-completions.lazy';
 import { openAIResponsesApi } from '@earendil-works/pi-ai/api/openai-responses.lazy';
 import { piMessagesApi } from '@earendil-works/pi-ai/api/pi-messages.lazy';
+import { anthropicMessagesApi } from '@earendil-works/pi-ai/api/anthropic-messages.lazy';
 import { normalizeHindsightConfig, parseHindsightOptions } from './hindsight-client.js';
 import { normalizeRuntimeExtensions, resolveRuntimeExtensions } from './extension-manager.js';
 import { readInputObject } from './cli-input.js';
@@ -10,6 +11,17 @@ import { readInputObject } from './cli-input.js';
 const DEFAULT_CONTEXT_WINDOW = 32768;
 const DEFAULT_MAX_TOKENS = 1024;
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+// pi 思考档位（pi-ai ModelThinkingLevel）；provider 原生档位差异归模型 thinkingLevelMap。
+const MODEL_THINKING_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+const COST_RATES = ['input', 'output', 'cacheRead', 'cacheWrite'];
+// 已接入的 provider API 工厂；未知 api 显式报错，不静默当 openai-completions。
+const PROVIDER_APIS = new Map([
+  ['openai-completions', openAICompletionsApi],
+  ['openai-responses', openAIResponsesApi],
+  ['pi-messages', piMessagesApi],
+  ['anthropic-messages', anthropicMessagesApi],
+]);
+const DEFAULT_PROVIDER_API = 'openai-completions';
 
 function errWithCode(message, code) {
   const err = new Error(message);
@@ -116,6 +128,73 @@ export function parseModelRef(value) {
   return { provider, modelId };
 }
 
+/** 可选默认思考档位：仅接受已知 pi 档位；undefined/null 表示交给 SDK 默认值。 */
+export function normalizeThinkingLevel(value) {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== 'string' || !MODEL_THINKING_LEVELS.includes(value)) {
+    throw invalidArgument(`thinkingLevel must be one of ${MODEL_THINKING_LEVELS.join(', ')}`);
+  }
+  return value;
+}
+
+/** cost 四档在 SDK 中必填：缺省补 0；tiers 逐档校验，不透传未知字段。 */
+function readCostRates(raw, label) {
+  const rates = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+  for (const key of COST_RATES) {
+    const value = raw[key];
+    if (value === undefined) continue;
+    if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+      throw invalidArgument(`${label} ${key} must be a non-negative number`);
+    }
+    rates[key] = value;
+  }
+  return rates;
+}
+
+function normalizeCost(raw, label) {
+  if (raw === undefined) return readCostRates({}, label);
+  if (!isPlainObject(raw)) throw invalidArgument(`${label} must be an object`);
+  rejectUnknownFields(raw, new Set([...COST_RATES, 'tiers']), label);
+  const cost = readCostRates(raw, label);
+  if (raw.tiers === undefined) return cost;
+  if (!Array.isArray(raw.tiers) || raw.tiers.length === 0) {
+    throw invalidArgument(`${label} tiers must be a non-empty array`);
+  }
+  cost.tiers = raw.tiers.map((tier, index) => {
+    const tierLabel = `${label} tiers[${index}]`;
+    if (!isPlainObject(tier)) throw invalidArgument(`${tierLabel} must be an object`);
+    rejectUnknownFields(tier, new Set([...COST_RATES, 'inputTokensAbove']), tierLabel);
+    const inputTokensAbove = tier.inputTokensAbove;
+    if (typeof inputTokensAbove !== 'number' || !Number.isFinite(inputTokensAbove) || inputTokensAbove <= 0) {
+      throw invalidArgument(`${tierLabel} inputTokensAbove must be a positive number`);
+    }
+    return { ...readCostRates(tier, tierLabel), inputTokensAbove };
+  });
+  return cost;
+}
+
+/** thinkingLevelMap 键只能是 pi 档位，值为 provider 原生档位字符串或 null（不支持）。 */
+function normalizeThinkingLevelMap(raw, label) {
+  if (raw === undefined) return undefined;
+  if (!isPlainObject(raw)) throw invalidArgument(`${label} must be an object`);
+  const map = {};
+  for (const [level, value] of Object.entries(raw)) {
+    if (!MODEL_THINKING_LEVELS.includes(level)) throw invalidArgument(`${label} has unknown level: ${level}`);
+    if (value !== null && (typeof value !== 'string' || value.trim() === '')) {
+      throw invalidArgument(`${label} ${level} must be a non-empty string or null`);
+    }
+    map[level] = value;
+  }
+  return map;
+}
+
+/** compat/inputLimits 由 SDK 与原生工具按各自已知字段读取：只校验对象边界，原样交给 SDK。 */
+function passThroughObject(value, label) {
+  if (value === undefined) return undefined;
+  if (!isPlainObject(value)) throw invalidArgument(`${label} must be an object`);
+  return value;
+}
+
 /**
  * 纯运行时配置校验：不读 env/文件/网络；拒未知字段，不悄悄存 apiKey/headers。
  * 扩展配置为 runtime.extensions；legacy runtime.hindsight 仍原样保留在规范化结果里，
@@ -123,7 +202,7 @@ export function parseModelRef(value) {
  */
 export function normalizeRuntimeConfig(raw) {
   if (!isPlainObject(raw)) throw invalidArgument('runtime config must be a JSON object');
-  rejectUnknownFields(raw, new Set(['providers', 'defaultModel', 'hindsight', 'extensions', 'bashPath', 'toolPaths']), 'runtime config');
+  rejectUnknownFields(raw, new Set(['providers', 'defaultModel', 'thinkingLevel', 'hindsight', 'extensions', 'bashPath', 'toolPaths']), 'runtime config');
   if (raw.hindsight !== undefined && raw.extensions !== undefined) {
     throw invalidArgument('runtime config must not set both hindsight and extensions');
   }
@@ -138,7 +217,9 @@ export function normalizeRuntimeConfig(raw) {
     defaultModel = raw.defaultModel;
   }
   const execution = parseExecutionOptions(raw);
+  const thinkingLevel = normalizeThinkingLevel(raw.thinkingLevel);
   const normalized = { providers, defaultModel };
+  if (thinkingLevel !== undefined) normalized.thinkingLevel = thinkingLevel;
   const hindsight = normalizeHindsightConfig(raw.hindsight);
   const extensions = normalizeRuntimeExtensions(raw.extensions);
   if (hindsight !== undefined) normalized.hindsight = hindsight;
@@ -164,6 +245,7 @@ export function parseRuntimeConfig(raw) {
   return {
     models,
     defaultModel: normalized.defaultModel,
+    thinkingLevel: normalized.thinkingLevel,
     bashPath: normalized.bashPath,
     toolPaths: normalized.toolPaths,
     hindsight,
@@ -199,6 +281,14 @@ function validateProviders(providers) {
     seenProviders.add(id);
 
     const baseUrl = normalizeProviderBaseUrl(p.baseUrl);
+    let api;
+    if (p.api !== undefined) {
+      const requested = typeof p.api === 'string' ? p.api.trim() : '';
+      if (!PROVIDER_APIS.has(requested)) {
+        throw invalidArgument(`runtime config: provider "${id}" api is not supported: ${requested || typeof p.api}; supported: ${[...PROVIDER_APIS.keys()].join(', ')}`);
+      }
+      api = requested;
+    }
     let apiKeyEnv;
     if (p.apiKeyEnv !== undefined) {
       if (typeof p.apiKeyEnv !== 'string' || !ENV_NAME.test(p.apiKeyEnv)) {
@@ -214,7 +304,7 @@ function validateProviders(providers) {
       if (!isPlainObject(m)) {
         throw invalidArgument(`runtime config: each model of provider "${id}" must be an object`);
       }
-      rejectUnknownFields(m, new Set(['id', 'name', 'reasoning', 'contextWindow', 'maxTokens', 'input']), 'runtime config model');
+      rejectUnknownFields(m, new Set(['id', 'name', 'reasoning', 'contextWindow', 'maxTokens', 'input', 'cost', 'compat', 'thinkingLevelMap', 'inputLimits']), 'runtime config model');
       const modelId = m.id;
       if (typeof modelId !== 'string' || modelId.trim() === '' || !modelId.isWellFormed()) {
         throw invalidArgument('runtime config: model id must be a non-empty well-formed string');
@@ -265,22 +355,30 @@ function validateProviders(providers) {
       if (m.name !== undefined) model.name = m.name;
       if (m.reasoning !== undefined) model.reasoning = m.reasoning;
       if (input !== undefined) model.input = input;
+      model.cost = normalizeCost(m.cost, `runtime config: model "${modelId}" cost`);
+      const compat = passThroughObject(m.compat, `runtime config: model "${modelId}" compat`);
+      if (compat !== undefined) model.compat = compat;
+      const thinkingLevelMap = normalizeThinkingLevelMap(m.thinkingLevelMap, `runtime config: model "${modelId}" thinkingLevelMap`);
+      if (thinkingLevelMap !== undefined) model.thinkingLevelMap = thinkingLevelMap;
+      const inputLimits = passThroughObject(m.inputLimits, `runtime config: model "${modelId}" inputLimits`);
+      if (inputLimits !== undefined) model.inputLimits = inputLimits;
       models.push(model);
     }
     // 规范结果不带 undefined 属性，保证 normalize -> stringify/parse -> normalize 等价。
     const provider = { id, baseUrl, models };
     if (typeof p.name === 'string' && p.name.trim() !== '') provider.name = p.name.trim();
-    if (typeof p.api === 'string' && p.api.trim() !== '') provider.api = p.api.trim();
+    if (api !== undefined) provider.api = api;
     if (apiKeyEnv !== undefined) provider.apiKeyEnv = apiKeyEnv;
     out.push(provider);
   }
   return out;
 }
 
-function resolveProviderApi(apiKind) {
-  if (apiKind === 'openai-responses') return { id: 'openai-responses', impl: openAIResponsesApi() };
-  if (apiKind === 'pi-messages') return { id: 'pi-messages', impl: piMessagesApi() };
-  return { id: 'openai-completions', impl: openAICompletionsApi() };
+function resolveProviderApi(providerId, apiKind) {
+  const id = apiKind ?? DEFAULT_PROVIDER_API;
+  const factory = PROVIDER_APIS.get(id);
+  if (!factory) throw invalidArgument(`runtime config: provider "${providerId}" api is not supported: ${id}`);
+  return { id, impl: factory() };
 }
 
 export function syncModelsFromRuntimeConfig(models, raw) {
@@ -293,7 +391,7 @@ export function syncModelsFromRuntimeConfig(models, raw) {
 }
 
 function buildProvider(provider) {
-  const resolvedApi = resolveProviderApi(provider.api);
+  const resolvedApi = resolveProviderApi(provider.id, provider.api);
   const models = provider.models.map((m) => ({
     id: m.id,
     name: m.name ?? m.id,
@@ -302,9 +400,12 @@ function buildProvider(provider) {
     baseUrl: provider.baseUrl,
     input: m.input ?? ['text'],
     reasoning: m.reasoning ?? false,
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    cost: m.cost,
     contextWindow: m.contextWindow,
     maxTokens: m.maxTokens,
+    ...(m.compat === undefined ? {} : { compat: m.compat }),
+    ...(m.thinkingLevelMap === undefined ? {} : { thinkingLevelMap: m.thinkingLevelMap }),
+    ...(m.inputLimits === undefined ? {} : { inputLimits: m.inputLimits }),
   }));
   return createProvider({
     id: provider.id,

@@ -34,6 +34,7 @@ final class ShowerController {
     private volatile boolean userControl;
     /** 用户接管过且 Agent 尚未重新截图：非截图动作拒绝执行，避免按旧画面坐标操作。 */
     private volatile boolean userDirty;
+    private String surfaceSessionId;
     private final java.util.LinkedHashSet<String> launchedPackages = new java.util.LinkedHashSet<>();
 
     static final class Preview {
@@ -240,6 +241,68 @@ final class ShowerController {
     }
 
     synchronized JSONObject screenshot(int maxWidth, int maxHeight) throws Exception {
+        byte[] png = requestPng(maxWidth, maxHeight);
+        BitmapFactory.Options bounds = new BitmapFactory.Options();
+        bounds.inJustDecodeBounds = true;
+        BitmapFactory.decodeByteArray(png, 0, png.length, bounds);
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
+            throw new IllegalStateException("无法读取截图尺寸");
+        }
+        userDirty = false;
+        return state("screenshot").put("imageWidth", bounds.outWidth)
+                .put("imageHeight", bounds.outHeight).put("mimeType", "image/png")
+                .put("data", Base64.encodeToString(png, Base64.NO_WRAP));
+    }
+
+    /** 统一 shower_surface：复用现有 PNG 获取，JPEG 缩放与 base64 预算在协议层完成。 */
+    synchronized byte[] capturePng(int maxWidth, int maxHeight) throws Exception {
+        return requestPng(maxWidth, maxHeight);
+    }
+
+    synchronized int surfaceWidth() {
+        return width;
+    }
+
+    synchronized int surfaceHeight() {
+        return height;
+    }
+
+    synchronized String surfaceSessionId() {
+        return surfaceSessionId;
+    }
+
+    /** manager 在首次 ensure 前分配 UUID；虚拟屏复用时只绑定该会话，不重建显示。 */
+    synchronized void adoptSurfaceSession(String sessionId) {
+        surfaceSessionId = sessionId;
+    }
+
+    /**
+     * 统一 surface 的空闲保活：只对已绑定 sessionId 且 binder 仍活的显示用现有 touchDisplay 延寿；
+     * 显示丢失时 clearDisplay（清 sessionId）后返回 false，绝不 ensureService、不重建。
+     */
+    synchronized boolean keepSurfaceAlive() {
+        if (surfaceSessionId == null) return false;
+        try {
+            activeService();
+            return surfaceSessionId != null;
+        } catch (Exception lost) {
+            return false;
+        }
+    }
+
+    /** 统一 text 输入：插入光标处（不做 select-all 替换），经系统剪贴板粘贴。 */
+    synchronized JSONObject surfaceText(String text) throws Exception {
+        if (text == null || text.isEmpty() || text.length() > 1000) {
+            throw new IllegalArgumentException("text 长度范围为 1..1000");
+        }
+        synchronized (clipboard) {
+            copy(text);
+            key(KeyEvent.KEYCODE_PASTE, 0, "PASTE");
+        }
+        return state("text").put("characters", text.length());
+    }
+
+    private byte[] requestPng(int maxWidth, int maxHeight) throws Exception {
         if (maxWidth < 160 || maxWidth > 1440 || maxHeight < 160 || maxHeight > 3200) {
             throw new IllegalArgumentException("截图尺寸范围为 160..1440 × 160..3200");
         }
@@ -261,16 +324,7 @@ final class ShowerController {
         }
         if (png.length < 24 || (png[0] & 0xff) != 0x89 || png[1] != 'P' || png[2] != 'N'
                 || png[3] != 'G') throw new IllegalStateException("Operit Shower 截图不是有效 PNG");
-        BitmapFactory.Options bounds = new BitmapFactory.Options();
-        bounds.inJustDecodeBounds = true;
-        BitmapFactory.decodeByteArray(png, 0, png.length, bounds);
-        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
-            throw new IllegalStateException("无法读取截图尺寸");
-        }
-        userDirty = false;
-        return state("screenshot").put("imageWidth", bounds.outWidth)
-                .put("imageHeight", bounds.outHeight).put("mimeType", "image/png")
-                .put("data", Base64.encodeToString(png, Base64.NO_WRAP));
+        return png;
     }
 
     synchronized JSONObject tap(int x, int y) throws Exception {
@@ -393,6 +447,7 @@ final class ShowerController {
         manualControl = false;
         userControl = false;
         userDirty = false;
+        surfaceSessionId = null;
         launchedPackages.clear();
         notifyAll();
         displayId = null;

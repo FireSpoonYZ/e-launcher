@@ -72,9 +72,10 @@ async function main() {
   }
   const options = { dataRoot: values['data-root'], token };
   if (values.port !== undefined) options.port = parsePort(values.port);
-  const { models, defaultModel, bashPath, toolPaths, hindsight, extensions } = await loadRuntimeConfig(values.config);
+  const { models, defaultModel, thinkingLevel, bashPath, toolPaths, hindsight, extensions } = await loadRuntimeConfig(values.config);
   options.models = models;
   options.defaultModel = defaultModel;
+  if (thinkingLevel !== undefined) options.thinkingLevel = thinkingLevel;
   if (bashPath !== undefined) options.bashPath = bashPath;
   if (toolPaths !== undefined) options.toolPaths = toolPaths;
   if (hindsight !== undefined) options.hindsight = hindsight;

@@ -46,6 +46,8 @@ export async function createPrimaryInTransaction(tx, bot, options = {}) {
   const record = await tx.createConversation({ ownership: { kind: 'ownerless' } });
   await configure(tx, record.id, {
     model,
+    // 未配置时显式 null 即 SDK 默认档位，与未写入等价，避免残留上次配置。
+    thinkingLevel: options.thinkingLevel ?? null,
     // 主会话人格来自真实 SOUL.md；未提供时保留旧 role 以兼容遗留导入路径。
     instructions: options.instructions === undefined ? bot.role : options.instructions,
     cwd: bot.cwd,
@@ -89,6 +91,8 @@ export function initialToolsChange(removeTools) {
 /**
  * 由当前 AgentState 计算人格/工具变更（无变化返回 undefined，避免无谓 system 变更）：
  * - instructions：null/空串表示清空人格（空 SOUL 合法且有意为空）。
+ * - thinkingLevel：profile 给出期望档位（null 表示 SDK 默认），与持久值不同才写入；
+ *   因此 reload/重新应用人格时也能落盘，不只首次创建生效。
  * - tools：只并入/移除本模块管理的工具名；旧版显式白名单（数组）不在改写范围。
  *   managedTools 是本模块完整工具定义（重算时清掉全部旧排除项），removeTools 是本次想要的排除项，
  *   二者分开才能让「关闭→启用」「只读→读写」恢复被移除的工具。
@@ -112,6 +116,11 @@ export function agentProfileChange(state, profile) {
     } else if (current !== next) {
       change.instructions = next;
     }
+  }
+
+  const thinkingLevel = profile?.thinkingLevel;
+  if (thinkingLevel !== undefined && (state?.thinkingLevel ?? null) !== thinkingLevel) {
+    change.thinkingLevel = thinkingLevel;
   }
 
   const desired = profile?.removeTools ?? [];

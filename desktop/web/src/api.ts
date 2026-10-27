@@ -246,6 +246,9 @@ export class DesktopViewApiImpl implements DesktopPanelApi {
   }
 
   private ensureLoaded(): Promise<DesktopUiSnapshot> {
+    // 已加载后（ui_set 成功或 CAS 对账已推进 snapshotValue）必须返回当前快照，
+    // 否则重复 init() 会拿到首次 ui_get 的旧值并覆盖更新后的界面状态。
+    if (this.snapshotValue) return Promise.resolve(this.snapshotValue);
     if (!this.loadPromise) {
       this.loadPromise = this.transport.request('ui_get', {}).then(
         (snap) => {

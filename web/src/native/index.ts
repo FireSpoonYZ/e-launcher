@@ -173,7 +173,15 @@ export const Device = registerPlugin<DevicePlugin>('Device');
 export type HostPhase = 'stopped'|'starting'|'running'|'stopping'|'failed';
 export type HostSnapshot = { phase: HostPhase; deviceId: string|null; lastUpdated: number; errorCode: string|null; restartRequired: boolean; workspace?: string|null };
 export type HostStatus = HostSnapshot;
-export type HostSettingsModel = { id: string; name?: string; reasoning?: boolean; contextWindow?: number; maxTokens?: number };
+export type HostSettingsModel = {
+  id: string; name?: string; reasoning?: boolean; contextWindow?: number; maxTokens?: number;
+  /** Pass-through 字段原样交给 SDK/原生工具，Host 回读时可能已按规范补全默认值。 */
+  input?: ('text'|'image')[];
+  cost?: Record<string, unknown>;
+  compat?: Record<string, unknown>;
+  thinkingLevelMap?: Record<string, string|null>;
+  inputLimits?: Record<string, unknown>;
+};
 export type HostProviderConfig = { id: string; name?: string; api?: string; baseUrl: string; apiKeyEnv?: string; models: HostSettingsModel[] };
 export type HostRelayConfig = { url: string; tokenEnv: string; caFile?: string };
 // Canonical extension/SOUL DTOs are declared once in host-core/index.d.ts and
@@ -184,6 +192,8 @@ export type HostHindsightConfig = SharedHindsightOptions & { timeoutMs?: number;
 export type HostRuntimeSettings = {
   providers: HostProviderConfig[];
   defaultModel?: string | null;
+  /** 默认思考档位；缺省/null 交给 SDK 默认值。 */
+  thinkingLevel?: string | null;
   /** Canonical extension config; legacy `hindsight` may still appear on readback. */
   extensions?: RuntimeExtensionsConfig;
   hindsight?: HostHindsightConfig;

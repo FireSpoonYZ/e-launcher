@@ -51,7 +51,13 @@ import type {
   BotExtensionsUpdate,
   BotSoul,
   BotSoulUpdate,
-  WorkLiveFrame
+  WorkLiveFrame,
+  ShowerCreateOptions,
+  ShowerFrame,
+  ShowerFrameLimits,
+  ShowerInput,
+  ShowerSession,
+  ShowerTarget
 } from './index.js';
 
 export class ControlApiError extends Error {
@@ -157,6 +163,41 @@ export interface ControlClient {
   setBotExtensions(botId: string, input: BotExtensionsUpdate, options?: ControlClientCallOptions): Promise<BotExtensionSnapshot>;
   getBotSoul(botId: string, options?: ControlClientCallOptions): Promise<BotSoul>;
   setBotSoul(botId: string, input: BotSoulUpdate, options?: ControlClientCallOptions): Promise<BotSoul>;
+  /*
+   * Unified Shower (Android/Windows/Linux): same argument order as the Runtime
+   * methods, with this client's trailing {signal} options. The body stays the
+   * remote v2 params {botId, scopeId?, ...}; Actor/targetDeviceId are never
+   * client supplied. takeover/release are not replayed.
+   */
+  getShowerStatus(target: ShowerTarget, options?: ControlClientCallOptions): Promise<ShowerSession>;
+  createShowerSession(
+    target: ShowerTarget,
+    input?: ShowerCreateOptions,
+    options?: ControlClientCallOptions
+  ): Promise<ShowerSession>;
+  getShowerFrame(
+    target: ShowerTarget,
+    sessionId: string,
+    limits?: ShowerFrameLimits,
+    options?: ControlClientCallOptions
+  ): Promise<ShowerFrame>;
+  sendShowerInput(
+    target: ShowerTarget,
+    sessionId: string,
+    input: ShowerInput,
+    options?: ControlClientCallOptions
+  ): Promise<Record<string, unknown>>;
+  /** Aborts the matching conversation; resolves with the current status. */
+  takeoverShower(
+    target: ShowerTarget,
+    sessionId: string,
+    options?: ControlClientCallOptions
+  ): Promise<ShowerSession>;
+  releaseShowerSession(
+    target: ShowerTarget,
+    sessionId: string,
+    options?: ControlClientCallOptions
+  ): Promise<Record<string, unknown>>;
 }
 
 export function createControlClient(options: ControlClientOptions): ControlClient;

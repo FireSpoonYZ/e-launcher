@@ -51,9 +51,11 @@ import {
 import { onMobileStreamFailure } from './native/tauri-host';
 import type { DesktopIdentity, DesktopPanelApi } from '../../desktop/web/src/types';
 import type { DesktopConnectionInput, DesktopUiProfile } from '../../host-core/desktop-client.js';
-import type { DevicesDirectoryItem } from '../../host-core/index.js';
+import type { DevicesDirectoryItem, ShowerTarget } from '../../host-core/index.js';
+import { ShowerPreview, type ShowerCall } from './ShowerPreview';
 import { Markdown } from './Markdown';
 import { BotScreenPanel } from './BotScreenPanel';
+import { resolveScreenClient } from './screen';
 import {
   GROK_AVATAR_PRESETS,
   GROK_COLOR_PALETTE,
@@ -118,6 +120,7 @@ const PI_PROVIDER_PROTOCOLS = [
   { id: 'openai-completions', label: 'openai-completions (OpenAI / 通用兼容)' },
   { id: 'openai-responses', label: 'openai-responses (OpenAI Responses)' },
   { id: 'pi-messages', label: 'pi-messages (Pi Gateway 协议)' },
+  { id: 'anthropic-messages', label: 'anthropic-messages (Anthropic Messages)' },
 ] as const;
 
 const MODEL_PROVIDER_PRESETS: {
@@ -596,9 +599,11 @@ function parseHistoryEntries(items: Array<Record<string, unknown>>, clearedAfter
     if (clearedAfterEntryId > 0 && Number.isFinite(numericId) && numericId <= clearedAfterEntryId) {
       continue;
     }
+    // raw 条目用 model 块（含工具/思考）；Host live 投影条目只有 messages:[{role,text,truncated}]。
     const model = array<unknown>(item.model);
-    for (let mIdx = 0; mIdx < model.length; mIdx++) {
-      const raw = model[mIdx];
+    const blocks = model.length > 0 ? model : array<unknown>(item.messages);
+    for (let mIdx = 0; mIdx < blocks.length; mIdx++) {
+      const raw = blocks[mIdx];
       if (!raw || typeof raw !== 'object') continue;
       const entry = record(raw);
       const role = entry.role;
@@ -609,6 +614,8 @@ function parseHistoryEntries(items: Array<Record<string, unknown>>, clearedAfter
       const toolParts: string[] = [];
       if (typeof content === 'string') {
         textParts.push(content);
+      } else if (typeof entry.text === 'string') {
+        textParts.push(entry.text);
       } else if (Array.isArray(content)) {
         for (const block of content) {
           if (typeof block === 'string') {
@@ -1418,36 +1425,59 @@ export function HostPage({
     [cancelActiveObservation, clearedMap, ensureLocalHostRunning, updateBotMeta],
   );
 
-  // Poll submission receipt until complete
+  // Poll submission receipt until complete（本机 BotHost.call 与远端 api.call 共用同一处理）
   useEffect(() => {
     if (screen !== 'chat' || !activeBot) return;
     if (!chatReceipt || (chatReceipt.status !== 'queued' && chatReceipt.status !== 'placed')) return;
+    const bot = activeBot;
+    const requestId = chatReceipt.requestId;
+    const remoteTarget =
+      bot.hostKind === 'remote' && bot.remoteIdentity && remoteClientRef.current
+        ? { api: remoteClientRef.current.api, identity: bot.remoteIdentity }
+        : null;
+    if (bot.hostKind === 'remote' && !remoteTarget) return;
+    if (bot.hostKind === 'local' && bot.botId === '__jarvis__') return;
+
+    const readSubmission = async (): Promise<HostSubmission | null> => {
+      if (bot.hostKind === 'local') {
+        const env = await BotHost.call({ method: 'getSubmission', params: { botId: bot.botId, requestId } });
+        return env.result as HostSubmission;
+      }
+      if (!remoteTarget) return null;
+      return (await remoteTarget.api.call(remoteTarget.identity, 'getSubmission', {
+        botId: bot.botId,
+        requestId,
+      })) as unknown as HostSubmission | null;
+    };
+    const readHistory = async (): Promise<Array<Record<string, unknown>> | null> => {
+      if (bot.hostKind === 'local') {
+        const env = await BotHost.call({ method: 'history', params: { botId: bot.botId, limit: 50 } });
+        return (env.result as HostHistoryPage)?.items ?? null;
+      }
+      if (!remoteTarget) return null;
+      const page = await remoteTarget.api.call(remoteTarget.identity, 'history', { botId: bot.botId, limit: 50 });
+      return ((page as unknown as HostHistoryPage)?.items as Array<Record<string, unknown>>) ?? null;
+    };
+
     let alive = true;
     const timer = window.setInterval(async () => {
       if (!alive || document.hidden) return;
       try {
-        if (activeBot.hostKind === 'local' && activeBot.botId !== '__jarvis__') {
-          const env = await BotHost.call({
-            method: 'getSubmission',
-            params: { botId: activeBot.botId, requestId: chatReceipt.requestId },
-          });
-          const next = env.result as HostSubmission;
-          if (!alive) return;
-          if (next && next.requestId === chatReceipt.requestId) {
-            setChatReceipt(next);
-            if (next.status === 'done' || next.status === 'unanswered') {
-              const histEnv = await BotHost.call({ method: 'history', params: { botId: activeBot.botId, limit: 50 } });
-              const page = histEnv.result as HostHistoryPage;
-              if (alive && page?.items) {
-                setChatHistory(page.items);
-                const turns = parseHistoryEntries(page.items, clearedMap[activeBot.key] ?? 0);
-                const last = turns.at(-1);
-                if (last?.text) {
-                  updateBotMeta(activeBot.key, { lastText: last.text, updatedAt: Date.now(), unread: false });
-                }
-              }
-            }
-          }
+        const next = await readSubmission();
+        if (!alive || !next || next.requestId !== requestId) return;
+        if (next.status !== 'done' && next.status !== 'unanswered') {
+          setChatReceipt(next);
+          return;
+        }
+        // 终态：先回读历史再提交 receipt，避免 receipt 重渲染 cleanup 把 alive 置 false 丢掉后续写入。
+        const items = await readHistory().catch(() => null);
+        if (!alive) return;
+        // 回读失败也要落终态 receipt，不能停在生成中；随后同步提交，无新的异步窗口。
+        setChatReceipt(next);
+        if (items) setChatHistory(items);
+        // 摘要只取真实答案；无答案（unanswered）保留 submit 时写入的用户消息摘要，不被历史旧文本覆盖。
+        if (next.answerText) {
+          updateBotMeta(bot.key, { lastText: next.answerText, updatedAt: Date.now(), unread: false });
         }
       } catch {
         // Ignore transient poll error
@@ -1457,7 +1487,7 @@ export function HostPage({
       alive = false;
       window.clearInterval(timer);
     };
-  }, [screen, activeBot, chatReceipt, clearedMap, updateBotMeta]);
+  }, [screen, activeBot, chatReceipt, updateBotMeta]);
 
   const openBotChat = (bot: UnifiedBotItem) => {
     setActiveBotKey(bot.key);
@@ -1540,7 +1570,12 @@ export function HostPage({
 
   const clearCurrentBotHistory = useCallback(() => {
     if (!activeBot) return;
-    const maxId = maxHistoryEntryId(chatHistory);
+    // 水位同时覆盖 raw 历史与 live 投影（lastEntryId 是最新可显示条目），避免新投影又回来。
+    const liveLastEntryId = Number(chatLive?.state?.lastEntryId);
+    const maxId = Math.max(
+      maxHistoryEntryId(chatHistory),
+      Number.isFinite(liveLastEntryId) ? liveLastEntryId : 0,
+    );
     const nextCutoff = Math.max(maxId, clearedMap[activeBot.key] ?? 0, 1);
     setClearedMap(prev => {
       const updated = { ...prev, [activeBot.key]: nextCutoff };
@@ -1556,7 +1591,7 @@ export function HostPage({
     updateBotMeta(activeBot.key, { lastText: t('对话已清空', 'History cleared'), updatedAt: Date.now(), unread: false });
     setClearNotice(t('已清空当前对话历史', 'Conversation history cleared'));
     window.setTimeout(() => setClearNotice(''), 2500);
-  }, [activeBot, chatHistory, clearedMap, t, updateBotMeta]);
+  }, [activeBot, chatHistory, chatLive, clearedMap, t, updateBotMeta]);
 
   // Materialize virtual Jarvis into a real Bot when needed
   const materializeJarvisIfNeeded = async (snap: HostSnapshot): Promise<{ botId: string; key: string }> => {
@@ -2602,33 +2637,31 @@ export function HostPage({
 
   const visibleTurns = useMemo(() => {
     if (!activeBot) return [];
-    const all = parseHistoryEntries(chatHistory, clearedMap[activeBot.key] ?? 0);
+    const clearedAfter = clearedMap[activeBot.key] ?? 0;
+    // raw history 是旧页，live 投影是新窗口：按 entry id 去重排序；同 id 保留 raw（工具/思考细节更全）。
+    const byId = new Map<string, Record<string, unknown>>();
+    for (const item of array<Record<string, unknown>>(chatLive?.state?.history)) {
+      byId.set(String(item.id), item);
+    }
+    for (const item of chatHistory) byId.set(String(item.id), item);
+    const numericId = (item: Record<string, unknown>) => {
+      const id = Number(item.id);
+      return Number.isFinite(id) ? id : 0;
+    };
+    const all = parseHistoryEntries(
+      [...byId.values()].sort((a, b) => numericId(a) - numericId(b)),
+      clearedAfter,
+    );
     const q = chatSearchQuery.trim().toLowerCase();
     if (!chatSearchOpen || !q) return all;
     return all.filter(turn => turn.text.toLowerCase().includes(q));
-  }, [chatHistory, activeBot, clearedMap, chatSearchOpen, chatSearchQuery]);
+  }, [chatHistory, chatLive, activeBot, clearedMap, chatSearchOpen, chatSearchQuery]);
 
-  const liveGeneratingText = useMemo(() => {
-    if (!chatLive?.state) return '';
-    const st = record(chatLive.state);
-    if (st.phase === 'idle') return '';
-    const msg = record(st.message);
-    const content = msg.content;
-    if (typeof content === 'string') return content;
-    if (Array.isArray(content)) {
-      return content
-        .map(c => {
-          const r = record(c);
-          return typeof r.text === 'string' ? r.text : '';
-        })
-        .filter(Boolean)
-        .join('\n');
-    }
-    return '';
-  }, [chatLive]);
+  const liveGeneratingText = chatLive?.state?.generation?.text ?? '';
 
   const isBotBusy = Boolean(
-    (chatLive?.state && record(chatLive.state).phase && record(chatLive.state).phase !== 'idle') ||
+    chatLive?.state?.busy ||
+      (chatLive?.state?.queuedCount ?? 0) > 0 ||
       (chatReceipt && (chatReceipt.status === 'queued' || chatReceipt.status === 'placed')),
   );
 
@@ -2666,6 +2699,48 @@ export function HostPage({
   const showSlashHints = chatDraft.startsWith('/') && chatDraft.length <= 8;
   const anyDrawerOpen = leftDrawerOpen || rightDrawerOpen;
   const primaryPreset = resolveBotAvatarPreset(primaryBot.key, primaryBot.role, true);
+
+  // 工作环境预览：本机与远程 Bot 共用同一右侧面板与同一共享组件，只换 call 桥。
+  // target 是当前已选真实 Bot 的主会话（无 scopeId）；合成主助手 __jarvis__ 没有环境。
+  const showerBotId = activeBot && activeBot.botId !== '__jarvis__' ? activeBot.botId : null;
+  const showerHostKind = activeBot?.hostKind;
+  const showerIdentity = activeBot?.remoteIdentity;
+  const showerTarget = useMemo<ShowerTarget | null>(
+    () => (showerBotId ? { botId: showerBotId } : null),
+    [showerBotId],
+  );
+  // 远程 Bot 必须与当前连接档案/设备/代一致，否则不把旧设备的帧当当前画面。
+  const showerRemoteReady = Boolean(
+    showerHostKind === 'remote' &&
+      remoteConnected &&
+      showerIdentity &&
+      remoteIdentity &&
+      showerIdentity.profileId === remoteIdentity.profileId &&
+      showerIdentity.targetDeviceId === remoteIdentity.targetDeviceId &&
+      showerIdentity.generation === remoteIdentity.generation,
+  );
+  // 复用既有 remote 面板 call（与 Host 其它调用同源），绝不发给本机 BotHost；
+  // 本机 Bot 不传 call，由 adapter 默认走 BotHost.call。
+  const showerCall = useMemo<ShowerCall | undefined>(() => {
+    if (showerHostKind !== 'remote' || !showerRemoteReady || !showerIdentity) return undefined;
+    const api = remoteClientRef.current?.api;
+    if (!api) return undefined;
+    const call = api.call.bind(api) as (
+      identity: DesktopIdentity,
+      method: string,
+      params: Record<string, unknown>,
+    ) => Promise<unknown>;
+    return (method, params) => call(showerIdentity, method, params);
+  }, [showerHostKind, showerRemoteReady, showerIdentity]);
+  const showerConnected =
+    showerHostKind === 'local' ? localHost?.phase === 'running' : showerRemoteReady;
+  // 换主机/档案/设备/代/Bot 就换 key：旧画面与旧会话随卸载丢弃，不跨设备复用帧。
+  const showerPreviewKey = `${showerHostKind ?? '-'}:${showerIdentity?.profileId ?? '-'}:${showerIdentity?.generation ?? '-'}:${showerIdentity?.targetDeviceId ?? '-'}:${showerBotId ?? '-'}`;
+  const closeShowerPreview = useCallback(() => setRightDrawerOpen(false), []);
+  // 本机 Tauri Android 界面优先用原生覆盖层（支持接管）；其余环境与远程 Bot 走共享 ShowerPreview。
+  const nativeScreenAvailable = activeBot
+    ? resolveScreenClient({ botId: activeBot.botId, hostKind: activeBot.hostKind }).kind === 'client'
+    : false;
 
   return (
     <div
@@ -2881,7 +2956,7 @@ export function HostPage({
                     }}
                   >
                     <PanelRight size={19} />
-                    <span>{t('右侧控制面板', 'Screen Control Panel')}</span>
+                    <span>{t('工作环境预览', 'Work environment preview')}</span>
                   </button>
                   <button
                     type="button"
@@ -5041,7 +5116,7 @@ export function HostPage({
               <X size={20} />
             </button>
           </header>
-          {activeBot ? (
+          {activeBot && nativeScreenAvailable ? (
             <BotScreenPanel
               botId={activeBot.botId}
               hostKind={activeBot.hostKind}
@@ -5057,10 +5132,26 @@ export function HostPage({
                 }
               }}
             />
+          ) : showerTarget && (showerHostKind === 'local' || showerCall) ? (
+            rightDrawerOpen && (
+              <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+                <ShowerPreview
+                  key={showerPreviewKey}
+                  call={showerCall}
+                  target={showerTarget}
+                  connected={showerConnected}
+                  onClose={closeShowerPreview}
+                />
+              </div>
+            )
           ) : (
             <div className="hub-right-drawer-empty">
               <Monitor size={30} />
-              <p>{t('选择一个 Bot 查看它的屏幕', 'Select a Bot to view its screen')}</p>
+              <p>
+                {activeBot
+                  ? t('该 Bot 还没有可预览的工作环境', 'No work environment for this Bot yet')
+                  : t('选择一个 Bot 查看它的屏幕', 'Select a Bot to view its screen')}
+              </p>
             </div>
           )}
         </aside>
