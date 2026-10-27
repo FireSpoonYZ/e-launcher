@@ -22,11 +22,11 @@ export default function Capabilities() {
   };
   return <main className="config-page"><h1>插件、MCP 与 Skill</h1><p>安装实例由中心管理，每个 Bot 单独启用。</p>{error && <p className="config-error" role="alert">{error}</p>}
     <section><h2>安装或登记</h2><form onSubmit={event => { event.preventDefault(); void install(); }}>
-      <label>类型 <select value={kind} onChange={event => setKind(event.target.value as CapabilityKind)}><option value="plugin">插件</option><option value="mcp">MCP</option><option value="skill">Skill</option></select></label>
+      <label>类型 <select value={kind} onChange={event => { const next = event.target.value as CapabilityKind; setKind(next); if (next !== 'mcp') setTarget('host'); }}><option value="plugin">插件</option><option value="mcp">MCP</option><option value="skill">Skill</option></select></label>
       <label>名称 <input required value={name} onChange={event => setName(event.target.value)}/></label>
       <label>来源 <select value={sourceType} onChange={event => setSourceType(event.target.value as InstallSource['type'])}><option value="npm">npm</option><option value="artifact">本地制品</option><option value="http">HTTP MCP</option></select></label>
       {sourceType === 'artifact' ? <label>制品 <input type="file" required onChange={event => setFile(event.target.files?.[0])}/></label> : <label>{sourceType === 'http' ? 'HTTP URL' : 'npm 包及版本'} <input required value={source} onChange={event => setSource(event.target.value)}/></label>}
-      <label>执行目标 <select value={target} onChange={event => setTarget(event.target.value as 'center' | 'host')}><option value="host">Host</option><option value="center">中心</option></select></label>
+      <label>执行目标 <select value={target} onChange={event => setTarget(event.target.value as 'center' | 'host')}><option value="host">Host</option>{kind === 'mcp' && <option value="center">中心</option>}</select></label>
       {sourceType === 'http' && <p>HTTP MCP 只登记远程端点，不下载安装远程服务。</p>}<button disabled={busy}>提交安装</button></form>
       {operation && <ConfigOperation key={operation} id={operation} onFinished={() => void load()}/>}</section>
     {(['plugin', 'mcp', 'skill'] as const).map(type => <section key={type}><h2>{type === 'plugin' ? '插件' : type === 'mcp' ? 'MCP' : 'Skill'}</h2><ul className="config-list">{items.filter(item => item.kind === type).map(item => <li key={item.installationId}><Link to={`/capabilities/${encodeURIComponent(item.installationId)}`}>{item.displayName}</Link> · {item.targetVersion} · {item.enabled ? '启用' : '禁用'} · {item.target}</li>)}</ul></section>)}

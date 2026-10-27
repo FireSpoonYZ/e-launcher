@@ -34,12 +34,41 @@ function resolve(schema: JsonSchema, root: JsonSchema): JsonSchema {
   }
   return schema;
 }
-function fields(schema: JsonSchema, root: JsonSchema, path: Path = []): Path[] {
+function fields(schema: JsonSchema, root: JsonSchema, data: JsonValue | undefined, path: Path = []): Path[] {
   const node = resolve(schema, root);
-  if (isObject(node) && node.type !== 'array' && isObject(node.properties) && Object.keys(node.properties).length) {
-    return Object.entries(node.properties).flatMap(([key, child]) => fields(child as JsonSchema, root, [...path, key]));
+  if (isObject(node) && node.type !== 'array') {
+    const properties = isObject(node.properties) ? node.properties : {};
+    const extra = node.additionalProperties;
+    const keys = new Set([...Object.keys(properties), ...(isObject(data) && (isObject(extra) || extra === true) ? Object.keys(data) : [])]);
+    if (keys.size || isObject(extra) || extra === true) return [...keys].flatMap(key => {
+      const child = properties[key] ?? extra;
+      return fields((typeof child === 'boolean' || isObject(child)) ? child : true, root, isObject(data) ? data[key] : undefined, [...path, key]);
+    });
   }
   return path.length ? [path] : [];
+}
+function isAdditionalPath(schema: JsonSchema, root: JsonSchema, path: Path): boolean {
+  let node = resolve(schema, root);
+  for (const key of path) {
+    if (!isObject(node)) return false;
+    const properties = isObject(node.properties) ? node.properties : {};
+    if (!(key in properties)) return isObject(node.additionalProperties) || node.additionalProperties === true;
+    const child = properties[key];
+    if (typeof child !== 'boolean' && !isObject(child)) return false;
+    node = resolve(child, root);
+  }
+  return false;
+}
+function initialValue(schema: JsonSchema, root: JsonSchema, path: Path): JsonValue {
+  let node = resolve(schema, root);
+  for (const key of path) {
+    if (!isObject(node)) return null;
+    const properties = isObject(node.properties) ? node.properties : {};
+    const child = properties[key] ?? node.additionalProperties;
+    if (typeof child !== 'boolean' && !isObject(child)) return null;
+    node = resolve(child, root);
+  }
+  return isObject(node) && node.type === 'array' ? [] : isObject(node) && node.type === 'object' ? {} : null;
 }
 function withoutDefaults(schema: JsonSchema): JsonSchema {
   if (!isObject(schema)) return schema;
@@ -71,32 +100,49 @@ function CredentialWidget(props: WidgetProps) {
   }, [props.value]);
   return <><input id={props.id} type="text" value={props.value ?? ''} disabled={props.disabled || busy} readOnly={props.readonly} required={props.required} onChange={event => props.onChange(event.target.value || undefined)} aria-describedby={`${props.id}-status`}/><small id={`${props.id}-status`}>凭证 ID · {status}（不显示密钥）</small>{props.value && !props.disabled && !props.readonly && <div><label>写入新密钥 <input type="password" autoComplete="new-password" value={secret} onChange={event => setSecret(event.target.value)}/></label><button type="button" disabled={!secret || busy} onClick={() => { setBusy(true); api.putCredential(String(props.value), { value: secret, expectedRevision: revision }).then(info => { setRevision(info.revision); setSecret(''); setStatus(info.configured ? '已配置' : '未配置'); }).catch(error => setStatus(error instanceof Error ? error.message : String(error))).finally(() => setBusy(false)); }}>保存凭证</button></div>}</>;
 }
-function makeUi(schema: JsonSchema, root: JsonSchema, ui: JsonObject, path: Path, selected: JsonObject | undefined): JsonObject {
+function makeUi(schema: JsonSchema, root: JsonSchema, ui: JsonObject, path: Path, selected: JsonObject | undefined, data: JsonValue | undefined): JsonObject {
   const node = resolve(schema, root), result: JsonObject = { ...ui };
-  if (isObject(node) && node.type !== 'array' && isObject(node.properties) && Object.keys(node.properties).length) {
-    for (const [key, child] of Object.entries(node.properties)) result[key] = makeUi(child as JsonSchema, root, isObject(ui[key]) ? ui[key] as JsonObject : {}, [...path, key], selected);
-  } else {
-    if (selected && at(selected, path) === undefined) result['ui:disabled'] = true;
-    if (isObject(node) && node.format === 'credential-ref') result['ui:widget'] = 'credentialRef';
+  if (isObject(node) && node.type !== 'array') {
+    const properties = isObject(node.properties) ? node.properties : {};
+    const extra = node.additionalProperties;
+    const keys = new Set([...Object.keys(properties), ...(isObject(data) && (isObject(extra) || extra === true) ? Object.keys(data) : [])]);
+    if (keys.size || isObject(extra) || extra === true) {
+      if (isObject(extra) || extra === true) result.additionalProperties = makeUi(extra, root, isObject(ui.additionalProperties) ? ui.additionalProperties : {}, [...path, '*'], undefined, undefined);
+      for (const key of keys) {
+        const child = properties[key] ?? extra;
+        result[key] = makeUi((typeof child === 'boolean' || isObject(child)) ? child : true, root, isObject(ui[key]) ? ui[key] as JsonObject : {}, [...path, key], selected, isObject(data) ? data[key] : undefined);
+      }
+      return result;
+    }
   }
+  if (selected && at(selected, path) === undefined) result['ui:disabled'] = true;
+  if (isObject(node) && node.format === 'credential-ref') result['ui:widget'] = 'credentialRef';
   return result;
 }
 
 export default function ConfigForm({ schema, uiSchema, globalConfig, overrides, onSave }: { schema: JsonSchema; uiSchema?: JsonObject; globalConfig: JsonObject; overrides?: JsonObject; onSave(value: JsonObject): void }) {
   const [value, setValue] = useState<JsonObject>(overrides ?? globalConfig);
   useEffect(() => setValue(overrides ?? globalConfig), [globalConfig, overrides]);
-  const paths = useMemo(() => fields(schema, schema), [schema]);
   const effective = overrides === undefined ? value : merge(globalConfig, value) as JsonObject;
-  const ui = makeUi(schema, schema, uiSchema ?? {}, [], overrides === undefined ? undefined : value);
+  const paths = useMemo(() => fields(schema, schema, effective), [schema, effective]);
+  const ui = makeUi(schema, schema, uiSchema ?? {}, [], overrides === undefined ? undefined : value, effective);
   return <div className="config-form">
-    {overrides !== undefined && <fieldset><legend>Bot 覆盖字段</legend><p>未勾选的字段继承全局配置；数组作为整体替换。</p>{paths.map(path => {
+    {overrides !== undefined && <fieldset><legend>Bot 覆盖字段</legend><p>未勾选的字段继承全局配置；数组作为整体替换。字典中编辑的键自动覆盖，继承的键不能删除。</p>{paths.map(path => {
       const active = at(value, path) !== undefined;
-      return <label className="config-override" key={JSON.stringify(path)}><input type="checkbox" checked={active} onChange={event => setValue(current => setAt(current, path, event.target.checked ? at(effective, path) ?? null : undefined))}/>{path.join(' › ')} {active ? '覆盖' : '继承'}</label>;
+      return <label className="config-override" key={JSON.stringify(path)}><input type="checkbox" checked={active} onChange={event => setValue(current => setAt(current, path, event.target.checked ? at(effective, path) ?? initialValue(schema, schema, path) : undefined))}/>{path.join(' › ')} {active ? '覆盖' : '继承'}</label>;
     })}</fieldset>}
     <Form schema={withoutDefaults(schema) as RJSFSchema} uiSchema={ui as UiSchema} validator={validator} widgets={{ credentialRef: CredentialWidget }} formData={effective} onChange={({ formData }) => {
       if (!isObject(formData)) return;
       if (overrides === undefined) setValue(formData);
-      else setValue(current => paths.reduce((next, path) => at(current, path) === undefined ? next : setAt(next, path, at(formData, path) ?? null), current));
+      else setValue(current => {
+        const all = [...fields(schema, schema, effective), ...fields(schema, schema, formData)];
+        const unique = [...new Map(all.map(path => [JSON.stringify(path), path])).values()];
+        return unique.reduce((next, path) => {
+          const previous = at(effective, path), nextValue = at(formData, path);
+          const changed = JSON.stringify(previous) !== JSON.stringify(nextValue);
+          return at(current, path) !== undefined || (changed && nextValue !== undefined && isAdditionalPath(schema, schema, path)) ? setAt(next, path, nextValue) : next;
+        }, current);
+      });
     }} onSubmit={() => onSave(value)}><button type="submit">保存配置</button></Form>
   </div>;
 }
