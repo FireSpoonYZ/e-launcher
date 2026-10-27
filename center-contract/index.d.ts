@@ -141,7 +141,10 @@ export type InstallSource =
   | { type: 'http'; url: string };
 export interface InstallRequest { requestId: string; displayName: string; kind: CapabilityKind; source: InstallSource; target: 'center' | 'host' }
 export interface OperationRequest { requestId: string }
-export interface UpdateRequest extends OperationRequest { targetVersion: string }
+export interface UpdateRequest extends OperationRequest {
+  targetVersion: string;
+  source?: { type: 'artifact'; artifactRef: string };
+}
 export interface DeploymentPlan {
   protocol: 1;
   target: 'center' | 'host';

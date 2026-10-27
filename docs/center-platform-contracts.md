@@ -7,6 +7,7 @@
 - JSON 编码，`revision` 是非负整数；CAS 更新要求 `expectedRevision` 与当前修订完全一致，冲突返回 409，不能覆盖。新 Binding 第一次写入时以 0 为修订、`enabled=false, overrides={}`；一次成功写入递增修订。
 - global 是唯一基础值；对象递归合并、数组整体替换、null 是显式值。删除 override 的字段即恢复继承。只在中心 data 层调用 deepmerge（`arrayMerge: (_target, source) => source`），合并后以对应 draft-07 schema 校验，初始化安装 global 时才应用 schema defaults。Host 只接收 effectiveConfig。
 - 凭证字段用 JSON Schema 的 `type: 'string', format: 'credential-ref'` 标记，值为 credentialId；支持普通 properties、items 和 additionalProperties 字典。中心按 Bot/实例合并后的配置计算 `EffectiveCapability.credentialRefs`；只为已启用的 Host 目标发送所需秘密，插件仅得到自身 refs 对应的只读映射，不能拿整设备秘密；center 目标由中心 execution 直接通过 store.resolveCredential 取秘密。普通管理响应只给 credentialId / configured / revision，不返回秘密。设备快照只在内存使用，不写离线业务快照、不记日志。浏览器凭证写入仅使用 HTTPS POST/PUT body。
+- 凭证 ID 前缀 `center-internal-` 保留给 relay/OAuth 内部状态；管理配置不得引用此前缀，管理凭证接口不得写入此前缀，Host 快照不下发此前缀对应的秘密。
 - 所有安装类副作用请求带 requestId；同一所有者的相同 requestId 和相同请求返回同 operationId，不同内容返回 409。202 仅表示受理；应轮询 operation 和设备回执，不等于已部署。未知外部副作用不能自动重放。
 - HTTP 响应错误统一 `{error:{code,message,details?}}`；400 INVALID_ARGUMENT/VALIDATION_FAILED，401 UNAUTHENTICATED，403 FORBIDDEN/CSRF_INVALID，404 NOT_FOUND，409 REVISION_CONFLICT/REQUEST_CONFLICT/INVALID_STATE，413 PAYLOAD_TOO_LARGE，429 RATE_LIMITED，503 CENTER_OFFLINE/DEVICE_OFFLINE，500 INTERNAL_ERROR。错误/日志不得包含凭证。schema 错误可用 details 返回不含敏感值的字段路径。
 - `center-contract` 是平台中立的线协议类型，不依赖具体 Fastify/React/Durable 类型；实现模块在其本地使用现有 SDK 类型，不把它们引入共享 DTO。
@@ -110,7 +111,7 @@ interface CenterStore {
 | POST /api/installations/:id/oauth/logout | OAuthStartRequest → 204 |
 | GET /api/oauth/mcp/callback | 公开回调，校验 state/PKCE 后显示固定完成提示 |
 | POST /api/installations/:id/updates/check | → PackageVersion[]；只查询，不激活 |
-| POST /api/installations/:id/update | UpdateRequest → Accepted，202 |
+| POST /api/installations/:id/update | UpdateRequest → Accepted，202；可选 source 为新上传 artifact |
 | POST /api/installations/:id/rollback | OperationRequest → Accepted，202 |
 | POST /api/installations/:id/disable | OperationRequest → Accepted，202 |
 | POST /api/installations/:id/enable | OperationRequest → Accepted，202；只恢复实例，不修改各 Bot 选择 |
@@ -126,6 +127,8 @@ interface CenterStore {
 `center-server/packages/index.js`：`openPackageManager({dataRoot, store, npmPath}) -> { uploadArtifact(input: AsyncIterable<Uint8Array>): Promise<ArtifactUploadReceipt>, readArtifact(artifactRef: string): Promise<Uint8Array>, listDeploymentPlans(deviceId: string): Promise<DeploymentPlan[]>, install(request: InstallRequest): Promise<Accepted>, update(id: string, request: UpdateRequest): Promise<Accepted>, enable(id: string, request: OperationRequest): Promise<Accepted>, disable(id: string, request: OperationRequest): Promise<Accepted>, uninstall(id: string, request: OperationRequest): Promise<Accepted>, rollback(id: string, request: OperationRequest): Promise<Accepted>, checkUpdates(id: string): Promise<PackageVersion[]>, close(): Promise<void> }`。上传读流限大小并按摘要存储；readArtifact 是仅供已授权服务调用的内部读取，HTTP 设备制品路由须先鉴权。listDeploymentPlans 只返回该设备需执行的当前计划；Operation.target/deviceIds 与各 DeploymentPlan、DeploymentReceipt 的 operationId/deviceId 对应（center 目标 deviceId=null；Host 目标为具体设备）。串行执行，先持久化 operation；源解析用 pacote，依赖树用固定 npm CLI；HTTP 类型登记 URL 而不声称下载或安装远端服务。中心保存固定 resolved/integrity、制品摘要与 lockfile。安装时从已校验的包解析 manifest 指向的 schema 文件，并将 draft-07 configSchema 和可选 uiSchema 作为 PackageVersion 顶层元数据保存，data 层不读取制品文件。原生 Hindsight 和 Skill 在 Host 执行；原生包选择 center 但无 manifest.components.center 时显式拒绝，禁止虚报安装成功。原生 manifest 固定为 capability.json；tgz 支持标准 npm 的 package/ 前缀，packageRoot 是实际含 package.json 的包目录。校验包路径、归档大小和越界链接；不可信归档不得穿越目录。manager 同时提供 getInstalled、reconcileDevice、withActivation 和 onChange(installationId)；Host 部署分配依据当前 Binding，异步操作实际持久化后才调用 onChange 通知相关设备，而非只在 HTTP 202 时通知。
 
 `host-core/managed-install/index.js`：`openManagedInstaller({dataRoot, npmPath, fetchArtifact, report, withActivation}) -> {apply(plan: DeploymentPlan): Promise<DeploymentReceipt>, getInstalled(installationId: string): Promise<{installationId: string, version: string, packageRoot: string, dataDir: string, manifest: JsonObject} | null>, close(): Promise<void>}`；getInstalled 只返回已激活版本的本地元数据，不返回暂存目录；fetchArtifact 接收 artifactRef 返回制品字节，report 接收 DeploymentReceipt。执行端验证摘要并在受管暂存目录用平台 npm 准备依赖，空闲边界激活；失败保留旧版，忙时报告 waiting-idle。卸载默认保留数据；不复制其他平台 node_modules，也不在 Bot 启动时安装。withActivation 接收 `(installationId, publish) => Promise<boolean>`，在同一安装实例按 Runtime 原子准入执行 publish，忙时返回 false；中心 execution 同样通过 withActivation 防止忙时替换。计划、回执只表达部署状态，不把 202 当作成功激活。
+
+更新原生插件或 Skill 时可在 UpdateRequest 中指定新上传的 `source: {type: 'artifact', artifactRef}`；npm 更新继续使用原 source 和目标 targetVersion。中心校验制品 packageId 与准确 targetVersion，准备成功后一起发布 targetVersion/source；requestId 幂等指纹包含 source。各 Host 独立应用，失败保留该 Host 原 active 并报告；不做跨 Host 原子提交或自动全局回滚。
 
 ## Host 在线入口（host-center）
 
