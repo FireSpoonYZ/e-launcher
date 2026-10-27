@@ -1459,16 +1459,19 @@ export function HostPage({
       try {
         const next = await readSubmission();
         if (!alive || !next || next.requestId !== requestId) return;
+        if (next.status !== 'done' && next.status !== 'unanswered') {
+          setChatReceipt(next);
+          return;
+        }
+        // 终态：先回读历史再提交 receipt，避免 receipt 重渲染 cleanup 把 alive 置 false 丢掉后续写入。
+        const items = await readHistory().catch(() => null);
+        if (!alive) return;
+        // 回读失败也要落终态 receipt，不能停在生成中；随后同步提交，无新的异步窗口。
         setChatReceipt(next);
-        if (next.status !== 'done' && next.status !== 'unanswered') return;
-        // 终态：回读该 Bot 的 Host 历史与摘要，不跨 Bot/身份更新。
-        const items = await readHistory();
-        if (!alive || !items) return;
-        setChatHistory(items);
-        const turns = parseHistoryEntries(items, clearedMap[bot.key] ?? 0);
-        const last = turns.at(-1);
-        if (last?.text) {
-          updateBotMeta(bot.key, { lastText: last.text, updatedAt: Date.now(), unread: false });
+        if (items) setChatHistory(items);
+        // 摘要只取真实答案；无答案（unanswered）保留 submit 时写入的用户消息摘要，不被历史旧文本覆盖。
+        if (next.answerText) {
+          updateBotMeta(bot.key, { lastText: next.answerText, updatedAt: Date.now(), unread: false });
         }
       } catch {
         // Ignore transient poll error
@@ -1478,7 +1481,7 @@ export function HostPage({
       alive = false;
       window.clearInterval(timer);
     };
-  }, [screen, activeBot, chatReceipt, clearedMap, updateBotMeta]);
+  }, [screen, activeBot, chatReceipt, updateBotMeta]);
 
   const openBotChat = (bot: UnifiedBotItem) => {
     setActiveBotKey(bot.key);
