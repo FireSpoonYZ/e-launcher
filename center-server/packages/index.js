@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 import Ajv from 'ajv';
 import pacote from 'pacote';
 import semver from 'semver';
@@ -45,6 +46,7 @@ export function openPackageManager({ dataRoot, store, npmPath, withActivation, o
   let queue = Promise.resolve();
   let closed = false;
   const waiting = new Map();
+  const monitoring = new Map();
   const changing = new Set();
   const reconciling = new Map();
   let retryQueued = false;
@@ -54,7 +56,7 @@ export function openPackageManager({ dataRoot, store, npmPath, withActivation, o
     }
   }
   const retryTimer = setInterval(() => {
-    if (!waiting.size || closed || retryQueued) return;
+    if ((!waiting.size && !monitoring.size) || closed || retryQueued) return;
     retryQueued = true;
     enqueue(async () => {
       try {
@@ -66,6 +68,7 @@ export function openPackageManager({ dataRoot, store, npmPath, withActivation, o
             if (receipt.phase === 'applied' || receipt.phase === 'removed') onChange(id);
           }
         }
+        for (const operationId of monitoring.keys()) updateMonitoredOperation(operationId);
       } finally { retryQueued = false; }
     });
   }, 1000);
@@ -110,7 +113,7 @@ export function openPackageManager({ dataRoot, store, npmPath, withActivation, o
   }
 
   async function resolveVersion(kind, source, version, target) {
-    if (kind === 'skill' && target !== 'host') throw error('INVALID_ARGUMENT', 'Skills require a Host target');
+    if (target === 'center' && (kind === 'plugin' || kind === 'skill')) throw error('UNSUPPORTED_TARGET', 'Native plugins and skills run on Hosts');
     if (source.type === 'http') {
       if (kind !== 'mcp') throw error('INVALID_ARGUMENT', 'HTTP source requires MCP');
       const url = new URL(source.url);
@@ -274,23 +277,80 @@ export function openPackageManager({ dataRoot, store, npmPath, withActivation, o
       integrity: v.packageVersion.integrity, lockfile: v.lockfile, action };
   }
 
+  function planMeaning(plan) {
+    const { planId, desiredRevision, operationId, action, ...rest } = plan;
+    return { ...rest, action: action === 'disable' || action === 'uninstall' ? 'inactive' : 'active' };
+  }
+
+  function savePlan(plan, previous) {
+    if (previous && isDeepStrictEqual(planMeaning(previous), planMeaning(plan))) return previous;
+    const next = { ...plan, planId: randomUUID(), desiredRevision: (previous?.desiredRevision ?? 0) + 1 };
+    store.putDeploymentPlan(next);
+    onChange(plan.installationId);
+    return next;
+  }
+
+  function updateMonitoredOperation(operationId) {
+    const pending = monitoring.get(operationId);
+    if (!pending) return;
+    const operation = store.getOperation(operationId);
+    if (!operation || ['applied', 'removed', 'failed'].includes(operation.phase)) {
+      monitoring.delete(operationId);
+      return;
+    }
+    const receipts = store.listDeploymentReceipts(operation.installationId);
+    const matched = pending.plans.map((plan) => {
+      const current = store.listDeploymentPlans(plan.deviceId).find((item) => item.installationId === plan.installationId);
+      if (!current || current.planId !== plan.planId || current.desiredRevision !== plan.desiredRevision) return { phase: 'superseded' };
+      const receipt = receipts.find((item) => item.deviceId === plan.deviceId && item.planId === plan.planId &&
+        item.desiredRevision === plan.desiredRevision && item.operationId === plan.operationId);
+      if (!receipt && store.getOperation(plan.operationId)?.phase === 'failed') return { phase: 'failed' };
+      return receipt;
+    });
+    if (matched.some((receipt) => receipt?.phase === 'failed' || receipt?.phase === 'superseded')) {
+      store.updateOperation(operationId, { phase: 'failed', error: { code: 'INSTALL_FAILED', message: 'Deployment failed or was superseded' } });
+      monitoring.delete(operationId);
+    } else if (matched.every((receipt) => receipt && ['applied', 'removed'].includes(receipt.phase))) {
+      store.updateOperation(operationId, { phase: operation.action === 'uninstall' ? 'removed' : 'applied', error: null });
+      monitoring.delete(operationId);
+    }
+  }
+
+  function monitorOperation(op, plans) {
+    monitoring.set(op.operationId, { plans });
+    updateMonitoredOperation(op.operationId);
+  }
+
   async function dispatch(installation, meta, op) {
     if (installation.target === 'center') {
       const action = installation.enabled ? op.action : op.action === 'uninstall' ? 'uninstall' : 'disable';
-      const plan = { ...planFor(installation, meta, op, null, action), planId: randomUUID(), desiredRevision: installation.revision };
-      waiting.delete(installation.installationId);
+      const previous = store.listDeploymentPlans(null).find((item) => item.installationId === installation.installationId);
+      const plan = savePlan(planFor(installation, meta, op, null, action), previous);
+      if (plan === previous) {
+        monitorOperation(op, [plan]);
+        return;
+      }
+      const pending = waiting.get(installation.installationId);
+      if (pending) {
+        waiting.delete(installation.installationId);
+        store.updateOperation(pending.operationId, { phase: 'failed', error: { code: 'INTERRUPTED', message: 'Operation superseded' } });
+      }
       const receipt = await installer.apply(plan);
       store.updateOperation(op.operationId, { phase: receipt.phase, error: receipt.error });
       if (receipt.phase === 'waiting-idle') waiting.set(installation.installationId, { plan, operationId: op.operationId });
       if (receipt.phase === 'applied' || receipt.phase === 'removed') onChange(installation.installationId);
       return;
     }
-    const devices = [...new Set(store.listBotBindings({ installationId: installation.installationId }).map((b) => b.deviceId))];
-    for (const device of devices) await reconcileDevice(device);
-    // Host receipts complete the operation separately; an unassigned installation remains queued.
+    for (const device of op.deviceIds) await reconcileDevice(device);
+    const plans = op.deviceIds.map((device) => store.listDeploymentPlans(device).find((item) => item.installationId === installation.installationId));
+    if (plans.some((plan) => !plan)) throw error('INVALID_STATE', 'Deployment plan is missing');
+    monitorOperation(op, plans);
   }
 
   async function install(request) {
+    if (request.target === 'center' && (request.kind === 'plugin' || request.kind === 'skill')) {
+      throw error('UNSUPPORTED_TARGET', 'Native plugins and skills run on Hosts');
+    }
     const id = randomUUID();
     return accept('install', id, request, request.target, [], async (op) => {
       store.updateOperation(op.operationId, { phase: 'downloading', error: null });
@@ -317,11 +377,6 @@ export function openPackageManager({ dataRoot, store, npmPath, withActivation, o
     const devices = [...new Set(store.listBotBindings({ installationId: id }).map((b) => b.deviceId))];
     return accept(action, id, request, installation.target, devices, async (op) => {
       const current = existing(id);
-      const pending = waiting.get(id);
-      if (pending) {
-        waiting.delete(id);
-        store.updateOperation(pending.operationId, { phase: 'failed', error: { code: 'INTERRUPTED', message: 'Operation superseded' } });
-      }
       const oldMeta = await getMeta(id);
       const meta = structuredClone(oldMeta);
       let targetVersion = current.targetVersion;
@@ -381,11 +436,7 @@ export function openPackageManager({ dataRoot, store, npmPath, withActivation, o
       const action = enabled ? (meta.action === 'disable' || meta.action === 'uninstall' ? 'install' : meta.action) : 'disable';
       const plan = planFor(installation, meta, op, deviceId, action);
       const previous = previousPlans.find((item) => item.installationId === id);
-      const previousContent = previous && Object.fromEntries(Object.entries(previous).filter(([key]) => key !== 'planId' && key !== 'desiredRevision'));
-      if (JSON.stringify(previousContent) !== JSON.stringify(plan)) {
-        store.putDeploymentPlan({ ...plan, planId: randomUUID(), desiredRevision: (previous?.desiredRevision ?? 0) + 1 });
-        onChange(id);
-      }
+      savePlan(plan, previous);
     }
   }
 
