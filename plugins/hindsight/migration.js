@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { existsSync, linkSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, renameSync, rmSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
@@ -120,8 +120,8 @@ export async function migrateLegacyHindsight({ legacyDataRoot, dataDir, deviceId
       }
       target.exec('PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode = DELETE');
     } finally { target.close(); }
-    // A hard link publishes the complete database atomically and never replaces an existing target.
-    linkSync(join(tempDir, DB_FILE), targetPath);
+    // Host ownership and serialized activation exclude concurrent writers; Android disallows hard links.
+    renameSync(join(tempDir, DB_FILE), targetPath);
     return { migrated: true, unassignedRequests };
   } finally {
     source.close();
