@@ -1,10 +1,15 @@
 import type {
-  Accepted, ActionRequest, ActionResult, ApiError, ArtifactUploadReceipt, BotCapabilityConfig,
+  Accepted, ActionRequest, ActionResult, ApiError, ArtifactUploadReceipt, BotCapabilityConfig, CapabilityToolsListResponse,
   BotModelConfig, BotRef, CredentialInfo, CredentialWrite, DeploymentReceipt, Device, DiscoveryResult,
   InstallRequest, Installation, InstallationConfig, LoginRequest, Model, ModelConfig, ModelSelection,
-  Operation, OperationRequest, PackageVersion, Provider, ProviderCheckRequest, ProviderCheckResult,
+  Operation, OperationRequest, PackageVersion, Provider, ProviderCheckRequest, ProviderCheckResult, JsonSchema,
   PutBotCapability, PutInstallationConfig, RevisionWrite, SessionInfo, UpdateRequest,
 } from '@e-launcher/center-contract';
+
+export interface InstallationCheckRequest { deviceId: string; botId: string }
+export interface ActionDescriptor { id: string; title: string; inputSchema: JsonSchema; outputSchema?: JsonSchema }
+export interface McpOAuthStart { flowId: string; authorizationUrl: string }
+export interface McpOAuthStatus { status: 'pending' | 'complete' | 'failed'; error?: string }
 
 let csrfToken: string | null = null;
 export class CenterApiError extends Error {
@@ -68,11 +73,17 @@ export const api = {
   putInstallationConfig: (installationId: string, body: PutInstallationConfig) => request<InstallationConfig>(`${installationPath(installationId)}/config`, 'PUT', body),
   getBotCapability: (deviceId: string, botId: string, installationId: string) => request<BotCapabilityConfig>(`${botPath(deviceId, botId)}/capabilities/${id(installationId)}`),
   putBotCapability: (deviceId: string, botId: string, installationId: string, body: PutBotCapability) => request<BotCapabilityConfig>(`${botPath(deviceId, botId)}/capabilities/${id(installationId)}`, 'PUT', body),
-  validateInstallation: (installationId: string, body: ProviderCheckRequest) => request<ProviderCheckResult>(`${installationPath(installationId)}/validate`, 'POST', body),
+  validateInstallation: (installationId: string, body: InstallationCheckRequest) => request<ProviderCheckResult>(`${installationPath(installationId)}/validate`, 'POST', body),
+  listActions: (installationId: string) => request<ActionDescriptor[]>(`${installationPath(installationId)}/actions`),
+  startMcpOAuth: (installationId: string, body: InstallationCheckRequest) => request<McpOAuthStart>(`${installationPath(installationId)}/oauth/start`, 'POST', body),
+  getMcpOAuthFlow: (flowId: string) => request<McpOAuthStatus>(`/api/oauth/mcp/flows/${id(flowId)}`),
+  logoutMcpOAuth: (installationId: string, body: InstallationCheckRequest) => request<void>(`${installationPath(installationId)}/oauth/logout`, 'POST', body),
+  listInstallationTools: (installationId: string, body: InstallationCheckRequest) => request<CapabilityToolsListResponse>(`${installationPath(installationId)}/tools/list`, 'POST', body),
   checkUpdates: (installationId: string) => request<PackageVersion[]>(`${installationPath(installationId)}/updates/check`, 'POST'),
   updateInstallation: (installationId: string, body: UpdateRequest) => request<Accepted>(`${installationPath(installationId)}/update`, 'POST', body),
   rollbackInstallation: (installationId: string, body: OperationRequest) => request<Accepted>(`${installationPath(installationId)}/rollback`, 'POST', body),
   disableInstallation: (installationId: string, body: OperationRequest) => request<Accepted>(`${installationPath(installationId)}/disable`, 'POST', body),
+  enableInstallation: (installationId: string, body: OperationRequest) => request<Accepted>(`${installationPath(installationId)}/enable`, 'POST', body),
   uninstallInstallation: (installationId: string, body: OperationRequest) => request<Accepted>(installationPath(installationId), 'DELETE', body),
   runAction: (installationId: string, action: string, body: ActionRequest) => request<ActionResult>(`${installationPath(installationId)}/actions/${id(action)}`, 'POST', body),
   listDeployments: (installationId: string) => request<DeploymentReceipt[]>(`${installationPath(installationId)}/deployments`),
