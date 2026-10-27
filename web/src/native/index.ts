@@ -172,7 +172,9 @@ export const Device = registerPlugin<DevicePlugin>('Device');
 // control protocol DTOs; credentials are never returned to the web layer.
 export type HostPhase = 'stopped'|'starting'|'running'|'stopping'|'failed';
 export type HostSnapshot = { phase: HostPhase; deviceId: string|null; lastUpdated: number; errorCode: string|null; restartRequired: boolean; workspace?: string|null };
-export type HostStatus = HostSnapshot;
+export type CenterConnectionStatus = { state: 'disconnected' | 'connecting' | 'ready'; centerUrl: string; appliedRevision: number | null; error: {code: string; message: string} | null };
+export type CenterSettings = { url: string; ca: string; tokenConfigured: boolean };
+export type HostStatus = HostSnapshot & { center?: CenterConnectionStatus };
 export type HostSettingsModel = {
   id: string; name?: string; reasoning?: boolean; contextWindow?: number; maxTokens?: number;
   /** Pass-through 字段原样交给 SDK/原生工具，Host 回读时可能已按规范补全默认值。 */
@@ -283,6 +285,8 @@ export type LegacyDraftPage = {
 export interface BotHostPlugin {
   snapshot(): Promise<HostSnapshot>;
   status(): Promise<HostStatus>;
+  centerSettings(): Promise<CenterSettings>;
+  saveCenterSettings(options: {input: {url: string; deviceToken: string; ca: string}}): Promise<CenterSettings>;
   start(): Promise<{requested: boolean}>;
   stop(): Promise<{requested: boolean}>;
   settingsGet(): Promise<HostSettingsPayload>;

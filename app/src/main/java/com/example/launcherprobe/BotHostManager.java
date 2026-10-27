@@ -51,6 +51,9 @@ public final class BotHostManager {
     private static final String PREF_ERROR_CODE = "error_code";
     private static final String PREF_RESTART_REQUIRED = "restart_required";
     private static final String PREF_CREDENTIAL_ALIASES = "credential_aliases";
+    private static final String PREF_CENTER_URL = "center_url";
+    private static final String PREF_CENTER_TOKEN = "center_token";
+    private static final String PREF_CENTER_CA = "center_ca";
     private static final int CONTROL_QUEUE_CAPACITY = 8;
     private static final long CLEANUP_SPAWN_WAIT_MS = 30_000;
 
@@ -239,6 +242,9 @@ public final class BotHostManager {
                         .put("restartRequired", restartRequired)
                         .put("deviceId", deviceId != null && !deviceId.isEmpty() ? deviceId : JSONObject.NULL)
                         .put("errorCode", errorCode != null && !errorCode.isEmpty() ? errorCode : JSONObject.NULL)
+                        .put("center", BotHostUiProtocol.object("state", phase == Phase.STARTING ? "connecting" : "disconnected",
+                                "centerUrl", credentialPrefs.getString(PREF_CENTER_URL, ""), "appliedRevision", JSONObject.NULL,
+                                "error", JSONObject.NULL))
                         .put("workspace", workspacePath);
             } catch (JSONException impossible) {
                 try {
@@ -253,6 +259,47 @@ public final class BotHostManager {
                     return new JSONObject();
                 }
             }
+        }
+    }
+
+    /** 仅返回连接信息和令牌是否已配置，不向 UI 返回设备令牌。 */
+    public JSONObject centerSettings() {
+        synchronized (lock) {
+            return BotHostUiProtocol.object("url", credentialPrefs.getString(PREF_CENTER_URL, ""),
+                    "ca", credentialPrefs.getString(PREF_CENTER_CA, ""),
+                    "tokenConfigured", credentialPrefs.contains(PREF_CENTER_TOKEN));
+        }
+    }
+
+    public JSONObject saveCenterSettings(JSONObject input) throws IOException {
+        String url = input.optString("url", "").trim();
+        String token = input.optString("deviceToken", "").trim();
+        String ca = input.optString("ca", "").trim();
+        try {
+            java.net.URI parsed = new java.net.URI(url);
+            if (!"https".equalsIgnoreCase(parsed.getScheme()) || parsed.getHost() == null
+                    || parsed.getUserInfo() != null || parsed.getQuery() != null || parsed.getFragment() != null) {
+                throw new IllegalArgumentException("中心地址必须是 HTTPS 地址");
+            }
+        } catch (java.net.URISyntaxException e) {
+            throw new IllegalArgumentException("中心地址无效");
+        }
+        if (!token.isEmpty() && !token.matches("[A-Za-z0-9_-]{32,512}")) {
+            throw new IllegalArgumentException("设备令牌格式无效");
+        }
+        synchronized (lock) {
+            if (phase != Phase.STOPPED && phase != Phase.FAILED) {
+                throw new IllegalStateException("请先停止 Host 再修改中心连接");
+            }
+            if (token.isEmpty() && (!credentialPrefs.contains(PREF_CENTER_TOKEN)
+                    || !url.equals(credentialPrefs.getString(PREF_CENTER_URL, "")))) {
+                throw new IllegalArgumentException("请输入此中心的设备令牌");
+            }
+            SharedPreferences.Editor editor = credentialPrefs.edit()
+                    .putString(PREF_CENTER_URL, url).putString(PREF_CENTER_CA, ca);
+            if (!token.isEmpty()) editor.putString(PREF_CENTER_TOKEN, token);
+            if (!editor.commit()) throw new IOException("无法保存中心连接");
+            return centerSettings();
         }
     }
 
@@ -1524,6 +1571,13 @@ public final class BotHostManager {
                     .put("mode", "host")
                     .put("dataRoot", assets.state.getAbsolutePath())
                     .put("token", g.token);
+            String centerUrl = credentialPrefs.getString(PREF_CENTER_URL, "");
+            String deviceToken = credentialPrefs.getString(PREF_CENTER_TOKEN, "");
+            if (centerUrl.isEmpty() || deviceToken.isEmpty()) throw new IOException("请先配置中心连接");
+            JSONObject center = new JSONObject().put("url", centerUrl).put("deviceToken", deviceToken);
+            String ca = credentialPrefs.getString(PREF_CENTER_CA, "");
+            if (!ca.isEmpty()) center.put("ca", ca);
+            init.put("center", center);
             JSONObject credentials = loadCredentials();
             if (credentials.length() > 0) init.put("credentials", credentials);
             return init;

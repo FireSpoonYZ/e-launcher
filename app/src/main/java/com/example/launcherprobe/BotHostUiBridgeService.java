@@ -334,6 +334,10 @@ public final class BotHostUiBridgeService extends Service {
                     return done(manager.snapshot());
                 case "status":
                     return manager.status();
+                case "centerSettings":
+                    return done(manager.centerSettings());
+                case "saveCenterSettings":
+                    return done(manager.saveCenterSettings(requiredObject(params, "input")));
                 case "settingsGet":
                     return manager.settingsGet();
                 case "settingsSet":

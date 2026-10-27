@@ -771,7 +771,7 @@ class BotHostTauriPlugin(private val hostActivity: Activity) : Plugin(hostActivi
     private companion object {
         /** 固定白名单：只有既有 Host 数据操作可转发；eventsFailed 是内部流控 helper，不在其中。 */
         val SERVICE_METHODS = setOf(
-            "snapshot", "status", "settingsGet", "settingsSet", "saveCredentials", "call",
+            "snapshot", "status", "centerSettings", "saveCenterSettings", "settingsGet", "settingsSet", "saveCredentials", "call",
             "legacyList", "legacyPreview", "legacyStatus", "legacyImport", "legacyDraft", "legacyDiscard",
             "observe", "cancelObservation", "voiceSettings", "saveVoiceSettings",
             "startVoice", "finishVoice", "cancelVoice", "uiSettings", "pause",

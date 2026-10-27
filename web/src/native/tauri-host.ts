@@ -12,7 +12,7 @@ import type { PluginListenerHandle } from '@capacitor/core';
 import type { DesktopObservationEvent } from '../../../host-core/desktop-client.js';
 import type { LiveTarget } from '../../../host-core/index.js';
 import type {
-  BotHostPlugin, DeviceState, FrozenInput, HostCallResult, HostFrameEvent, HostSettings,
+  BotHostPlugin, CenterSettings, DeviceState, FrozenInput, HostCallResult, HostFrameEvent, HostSettings,
   HostSettingsPayload, HostSnapshot, HostStatus, HostVoiceEvent, HostVoiceSaveInput,
   HostVoiceSettings, LegacyDraftPage, LegacyListResult, LegacyPreview, LegacyStatus,
 } from './index';
@@ -144,6 +144,10 @@ class MobileBotHost implements BotHostPlugin {
 
   snapshot(): Promise<HostSnapshot> { return request('snapshot'); }
   status(): Promise<HostStatus> { return request('status'); }
+  centerSettings(): Promise<CenterSettings> { return request('centerSettings'); }
+  saveCenterSettings(options: {input: {url: string; deviceToken: string; ca: string}}): Promise<CenterSettings> {
+    return request('saveCenterSettings', options);
+  }
   /** UI-local：经 Service 入口请求启动，返回仅为“已请求”。 */
   start(): Promise<{ requested: boolean }> { return request('start'); }
   /** UI-local：用户显式停止。 */

@@ -52,6 +52,8 @@ const ALLOWED_METHODS: &[&str] = &[
   // 私有 bridge 服务的固定 op
   "snapshot",
   "status",
+  "centerSettings",
+  "saveCenterSettings",
   "settingsGet",
   "settingsSet",
   "saveCredentials",

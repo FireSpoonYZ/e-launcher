@@ -207,7 +207,7 @@ export function normalizeInitFrame(parsed) {
     rejectUnknownFields(parsed, new Set(['type', 'protocol', 'mode', 'dataRoot']), `${parsed.mode} init frame`);
     return { mode: parsed.mode, dataRoot };
   }
-  rejectUnknownFields(parsed, new Set(['type', 'protocol', 'mode', 'dataRoot', 'token', 'credentials', 'initialSettings']), 'host init frame');
+  rejectUnknownFields(parsed, new Set(['type', 'protocol', 'mode', 'dataRoot', 'token', 'credentials', 'initialSettings', 'center']), 'host init frame');
   if (typeof parsed.token !== 'string' || !TOKEN_PATTERN.test(parsed.token)) {
     throw invalid('INVALID_ARGUMENT', 'token must be a URL-safe opaque string of 32-512 characters');
   }
@@ -215,7 +215,22 @@ export function normalizeInitFrame(parsed) {
   if (parsed.credentials !== undefined) {
     credentials = normalizeCredentials(parsed.credentials); // explicit null is invalid
   }
-  const init = { mode: 'host', dataRoot, token: parsed.token, credentials };
+  if (!isPlainObject(parsed.center)) throw invalid('INVALID_ARGUMENT', 'center is required');
+  rejectUnknownFields(parsed.center, new Set(['url', 'deviceToken', 'ca']), 'center');
+  let centerUrl;
+  try { centerUrl = new URL(parsed.center.url); } catch { throw invalid('INVALID_ARGUMENT', 'invalid center URL'); }
+  if (centerUrl.protocol !== 'https:' || centerUrl.username || centerUrl.password || centerUrl.search || centerUrl.hash) {
+    throw invalid('INVALID_ARGUMENT', 'center URL must be HTTPS without credentials, query or fragment');
+  }
+  if (typeof parsed.center.deviceToken !== 'string' || !TOKEN_PATTERN.test(parsed.center.deviceToken)) {
+    throw invalid('INVALID_ARGUMENT', 'invalid center device token');
+  }
+  if (parsed.center.ca !== undefined && (typeof parsed.center.ca !== 'string' || !parsed.center.ca.trim())) {
+    throw invalid('INVALID_ARGUMENT', 'invalid center CA');
+  }
+  const center = { url: parsed.center.url, deviceToken: parsed.center.deviceToken,
+    ...(parsed.center.ca !== undefined ? { ca: parsed.center.ca } : {}) };
+  const init = { mode: 'host', dataRoot, token: parsed.token, credentials, center };
   if (parsed.initialSettings !== undefined) {
     init.initialSettings = normalizeHostSettings(parsed.initialSettings);
   }

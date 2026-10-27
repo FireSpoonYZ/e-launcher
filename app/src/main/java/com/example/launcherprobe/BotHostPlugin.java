@@ -104,6 +104,20 @@ public final class BotHostPlugin extends Plugin {
         }
     }
 
+    @PluginMethod public void centerSettings(PluginCall call) {
+        resolve(call, manager().centerSettings());
+    }
+
+    @PluginMethod public void saveCenterSettings(PluginCall call) {
+        try {
+            JSONObject input = call.getObject("input");
+            if (input == null) throw new IllegalArgumentException("input is required");
+            resolve(call, manager().saveCenterSettings(input));
+        } catch (Exception exception) {
+            reject(call, exception);
+        }
+    }
+
     // ---------- 设置与凭据 ----------
 
     @PluginMethod public void settingsGet(PluginCall call) {

@@ -75,7 +75,7 @@ final class BotHostUiProtocol {
      * 客户端子进程的释放只由 UI 会话 close/EOF 驱动，不存在显式关闭入口。
      */
     private static final Set<String> OPERATIONS = Collections.unmodifiableSet(new HashSet<>(Arrays.asList(
-            "snapshot", "status", "settingsGet", "settingsSet", "saveCredentials", "call",
+            "snapshot", "status", "centerSettings", "saveCenterSettings", "settingsGet", "settingsSet", "saveCredentials", "call",
             "legacyList", "legacyPreview", "legacyStatus", "legacyImport", "legacyDraft", "legacyDiscard",
             "observe", "cancelObservation",
             "voiceSettings", "saveVoiceSettings", "startVoice", "finishVoice", "cancelVoice",

@@ -1172,6 +1172,7 @@ export function createAndroidBridge(options = {}) {
         service = await openHostService({
           dataRoot: init.dataRoot,
           token: init.token,
+          center: init.center,
           port: 0,
           initialSettings: init.initialSettings,
           nativeBridge: requestNativeBridge,
