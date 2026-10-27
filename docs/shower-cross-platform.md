@@ -256,14 +256,57 @@ Evidence is outside the repository in the local temporary directory
 `desktop-shower-development-1793002760507/e2e`. Test Host/device-link/relay
 processes and tunnels are stopped after verification; test credentials are removed.
 
-### Next-stage coverage
+## Deployment and real-model acceptance — 2026-10-27
 
-Deployment and real-model testing on Windows, Linux and both Android devices
-follow this baseline acceptance. Use `antigravity:gemini-3.8-flash-high:high` for
-that stage, including actual `shower.launch`, screenshot results consumed by the
-model, and takeover during an active model conversation. The baseline checks used
-the real control/native paths but not an active model conversation.
+The relay is deployed at `wss://relay.firespoon.cn:3000/v1/link`, behind the
+existing Ferron TLS gateway. Linux relay and Host services are enabled through
+systemd. Windows has a persistent Host directory and a manual start script.
+The existing Pi configuration was converted into 77 chat models and 10 provider
+declarations, with credential environment aliases. Devin had no explicit or
+cached model list and remains empty. Pi Durable stays pinned to 1.3.0.
 
-Linux's physical seat was a GDM greeter, so simultaneous physical-user focus was
-not compared. Mobile UI checks used device automation, not physical finger input.
-Per-application compatibility work, Xpra and Wayland are outside this change.
+All model-driven checks below used `antigravity/gemini-3.8-flash-high` with
+`thinkingLevel: high`, through the deployed authenticated WSS relay.
+
+| Environment | Real execution evidence |
+| --- | --- |
+| Windows child session 9 | Model launched the WinForms verification app through shower, read screenshots and entered Chinese text. The first button coordinate missed; after counter feedback the model re-read the image and triggered the button (application counter 1). |
+| Linux Xvnc | Model launched GTK zenity through shower, entered `LINUX_REAL_MODEL_中文_20261026` through GUI input, and confirmed it. The application output file matched; the model also used read to verify that file. |
+| Redmi K90 Pro Max / Android 17 | Model launched Android Settings on the virtual display, scaled image coordinates to source pixels and entered `MYRON_REAL_20261027`; an independent frame confirmed it. |
+| Android 16 / API 36 x86_64 emulator | Existing AVD probe36, no data wipe. Model created a 1088×2400 virtual display, launched Settings and entered `EMULATOR_REAL_20261027`; independent capture confirmed it. |
+
+On each environment, takeover aborted a genuinely active model turn
+(`unanswered / aborted`), preserved the same environment, and the next turn
+read a new human-entered marker from a fresh screenshot. The emulator additionally
+passed a native touch through the local preview, text input, preview close and
+model continuation reading `EMU_HUMAN_62_UI`.
+
+K90's actual Tauri UI displayed Windows and Linux frames through the production
+relay. Its takeover button stopped a Windows model turn; text input reached the
+Windows app exactly once. Linux text and Enter sent from the same preview produced
+`HUMAN_接管_246810_UI_LX` in the application output.
+
+Device testing exposed and fixed two shared UI issues: repeated client init
+returned an old UI snapshot after profile saves, and chat rendering ignored the
+live history/generation fields while remote receipt polling was missing. The final
+emulator APK showed old and new remote answers, observed local streaming text,
+returned to idle after completion, and kept cleared history hidden on reopening.
+The clear-view preference was restored after this check.
+
+The final builds cover ARM64 and x86_64 Android, Web, desktop TypeScript and the
+Windows native host. APK paths:
+- `app/build/outputs/apk/debug/app-debug.apk` — ARM64
+- `app/build/outputs/acceptance/app-debug-x86_64.apk` — emulator
+
+Detailed artifacts are outside the repository under
+`desktop-shower-development-1793002760507/deployment`.
+Windows/Linux/K90 test displays were released; Windows child-session enablement
+and TermService were read back at their original disabled/stopped state.
+K90's temporary screen timeout was restored to 600000 ms.
+
+The other physical phone (zorn / 24117RK2CC) remained disconnected, so its
+configuration was not changed. At the user's request, remaining device-side
+verification used the emulator. K90 was tested before the last chat UI fix and
+can receive the final ARM64 APK when reconnected. Linux's physical seat was a GDM
+greeter; mobile checks used device automation, not physical fingers.
+Per-application compatibility work, Xpra and Wayland remain outside this change.
