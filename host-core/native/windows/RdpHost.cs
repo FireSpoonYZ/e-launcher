@@ -857,8 +857,11 @@ namespace ELauncher.Shower
                     return;
                 }
                 control = new RdpControl();
+                control.BeginInit();
                 control.Dock = DockStyle.Fill;
                 ui.Controls.Add(control);
+                control.EndInit();
+                control.CreateControl();
                 object ocx = control.Ocx;
                 IMsRdpClient9 rdp = (IMsRdpClient9)ocx;
                 IMsTscAxEvents_Event events = (IMsTscAxEvents_Event)ocx;
