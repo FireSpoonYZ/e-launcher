@@ -62,7 +62,7 @@ export function createPlugin({ installationId, dataDir, host }) {
       const memory = createRuntimeHindsight({ host: localHost, getHarness: host.getHarness,
         getWorkContexts: host.getWorkContexts, getWorkActivity: host.getWorkActivity,
         context: host.context, documents: host.documents, countMessageTokens: host.countMessageTokens,
-        config, getBotPolicy });
+        tryRunBackgroundTask: (id, task) => host.tryRunBackgroundTask(id, task), config, getBotPolicy });
       const controller = {
         async fromTool(api, context, operation, input) {
           check();

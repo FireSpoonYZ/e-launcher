@@ -54,7 +54,7 @@ function endpointHashOf(baseUrl) {
  * Disabled 时不创建 client、不打开 store、不注册任何后台状态。
  * getBotPolicy(botId) 返回每 Bot 策略 {enabled,mode,canRead,canWrite,retentionFloor}；未提供时全部放行。
  */
-export function createRuntimeHindsight({ host, getHarness, getWorkContexts, getWorkActivity, config, context, getBotPolicy, documents, countMessageTokens }) {
+export function createRuntimeHindsight({ host, getHarness, getWorkContexts, getWorkActivity, config, context, getBotPolicy, documents, countMessageTokens, tryRunBackgroundTask }) {
   const { ContextState } = documents;
   const client = config ? createHindsightClient(config) : null;
   const sources = createHindsightSources({ host, getHarness, context, getBotPolicy, documents });
@@ -289,24 +289,26 @@ export function createRuntimeHindsight({ host, getHarness, getWorkContexts, getW
       if (closing) return;
       // 批次是开头选定的：每个 job 开始时重读策略，避免批次内后续 job 在关闭/只读后仍写远端。
       if (!canWriteFor(job.botId)) continue;
-      try {
-        await processOneJob(store, job);
-      } catch (err) {
-        if (err?.code === CLOSED_CODE || isAbortLike(err)) throw err;
-        if (err?.code === 'HINDSIGHT_UNAVAILABLE') {
-          const settledAt = Date.now();
-          // 网络不确定：保留原 operation ID，指数回退 1–30s。
-          store.setJob(job.operationId, {
-            state: job.state,
-            attempts: job.attempts + 1,
-            nextAttemptAt: settledAt + backoffMs(job.attempts),
-            lastErrorCode: 'HINDSIGHT_UNAVAILABLE',
-          });
-        } else {
-          // 存储/内部错误上抛，由 pump 停止适配器。
-          throw err;
+      await tryRunBackgroundTask(job.botId, async () => {
+        try {
+          await processOneJob(store, job);
+        } catch (err) {
+          if (err?.code === CLOSED_CODE || isAbortLike(err)) throw err;
+          if (err?.code === 'HINDSIGHT_UNAVAILABLE') {
+            const settledAt = Date.now();
+            // 网络不确定：保留原 operation ID，指数回退 1–30s。
+            store.setJob(job.operationId, {
+              state: job.state,
+              attempts: job.attempts + 1,
+              nextAttemptAt: settledAt + backoffMs(job.attempts),
+              lastErrorCode: 'HINDSIGHT_UNAVAILABLE',
+            });
+          } else {
+            // 存储/内部错误上抛，由 pump 停止适配器。
+            throw err;
+          }
         }
-      }
+      });
     }
   }
 
@@ -319,24 +321,26 @@ export function createRuntimeHindsight({ host, getHarness, getWorkContexts, getW
       if (closing) return;
       // 关闭/只读 Bot 暂停收集（本地 job 写入）；退回读写后同一批 pending run 仍可继续。
       if (!canWriteFor(run.botId)) continue;
-      const ctx = store.getContext(run.contextKey);
-      const afterEntryId = Math.max(ctx?.lastEntryId ?? 0, run.floorEntryId ?? 0);
-      const result = await sources.collectRun(run, afterEntryId, context);
-      if (result.status === 'pending') continue;
-      const unanswered = result.status === 'unanswered';
-      const jobs = unanswered
-        ? []
-        : sources.makeHindsightJobs({
-            key: run.contextKey,
-            botId: run.botId,
-            target: run.target,
-            bankId: run.bankId,
-          }, result.items);
-      store.completeRun(run.submissionId, {
-        jobs,
-        afterEntryId: result.afterEntryId,
-        done: result.done,
-        unanswered,
+      await tryRunBackgroundTask(run.botId, async () => {
+        const ctx = store.getContext(run.contextKey);
+        const afterEntryId = Math.max(ctx?.lastEntryId ?? 0, run.floorEntryId ?? 0);
+        const result = await sources.collectRun(run, afterEntryId, context);
+        if (result.status === 'pending') return;
+        const unanswered = result.status === 'unanswered';
+        const jobs = unanswered
+          ? []
+          : sources.makeHindsightJobs({
+              key: run.contextKey,
+              botId: run.botId,
+              target: run.target,
+              bankId: run.bankId,
+            }, result.items);
+        store.completeRun(run.submissionId, {
+          jobs,
+          afterEntryId: result.afterEntryId,
+          done: result.done,
+          unanswered,
+        });
       });
     }
     runCursor = page.nextCursor === null ? 0 : page.nextCursor;
