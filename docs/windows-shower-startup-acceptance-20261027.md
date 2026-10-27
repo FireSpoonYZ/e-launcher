@@ -1,8 +1,8 @@
 # Windows 虚拟屏启动修复与验收（2026-10-27）
 
-修复提交：`2cc9825`。Windows 部署目录：
+主体修复提交：`2cc9825`；管理员诊断 `dc7d8d8`；无人值守 ActiveX 初始化修复 `ccf2787`。Windows Host 部署目录：
 `D:/services/e-launcher/releases/20261027-2cc9825`，
-原生组件：`D:/services/e-launcher/native/2cc9825/shower-windows.exe`。
+原生组件：`D:/services/e-launcher/native/ccf2787/shower-windows.exe`。
 
 ## 使用方式
 
@@ -24,6 +24,7 @@
 3. 释放屏幕时保留原生宿主和 ActiveX 控件；Host 退出时由 guardian 清理子会话并恢复系统原值。
 4. `WTSLogoffSession` 等待注销完成，避免释放后立即新建碰到仍未退出的旧子会话。
 5. 复用控件前等待断开回调结束；初始化桌面时做有界截图探测，避免将 Winlogon 短暂过渡误报为需要输入密码。
+6. ActiveX 显式完成 BeginInit／EndInit／CreateControl，修复 UAC 取消后再重试时可能出现的空引用。
 
 未修改 Windows Hello、NLA、RDP-Tcp 或防火墙设置。正常 Windows 子会话应自动登录，但本机 Microsoft 账户环境实测返回 2055；参数变体未解决，最终采用用户明确批准的本机凭据管理器方案。
 
@@ -34,11 +35,14 @@
 - 重启 Host 后，新的原生进程和 guardian 从 Windows 凭据管理器恢复登录，子会话 16 就绪，未重新输入密码。
 - 再由 Linux 与 K80 分别发起释放／重建，子会话 17、18 就绪；第二次桌面过渡较慢，由自动探测等待后完成，无需人工截图触发。
 - Linux→Windows 与 K80→Windows 的中文输入、键盘、点击通过。测试应用直接读回 `LINUX_VAULT_FINAL_中文`、`K80_VAULT_FINAL_中文`，点击计数从 1 增至 2。
-- Host 退出时，日志记录子会话 15 清理与系统原值恢复成功。
+- Host 退出时，日志记录子会话 15、18 清理与系统原值恢复成功。
+- 最终 `ccf2787` 构建：子会话 19 冷启动自动登录；连续释放／重建为 20、21，均自动就绪。原生宿主 PID 37272、guardian PID 28004 全程保持不变。
+- 最终构建再次完成模型启动应用，以及 Linux／K80 中文输入与点击；应用在子会话 21 读回 `FINAL_LINUX_TO_WINDOWS_中文`、`FINAL_K80_TO_WINDOWS_中文`，点击计数 1→2。
+- 结束时已释放验收屏，Windows 屏幕状态 idle，三端 Host 均为 running / center ready / relay online。
 
 最终构建 SHA-256：
-- shower-windows.exe：`3942560e6b107a6544b2f80993778a182b87a135b63150e6dcda4db4ee949360`
-- MSTSCLib.dll：`896aabc8b0f846a79b088a62c4f4c75cdaf6550d71cb7a9d5495b04fe6f3cb74`
+- shower-windows.exe：`7ae1eb92700c67d245bc810f70b3a676b3ac06b17b34ebe230ed3b0121ad40dc`
+- MSTSCLib.dll：`d43e67b42b28e70a144e3b3c2547b51cbcb1ec05f8b26dca2365350c29483e7c`
 
 日志、截图、请求和应用侧读回在仓库外受限目录：
 `e-launcher-center-acceptance-1793100557367/windows-startup-fix`。
@@ -46,7 +50,9 @@
 
 ## 最终部署状态
 
-最终 `2cc9825` 构建已部署。23:16:07 的首次启动未完成管理员授权，系统返回取消；需要完成当前 Host 进程的首次 UAC，保存的密码无需重新输入。
+最终构建已部署并通过冷启动、重建和输入验收。桌面 UAC 未完成时，使用已授权的 Windows 管理员 SSH 通道创建一次性、仅交互用户运行的最高权限启动任务，调用同一个 `bootstrap-ensure`，并核对 Host PID、启动时间、SID 和父会话。初始化后立即删除任务。
+
+两项临时任务 `ELauncher-Acceptance-Bootstrap-42948` 与 `ELauncher-Acceptance-Bootstrap-37272` 均已确认不存在。没有更改 UAC、自动登录、Windows Hello、NLA 或防火墙策略，没有安装永久计划任务或服务。当前 Host 已完成首次管理员初始化；以后重启 Host 仍需一次管理员授权或由管理员执行同等初始化。
 
 ## 尚未覆盖
 

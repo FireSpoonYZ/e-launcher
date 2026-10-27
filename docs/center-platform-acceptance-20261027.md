@@ -1,6 +1,6 @@
 # 中心部署与三端验收（2026-10-27）
 
-代码基线：中心分支 fe5d0ec，按用户选择合入 f5f7b74（本分支 d5a4af1），中心修复至 71d4420；Windows 启动与凭据复用修复至 2cc9825。父助手直接完成，未派子代理。下列结果均来自本轮实跑。
+代码基线：中心分支 fe5d0ec，按用户选择合入 f5f7b74（本分支 d5a4af1），中心修复至 71d4420；Windows 启动与凭据复用修复至 ccf2787。父助手直接完成，未派子代理。下列结果均来自本轮实跑。
 
 ## 部署
 
@@ -45,7 +45,7 @@
 
 ## 未完成与限制
 
-- Windows 图形输入和本机凭据自动复用已补充验收，见 [Windows 启动修复报告](windows-shower-startup-acceptance-20261027.md)。最终部署后的首次 UAC 尚需完成；Host 运行期间重建不再重复请求授权。
+- Windows 图形输入和本机凭据自动复用已补充验收，见 [Windows 启动修复报告](windows-shower-startup-acceptance-20261027.md)。最终构建已通过冷启动和连续重建，首次初始化已由授权的管理员通道完成；Host 运行期间重建不再重复请求授权。
 - Linux 原生桌面客户端 GUI 未在本轮构建/运行；已验证真实 Linux Host、CLI、私有 Xvnc。
 - MCP OAuth、Node/stdio MCP、全版本回滚/卸载、长时间压力与物理触摸未覆盖。
 - 导入的 antigravity/gemini-3.8-flash-medium 实际上游返回 400 model_not_found；保留目录原项，未将目录全部模型标记可用。
