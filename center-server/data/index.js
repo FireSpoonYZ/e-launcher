@@ -2,6 +2,7 @@ import { mkdirSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
 import { randomBytes, randomUUID, createCipheriv, createDecipheriv } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
+import { isDeepStrictEqual } from 'node:util';
 import Ajv from 'ajv';
 import deepmerge from 'deepmerge';
 
@@ -373,6 +374,14 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
       findOperationByRequestId(requestId) {
         return parse(db.prepare('SELECT json FROM operations WHERE request_id = ?').get(requestId));
       },
+      listOperations(filter = {}) {
+        assertObject(filter);
+        return db.prepare('SELECT json FROM operations ORDER BY id').all().map(parse).filter((operation) =>
+          (filter.installationId === undefined || operation.installationId === filter.installationId)
+          && (filter.deviceId === undefined || operation.deviceIds.includes(filter.deviceId))
+          && (filter.action === undefined || operation.action === filter.action)
+          && (filter.phase === undefined || operation.phase === filter.phase));
+      },
       putOperation(operation, requestFingerprint) {
         assertObject(operation); assertId(operation.operationId); assertId(operation.requestId); assertId(requestFingerprint);
         return transaction(() => {
@@ -397,20 +406,43 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
         });
       },
       listDeploymentReceipts(installationId) {
-        return db.prepare('SELECT json FROM deployment_receipts WHERE installation_id = ? ORDER BY device_id, operation_id').all(installationId).map(parse);
+        return db.prepare(`SELECT r.json, p.json AS plan_json FROM deployment_receipts r
+          JOIN deployment_plans p ON p.device_id = r.device_id AND p.installation_id = r.installation_id
+          WHERE r.installation_id = ? ORDER BY r.device_id, r.operation_id`).all(installationId)
+          .map((row) => ({ receipt: JSON.parse(row.json), plan: JSON.parse(row.plan_json) }))
+          .filter(({ receipt, plan }) => typeof plan.planId === 'string' && receipt.planId === plan.planId && receipt.desiredRevision === plan.desiredRevision && receipt.operationId === plan.operationId)
+          .map(({ receipt }) => receipt);
       },
       putDeploymentReceipt(receipt) {
-        assertObject(receipt);
+        assertObject(receipt); assertId(receipt.planId); assertId(receipt.operationId); assertId(receipt.installationId);
+        if (receipt.deviceId !== null) assertId(receipt.deviceId);
         return transaction(() => {
-          const value = safeReceipt(pick(receipt, ['deviceId', 'installationId', 'operationId', 'desiredRevision', 'appliedRevision', 'actualVersion', 'phase', 'health', 'error']));
+          const plan = parse(db.prepare('SELECT json FROM deployment_plans WHERE device_id = ? AND installation_id = ?').get(receipt.deviceId ?? '', receipt.installationId));
+          if (!plan || receipt.planId !== plan.planId || receipt.desiredRevision !== plan.desiredRevision || receipt.operationId !== plan.operationId) {
+            throw error('REVISION_CONFLICT', 'Deployment plan has changed');
+          }
+          const value = safeReceipt(pick(receipt, ['deviceId', 'installationId', 'operationId', 'planId', 'desiredRevision', 'appliedRevision', 'actualVersion', 'phase', 'health', 'error']));
           db.prepare('INSERT INTO deployment_receipts VALUES (?, ?, ?, ?) ON CONFLICT(device_id, installation_id, operation_id) DO UPDATE SET json = excluded.json').run(value.deviceId ?? '', value.installationId, value.operationId, json(value));
           bump();
         });
       },
       putDeploymentPlan(plan) {
-        assertObject(plan);
+        assertObject(plan); assertId(plan.installationId); assertId(plan.operationId); assertId(plan.planId);
+        if (plan.deviceId !== null) assertId(plan.deviceId);
+        if (!Number.isSafeInteger(plan.desiredRevision) || plan.desiredRevision < 1) throw error('INVALID_ARGUMENT', 'Invalid deployment revision');
         return transaction(() => {
-          db.prepare('INSERT INTO deployment_plans VALUES (?, ?, ?) ON CONFLICT(device_id, installation_id) DO UPDATE SET json = excluded.json').run(plan.deviceId ?? '', plan.installationId, json(plan));
+          const value = JSON.parse(json(plan));
+          const current = parse(db.prepare('SELECT json FROM deployment_plans WHERE device_id = ? AND installation_id = ?').get(value.deviceId ?? '', value.installationId));
+          if (current && typeof current.planId === 'string' && Number.isSafeInteger(current.desiredRevision)) {
+            const { planId: _id, desiredRevision: _revision, operationId: _operation, ...meaning } = value;
+            const { planId: _oldId, desiredRevision: _oldRevision, operationId: _oldOperation, ...oldMeaning } = current;
+            if (isDeepStrictEqual(meaning, oldMeaning)) {
+              if (!isDeepStrictEqual(value, current)) throw error('REVISION_CONFLICT', 'Unchanged deployment must retain its plan');
+              return;
+            }
+            if (value.desiredRevision <= current.desiredRevision || value.planId === current.planId) throw error('REVISION_CONFLICT', 'Deployment revision must advance');
+          }
+          db.prepare('INSERT INTO deployment_plans VALUES (?, ?, ?) ON CONFLICT(device_id, installation_id) DO UPDATE SET json = excluded.json').run(value.deviceId ?? '', value.installationId, json(value));
           bump();
         });
       },
@@ -445,13 +477,16 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
             const capabilities = installations.map((installation) => {
               const config = capabilityFor(deviceId, bot.botId, installation.installationId);
               const enabled = installation.enabled && config.enabled;
+              const capabilityRefs = new Set();
+              collectCredentialRefs(config.configSchema, config.effectiveConfig, capabilityRefs);
               if (enabled) {
                 validate(config.configSchema, config.effectiveConfig);
-                if (installation.target === 'host') collectCredentialRefs(config.configSchema, config.effectiveConfig, refs);
+                if (installation.target === 'host') for (const ref of capabilityRefs) refs.add(ref);
               }
               return {
                 installationId: installation.installationId, kind: installation.kind, target: installation.target,
                 targetVersion: installation.targetVersion, enabled, revision: config.revision, effectiveConfig: config.effectiveConfig,
+                credentialRefs: [...capabilityRefs],
               };
             });
             return { botId: bot.botId, model, capabilities };
