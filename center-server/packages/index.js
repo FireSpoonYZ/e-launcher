@@ -50,11 +50,6 @@ export function openPackageManager({ dataRoot, store, npmPath, withActivation, o
   const changing = new Set();
   const reconciling = new Map();
   let retryQueued = false;
-  for (const op of store.listOperations()) {
-    if (op.target === 'center' && ['queued', 'downloading', 'preparing', 'waiting-idle', 'activating'].includes(op.phase)) {
-      store.updateOperation(op.operationId, { phase: 'failed', error: { code: 'INTERRUPTED', message: 'Operation interrupted; retry explicitly' } });
-    }
-  }
   const retryTimer = setInterval(() => {
     if ((!waiting.size && !monitoring.size) || closed || retryQueued) return;
     retryQueued = true;
@@ -279,7 +274,7 @@ export function openPackageManager({ dataRoot, store, npmPath, withActivation, o
 
   function planMeaning(plan) {
     const { planId, desiredRevision, operationId, action, ...rest } = plan;
-    return { ...rest, action: action === 'disable' || action === 'uninstall' ? 'inactive' : 'active' };
+    return { ...rest, action: action === 'uninstall' ? 'uninstall' : action === 'disable' ? 'disable' : 'active' };
   }
 
   function savePlan(plan, previous) {
@@ -433,7 +428,8 @@ export function openPackageManager({ dataRoot, store, npmPath, withActivation, o
       const op = store.getOperation(meta.operationId);
       if (!op) continue;
       const enabled = installation.enabled && bindings.some((binding) => binding.installationId === id && binding.enabled);
-      const action = enabled ? (meta.action === 'disable' || meta.action === 'uninstall' ? 'install' : meta.action) : 'disable';
+      const action = enabled ? (meta.action === 'disable' || meta.action === 'uninstall' ? 'install' : meta.action)
+        : meta.action === 'uninstall' ? 'uninstall' : 'disable';
       const plan = planFor(installation, meta, op, deviceId, action);
       const previous = previousPlans.find((item) => item.installationId === id);
       savePlan(plan, previous);
@@ -460,6 +456,19 @@ export function openPackageManager({ dataRoot, store, npmPath, withActivation, o
     const name = split > 0 ? spec.slice(0, split) : spec;
     const v = await resolveVersion(installation.kind, { type: 'npm', spec: name + '@latest' }, null, installation.target);
     return semver.gt(v.packageVersion.version, installation.targetVersion) ? [v.packageVersion] : [];
+  }
+
+  for (const op of store.listOperations()) {
+    if (['applied', 'removed', 'failed'].includes(op.phase)) continue;
+    const devices = op.target === 'center' ? [null] : op.deviceIds;
+    const plans = devices.map((deviceId) => store.listDeploymentPlans(deviceId)
+      .find((plan) => plan.installationId === op.installationId && plan.operationId === op.operationId));
+    if (plans.length && plans.every(Boolean)) {
+      monitorOperation(op, plans);
+      if (op.target === 'host' || !monitoring.has(op.operationId)) continue;
+      monitoring.delete(op.operationId);
+    }
+    store.updateOperation(op.operationId, { phase: 'failed', error: { code: 'INTERRUPTED', message: 'Operation interrupted; retry explicitly' } });
   }
 
   return {

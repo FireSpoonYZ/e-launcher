@@ -54,14 +54,14 @@ export function openManagedInstaller({ dataRoot, npmPath, fetchArtifact, report,
     const receipt = (phase, error = null) => ({
       deviceId: plan.deviceId, installationId: plan.installationId, operationId: plan.operationId, planId: plan.planId,
       desiredRevision: plan.desiredRevision, appliedRevision: phase === 'applied' || phase === 'removed' ? plan.desiredRevision : null,
-      actualVersion: actual, phase, health: error ? 'unsupported' : phase === 'removed' ? 'disabled' : 'ready', error,
+      actualVersion: actual, phase, health: error ? 'unsupported' : phase === 'removed' || (phase === 'applied' && plan.action === 'disable') ? 'disabled' : 'ready', error,
     });
     const emit = async (phase) => { const result = receipt(phase); await report(result); return result; };
     try {
       let appliedPlan = null;
       try { appliedPlan = await readJson(currentFile(plan.installationId)); }
       catch (error) { if (error.code !== 'ENOENT') throw error; }
-      if (appliedPlan?.planId === plan.planId) return await emit(appliedPlan.removed ? 'removed' : 'applied');
+      if (appliedPlan?.planId === plan.planId) return await emit(plan.action === 'uninstall' ? 'removed' : 'applied');
       const platform = process.env.ANDROID_ROOT ? 'android' : process.platform === 'win32' ? 'windows' : process.platform;
       if (plan.action !== 'disable' && plan.action !== 'uninstall' && plan.kind === 'plugin' &&
           !plan.manifest.platforms.includes(platform)) {
@@ -70,11 +70,28 @@ export function openManagedInstaller({ dataRoot, npmPath, fetchArtifact, report,
       if (plan.action === 'disable' || plan.action === 'uninstall') {
         await emit('waiting-idle');
         const applied = await withActivation(plan.installationId, async () => {
-          await writeJson(currentFile(plan.installationId), { planId: plan.planId, removed: true });
+          const current = plan.action === 'disable' && prior
+            ? { ...appliedPlan, planId: plan.planId, disabled: true }
+            : { planId: plan.planId, removed: true, disabled: plan.action === 'disable' };
+          await writeJson(currentFile(plan.installationId), current);
         });
         if (!applied) return receipt('waiting-idle');
-        actual = null;
-        return await emit('removed');
+        if (plan.action === 'uninstall') actual = null;
+        return await emit(plan.action === 'uninstall' ? 'removed' : 'applied');
+      }
+      if ((plan.action === 'enable' || appliedPlan?.disabled) && prior?.version === plan.targetVersion) {
+        let state = null;
+        try { state = await readJson(prior.packageRoot + '.state.json'); }
+        catch (error) { if (error.code !== 'ENOENT') throw error; }
+        if (state?.status === 'ready' && state.digest === plan.digest && state.version === plan.targetVersion) {
+          await emit('waiting-idle');
+          const applied = await withActivation(plan.installationId, async () => {
+            await emit('activating');
+            await writeJson(currentFile(plan.installationId), { ...appliedPlan, planId: plan.planId, disabled: false, manifest: plan.manifest });
+          });
+          if (!applied) return receipt('waiting-idle');
+          return await emit('applied');
+        }
       }
       const dir = instance(plan.installationId);
       const versionDir = path.join(dir, 'versions', key(plan.planId));
