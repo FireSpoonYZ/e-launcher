@@ -64,6 +64,8 @@ export interface PackageVersion {
   digest: string;
   artifactRef: string | null;
   manifest: JsonObject;
+  configSchema: JsonSchema;
+  uiSchema?: JsonObject;
   resolved: string | null;
   integrity: string | null;
 }
@@ -150,6 +152,7 @@ export interface DeploymentPlan {
 export interface EffectiveCapability {
   installationId: string;
   kind: CapabilityKind;
+  target: 'center' | 'host';
   targetVersion: string;
   enabled: boolean;
   revision: number;
@@ -179,6 +182,11 @@ export interface RuntimeReceipt {
 }
 export interface BootstrapRequest { deviceId: string; capabilityProtocol: 1; bots: BotRef[] }
 export interface BootstrapResponse { snapshot: DeviceRuntimeSnapshot }
+export interface CapabilityToolsListRequest { botId: string }
+export interface CapabilityTool { name: string; description?: string; inputSchema: JsonObject }
+export interface CapabilityToolsListResponse { tools: CapabilityTool[] }
+export interface CapabilityToolCallRequest { botId: string; name: string; args: JsonObject; callId: string }
+export interface CapabilityToolCallResponse { content: JsonObject[]; isError?: boolean; structuredContent?: JsonObject }
 export interface ArtifactUploadReceipt { artifactRef: string; digest: string; size: number }
 export interface CenterConnectionStatus {
   state: 'disconnected' | 'connecting' | 'ready';
