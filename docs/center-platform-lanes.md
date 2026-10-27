@@ -1,6 +1,6 @@
 # 中心平台并行实施分工
 
-开始实现前必须读取 [父助手派发补充](center-platform-dispatch-addendum.md)，其中包含接口冻结后的最新文件职责，优先于首次任务消息中的旧路径列举。
+开始实现前必须读取 [父助手派发补充](center-platform-dispatch-addendum.md) 和 [第二轮接线补充](center-platform-contract-addendum.md)，其中包含最新接口与文件职责，优先于首次任务消息中的旧路径列举。
 
 基线：c92a80dc5244be1df6d040494fe2366b094e0a33。集成目录：C:/Users/firespoon/orca/workspaces/e-launcher/center-platform-development。
 
