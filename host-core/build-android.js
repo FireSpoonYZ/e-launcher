@@ -35,6 +35,7 @@ const UPSTREAM_LICENSE_ALLOWLIST = new Map([
   ['@earendil-works/chord', { version: '1.3.0', declared: 'MIT', license: 'pi-v1.3.0-MIT.txt' }],
   ['@earendil-works/pi-ai', { version: '1.3.0', declared: 'MIT', license: 'pi-v1.3.0-MIT.txt' }],
   ['@earendil-works/pi-durable', { version: '1.3.0', declared: 'MIT', license: 'pi-v1.3.0-MIT.txt' }],
+  ['@earendil-works/pi-mcp', { version: '1.3.0', declared: 'MIT', license: 'pi-v1.3.0-MIT.txt' }],
   ['@vectorize-io/hindsight-client', { version: '0.9.2', declared: 'MIT', license: 'hindsight-client-0.9.2-MIT.txt' }],
   ['standardwebhooks', { version: '1.1.1', declared: 'MIT', license: 'standardwebhooks-1.1.1-LICENSE.txt' }],
 ]);
@@ -268,6 +269,10 @@ async function main() {
     outfile,
     logLevel: 'info',
   });
+  const centerDir = path.join(ROOT, 'center-server') + path.sep;
+  if (includedBundleInputs(result.metafile, outfile, ROOT).some((input) => normalizeToAbsolute(ROOT, input).startsWith(centerDir))) {
+    throw new Error('center-server code or dependencies cannot be bundled into the Android Host');
+  }
   await writeFile(metafilePath, JSON.stringify(result.metafile, null, 2), 'utf8');
   await assertNoRequiredDynamicAssets(result.metafile, outfile, ROOT);
   const toolNotices = await loadToolNotices();

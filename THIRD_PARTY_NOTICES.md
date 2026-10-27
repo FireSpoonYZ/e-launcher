@@ -177,6 +177,38 @@ packages, which are published from the same upstream repository. Any other
 bundled package without a license file still fails the build instead of
 falling back to package metadata.
 
+## Center platform dependencies and Pi Skill adaptation
+
+The center's independent npm installation roots are `center-server` and
+`center-web`; the existing relay uses `host-core`. Their exact installed
+versions and transitive dependency metadata are recorded in their respective
+lockfiles. The image retains those installed packages and their accompanying
+license/notice files under each root's `node_modules`; it also includes this
+notice, `LICENSE`, and `licenses/`. Build-only center-web dependencies are
+retained to preserve their notices. Runtime managed packages installed by a
+user are separate artifacts and retain their own license obligations.
+
+The center uses Fastify and its official plugins (MIT), Ajv (MIT), deepmerge
+4.3.1 (MIT), pacote (ISC), semver (ISC), npm 11.6.2 (Artistic License 2.0),
+and React JSON Schema Form 6.11.0 (Apache-2.0). React and the existing
+frontend libraries remain subject to their own included notices. Package
+versions and transitive licenses must be reviewed against the generated
+lockfiles and installed distributions before release; candidate versions are
+not proof of compatibility or of the completeness of those notices.
+
+The managed Skill implementation adapts Pi's
+`packages/coding-agent/src/core/skills.ts` from tag `v1.3.0`
+(https://github.com/earendil-works/pi/tree/v1.3.0), using the published 1.3.0
+source package (SHA-256
+`ae2785e870b81a8c8e1d44510a57b5ee0bfc9e974679ac2faaada4aabee3d3c0`).
+The adaptation is restricted to managed directories rather than Pi's
+HOME/project scanning. Pi is Copyright (c) 2025 Mario Zechner, MIT;
+the full upstream text is retained in
+[`licenses/pi-v1.3.0-MIT.txt`](licenses/pi-v1.3.0-MIT.txt).
+The same license applies to `@earendil-works/pi-mcp` 1.3.0; the Android
+and desktop packagers use that exact-version fallback if its archive has no
+license file. These attributions do not alter this project's AGPL-3.0 license.
+
 ## ws (WebSocket)
 
 The host-core depends on **ws 8.22.0**, the WebSocket client/server implementation for Node.js, under the MIT License:

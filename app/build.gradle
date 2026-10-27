@@ -78,6 +78,8 @@ def buildHostRuntime = tasks.register('buildHostRuntime', Exec) {
     workingDir rootProject.file('host-core')
     commandLine 'node', 'build-android.js'
     inputs.files rootProject.fileTree('host-core') { exclude 'build/**', 'node_modules/**' },
+            rootProject.fileTree('center-contract'),
+            rootProject.fileTree('plugins') { exclude 'build/**', 'node_modules/**' },
             rootProject.file('licenses/pi-v1.3.0-MIT.txt'),
             rootProject.file('licenses/hindsight-client-0.9.2-MIT.txt'),
             rootProject.file('licenses/standardwebhooks-1.1.1-LICENSE.txt'),
