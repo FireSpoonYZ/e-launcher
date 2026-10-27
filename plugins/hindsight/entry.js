@@ -12,7 +12,27 @@ const WRITE_ACTIONS = new Set(['retainMemory', 'correctMemory', 'retryMemory']);
 
 export function createPlugin({ installationId, dataDir, host }) {
   const bots = new Set();
+  const botKey = (botId) => createHash('sha256').update(botId).digest('hex');
+  const policyFile = (botId) => join(dataDir, botKey(botId) + '.policy.json');
+  const readPolicy = (botId) => existsSync(policyFile(botId))
+    ? JSON.parse(readFileSync(policyFile(botId), 'utf8'))
+    : { writable: false, floor: host.host.getBotExtensions(botId)?.retentionFloor ?? 0 };
+  async function writePolicy(botId, writable) {
+    const current = readPolicy(botId);
+    const floor = writable && !current.writable
+      ? Math.max(current.floor, await host.getBotEntryWatermark(botId)) : current.floor;
+    const next = { writable, floor };
+    mkdirSync(dataDir, { recursive: true });
+    const path = policyFile(botId);
+    const temporary = path + '.tmp';
+    writeFileSync(temporary, JSON.stringify(next), { encoding: 'utf8', mode: 0o600 });
+    renameSync(temporary, path);
+    return next;
+  }
   return {
+    async onBotPolicyChanged({ botId, enabled }) {
+      if (!enabled) await writePolicy(botId, false);
+    },
     async forBot({ deviceId, botId, effectiveConfig, credentials }) {
       const { baseUrl, apiKeyRef, mode = 'read-write', sharedMemory, timeoutMs, reflectTimeoutMs } = effectiveConfig;
       const normalized = normalizeHindsightConfig({ baseUrl, ...(sharedMemory === undefined ? {} : { sharedMemory }),
@@ -22,12 +42,10 @@ export function createPlugin({ installationId, dataDir, host }) {
         throw Object.assign(new Error('Hindsight credential is unavailable or invalid.'), { code: 'INVALID_ARGUMENT' });
       }
       const config = { ...normalized, apiKey, timeoutMs: normalized.timeoutMs ?? 30000, reflectTimeoutMs: normalized.reflectTimeoutMs ?? 120000 };
-      const botKey = createHash('sha256').update(botId).digest('hex');
-      const botDataDir = join(dataDir, botKey);
-      const policyFile = join(dataDir, botKey + '.policy.json');
-      let policy = existsSync(policyFile)
-        ? JSON.parse(readFileSync(policyFile, 'utf8'))
-        : { writable: false, floor: host.host.getBotExtensions(botId)?.retentionFloor ?? 0 };
+      const botDataDir = join(dataDir, botKey(botId));
+      const namespace = 'hindsight_' + createHash('sha256')
+        .update(JSON.stringify([installationId, botId])).digest('hex').slice(0, 32);
+      let policy = readPolicy(botId);
       let active = false;
       let closed = false;
       const check = () => {
@@ -68,7 +86,7 @@ export function createPlugin({ installationId, dataDir, host }) {
         },
       }]));
       const bot = {
-        durableContributions: { tools: createHindsightTools(controller, host.sdk.defineTool) },
+        durableContributions: { tools: createHindsightTools(controller, host.sdk.defineTool, namespace) },
         requestContributions: {
           async beforeRequest(request, api, context) {
             check();
@@ -86,16 +104,8 @@ export function createPlugin({ installationId, dataDir, host }) {
             } });
         },
         async onPolicyChanged({ enabled, effectiveConfig: nextConfig }) {
-          if (existsSync(policyFile)) policy = JSON.parse(readFileSync(policyFile, 'utf8'));
           const writable = enabled && (nextConfig?.mode ?? 'read-write') === 'read-write';
-          const floor = writable && !policy.writable
-            ? Math.max(policy.floor, await host.getBotEntryWatermark(botId)) : policy.floor;
-          const next = { writable, floor };
-          mkdirSync(dataDir, { recursive: true });
-          const temporary = policyFile + '.tmp';
-          writeFileSync(temporary, JSON.stringify(next), { encoding: 'utf8', mode: 0o600 });
-          renameSync(temporary, policyFile);
-          policy = next;
+          policy = await writePolicy(botId, writable);
         },
         async activate() { host.assertCapabilityAllowed(botId, installationId); active = true; memory.resume(); },
         async quiesce() { active = false; closed = true; await memory.quiesce(); },

@@ -111,10 +111,10 @@ const SHARED_PROP = { type: 'boolean' };
  * 先于输出边界处理（recall 使用 renderHindsightRecall）。
  * 仅 hindsight_retry 为 replay:'unsafe'：固定 operationId 不使 retry POST 幂等。
  */
-export function createHindsightTools(controller, defineTool) {
+export function createHindsightTools(controller, defineTool, namespace) {
   function tool({ name, description, properties, required = [], operation, replay = 'safe', render }) {
     return defineTool({
-      name,
+      name: `${namespace}_${name.slice('hindsight_'.length)}`,
       description,
       parameters: { type: 'object', properties, required, additionalProperties: false },
       replay,
