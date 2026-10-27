@@ -307,7 +307,7 @@ export async function openRuntime(options) {
   })] });
   registry.install(finalBudgetExtension);
   const coreExtensions = registry.snapshot().installed().filter((extension) => extension !== finalBudgetExtension);
-  // 显式传入 models 才是主动模式：把旧 tools:[] 会话升级为继承 registry 默认工具。
+  // 显式传入 models 才是主动模式：初始化旧会话的 ContextState，不改工具选择。
   const upgradeLegacy = options?.models !== undefined;
   try {
     releaseOwner = acquireRuntimeOwner(host.dataRoot);
@@ -391,8 +391,9 @@ function botProfile(host, plugins, botModels, coreExtensions, finalBudgetExtensi
   }
   const soul = host.getBotSoul(botId).text;
   const instructions = workMeta ? workInstructions(soul, workMeta) : (soul === '' ? null : soul);
+  const pluginExtensions = plugins.extensionsFor(botId);
   // thinkingLevel 总是给出：(null 表示 SDK 默认) 才能让 reload 后重应用人格时回写变更。
-  return { instructions, selectedExtensions: [...coreExtensions, ...plugins.extensionsFor(botId), finalBudgetExtension], thinkingLevel: selection.thinkingLevel ?? null, ...(model ? { model } : {}) };
+  return { instructions, selectedExtensions: [...coreExtensions, ...pluginExtensions, finalBudgetExtension], pluginTools: pluginExtensions.flatMap((extension) => extension.tools ?? []), thinkingLevel: selection.thinkingLevel ?? null, ...(model ? { model } : {}) };
 }
 
 function parseBindingKey(key) {

@@ -93,7 +93,7 @@ export function initialToolsChange(removeTools) {
  * - instructions：null/空串表示清空人格（空 SOUL 合法且有意为空）。
  * - thinkingLevel：profile 给出期望档位（null 表示 SDK 默认），与持久值不同才写入；
  *   因此 reload/重新应用人格时也能落盘，不只首次创建生效。
- * - tools：只并入/移除本模块管理的工具名；旧版显式白名单（数组）不在改写范围。
+ * - tools：保留已有选择并启用当前 Bot 的插件工具；旧名字由已选 extensions 限定实际暴露范围。
  *   managedTools 是本模块完整工具定义（重算时清掉全部旧排除项），removeTools 是本次想要的排除项，
  *   二者分开才能让「关闭→启用」「只读→读写」恢复被移除的工具。
  *   未知名字按原样保留（SDK 的 configure 只读取注册项的 name）。
@@ -133,14 +133,19 @@ export function agentProfileChange(state, profile) {
 
   const desired = profile?.removeTools ?? [];
   const managed = profile?.managedTools ?? desired;
+  const pluginTools = profile?.pluginTools ?? [];
+  const pluginNames = new Set(pluginTools.map((tool) => tool.name));
   const current = state?.tools;
-  if (!Array.isArray(current)) {
+  if (Array.isArray(current)) {
+    const added = pluginTools.filter((tool) => !current.includes(tool.name));
+    if (added.length) change.tools = [...current.map((name) => ({ name })), ...added];
+  } else {
     const managedNames = new Set(managed.map((tool) => tool.name));
     const byName = new Map([...managed, ...desired].map((tool) => [tool.name, tool]));
     const previous = current?.remove ?? [];
     const next = [
-      ...previous.filter((name) => !managedNames.has(name)),
-      ...desired.map((tool) => tool.name),
+      ...previous.filter((name) => !managedNames.has(name) && !pluginNames.has(name)),
+      ...desired.filter((tool) => !pluginNames.has(tool.name)).map((tool) => tool.name),
     ];
     // 排除项顺序不影响可调用性：同集合不写 configure，避免无谓 system 变更。
     const unchanged = next.length === previous.length && next.every((name) => previous.includes(name));
@@ -170,8 +175,7 @@ export async function applyAgentProfile(harness, conversationId, profile, contex
 }
 
 /**
- * 主动模式升级：旧版创建的会话受 tools:[] 限制，未启用 Billion Context。
- * 对已映射且尚无 ContextState 的会话清除该限制（tools:null 继承 registry 默认工具）。
+ * 主动模式初始化已映射会话的 Billion Context 状态，并保留原有工具选择。
  * 调用方只应在显式传入 models 的 active openRuntime 中执行；被动查询不做改造。
  */
 export async function upgradeLegacyContextConversations(harness, context) {
@@ -188,7 +192,7 @@ export async function upgradeLegacyContextConversations(harness, context) {
       continue;
     }
     await harness.commit(async (tx) => {
-      await configure(tx, conversationId, { tools: null });
+      await tx.doc(ContextState, conversationId);
     }, context);
   }
 }
