@@ -22,7 +22,9 @@ sh scripts/center-build.sh
 
 该镜像非 root 运行；Node/npm 安装型 MCP 可能需要原生编译工具或目标平台
 支持，安装失败应查看中心操作/设备回执，不能视为已部署成功。不要把 Linux
-的 node_modules 复制到其他平台。
+的 node_modules 复制到其他平台。桌面构建将 Host 锁定的完整 npm 11.6.2
+打入 Tauri 资源 `npm/`，由启动桥解析 `npm/bin/npm-cli.js` 的绝对路径；
+Android 复用原有版本化 npm 资产并由启动桥准备，不依赖系统 PATH。
 
 ## 配置和启动
 

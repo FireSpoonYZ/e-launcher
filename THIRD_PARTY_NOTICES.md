@@ -196,11 +196,11 @@ versions and transitive licenses must be reviewed against the generated
 lockfiles and installed distributions before release; candidate versions are
 not proof of compatibility or of the completeness of those notices.
 
-The managed Skill implementation adapts Pi's
-`packages/coding-agent/src/core/skills.ts` from tag `v1.3.0`
-(https://github.com/earendil-works/pi/tree/v1.3.0), using the published 1.3.0
-source package (SHA-256
-`ae2785e870b81a8c8e1d44510a57b5ee0bfc9e974679ac2faaada4aabee3d3c0`).
+`host-core/third-party/pi-skills.js` adapts
+`dist/core/skills.js` and `dist/utils/frontmatter.js` from the published
+`@earendil-works/pi-coding-agent` 1.3.0 archive, corresponding to tag
+`v1.3.0` (https://github.com/earendil-works/pi/tree/v1.3.0). The archive SHA-256 is
+`ae2785e870b81a8c8e1d44510a57b5ee0bfc9e974679ac2faaada4aabee3d3c0`.
 The adaptation is restricted to managed directories rather than Pi's
 HOME/project scanning. Pi is Copyright (c) 2025 Mario Zechner, MIT;
 the full upstream text is retained in
@@ -208,6 +208,15 @@ the full upstream text is retained in
 The same license applies to `@earendil-works/pi-mcp` 1.3.0; the Android
 and desktop packagers use that exact-version fallback if its archive has no
 license file. These attributions do not alter this project's AGPL-3.0 license.
+
+The desktop Host build copies the complete npm 11.6.2 distribution from its
+locked `host-core` dependency to the Tauri resource `npm/`, including its
+Artistic-2.0 license and bundled dependency notices. Android reuses the
+versioned npm asset described above; it does not package another npm copy.
+The Host's `tar` 7.5.22 is by Isaac Z. Schlueter and contributors,
+under the Blue Oak Model License 1.0.0; its full text is retained in
+[`licenses/tar-7.5.22-BlueOak-1.0.0.md`](licenses/tar-7.5.22-BlueOak-1.0.0.md).
+Bundled Host dependency notices are collected from the actual esbuild inputs.
 
 ## ws (WebSocket)
 

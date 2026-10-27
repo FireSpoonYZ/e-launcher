@@ -170,6 +170,12 @@ async function writePayloadFiles(metafile, outfile, absWorkingDir, toolNotices) 
       }
     }
   }
+  if (includedBundleInputs(metafile, outfile, absWorkingDir).some(
+    (input) => normalizeToAbsolute(absWorkingDir, input) === path.join(ROOT, 'host-core', 'third-party', 'pi-skills.js')
+  )) {
+    sections.push('# Pi managed Skill adaptation (MIT; v1.3.0)');
+    sections.push((await readFile(path.join(ROOT, 'licenses', 'pi-v1.3.0-MIT.txt'), 'utf8')).trim());
+  }
   for (const notice of toolNotices) {
     sections.push(`# ${notice.title}`);
     sections.push(notice.text.trim());
