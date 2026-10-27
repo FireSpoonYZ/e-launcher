@@ -70,7 +70,10 @@ export interface PackageVersion {
 export interface Installation {
   installationId: string;
   packageId: string;
+  displayName: string;
   kind: CapabilityKind;
+  source: InstallSource;
+  target: 'center' | 'host';
   targetVersion: string;
   enabled: boolean;
   revision: number;
@@ -99,7 +102,8 @@ export interface PutBotCapability { expectedRevision: number; enabled: boolean; 
 export interface Device { deviceId: string; name: string; online: boolean }
 export interface BotRef { deviceId: string; botId: string; name: string }
 export interface DeploymentReceipt {
-  deviceId: string;
+  /** null denotes the center execution target; otherwise the assigned Host. */
+  deviceId: string | null;
   installationId: string;
   operationId: string;
   desiredRevision: number;
@@ -114,6 +118,9 @@ export interface Operation {
   requestId: string;
   action: 'install' | 'update' | 'disable' | 'uninstall' | 'rollback';
   installationId: string;
+  /** Empty for center; Host-targeted operations may have multiple device receipts. */
+  deviceIds: string[];
+  target: 'center' | 'host';
   phase: DeploymentPhase;
   error: ApiError['error'] | null;
 }
@@ -121,11 +128,13 @@ export type InstallSource =
   | { type: 'npm'; spec: string }
   | { type: 'artifact'; artifactRef: string }
   | { type: 'http'; url: string };
-export interface InstallRequest { requestId: string; kind: CapabilityKind; source: InstallSource; target: 'center' | 'host' }
+export interface InstallRequest { requestId: string; displayName: string; kind: CapabilityKind; source: InstallSource; target: 'center' | 'host' }
 export interface OperationRequest { requestId: string }
 export interface UpdateRequest extends OperationRequest { targetVersion: string }
 export interface DeploymentPlan {
   protocol: 1;
+  target: 'center' | 'host';
+  deviceId: string | null;
   operationId: string;
   installationId: string;
   kind: CapabilityKind;
@@ -168,8 +177,15 @@ export interface RuntimeReceipt {
   status: 'applied' | 'failed';
   error: ApiError['error'] | null;
 }
-export interface BootstrapRequest { deviceId: string; capabilityProtocol: 1 }
+export interface BootstrapRequest { deviceId: string; capabilityProtocol: 1; bots: BotRef[] }
 export interface BootstrapResponse { snapshot: DeviceRuntimeSnapshot }
+export interface ArtifactUploadReceipt { artifactRef: string; digest: string; size: number }
+export interface CenterConnectionStatus {
+  state: 'disconnected' | 'connecting' | 'ready';
+  centerUrl: string;
+  appliedRevision: number | null;
+  error: ApiError['error'] | null;
+}
 export interface SessionInfo { authenticated: boolean; csrfToken: string | null }
 export interface LoginRequest { password: string }
 export interface CredentialWrite { value: string; expectedRevision: number | null }

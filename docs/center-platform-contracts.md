@@ -26,6 +26,9 @@ interface CenterStore {
   putModelConfig(expectedRevision: number, global: ModelSelection): ModelConfig;
   getBotModelConfig(deviceId: string, botId: string): BotModelConfig;
   putBotModelConfig(deviceId: string, botId: string, expectedRevision: number, overrides: ModelSelection): BotModelConfig;
+  replaceDeviceBots(deviceId: string, bots: BotRef[]): void;
+  listDeviceBots(deviceId: string): BotRef[];
+  listBotBindings(filter: {deviceId?: string; installationId?: string}): BotBinding[];
   listInstallations(): Installation[];
   getInstallation(id: string): Installation | null;
   getInstallationConfig(id: string): InstallationConfig;
@@ -49,7 +52,7 @@ interface CenterStore {
 }
 ```
 
-创建 Provider/Model/Installation 时 expectedRevision 为 null，服务生成 ID 和 revision；写入已有项时以 CAS 为准。credential value 为明文写入入口，持久层加密；仅可信服务内部可调用 resolveCredential。操作写入须原子地检查 requestId 和请求摘要。快照在一次一致性读取中生成，不能包含其他设备的 Bot/秘密。模型字段沿用现有 `host-core/runtime-models.js`，迁移时需要兼容其模型和凭证解析，不把明文写到本地 settings。
+创建 Provider/Model/Installation 时 expectedRevision 为 null，服务生成 ID 和 revision；写入已有项时以 CAS 为准。credential value 为明文写入入口，持久层加密；仅可信服务内部可调用 resolveCredential。操作写入须原子地检查 requestId 和请求摘要。replaceDeviceBots 在事务内全量替换该设备登记的 Bot 引用（不得删除持久 Binding/业务数据）；listBotBindings 两个过滤字段同时提供时取交集。快照在一次一致性读取中生成，不能包含其他设备的 Bot/秘密；每个已登记 Bot 即使没有模型覆盖或 Binding 也必须出现，模型使用 global，能力默认禁用并使用 global 配置。模型字段沿用现有 `host-core/runtime-models.js`，迁移时需要兼容其模型和凭证解析，不把明文写到本地 settings。
 
 ## 服务组合（center-api）
 
@@ -78,12 +81,13 @@ interface CenterStore {
 | GET /api/model-config | → ModelConfig |
 | PUT /api/model-config | RevisionWrite<ModelSelection> → ModelConfig |
 | GET /api/devices | → Device[]（取原 relay 在线状态） |
-| GET /api/devices/:deviceId/bots | → BotRef[]（在线 Host 查询，离线 503） |
+| GET /api/devices/:deviceId/bots | → BotRef[]（中心登记目录；设备离线时标识设备离线，不触发 Runtime 启动） |
 | GET /api/devices/:deviceId/bots/:botId/model-config | → BotModelConfig |
 | PUT /api/devices/:deviceId/bots/:botId/model-config | RevisionWrite<ModelSelection>（value 为 overrides）→ BotModelConfig |
 | GET /api/credentials/:id | → CredentialInfo |
 | PUT /api/credentials/:id | CredentialWrite → CredentialInfo |
 | DELETE /api/credentials/:id | RevisionWrite<null> → 204 |
+| POST /api/artifacts | multipart 字段 file（受限大小）→ ArtifactUploadReceipt，201；校验并存入制品库 |
 | GET /api/capabilities | → Installation[] |
 | POST /api/installations | InstallRequest → Accepted，202 |
 | GET /api/installations/:id | → Installation |
@@ -101,34 +105,70 @@ interface CenterStore {
 | GET /api/installations/:id/deployments | → DeploymentReceipt[] |
 | GET /api/operations/:id | → Operation |
 
-设备独立认证接口（不是浏览器管理接口）：POST `/api/host/bootstrap` BootstrapRequest → BootstrapResponse；GET `/api/host/snapshot` → DeviceRuntimeSnapshot；POST `/api/host/receipt` RuntimeReceipt → 204；POST `/api/host/deployments/receipt` DeploymentReceipt → 204；GET `/api/host/deployments` → DeploymentPlan[]；GET `/api/host/artifacts/:artifactRef` → 原始制品字节。服务端从认证身份确定 deviceId 并与 body 一致性校验，按实际分配检查制品，不让设备自行指定其他设备的 snapshot。通知通过现有设备链路触发重新读取完整快照；不把秘密或制品塞进有界控制帧。
+设备独立认证接口（不是浏览器管理接口）：GET `/api/host/events` → `text/event-stream`，仅发送 `event: config-changed` 和 `event: heartbeat`，data 为 `{}`，无秘密；POST `/api/host/bootstrap` BootstrapRequest → BootstrapResponse；GET `/api/host/snapshot` → DeviceRuntimeSnapshot；POST `/api/host/receipt` RuntimeReceipt → 204；POST `/api/host/deployments/receipt` DeploymentReceipt → 204；GET `/api/host/deployments` → DeploymentPlan[]；GET `/api/host/artifacts/:artifactRef` → 原始制品字节。服务端从认证身份确定 deviceId 并与 body 一致性校验，按实际分配检查制品，不让设备自行指定其他设备的 snapshot。bootstrap 先认证、校验并以事务替换来自该 Host 的 BotRef[]，再生成快照；BotRef 均须匹配认证 deviceId。变更影响设备的模型、配置、Binding、凭证或部署计划时，center-api 向对应活跃 SSE 发送 config-changed；心跳维持活性，不持久化事件、不重放。Host 收到通知读取完整当前快照及部署计划，断线后重新连接并再次 bootstrap；原 DeviceLink 仅用于消息与控制。不把秘密或制品塞进 SSE 或有界控制帧。
 
 ## 安装和部署（package-install）
 
-`center-server/packages/index.js`：`openPackageManager({dataRoot, store, npmPath}) -> { install(request: InstallRequest): Promise<Accepted>, update(id: string, request: UpdateRequest): Promise<Accepted>, disable(id: string, request: OperationRequest): Promise<Accepted>, uninstall(id: string, request: OperationRequest): Promise<Accepted>, rollback(id: string, request: OperationRequest): Promise<Accepted>, checkUpdates(id: string): Promise<PackageVersion[]>, close(): Promise<void> }`。串行执行，先持久化 operation；源解析用 pacote，依赖树用固定 npm CLI；HTTP 类型登记 URL 而不声称下载或安装远端服务。中心保存固定 resolved/integrity、制品摘要与 lockfile。校验包路径、归档大小和越界链接；不可信归档不得穿越目录。
+`center-server/packages/index.js`：`openPackageManager({dataRoot, store, npmPath}) -> { uploadArtifact(input: AsyncIterable<Uint8Array>): Promise<ArtifactUploadReceipt>, readArtifact(artifactRef: string): Promise<Uint8Array>, listDeploymentPlans(deviceId: string): Promise<DeploymentPlan[]>, install(request: InstallRequest): Promise<Accepted>, update(id: string, request: UpdateRequest): Promise<Accepted>, disable(id: string, request: OperationRequest): Promise<Accepted>, uninstall(id: string, request: OperationRequest): Promise<Accepted>, rollback(id: string, request: OperationRequest): Promise<Accepted>, checkUpdates(id: string): Promise<PackageVersion[]>, close(): Promise<void> }`。上传读流限大小并按摘要存储；readArtifact 是仅供已授权服务调用的内部读取，HTTP 设备制品路由须先鉴权。listDeploymentPlans 只返回该设备需执行的当前计划；Operation.target/deviceIds 与各 DeploymentPlan、DeploymentReceipt 的 operationId/deviceId 对应（center 目标 deviceId=null；Host 目标为具体设备）。串行执行，先持久化 operation；源解析用 pacote，依赖树用固定 npm CLI；HTTP 类型登记 URL 而不声称下载或安装远端服务。中心保存固定 resolved/integrity、制品摘要与 lockfile。校验包路径、归档大小和越界链接；不可信归档不得穿越目录。
 
-`host-core/managed-install/index.js`：`openManagedInstaller({dataRoot, npmPath, fetchArtifact, report}) -> {apply(plan: DeploymentPlan): Promise<DeploymentReceipt>, close(): Promise<void>}`；fetchArtifact 接收 artifactRef 返回制品字节，report 接收 DeploymentReceipt。执行端验证摘要并在受管暂存目录用平台 npm 准备依赖，空闲边界激活；失败保留旧版，忙时报告 waiting-idle。卸载默认保留数据；不复制其他平台 node_modules，也不在 Bot 启动时安装。计划、回执只表达部署状态，不把 202 当作成功激活。
+`host-core/managed-install/index.js`：`openManagedInstaller({dataRoot, npmPath, fetchArtifact, report}) -> {apply(plan: DeploymentPlan): Promise<DeploymentReceipt>, getInstalled(installationId: string): Promise<{installationId: string, version: string, packageRoot: string, dataDir: string, manifest: JsonObject} | null>, close(): Promise<void>}`；getInstalled 只返回已激活版本的本地元数据，不返回暂存目录；fetchArtifact 接收 artifactRef 返回制品字节，report 接收 DeploymentReceipt。执行端验证摘要并在受管暂存目录用平台 npm 准备依赖，空闲边界激活；失败保留旧版，忙时报告 waiting-idle。卸载默认保留数据；不复制其他平台 node_modules，也不在 Bot 启动时安装。计划、回执只表达部署状态，不把 202 当作成功激活。
 
 ## Host 在线入口（host-center）
 
-`host-core/center-client.js` 导出 `connectCenter({centerUrl, deviceId, deviceToken, onDisconnect, onChange}) -> Promise<CenterClient>`，返回 `{bootstrap(): Promise<BootstrapResponse>, getSnapshot(): Promise<DeviceRuntimeSnapshot>, reportRuntime(receipt: RuntimeReceipt): Promise<void>, getDeployments(): Promise<DeploymentPlan[]>, reportDeployment(receipt: DeploymentReceipt): Promise<void>, fetchArtifact(ref: string): Promise<Uint8Array>, close(): Promise<void>}`。认证与通知复用现有链路，不新造离线授权。设备 token 永不传给浏览器。
+`host-core/center-client.js` 导出 `connectCenter({centerUrl, deviceId, deviceToken, ca, onDisconnect, onChange}) -> Promise<CenterClient>`（ca 是可选 PEM）；认证后、bootstrap 前建立 SSE 并在整个在线会话保持，断线调用 onDisconnect(error)，config-changed 调用 onChange()；返回 `{bootstrap(bots: BotRef[]): Promise<BootstrapResponse>, getSnapshot(): Promise<DeviceRuntimeSnapshot>, reportRuntime(receipt: RuntimeReceipt): Promise<void>, getDeployments(): Promise<DeploymentPlan[]>, reportDeployment(receipt: DeploymentReceipt): Promise<void>, fetchArtifact(ref: string): Promise<Uint8Array>, close(): Promise<void>}`。认证与通知复用现有链路，不新造离线授权。设备 token 永不传给浏览器。
 
-`host-core/host-service.js` 保留现有 `openHostService(options)` 导出，由 host-center 改造：先读取设备身份、认证、bootstrap 并获取快照，再准备部署/registry、建立链路、启动 runtime，最后回报 ready。中心断连立即拒绝新工作并经现有取消机制停止在途调用；重连重新读取当前快照、应用后才恢复，不自动重发未确认请求。`host-core/runtime-models.js` 导出 `applyCenterModels(snapshot: DeviceRuntimeSnapshot) -> {models, botModels}`，复用现有模型注册与校验，按引用注入凭证（仅内存）。`models` 为既有 pi-ai registry，`botModels` 按 botId 索引有效 ModelSelection；被禁用/不存在的模型应报错，不自动换模型。
+`host-core/host-service.js` 保留现有 `openHostService(options)` 导出，由 host-center 改造：先冷读 host.sqlite 设备身份及 Bot（复用 `openHost({dataRoot}).listBots()`，按 BotRecord.botId/deviceId/role 转为 BotRef.botId/deviceId/name，关闭冷读连接），认证、SSE 和 bootstrap 并获取快照，再准备部署/registry、建立原 DeviceLink、启动 runtime，最后回报 ready。Bot 创建、删除或名称变化后同样调用 bootstrap 更新目录，不依赖已启动 Runtime 才能列 Bot。中心断连立即拒绝新工作并经现有取消机制停止在途调用；重连重新读取当前快照、应用后才恢复，不自动重发未确认请求。`host-core/runtime-models.js` 导出 `applyCenterModels(snapshot: DeviceRuntimeSnapshot) -> {models, botModels}`，复用现有模型注册与校验，按引用注入凭证（仅内存）。`models` 为既有 pi-ai registry，`botModels` 按 botId 索引有效 ModelSelection；被禁用/不存在的模型应报错，不自动换模型。
+
+
+### Runtime 与 App 接缝（由 host-plugins 实现 runtime，host-center 调用）
+
+`openRuntime(options)` 返回既有 Runtime，追加以下方法（保留原 API），host-center 不直接修改 `runtime.js`：
+
+```ts
+applyCenterSnapshot(snapshot: DeviceRuntimeSnapshot): Promise<void>;
+setCenterOnline(online: boolean): Promise<void>;
+callCapabilityAction(installationId: string, action: string, request: ActionRequest): Promise<ActionResult>;
+```
+
+applyCenterSnapshot 只接收认证中心当前设备的完整快照；在 Bot 安全边界应用模型、已安装版本和每 Bot effectiveConfig，返回时应用成功，失败抛带 code 的错误且保持拒绝新工作，不能回报 applied。setCenterOnline(false) 在调用后同步关闭新工作准入，再通过现有取消机制终止在途调用并异步完成清理；true 仅在最新快照成功应用后恢复准入。操作按服务生命周期串行协调，旧快照不能覆盖新的禁用策略。callCapabilityAction 只调用已声明的动作，校验 request.deviceId/botId、实例及当前策略，使用对应 Bot 配置/凭证；无权限、离线、未知动作分别拒绝，不自动重试外部副作用。
+
+`openHostService(options)` 保留原字段 `{dataRoot, token, port?, initialSettings?, nativeBridge?}`，增加必需 `center: {url: string, deviceToken: string, ca?: string}`；token 仍是本地 control token，deviceToken 是设备认证密钥，ca 为可选 PEM。二者用途不可混同，不把密钥作为状态返回或放到 URL。HostService.getStatus() 在既有字段基础上增加 `center: CenterConnectionStatus`；仅 `center.state === 'ready'` 时业务可用，appliedRevision 为已应用快照修订，错误经脱敏。host-center 可修改 `control-server.js`、`local-control-adapter.js`、`remote-control-protocol.js`、`control-client.js`、`index.d.ts`、`control-client.d.ts` 完成此接线；`runtime.js` 仍由 host-plugins 独占。
+
+app-online 启动桥按上述 `center` 形状传递中心 URL、设备 token 和可选 CA；只保存连接信息和设备认证材料，不保存业务快照。原生桥的连接设置/状态读取必须在 Host 启动失败或尚未创建时也可用，呈现 `CenterConnectionStatus`（disconnected/connecting/ready，未应用时 appliedRevision=null，error 为脱敏错误）；成功启动后从 HostService 状态同步。App 在非 ready 状态只显示连接设置/重试与管理入口，不放行聊天或其他业务；断连立即变为 disconnected，重连仅在快照应用成功后变 ready。桌面/Android 接桥由 app-online 实现，HostService 与控制协议的契约由 host-center 负责。
 
 ## 插件与驱动（host-plugins、mcp-skills）
 
-`host-core/plugins/index.js` 导出 `loadNativePlugin({installationId, version, entry, dataDir, host}) -> Promise<NativePlugin>`。原生包 entry 导出 `createPlugin({installationId, version, dataDir, host}) -> Promise<NativePlugin> | NativePlugin`；NativePlugin 为 `{forBot(context): Promise<BotPlugin> | BotPlugin, close(): Promise<void>}`。context 为 `{deviceId, botId, installationId, effectiveConfig, credentials}`，credentials 是按有效引用解析的只读映射；BotPlugin 为 `{durableContributions, requestContributions, actions, prepare(), activate(), quiesce(), close()}`，四个生命周期方法均返回 Promise<void>。贡献采用既有 Durable tools/sections/tasks/docs 类型；上下文增强、actions 的具体现有 SDK 类型由 host-plugins 在本模块声明，不重新定义引擎。资源按 Bot 创建复用；全部 direct/nested 工具、后台任务及 hook 在执行入口检查中心在线、实例与 Binding 双开关。Hindsight 作为此契约的普通插件，迁移保留原状态身份。
+`host-core/plugins/index.js` 导出 `loadNativePlugin({installationId, version, entry, packageRoot, dataDir, host}) -> Promise<NativePlugin>`。原生包 entry 导出 `createPlugin({installationId, version, packageRoot, dataDir, host}) -> Promise<NativePlugin> | NativePlugin`；packageRoot 是已激活不可变包目录（含代码与 Skill 资源），dataDir 是保留状态目录，不能混同；NativePlugin 为 `{forBot(context): Promise<BotPlugin> | BotPlugin, close(): Promise<void>}`。context 为 `{deviceId, botId, installationId, effectiveConfig, credentials}`，credentials 是按有效引用解析的只读映射；BotPlugin 为 `{durableContributions, requestContributions, actions, prepare(), activate(), quiesce(), close()}`，四个生命周期方法均返回 Promise<void>。贡献采用既有 Durable tools/sections/tasks/docs 类型；上下文增强、actions 的具体现有 SDK 类型由 host-plugins 在本模块声明，不重新定义引擎。资源按 Bot 创建复用；全部 direct/nested 工具、后台任务及 hook 在执行入口检查中心在线、实例与 Binding 双开关。Hindsight 作为此契约的普通插件，迁移保留原状态身份。
 
-`host-core/capabilities/mcp.js` 导出 `createMcpDriver({installationId, version, dataDir, host}) -> Promise<NativePlugin>`；`host-core/capabilities/skill.js` 导出 `createSkillDriver({installationId, version, dataDir, host}) -> Promise<NativePlugin>`。两者使用相同 `forBot(context)` 和生命周期；MCP 依 pi-mcp 将工具适配 Durable，Skill 只加载完整受管目录并输出启用 Bot 的 section；必须保留相对资源路径。驱动不得自行合并 global/overrides、绕过策略或将其他 Bot 客户端复用为当前 Bot。
+
+工厂中的 `host` 不是任意对象；由 host-plugins 构造以下最小可信服务，MCP/Skill 和 Hindsight 可共同依赖（类型指向现有 Host/Durable，而不塞入平台无关的 DTO）：
+
+```ts
+interface PluginHostServices {
+  host: import('../host-core/index.js').Host;
+  getHarness(): import('@earendil-works/pi-durable').Harness;
+  context: typeof import('@earendil-works/chord/context').BACKGROUND_CONTEXT;
+  getWorkContexts(): ReturnType<typeof import('../host-core/runtime-work-contexts.js').createWorkContextRuntime>;
+  getWorkActivity(botId: string, scopeId: string): Promise<import('../host-core/index.js').WorkActivity>;
+  resolveConversationBot(conversationId: string): Promise<string>;
+  assertCapabilityAllowed(botId: string, installationId: string): void;
+  getExecutionEnv(botId: string): Promise<ReturnType<typeof import('../host-core/host-environment.js').createHostExecutionEnv>>;
+}
+```
+
+`resolveConversationBot` 仅查 Host/持久会话绑定，未映射或有歧义时报错，不信任模型传入的 botId；`assertCapabilityAllowed` 同步检查在线、当前快照、实例和 Binding，拒绝时抛带 code 的错误，调用及后台执行入口均须使用。`getExecutionEnv` 是该 Bot 现有工作目录的受控 Durable 执行环境，不授予超出现有 Host 权限；context 为既有 Chord 后台上下文，具体调用时仍传实际 invocation context。host/getHarness/getWorkContexts/getWorkActivity 供 Hindsight 迁移原有 source、outbox 和工作上下文语义；它们是同进程受信代码接口，不是沙箱。插件不持久化或输出凭证。
+
+
+`host-core/capabilities/mcp.js` 导出 `createMcpDriver({installationId, version, packageRoot, dataDir, host}) -> Promise<NativePlugin>`；`host-core/capabilities/skill.js` 导出 `createSkillDriver({installationId, version, packageRoot, dataDir, host}) -> Promise<NativePlugin>`。两者使用相同 `forBot(context)` 和生命周期；MCP 依 pi-mcp 将工具适配 Durable，Skill 只加载完整受管目录并输出启用 Bot 的 section；必须保留相对资源路径。驱动不得自行合并 global/overrides、绕过策略或将其他 Bot 客户端复用为当前 Bot。
 
 ## 管理前端（admin-shell、plugin-ui）
 
-`center-web/api.ts` 导出 `api` 对象，方法命名与 HTTP 操作一致：`session, login, logout, listProviders, getProvider, putProvider, validateProvider, discoverModels, listModels, putModel, getModelConfig, putModelConfig, listDevices, listBots, getBotModelConfig, putBotModelConfig, getCredential, putCredential, deleteCredential, listCapabilities, install, getInstallation, getInstallationConfig, putInstallationConfig, getBotCapability, putBotCapability, validateInstallation, checkUpdates, updateInstallation, rollbackInstallation, disableInstallation, uninstallInstallation, runAction, listDeployments, getOperation`。参数按上表顺序（路径 ID 在前，body 在后），返回 Promise<对应响应 DTO>；统一 same-origin、session 和 CSRF，并将 ApiError 转为可展示错误。列表/详情查询无密钥。
+`center-web/api.ts` 导出 `api` 对象，方法命名与 HTTP 操作一致：`session, login, logout, listProviders, createProvider, getProvider, putProvider, validateProvider, discoverModels, listModels, createModel, putModel, getModelConfig, putModelConfig, listDevices, listBots, getBotModelConfig, putBotModelConfig, getCredential, putCredential, deleteCredential, uploadArtifact, listCapabilities, install, getInstallation, getInstallationConfig, putInstallationConfig, getBotCapability, putBotCapability, validateInstallation, checkUpdates, updateInstallation, rollbackInstallation, disableInstallation, uninstallInstallation, runAction, listDeployments, getOperation`。参数按上表顺序（路径 ID 在前，body 在后），返回 Promise<对应响应 DTO>；统一 same-origin、session 和 CSRF，并将 ApiError 转为可展示错误。列表/详情查询无密钥。
 
 `center-web/App.tsx` 默认导出 App；`center-web/pages/Login.tsx`、`Providers.tsx`、`Models.tsx`、`Devices.tsx`、`Capabilities.tsx`、`Installation.tsx`、`BotCapabilities.tsx` 分别默认导出无必需 props 的路由组件。路由参数使用 React Router：`/login`、`/providers`、`/providers/:providerId/models`、`/devices`、`/capabilities`、`/capabilities/:installationId`、`/devices/:deviceId/bots/:botId/capabilities`。admin-shell 挂载这些 export；plugin-ui 使用同一 api，不创建另一份业务状态。共享配置表单由 `center-web/components/ConfigForm.tsx` 默认导出，props 为 `{schema: JsonSchema, uiSchema?: JsonObject, globalConfig: JsonObject, overrides?: JsonObject, onSave(value: JsonObject): void}`；有 overrides 时 onSave 仅提交覆盖项，否则提交 global。凭证字段只显示引用及配置状态，不回填秘密。
 
 ## 依赖与验收边界
 
-各清单是互相独立的 npm 安装根，父助手生成对应 lockfile；原 root 和 host lock 不在此轮改动。RJSF 同版 6.11.0、deepmerge 4.3.1、npm 11.6.2 来自计划；pi-mcp 1.1.0 和 yaml 2.9.0 来自现有 `pi-runtime/package-lock.json`，与现有 Pi 配套需实际验收；React/Vite 使用项目已有版本。Fastify 及插件、Ajv、pacote 和 semver 的清单为固定候选版本，未进行 registry/安装/兼容性验证；父助手在 P0 安装时核验，不能将本契约视作已完成库兼容验证。中心 web、server 分别依赖 center-contract，server 专用依赖不进入 Host/Android/浏览器 bundle。
+各清单是互相独立的 npm 安装根，父助手生成对应 lockfile；原 root 和 host lock 不在此轮改动。RJSF 同版 6.11.0、deepmerge 4.3.1、npm 11.6.2 来自计划；yaml 2.9.0 来自现有 `pi-runtime/package-lock.json`；pi-mcp 按父助手定案固定 1.3.0（当前 lock 内是 1.1.0），与现有 Pi 配套需实际验收；React/Vite 使用项目已有版本。Fastify 及插件、Ajv、pacote 和 semver 的清单为固定候选版本，未进行 registry/安装/兼容性验证；父助手在 P0 安装时核验，不能将本契约视作已完成库兼容验证。中心 web、server 分别依赖 center-contract，server 专用依赖不进入 Host/Android/浏览器 bundle。
 
 此轮无业务 stub、无新增测试；端到端需验证真实中心/Host/浏览器及设备，尤其在线中断、CAS、秘密边界、数组替换、制品安全、目标平台 npm 和 React 19 表单。
