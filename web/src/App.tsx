@@ -31,11 +31,12 @@ function Navigation() {
         void Device.hideKeyboard(); return;
       }
       if (!window.dispatchEvent(new Event('composer-back', {cancelable:true}))) return;
-      if (document.querySelector('[role="dialog"]')) {
+      const request = new Event('app-back', {cancelable: true});
+      if (!window.dispatchEvent(request)) return;
+      if (document.querySelector('[role="dialog"]:not([aria-hidden="true"])')) {
         document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true})); return;
       }
-      const request = new Event('app-back', {cancelable: true});
-      if (window.dispatchEvent(request)) back();
+      back();
     });
     return () => { viewport?.removeEventListener('resize', resized); void listener.then(handle => handle.remove()); };
   }, [location.key]);

@@ -8,6 +8,7 @@ import android.view.View;
 import android.view.WindowManager;
 import android.webkit.WebView;
 
+import androidx.activity.OnBackPressedCallback;
 import androidx.core.graphics.Insets;
 import androidx.core.view.ViewCompat;
 import androidx.core.view.WindowCompat;
@@ -52,6 +53,37 @@ public class TauriMainActivity extends TauriActivity {
         }
         // edge-to-edge 下窗口底色与前端主背景一致，避免首帧或边缘露白。
         getWindow().getDecorView().setBackgroundColor(bgColor);
+        getOnBackPressedDispatcher().addCallback(this, new OnBackPressedCallback(true) {
+            @Override public void handleOnBackPressed() {
+                handleBackNavigation();
+            }
+        });
+    }
+
+    private void handleBackNavigation() {
+        WebView wv = activeWebView;
+        if (wv == null) {
+            moveTaskToBack(true);
+            return;
+        }
+        String js = "(function(){"
+                + "try{"
+                + "if(!window.dispatchEvent(new Event('composer-back',{cancelable:true})))return true;"
+                + "var req=new Event('app-back',{cancelable:true});"
+                + "if(!window.dispatchEvent(req))return true;"
+                + "if(document.querySelector('[role=\"dialog\"]:not([aria-hidden=\"true\"])')){"
+                + "document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));"
+                + "return true;"
+                + "}"
+                + "if((window.history.state&&window.history.state.idx)>0){window.history.back();return true;}"
+                + "return false;"
+                + "}catch(e){return false;}"
+                + "})()";
+        wv.evaluateJavascript(js, handled -> {
+            if (!"true".equals(handled)) {
+                moveTaskToBack(true);
+            }
+        });
     }
 
     private void syncSafeAreaCss() {

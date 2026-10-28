@@ -1,10 +1,67 @@
-import { createContext, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
+import { createContext, useContext, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { BotHost, openCenterUrl } from './index';
 import { mobileClientRequest } from './tauri-host';
 
-type SavedConnection = { url: string; deviceId: string; ca: string };
-type Status = { state: 'disconnected' | 'connecting' | 'ready'; centerUrl: string; clientId?: string; savedConnection?: SavedConnection; savedConnectionError?: string };
+export type SavedConnection = { url: string; deviceId: string; ca: string };
+export type CenterStatus = { state: 'disconnected' | 'connecting' | 'ready'; centerUrl: string; clientId?: string; savedConnection?: SavedConnection; savedConnectionError?: string };
 export const ActiveCenter = createContext('');
+
+export interface CenterConnectionContextValue {
+  remoteClient: boolean;
+  url: string;
+  setUrl: (v: string) => void;
+  deviceId: string;
+  setDeviceId: (v: string) => void;
+  token: string;
+  setToken: (v: string) => void;
+  hostToken: string;
+  setHostToken: (v: string) => void;
+  ca: string;
+  setCa: (v: string) => void;
+  status?: CenterStatus;
+  saved?: SavedConnection;
+  initialized: boolean;
+  busy: boolean;
+  preparing: boolean;
+  connecting: boolean;
+  ready: boolean;
+  matchesSaved: boolean;
+  error: string;
+  setError: (v: string) => void;
+  connect: (event?: FormEvent) => Promise<void>;
+  disconnect: () => void;
+  openManagement: () => void;
+  stopLocalHost: () => void;
+}
+
+const defaultCenterContext: CenterConnectionContextValue = {
+  remoteClient: false,
+  url: '',
+  setUrl: () => {},
+  deviceId: '',
+  setDeviceId: () => {},
+  token: '',
+  setToken: () => {},
+  hostToken: '',
+  setHostToken: () => {},
+  ca: '',
+  setCa: () => {},
+  initialized: true,
+  busy: false,
+  preparing: false,
+  connecting: false,
+  ready: false,
+  matchesSaved: false,
+  error: '',
+  setError: () => {},
+  connect: async () => {},
+  disconnect: () => {},
+  openManagement: () => {},
+  stopLocalHost: () => {},
+};
+
+export const CenterConnectionContext = createContext<CenterConnectionContextValue>(defaultCenterContext);
+export const useCenterConnection = () => useContext(CenterConnectionContext);
 
 export function CenterGate({ children, remoteClient = false, onDisconnected, onReady }: { children: ReactNode; remoteClient?: boolean; onDisconnected?: () => void; onReady?: (centerUrl: string) => Promise<void> }) {
   const [url, setUrl] = useState('');
@@ -12,13 +69,13 @@ export function CenterGate({ children, remoteClient = false, onDisconnected, onR
   const [token, setToken] = useState('');
   const [hostToken, setHostToken] = useState('');
   const [ca, setCa] = useState('');
-  const [status, setStatus] = useState<Status>();
+  const [status, setStatus] = useState<CenterStatus>();
   const [saved, setSaved] = useState<SavedConnection>();
   const [initialized, setInitialized] = useState(false);
   const [busy, setBusy] = useState(false);
   const epoch = useRef(0);
   const autoAttempted = useRef(false);
-  const autoConnection = useRef<Promise<Status> | null>(null);
+  const autoConnection = useRef<Promise<CenterStatus> | null>(null);
   const wasReady = useRef(false);
   const [error, setError] = useState('');
   const [preparedCenter, setPreparedCenter] = useState('');
@@ -45,12 +102,12 @@ export function CenterGate({ children, remoteClient = false, onDisconnected, onR
       void pollHost();
       return () => { live = false; epoch.current += 1; clearTimeout(timer); };
     }
-    const updateStatus = (next: Status) => {
+    const updateStatus = (next: CenterStatus) => {
       setStatus(next);
       setSaved(next.savedConnection);
       if (next.savedConnectionError) setError(next.savedConnectionError);
     };
-    const readStatus = () => mobileClientRequest<Status>('center_status', {});
+    const readStatus = () => mobileClientRequest<CenterStatus>('center_status', {});
     const poll = async () => {
       const issued = epoch.current;
       try {
@@ -83,7 +140,7 @@ export function CenterGate({ children, remoteClient = false, onDisconnected, onR
           setCa(connection.ca);
           if (next.state !== 'ready' && !autoAttempted.current) {
             autoAttempted.current = true;
-            autoConnection.current = mobileClientRequest<Status>('center_connect', {
+            autoConnection.current = mobileClientRequest<CenterStatus>('center_connect', {
               url: connection.url, deviceId: connection.deviceId, deviceToken: '',
               ...(connection.ca ? { ca: connection.ca } : {}),
             });
@@ -132,8 +189,8 @@ export function CenterGate({ children, remoteClient = false, onDisconnected, onR
     return () => { live = false; };
   }, [status?.state, status?.centerUrl, onReady]);
 
-  const connect = async (event: FormEvent) => {
-    event.preventDefault();
+  const connect = async (event?: FormEvent) => {
+    event?.preventDefault();
     const issued = ++epoch.current;
     setBusy(true);
     setError('');
@@ -151,7 +208,7 @@ export function CenterGate({ children, remoteClient = false, onDisconnected, onR
         } });
       }
       if (remoteClient) {
-        const next = await mobileClientRequest<Status>('center_connect', {
+        const next = await mobileClientRequest<CenterStatus>('center_connect', {
           url: url.trim(), deviceId: deviceId.trim(), deviceToken: token.trim(),
           ...(ca.trim() ? { ca: ca.trim() } : {}),
         });
@@ -174,12 +231,12 @@ export function CenterGate({ children, remoteClient = false, onDisconnected, onR
     }
   };
 
-  const matchesSaved = saved && saved.url === url.trim() && saved.deviceId === deviceId.trim() && saved.ca === ca.trim();
+  const matchesSaved = Boolean(saved && saved.url === url.trim() && saved.deviceId === deviceId.trim() && saved.ca === ca.trim());
   const disconnect = () => {
     const issued = ++epoch.current;
     setBusy(true);
     setError('');
-    const request = remoteClient ? mobileClientRequest<Status>('center_disconnect', {}) : BotHost.stop().then(() => undefined);
+    const request = remoteClient ? mobileClientRequest<CenterStatus>('center_disconnect', {}) : BotHost.stop().then(() => undefined);
     void request.then(next => {
       if (issued !== epoch.current) return;
       setSaved(undefined);
@@ -188,23 +245,55 @@ export function CenterGate({ children, remoteClient = false, onDisconnected, onR
       if (issued === epoch.current) setError(failure instanceof Error ? failure.message : '断开连接失败，请重试。');
     }).finally(() => { if (issued === epoch.current) setBusy(false); });
   };
-  if (status?.state === 'ready' && (!onReady || preparedCenter === status.centerUrl)) return <><button type="button" disabled={busy} onClick={disconnect}>更换中心连接</button>{error && <p role="alert">{error}</p>}<ActiveCenter.Provider value={status.centerUrl}>{children}</ActiveCenter.Provider></>;
-  return <main className="page">
-    <h1>连接中心</h1>
-    <p>连接中心后才能使用助手。请先登记设备并获取设备令牌。</p>
-    {remoteClient && saved && <button type="button" disabled={busy || preparing} onClick={disconnect}>更换中心连接</button>}
-    {remoteClient && <p>成功连接后客户端令牌将加密保存在本机；中心地址、设备身份和 CA 与已保存记录相同时可留空。</p>}
-    {remoteClient && status?.clientId && <p>本客户端标识：{status.clientId}</p>}
-    <form className="form" onSubmit={connect}>
-      <label>中心 HTTPS 地址<input required type="url" value={url} onChange={e => setUrl(e.target.value)} /></label>
-      {remoteClient && <label>客户端设备身份<input required value={deviceId} onChange={e => setDeviceId(e.target.value)} /></label>}
-      <label>{remoteClient ? '客户端设备令牌' : '本机 Host 设备令牌'}<input type="password" autoComplete="off" required={remoteClient && !matchesSaved} value={token} onChange={e => setToken(e.target.value)} placeholder="已保存时可留空" /></label>
-      {remoteClient && <label>本机 Host 设备令牌（可选，仅在配置本机 Host 时填写）<input type="password" autoComplete="off" value={hostToken} onChange={e => setHostToken(e.target.value)} /></label>}
-      <label>CA 证书（可选）<textarea value={ca} onChange={e => setCa(e.target.value)} /></label>
-      <button className="button" disabled={busy || preparing || !initialized} type="submit">{busy || preparing ? '连接设备中…' : '连接 / 重试'}</button>
-    </form>
-    <button className="button secondary-button" disabled={!url} onClick={() => void openCenterUrl(url.trim()).catch(() => setError('无法打开中心管理页面'))}>打开中心管理 / 登录</button>
-    <button className="button secondary-button" onClick={() => void BotHost.stop()}>停止本机 Host 以修改连接</button>
-    {error && <p role="alert">{error}</p>}
-  </main>;
+
+  const openManagement = () => {
+    if (!url.trim()) return;
+    void openCenterUrl(url.trim()).catch(() => setError('无法打开中心管理页面'));
+  };
+
+  const stopLocalHost = () => {
+    void BotHost.stop().catch(failure => {
+      setError(failure instanceof Error ? failure.message : '停止本机 Host 失败');
+    });
+  };
+
+  const ready = Boolean(status?.state === 'ready' && (!onReady || preparedCenter === status.centerUrl));
+  const connecting = Boolean(!initialized || busy || preparing || status?.state === 'connecting');
+  const activeCenterUrl = ready && status ? status.centerUrl : '';
+
+  const contextValue: CenterConnectionContextValue = {
+    remoteClient,
+    url,
+    setUrl,
+    deviceId,
+    setDeviceId,
+    token,
+    setToken,
+    hostToken,
+    setHostToken,
+    ca,
+    setCa,
+    status,
+    saved,
+    initialized,
+    busy,
+    preparing,
+    connecting,
+    ready,
+    matchesSaved,
+    error,
+    setError,
+    connect,
+    disconnect,
+    openManagement,
+    stopLocalHost,
+  };
+
+  return (
+    <CenterConnectionContext.Provider value={contextValue}>
+      <ActiveCenter.Provider value={activeCenterUrl}>
+        {children}
+      </ActiveCenter.Provider>
+    </CenterConnectionContext.Provider>
+  );
 }

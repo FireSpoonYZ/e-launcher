@@ -1,4 +1,4 @@
-import { useId } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import {
   GROK_EXPRESSIONS,
   GROK_HEAD_CENTER,
@@ -6,6 +6,14 @@ import {
   GROK_STAR_GOLD,
   GROK_STAR_PATH,
 } from './grokBotData';
+import {
+  GROK_POKE_TYPES,
+  createGrokAppearance,
+  createGrokMascotController,
+  normalizeGrokBodyShape,
+  resolveGrokMascotState,
+  type GrokMascotState,
+} from './grokMascotEngine';
 
 export interface GrokAvatarPreset {
   id: string;
@@ -220,5 +228,243 @@ export function GrokBotAvatar({
         )}
       </svg>
     </span>
+  );
+}
+
+export function GrokBotAnimatedMark({
+  seedId,
+  shape = 'cloud',
+  color = '#2B70F6',
+  eyeColor = '#FAF8F5',
+  state = 'working',
+  size = 36,
+  isPlaying = true,
+  isEmphasized = false,
+  interactivePoke = false,
+  className = '',
+}: {
+  seedId?: string;
+  shape?: string;
+  color?: string;
+  eyeColor?: string;
+  state?: GrokMascotState;
+  size?: number;
+  isPlaying?: boolean;
+  isEmphasized?: boolean;
+  interactivePoke?: boolean;
+  className?: string;
+}) {
+  const reactId = useId().replace(/:/g, '_');
+  const markId = seedId ? `grok_mark_${seedId.replace(/[^a-zA-Z0-9_-]/g, '_')}_${reactId}` : `grok_mark_${reactId}`;
+  const hostRef = useRef<HTMLSpanElement | null>(null);
+  const canvasRef = useRef<HTMLSpanElement | null>(null);
+  const controllerRef = useRef<ReturnType<typeof createGrokMascotController> | null>(null);
+  const pokeIndexRef = useRef(0);
+
+  useEffect(() => {
+    const host = hostRef.current;
+    const canvas = canvasRef.current;
+    if (!host || !canvas) return;
+    const ctrl = createGrokMascotController({
+      id: markId,
+      body: normalizeGrokBodyShape(shape),
+      inkColor: color,
+      eyeColor,
+      state,
+      size,
+      isPlaying,
+      isEmphasized,
+      seed: seedId || markId,
+    });
+    controllerRef.current = ctrl;
+    const detach = ctrl.attach({ host, canvas });
+    return () => {
+      detach();
+      controllerRef.current = null;
+    };
+  }, [markId, seedId]);
+
+  useEffect(() => {
+    const ctrl = controllerRef.current;
+    if (!ctrl) return;
+    ctrl.update({
+      body: normalizeGrokBodyShape(shape),
+      appearance: createGrokAppearance(color, eyeColor),
+      state,
+      size,
+      isPlaying,
+      isEmphasized,
+    });
+  }, [shape, color, eyeColor, state, size, isPlaying, isEmphasized]);
+
+  const handlePoke = () => {
+    if (!interactivePoke || !controllerRef.current) return;
+    const kind = GROK_POKE_TYPES[pokeIndexRef.current % GROK_POKE_TYPES.length] ?? 'spin';
+    pokeIndexRef.current += 1;
+    controllerRef.current.poke(kind, undefined);
+  };
+
+  return (
+    <span
+      ref={hostRef}
+      className={`sand-grok-bot-mark${interactivePoke ? ' is-interactive' : ''}${className ? ` ${className}` : ''}`}
+      data-grok-state={state}
+      style={{ width: `${size}px`, height: `${size}px` }}
+      onClick={interactivePoke ? handlePoke : undefined}
+      role={interactivePoke ? 'button' : undefined}
+      tabIndex={interactivePoke ? 0 : undefined}
+      aria-hidden={interactivePoke ? undefined : 'true'}
+      aria-label={interactivePoke ? 'Bot working indicator' : undefined}
+    >
+      <span ref={canvasRef} className="sand-grok-bot-mark-canvas" />
+    </span>
+  );
+}
+
+export function GrokBotWorkingSlot({
+  botKey,
+  preset,
+  isBusy,
+  isStreaming,
+  activeToolName,
+  hasThinking,
+  queuedCount = 0,
+  hasError = false,
+  t,
+}: {
+  botKey: string;
+  preset: GrokAvatarPreset;
+  isBusy: boolean;
+  isStreaming: boolean;
+  activeToolName?: string | null;
+  hasThinking?: boolean;
+  queuedCount?: number;
+  hasError?: boolean;
+  t: (zh: string, en: string) => string;
+}) {
+  const [elapsedSec, setElapsedSec] = useState(0);
+  const [settlementOutcome, setSettlementOutcome] = useState<'success' | 'error' | null>(null);
+  const [emphasized, setEmphasized] = useState(false);
+  const [pulseThinkingMorph, setPulseThinkingMorph] = useState(false);
+  const wasBusyRef = useRef(false);
+
+  useEffect(() => {
+    if (isBusy) {
+      wasBusyRef.current = true;
+      setSettlementOutcome(null);
+      const startMs = Date.now();
+      setElapsedSec(0);
+      const timer = window.setInterval(() => {
+        setElapsedSec(Math.max(0, Math.floor((Date.now() - startMs) / 1000)));
+      }, 1000);
+      return () => window.clearInterval(timer);
+    }
+    if (wasBusyRef.current) {
+      wasBusyRef.current = false;
+      setSettlementOutcome(hasError ? 'error' : 'success');
+      const settleTimer = window.setTimeout(() => {
+        setSettlementOutcome(null);
+        setElapsedSec(0);
+      }, 1450);
+      return () => window.clearTimeout(settleTimer);
+    }
+    return undefined;
+  }, [isBusy, hasError]);
+
+  useEffect(() => {
+    if (!isBusy || isStreaming || activeToolName) {
+      setPulseThinkingMorph(false);
+      return undefined;
+    }
+    // Primarily play the 2.5D Cloud Working_A..F clips so the cloud eyes & expressions are visible,
+    // and periodically pulse the Grok 'thinking' dots morph during long reasoning pauses.
+    const cycle = window.setInterval(() => {
+      setPulseThinkingMorph(prev => !prev);
+    }, 4200);
+    return () => window.clearInterval(cycle);
+  }, [isBusy, isStreaming, activeToolName]);
+
+  if (!isBusy && !settlementOutcome) return null;
+
+  const baseState = resolveGrokMascotState({
+    isBusy,
+    isStreaming,
+    activeToolName,
+    hasThinking,
+    settlementOutcome,
+  });
+
+  const mascotState: GrokMascotState =
+    baseState === 'working' && pulseThinkingMorph && !activeToolName && !isStreaming ? 'thinking' : baseState;
+
+  const statusText = (() => {
+    if (!isBusy) {
+      return settlementOutcome === 'error'
+        ? t('执行中断', 'Interrupted')
+        : t('已完成', 'Done');
+    }
+    if (isStreaming) {
+      return t('正在回复…', 'Replying…');
+    }
+    const tool = (activeToolName || '').trim();
+    if (tool) {
+      const lower = tool.toLowerCase();
+      if (/search|grep|glob|find|web_search|query|recall/.test(lower)) {
+        return `${t('正在搜索', 'Searching')} · ${tool}`;
+      }
+      if (/write|edit|patch|create|save/.test(lower)) {
+        return `${t('正在编写', 'Writing')} · ${tool}`;
+      }
+      if (/read|view|cat|fetch|browse|open|ls/.test(lower)) {
+        return `${t('正在读取', 'Reading')} · ${tool}`;
+      }
+      if (/shower|android_apps/.test(lower)) {
+        return `${t('正在操作屏幕', 'Controlling screen')} · ${tool}`;
+      }
+      if (/bash|exec|shell|cmd|run|terminal/.test(lower)) {
+        return `${t('正在执行命令', 'Running command')} · ${tool}`;
+      }
+      return `${t('正在调用工具', 'Using tool')} · ${tool}`;
+    }
+    if (hasThinking) {
+      return t('正在深入思考…', 'Thinking…');
+    }
+    if (queuedCount > 0) {
+      return t('正在处理消息…', 'Processing…');
+    }
+    return t('正在思考…', 'Working…');
+  })();
+
+  return (
+    <div
+      className={`sand-activity-slot${!isBusy && settlementOutcome ? ' is-settling' : ''}`}
+      data-role="assistant"
+      data-grok-state={mascotState}
+      aria-live="polite"
+      onPointerEnter={() => setEmphasized(true)}
+      onPointerLeave={() => setEmphasized(false)}
+    >
+      <div className="sand-activity-mark">
+        <GrokBotAnimatedMark
+          seedId={botKey}
+          shape="cloud"
+          color={preset.color}
+          eyeColor="#FAF8F5"
+          state={mascotState}
+          size={36}
+          isPlaying={true}
+          isEmphasized={emphasized}
+          interactivePoke={true}
+        />
+        <span className="sand-activity-mark-label">
+          <span className={`sand-activity-label-text${isBusy ? ' is-shimmering' : ''}`}>
+            {statusText}
+          </span>
+          {isBusy && elapsedSec >= 1 && (
+            <span className="sand-activity-elapsed">{elapsedSec}s</span>
+          )}
+        </span>
+      </div>
+    </div>
   );
 }
