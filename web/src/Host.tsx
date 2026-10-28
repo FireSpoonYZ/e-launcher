@@ -10,7 +10,10 @@ import {
   Clock,
   Code2,
   Cpu,
+  ExternalLink,
   FolderOpen,
+  Globe,
+  MessageSquare,
   Mic,
   Monitor,
   MoreHorizontal,
@@ -24,7 +27,6 @@ import {
   Settings,
   Sparkles,
   Square,
-  Star,
   Trash2,
   User,
   X,
@@ -46,7 +48,7 @@ import {
   type HostVoiceSettings,
 } from './native';
 import { onMobileStreamFailure } from './native/tauri-host';
-import { ActiveCenter } from './native/CenterGate';
+import { ActiveCenter, useCenterConnection } from './native/CenterGate';
 import { useDrafts } from '../../desktop/web/src/drafts';
 import { PendingPanel } from '../../desktop/web/src/PendingPanel';
 import { Scopes } from '../../desktop/web/src/Scopes';
@@ -63,6 +65,7 @@ import {
   GROK_EXPRESSION_LIST,
   GROK_SHAPE_ORDER,
   GrokBotAvatar,
+  GrokBotWorkingSlot,
   JARVIS_AVATAR_PRESET,
   getDefaultBotAvatarPreset,
   getSavedAvatarConfigMap,
@@ -131,8 +134,65 @@ export interface UnifiedBotItem {
   hostKind: 'local' | 'remote';
   hostId: string;
   hostLabel: string;
+  platform?: string;
+  online?: boolean;
   isPrimary?: boolean;
   remoteIdentity?: DesktopIdentity;
+}
+
+function normalizePlatformKind(platform?: string): 'android' | 'windows' | 'linux' | 'other' {
+  const p = (platform ?? '').toLowerCase();
+  if (p.includes('android')) return 'android';
+  if (p.includes('win')) return 'windows';
+  if (p.includes('linux') || p.includes('ubuntu') || p.includes('debian') || p.includes('arch')) return 'linux';
+  return 'other';
+}
+
+function PlatformLogoIcon({ platform, size = 12 }: { platform?: string; size?: number }) {
+  const kind = normalizePlatformKind(platform);
+  if (kind === 'android') {
+    return (
+      <svg
+        width={size}
+        height={size}
+        viewBox="0 0 24 24"
+        fill="currentColor"
+        className="platform-logo-icon is-android"
+        aria-label="Android"
+      >
+        <path d="M17.523 15.341a1.003 1.003 0 0 1-1.002-1.002c0-.553.45-1.002 1.002-1.002.553 0 1.002.45 1.002 1.002 0 .553-.449 1.002-1.002 1.002m-11.046 0a1.003 1.003 0 0 1-1.002-1.002c0-.553.45-1.002 1.002-1.002.553 0 1.002.45 1.002 1.002 0 .553-.449 1.002-1.002 1.002m11.405-6.02 1.997-3.46a.416.416 0 0 0-.152-.567.416.416 0 0 0-.568.152L17.137 8.95c-1.547-.704-3.28-1.097-5.137-1.097-1.857 0-3.59.393-5.137 1.097L4.841 5.446a.416.416 0 0 0-.568-.152.416.416 0 0 0-.152.567l1.997 3.46C2.688 11.186.343 14.658 0 18.761h24c-.343-4.103-2.688-7.575-6.118-9.44" />
+      </svg>
+    );
+  }
+  if (kind === 'windows') {
+    return (
+      <svg
+        width={size}
+        height={size}
+        viewBox="0 0 24 24"
+        fill="currentColor"
+        className="platform-logo-icon is-windows"
+        aria-label="Windows"
+      >
+        <path d="M0 3.449L9.75 2.1v9.451H0m10.949-9.602L24 0v11.4H10.949M0 12.6h9.75v9.451L0 20.699M10.949 12.6H24V24l-12.9-1.801" />
+      </svg>
+    );
+  }
+  if (kind === 'linux') {
+    return (
+      <svg
+        width={size}
+        height={size}
+        viewBox="0 0 24 24"
+        fill="currentColor"
+        className="platform-logo-icon is-linux"
+        aria-label="Linux"
+      >
+        <path d="M12 2C9.24 2 7 4.24 7 7v4.27c-1.21 1.48-2 3.32-2 5.23 0 2.76 2.24 5.5 7 5.5s7-2.74 7-5.5c0-1.91-.79-3.75-2-5.23V7c0-2.76-2.24-5-5-5zm-2 4.5a1.25 1.25 0 1 1 0 2.5 1.25 1.25 0 0 1 0-2.5zm4 0a1.25 1.25 0 1 1 0 2.5 1.25 1.25 0 0 1 0-2.5zM12 10c1.38 0 2.5.67 2.5 1.5S13.38 13 12 13s-2.5-.67-2.5-1.5S10.62 10 12 10zm0 4.5c2.21 0 4 1.34 4 3s-1.79 3-4 3-4-1.34-4-3 1.79-3 4-3z" />
+      </svg>
+    );
+  }
+  return <Server size={size} className="platform-logo-icon is-generic" aria-hidden="true" />;
 }
 
 interface BotPreviewMeta {
@@ -604,10 +664,16 @@ export function HostPage({
       if (generation !== localBotsGeneration.current) return [];
       setLocalHost(currentSnap);
       if (currentSnap.phase !== 'running') { setLocalBots([]); return []; }
-      const status = await BotHost.status();
-      if (status.center?.state !== 'ready' || new URL(status.center.centerUrl).origin !== new URL(activeCenter).origin) {
-        setLocalBots([]);
-        return [];
+      if (activeCenter) {
+        try {
+          const status = await BotHost.status();
+          if (status.center?.centerUrl && new URL(status.center.centerUrl).origin !== new URL(activeCenter).origin) {
+            setLocalBots([]);
+            return [];
+          }
+        } catch {
+          // Ignore transient status check errors while center is connecting
+        }
       }
       const envelope = await BotHost.call({ method: 'listBots', params: {} });
       const list = array<HostBot>(envelope.result);
@@ -627,8 +693,10 @@ export function HostPage({
         let snap = await BotHost.snapshot();
         setLocalHost(snap);
         if (snap.phase === 'running') {
-          const status = await BotHost.status();
-          if (status.center?.state !== 'ready' || new URL(status.center.centerUrl).origin !== new URL(activeCenter).origin) return undefined;
+          if (activeCenter) {
+            const status = await BotHost.status();
+            if (status.center?.centerUrl && new URL(status.center.centerUrl).origin !== new URL(activeCenter).origin) return undefined;
+          }
           await syncLocalBots(snap);
           return snap;
         }
@@ -641,8 +709,10 @@ export function HostPage({
           snap = await BotHost.snapshot();
           setLocalHost(snap);
           if (snap.phase === 'running') {
-            const status = await BotHost.status();
-            if (status.center?.state !== 'ready' || new URL(status.center.centerUrl).origin !== new URL(activeCenter).origin) return undefined;
+            if (activeCenter) {
+              const status = await BotHost.status();
+              if (status.center?.centerUrl && new URL(status.center.centerUrl).origin !== new URL(activeCenter).origin) return undefined;
+            }
             await syncLocalBots(snap);
             return snap;
           }
@@ -779,6 +849,7 @@ export function HostPage({
     }
     const allLocal: UnifiedBotItem[] = [...localByIdentity.values()].map(b => {
       const key = `local:local:${b.botId}`;
+      const matchedDevice = remoteDevices.find(device => device.deviceId === b.deviceId);
       return {
         key,
         botId: b.botId,
@@ -790,7 +861,9 @@ export function HostPage({
         createdAt: b.createdAt,
         hostKind: 'local',
         hostId: 'local',
-        hostLabel: [t('本机', 'Local'), remoteDevices.find(device => device.deviceId === b.deviceId)?.displayName, remoteDevices.find(device => device.deviceId === b.deviceId)?.platform].filter(Boolean).join(' · '),
+        hostLabel: matchedDevice?.displayName || t('本机', 'Local'),
+        platform: matchedDevice?.platform || 'android',
+        online: true,
       };
     });
 
@@ -801,11 +874,16 @@ export function HostPage({
     const allRemote: UnifiedBotItem[] = remoteIdentity && api
       ? [...remoteByIdentity.values()].map(b => {
           const key = `remote:${remoteIdentity.profileId}:${b.deviceId}:${b.botId}`;
+          const matchedDevice = remoteDevices.find(device => device.deviceId === b.deviceId);
+          const isOnline = Boolean(remoteConnected && matchedDevice?.online);
+          const shortHostName = b.deviceName || matchedDevice?.displayName || b.deviceId.slice(0, 10);
           return {
             key, botId: b.botId, primaryConversationId: b.primaryConversationId,
             role: b.role, description: b.description ?? '', cwd: b.cwd, modelRef: b.modelRef,
             createdAt: b.createdAt, hostKind: 'remote' as const, hostId: b.deviceId,
-            hostLabel: [b.deviceName || b.deviceId, b.platform, !remoteConnected || !remoteDevices.some(device => device.deviceId === b.deviceId && device.online) ? t('离线', 'Offline') : ''].filter(Boolean).join(' · '),
+            hostLabel: shortHostName,
+            platform: b.platform || matchedDevice?.platform,
+            online: isOnline,
             remoteIdentity: api.identityForTarget(b.deviceId),
           };
         }) : [];
@@ -834,6 +912,8 @@ export function HostPage({
         hostKind: 'local',
         hostId: 'local',
         hostLabel: t('本机', 'Local'),
+        platform: 'android',
+        online: true,
         isPrimary: true,
       };
     }
@@ -1862,11 +1942,144 @@ export function HostPage({
         (chatReceipt.status === 'queued' || chatReceipt.status === 'placed')),
   );
 
+  const activeLiveToolName = useMemo(() => {
+    const tools = array<Record<string, unknown>>(chatLive?.state?.tools);
+    for (let i = tools.length - 1; i >= 0; i--) {
+      const slot = tools[i];
+      const name = typeof slot?.name === 'string' ? slot.name.trim() : '';
+      const status = typeof slot?.status === 'string' ? slot.status : '';
+      if (name && (status === 'running' || status === 'pending' || status === 'started' || !status)) {
+        return name;
+      }
+    }
+    const last = tools[tools.length - 1];
+    return typeof last?.name === 'string' && chatLive?.state?.busy && !liveGeneratingText
+      ? last.name.trim()
+      : null;
+  }, [chatLive?.state?.tools, chatLive?.state?.busy, liveGeneratingText]);
+
   useEffect(() => {
     if (screen === 'chat' && chatScrollRef.current) {
       chatScrollRef.current.scrollTop = chatScrollRef.current.scrollHeight;
     }
-  }, [screen, visibleTurns.length, liveGeneratingText, submissionFailure]);
+  }, [screen, visibleTurns.length, liveGeneratingText, isBotBusy, activeLiveToolName, submissionFailure]);
+
+  const centerConn = useCenterConnection();
+  const [hubRefreshing, setHubRefreshing] = useState(false);
+  const [pullDistance, setPullDistance] = useState(0);
+  const hubScrollRef = useRef<HTMLDivElement | null>(null);
+  const pullTouchRef = useRef<{ startY: number; startX: number; pulling: boolean } | null>(null);
+  const PULL_THRESHOLD = 62;
+
+  const triggerHubRefresh = useCallback(async () => {
+    if (hubRefreshing) return;
+    setHubRefreshing(true);
+    try {
+      await Promise.allSettled([
+        syncLocalBots(),
+        syncRemoteBots(),
+      ]);
+      await new Promise(r => setTimeout(r, 420));
+    } finally {
+      setHubRefreshing(false);
+      setPullDistance(0);
+    }
+  }, [hubRefreshing, syncLocalBots, syncRemoteBots]);
+
+  // Step-by-step Back Navigation for Android full-screen back gesture & hardware Back button
+  const handleStepBack = useCallback((): boolean => {
+    if (modelTarget) {
+      setModelTarget(null);
+      return true;
+    }
+    if (chatTopMenuOpen) {
+      setChatTopMenuOpen(false);
+      return true;
+    }
+    if (composerMenuOpen) {
+      setComposerMenuOpen(false);
+      return true;
+    }
+    if (chatSearchOpen) {
+      setChatSearchOpen(false);
+      setChatSearchQuery('');
+      return true;
+    }
+    if (leftDrawerOpen) {
+      setLeftDrawerOpen(false);
+      return true;
+    }
+    if (screen === 'bot-avatar') {
+      setScreen(avatarReturnScreen);
+      return true;
+    }
+    if (screen === 'bot-soul') {
+      setScreen(subPageReturnScreen);
+      return true;
+    }
+    if (screen === 'bot-schedules') {
+      if (scheduleEditing !== null) {
+        setScheduleEditing(null);
+      } else {
+        setScreen('bot-profile');
+      }
+      return true;
+    }
+    if (screen === 'bot-screen') {
+      setScreen('bot-profile');
+      return true;
+    }
+    if (screen === 'bot-edit') {
+      setScreen(editMode === 'create' ? 'hub' : 'bot-profile');
+      return true;
+    }
+    if (screen === 'bot-profile') {
+      setScreen('chat');
+      return true;
+    }
+    if (screen === 'chat') {
+      chatLoadGeneration.current += 1;
+      profileLoadGeneration.current += 1;
+      scheduleLoadGeneration.current += 1;
+      cancelActiveObservation();
+      setChatTopMenuOpen(false);
+      setScreen('hub');
+      return true;
+    }
+    if (screen === 'settings' || screen === 'scopes' || screen === 'pending') {
+      setScreen('hub');
+      return true;
+    }
+    if (screen === 'hub' && searchQuery.trim()) {
+      setSearchQuery('');
+      return true;
+    }
+    return false;
+  }, [
+    modelTarget,
+    chatTopMenuOpen,
+    composerMenuOpen,
+    chatSearchOpen,
+    leftDrawerOpen,
+    screen,
+    avatarReturnScreen,
+    subPageReturnScreen,
+    scheduleEditing,
+    editMode,
+    searchQuery,
+    cancelActiveObservation,
+  ]);
+
+  useEffect(() => {
+    if (!active) return;
+    const onAppBack = (ev: Event) => {
+      if (handleStepBack()) {
+        ev.preventDefault();
+      }
+    };
+    window.addEventListener('app-back', onAppBack);
+    return () => window.removeEventListener('app-back', onAppBack);
+  }, [active, handleStepBack]);
 
   // Edge swipe gesture support for Left Hidden Sidebar
   const touchStartRef = useRef<{ x: number; y: number } | null>(null);
@@ -1886,6 +2099,64 @@ export function HostPage({
       setLeftDrawerOpen(true);
     } else if (leftDrawerOpen && dx < -65) {
       setLeftDrawerOpen(false);
+    }
+  };
+
+  // Android Pull-to-Refresh gesture on Hub Scroll Area
+  const onHubScrollTouchStart = (e: React.TouchEvent<HTMLDivElement>) => {
+    if (hubRefreshing) return;
+    const scrollEl = hubScrollRef.current;
+    if (!scrollEl || scrollEl.scrollTop > 2) {
+      pullTouchRef.current = null;
+      return;
+    }
+    const touch = e.touches[0];
+    if (!touch) return;
+    pullTouchRef.current = {
+      startY: touch.clientY,
+      startX: touch.clientX,
+      pulling: false,
+    };
+  };
+
+  const onHubScrollTouchMove = (e: React.TouchEvent<HTMLDivElement>) => {
+    const state = pullTouchRef.current;
+    const scrollEl = hubScrollRef.current;
+    if (!state || !scrollEl || hubRefreshing) return;
+    const touch = e.touches[0];
+    if (!touch) return;
+    const dy = touch.clientY - state.startY;
+    const dx = Math.abs(touch.clientX - state.startX);
+    if (!state.pulling) {
+      if (dy > 10 && dy > dx * 1.2 && scrollEl.scrollTop <= 0) {
+        state.pulling = true;
+      } else if (dy < -6 || dx > 28) {
+        pullTouchRef.current = null;
+        setPullDistance(0);
+        return;
+      }
+    }
+    if (state.pulling) {
+      if (scrollEl.scrollTop > 0 || dy <= 0) {
+        setPullDistance(0);
+        return;
+      }
+      const damped = Math.min(96, Math.round(Math.pow(dy, 0.82) * 1.6));
+      setPullDistance(damped);
+    }
+  };
+
+  const onHubScrollTouchEnd = () => {
+    const state = pullTouchRef.current;
+    pullTouchRef.current = null;
+    if (!state || !state.pulling) {
+      if (!hubRefreshing) setPullDistance(0);
+      return;
+    }
+    if (pullDistance >= PULL_THRESHOLD) {
+      void triggerHubRefresh();
+    } else {
+      setPullDistance(0);
     }
   };
 
@@ -1958,6 +2229,47 @@ export function HostPage({
             >
               <PanelLeft size={20} strokeWidth={2} />
             </button>
+
+            {(() => {
+              const isSpinning = hubRefreshing || centerConn.connecting;
+              const isVisible = isSpinning || pullDistance > 4;
+              const progress = Math.min(1, pullDistance / PULL_THRESHOLD);
+              return (
+                <div
+                  className={`hub-top-spinner-indicator${isVisible ? ' visible' : ''}${isSpinning ? ' spinning' : ''}${pullDistance >= PULL_THRESHOLD ? ' ready' : ''}`}
+                  style={
+                    !isSpinning && pullDistance > 0
+                      ? {
+                          transform: `translateY(${Math.min(26, Math.round(pullDistance * 0.36))}px) scale(${0.75 + progress * 0.25})`,
+                          opacity: Math.min(1, 0.25 + progress * 0.85),
+                        }
+                      : undefined
+                  }
+                  role="status"
+                  aria-live="polite"
+                  aria-label={
+                    centerConn.connecting
+                      ? t('正在连接中心…', 'Connecting to center…')
+                      : hubRefreshing
+                        ? t('正在刷新节点与 Bot…', 'Refreshing nodes and bots…')
+                        : pullDistance >= PULL_THRESHOLD
+                          ? t('松手立即刷新', 'Release to refresh')
+                          : t('下拉刷新', 'Pull down to refresh')
+                  }
+                >
+                  <RefreshCw
+                    size={17}
+                    strokeWidth={2.3}
+                    style={
+                      !isSpinning && pullDistance > 0
+                        ? { transform: `rotate(${Math.round(pullDistance * 3.8)}deg)` }
+                        : undefined
+                    }
+                  />
+                </div>
+              );
+            })()}
+
             <button
               type="button"
               className="hub-circle-btn hub-add-btn"
@@ -1968,7 +2280,14 @@ export function HostPage({
             </button>
           </header>
 
-          <div className="hub-scroll-area">
+          <div
+            className="hub-scroll-area"
+            ref={hubScrollRef}
+            onTouchStart={onHubScrollTouchStart}
+            onTouchMove={onHubScrollTouchMove}
+            onTouchEnd={onHubScrollTouchEnd}
+            onTouchCancel={onHubScrollTouchEnd}
+          >
             {/* Hero Spotlight: Primary Assistant */}
             <section className="hub-hero-section">
               <button
@@ -1984,7 +2303,6 @@ export function HostPage({
 
             {/* Unified Bot List (Local + Remote) */}
             <section className="hub-bot-list" aria-label={t('智能体列表', 'Bots')}>
-              <button type="button" className="hub-outline-btn" onClick={() => { void syncLocalBots(); void syncRemoteBots(); }}>{t('刷新节点与 Bot', 'Refresh devices and bots')}</button>
               <ErrorNotice error={directoryError} />
               {filteredBotItems.length === 0 ? (
                 <div className="hub-empty-list">
@@ -2017,8 +2335,12 @@ export function HostPage({
                         <div className="hub-bot-title-line">
                           <span className="hub-bot-title">{item.role}</span>
                           {hasRemoteConfigured && (
-                            <span className={`hub-bot-host-badge ${item.hostKind}`}>
-                              {item.hostLabel}
+                            <span
+                              className={`hub-bot-host-badge ${item.hostKind}${item.online === false ? ' is-offline' : ''}`}
+                              title={`${item.hostLabel}${item.platform ? ` (${item.platform})` : ''}${item.online === false ? ` · ${t('离线', 'Offline')}` : ''}`}
+                            >
+                              <PlatformLogoIcon platform={item.platform} size={12} />
+                              <span className="hub-bot-host-text">{item.hostLabel}</span>
                             </span>
                           )}
                           <span className="hub-bot-time">{timeLabel}</span>
@@ -2109,8 +2431,11 @@ export function HostPage({
               />
               <span className="grok-chat-pill-name">{activeBot.role}</span>
               {hasRemoteConfigured && (
-                <span className={`hub-bot-host-badge ${activeBot.hostKind}`}>
-                  {activeBot.hostLabel}
+                <span
+                  className={`hub-bot-host-badge ${activeBot.hostKind}${activeBot.online === false ? ' is-offline' : ''}`}
+                >
+                  <PlatformLogoIcon platform={activeBot.platform} size={11} />
+                  <span className="hub-bot-host-text">{activeBot.hostLabel}</span>
                 </span>
               )}
             </button>
@@ -2248,6 +2573,22 @@ export function HostPage({
                 <Markdown text={liveGeneratingText} />
               </article>
             )}
+            <GrokBotWorkingSlot
+              key={activeBot.key}
+              botKey={activeBot.key}
+              preset={resolveBotAvatarPreset(activeBot.key, activeBot.role, activeBot.isPrimary)}
+              isBusy={isBotBusy}
+              isStreaming={Boolean(liveGeneratingText)}
+              activeToolName={activeLiveToolName}
+              hasThinking={Boolean(
+                visibleTurns[visibleTurns.length - 1]?.role === 'assistant' &&
+                  visibleTurns[visibleTurns.length - 1]?.thinking &&
+                  !liveGeneratingText,
+              )}
+              queuedCount={chatLive?.state?.queuedCount ?? 0}
+              hasError={Boolean(submissionFailure)}
+              t={t}
+            />
             <ErrorNotice error={submissionFailure} />
             {clearNotice && (
               <div className="bot-chat-system-notice" role="status">
@@ -2259,15 +2600,39 @@ export function HostPage({
           {/* 15845.jpg / 15866.jpg Bottom Composer Bar */}
           <footer className="grok-chat-composer-area">
             {activeBot.hostKind === 'remote' && activeBot.remoteIdentity && remoteClientRef.current ? (
-              <RemotePendingComposer key={activeBot.key} api={remoteClientRef.current.api} identity={activeBot.remoteIdentity} botId={activeBot.botId} onAccepted={() => {
-                const generation = chatLoadGeneration.current;
-                const api = remoteClientRef.current?.api;
-                const identity = activeBot.remoteIdentity;
-                if (!api || !identity) return;
-                void api.call(identity, 'history', { botId: activeBot.botId, limit: 50 }).then(page => {
-                  if (generation === chatLoadGeneration.current) setChatHistory(page.items as unknown as Array<Record<string, unknown>>);
-                }).catch(() => {});
-              }} />
+              <RemotePendingComposer
+                key={activeBot.key}
+                api={remoteClientRef.current.api}
+                identity={activeBot.remoteIdentity}
+                botId={activeBot.botId}
+                botRole={activeBot.role}
+                isBotBusy={isBotBusy}
+                composerMenuOpen={composerMenuOpen}
+                onToggleComposerMenu={() => setComposerMenuOpen(v => !v)}
+                onOpenProfile={() => {
+                  setComposerMenuOpen(false);
+                  openBotProfile(activeBot);
+                }}
+                onClearHistory={clearCurrentBotHistory}
+                onAbort={() =>
+                  void action.run(async () => {
+                    if (activeBot.remoteIdentity && remoteClientRef.current) {
+                      await remoteClientRef.current.api.call(activeBot.remoteIdentity, 'abort', {
+                        botId: activeBot.botId,
+                      });
+                    }
+                  })
+                }
+                onAccepted={() => {
+                  const generation = chatLoadGeneration.current;
+                  const api = remoteClientRef.current?.api;
+                  const identity = activeBot.remoteIdentity;
+                  if (!api || !identity) return;
+                  void api.call(identity, 'history', { botId: activeBot.botId, limit: 50 }).then(page => {
+                    if (generation === chatLoadGeneration.current) setChatHistory(page.items as unknown as Array<Record<string, unknown>>);
+                  }).catch(() => {});
+                }}
+              />
             ) : <>
             <ErrorNotice error={action.error} />
 
@@ -2643,26 +3008,79 @@ export function HostPage({
           </header>
 
           <div className="grok-subpage-scroll">
-            {editMode === 'create' && createAttempt && <div className="grok-card-group">
-              <p>{t('创建回执未确认，原请求', 'Creation unconfirmed, original request')}: {createAttempt.requestId}</p>
-              <button type="button" className="hub-outline-btn" onClick={() => void action.run(async () => {
-                let found: unknown;
-                if (createAttempt.target === 'local') {
-                  const snap = await ensureLocalHostRunning();
-                  if (!snap || snap.phase !== 'running') throw new Error('Host unavailable');
-                  found = (await BotHost.call({ method: 'findByRequest', params: { requestId: createAttempt.requestId } })).result;
-                  if (found) await syncLocalBots(snap);
-                } else {
-                  const api = remoteClientRef.current?.api;
-                  if (!api || !api.transportConnected || api.identity?.profileId !== createAttempt.profileId) throw new Error('Original connection unavailable');
-                  found = await api.call(api.identityForTarget(createAttempt.target), 'findByRequest', { requestId: createAttempt.requestId });
-                  if (found) await syncRemoteBots();
-                }
-                if (!found) throw new Error(t('尚未找到原请求，保持原 ID，不能重新创建', 'Original request not found; retain its ID and do not recreate'));
-                setCreateAttempt(null);
-                setScreen('hub');
-              })}>{t('按原 ID 对账', 'Reconcile original ID')}</button>
-            </div>}
+            {editMode === 'create' && createAttempt && (
+              <div className="grok-field-section">
+                <section className="grok-card-group grok-pending-freeze-card">
+                  <div className="grok-pending-freeze-head">
+                    <span className="grok-pending-freeze-badge">{t('创建回执未确认', 'Creation Unconfirmed')}</span>
+                    <code className="grok-pending-freeze-id">{createAttempt.requestId.slice(0, 12)}</code>
+                  </div>
+                  <p className="grok-pending-freeze-desc">
+                    {t(
+                      '上次创建请求的回执尚未确认，请先按原请求 ID 对账，避免重复创建。',
+                      'Previous creation receipt is unconfirmed. Reconcile the original request ID first.',
+                    )}
+                  </p>
+                  <div className="grok-pending-freeze-actions">
+                    <button
+                      type="button"
+                      className="grok-done-pill-btn"
+                      disabled={action.busy}
+                      onClick={() =>
+                        void action.run(async () => {
+                          let found: unknown;
+                          if (createAttempt.target === 'local') {
+                            const snap = await ensureLocalHostRunning();
+                            if (!snap || snap.phase !== 'running') throw new Error('Host unavailable');
+                            found = (
+                              await BotHost.call({
+                                method: 'findByRequest',
+                                params: { requestId: createAttempt.requestId },
+                              })
+                            ).result;
+                            if (found) await syncLocalBots(snap);
+                          } else {
+                            const api = remoteClientRef.current?.api;
+                            if (
+                              !api ||
+                              !api.transportConnected ||
+                              api.identity?.profileId !== createAttempt.profileId
+                            ) {
+                              throw new Error('Original connection unavailable');
+                            }
+                            found = await api.call(
+                              api.identityForTarget(createAttempt.target),
+                              'findByRequest',
+                              { requestId: createAttempt.requestId },
+                            );
+                            if (found) await syncRemoteBots();
+                          }
+                          if (!found) {
+                            throw new Error(
+                              t(
+                                '尚未找到原请求，保持原 ID，不能重新创建',
+                                'Original request not found; retain its ID and do not recreate',
+                              ),
+                            );
+                          }
+                          setCreateAttempt(null);
+                          setScreen('hub');
+                        })
+                      }
+                    >
+                      {t('按原 ID 对账', 'Reconcile Original ID')}
+                    </button>
+                    <button
+                      type="button"
+                      className="hub-outline-btn"
+                      onClick={() => setCreateAttempt(null)}
+                    >
+                      {t('清除冻结状态', 'Clear Freeze')}
+                    </button>
+                  </div>
+                </section>
+              </div>
+            )}
             {/* Hero Avatar with Pencil Badge (15847.jpg) */}
             <section className="grok-profile-hero compact">
               <button
@@ -3574,15 +3992,104 @@ export function HostPage({
 
       {(screen === 'scopes' || screen === 'pending') && (
         <main className="grok-subpage grok-page-enter">
-          <header className="grok-subpage-topbar"><button type="button" className="grok-floating-circle-btn" onClick={() => setScreen('hub')} aria-label={t('返回', 'Back')}><ArrowLeft size={20} /></button><h2>{screen === 'scopes' ? t('群聊与 Bot 私聊', 'Rooms and DMs') : t('待发送', 'Pending')}</h2></header>
+          <header className="grok-subpage-topbar">
+            <button
+              type="button"
+              className="grok-floating-circle-btn"
+              onClick={() => setScreen('hub')}
+              aria-label={t('返回', 'Back')}
+            >
+              <ArrowLeft size={20} />
+            </button>
+            <h2 className="grok-subpage-header-title">
+              {screen === 'scopes' ? t('群聊与 Bot 私聊', 'Rooms and DMs') : t('待发送', 'Pending')}
+            </h2>
+            <span style={{ width: 44 }} />
+          </header>
           <div className="grok-subpage-scroll">
-            {remoteClientRef.current && remoteIdentity ? <>
-              <label>{t('目标设备', 'Target device')} <select value={remoteIdentity.targetDeviceId} onChange={e => { const api = remoteClientRef.current!.api; api.setIdentity({ profileId: remoteIdentity.profileId, kind: remoteIdentity.kind, targetDeviceId: e.target.value }); }}>
-                <option value="">{t('请选择设备', 'Select device')}</option>
-                {remoteDevices.map(device => <option key={device.deviceId} value={device.deviceId}>{device.displayName || device.deviceId}</option>)}
-              </select></label>
-              {remoteIdentity.targetDeviceId && (screen === 'scopes' ? <Scopes key={`${remoteIdentity.profileId}|${remoteIdentity.kind}|${remoteIdentity.targetDeviceId}`} api={remoteClientRef.current.api} pageActive={active} /> : <PendingPanel key={`${remoteIdentity.profileId}|${remoteIdentity.kind}|${remoteIdentity.targetDeviceId}`} api={remoteClientRef.current.api} identity={remoteIdentity} transportConnected={remoteConnected} />)}
-            </> : <p>{t('请先连接远程节点', 'Connect a remote node first')}</p>}
+            {remoteClientRef.current && remoteIdentity ? (
+              <>
+                <div className="grok-field-section">
+                  <label className="grok-section-label">{t('当前操作节点', 'Target Node')}</label>
+                  <section className="grok-card-group">
+                    <div className="grok-card-row no-active">
+                      <Server size={18} className="grok-row-icon" />
+                      <span className="grok-row-label">{t('目标设备', 'Target device')}</span>
+                      <label className="grok-select-wrap">
+                        <select
+                          value={remoteIdentity.targetDeviceId}
+                          onChange={e => {
+                            const api = remoteClientRef.current!.api;
+                            api.setIdentity({
+                              profileId: remoteIdentity.profileId,
+                              kind: remoteIdentity.kind,
+                              targetDeviceId: e.target.value,
+                            });
+                          }}
+                        >
+                          <option value="">{t('请选择设备', 'Select device')}</option>
+                          {remoteDevices.map(device => (
+                            <option key={device.deviceId} value={device.deviceId}>
+                              {device.displayName || device.deviceId}
+                            </option>
+                          ))}
+                        </select>
+                        <ChevronsUpDown size={15} />
+                      </label>
+                    </div>
+                  </section>
+                </div>
+
+                {!remoteIdentity.targetDeviceId ? (
+                  <section className="grok-card-group grok-schedule-empty">
+                    <Server size={28} className="grok-row-icon" />
+                    <h4>{t('请先选择目标节点设备', 'Select a Target Device')}</h4>
+                    <p>
+                      {t(
+                        '在上方下拉菜单中选择已连接的节点设备，即可管理该节点上的群聊房间或待发送队列。',
+                        'Choose a connected device above to view its rooms or pending queue.',
+                      )}
+                    </p>
+                  </section>
+                ) : screen === 'scopes' ? (
+                  <div className="grok-scopes-mobile-container">
+                    <Scopes
+                      key={`${remoteIdentity.profileId}|${remoteIdentity.kind}|${remoteIdentity.targetDeviceId}`}
+                      api={remoteClientRef.current.api}
+                      pageActive={active}
+                    />
+                  </div>
+                ) : (
+                  <div className="grok-pending-mobile-container">
+                    <PendingPanel
+                      key={`${remoteIdentity.profileId}|${remoteIdentity.kind}|${remoteIdentity.targetDeviceId}`}
+                      api={remoteClientRef.current.api}
+                      identity={remoteIdentity}
+                      transportConnected={remoteConnected}
+                    />
+                  </div>
+                )}
+              </>
+            ) : (
+              <section className="grok-card-group grok-schedule-empty" style={{ marginTop: 12 }}>
+                <Globe size={28} className="grok-row-icon" />
+                <h4>{t('尚未连接中心或远程节点', 'Not Connected to Center or Remote Node')}</h4>
+                <p>
+                  {t(
+                    '请先在设置中配置并连接中心服务或远程节点，连接成功后即可使用群聊与待发送对账。',
+                    'Configure and connect to Center or a remote host in Settings first.',
+                  )}
+                </p>
+                <button
+                  type="button"
+                  className="grok-done-pill-btn"
+                  style={{ marginTop: 8 }}
+                  onClick={() => setScreen('settings')}
+                >
+                  {t('前往设置连接', 'Go to Settings')}
+                </button>
+              </section>
+            )}
           </div>
         </main>
       )}
@@ -3623,9 +4130,52 @@ export function HostPage({
           aria-label={t('左侧边栏', 'Left sidebar')}
           onClick={e => e.stopPropagation()}
         >
+          <header className="hub-left-drawer-header">
+            <div className="hub-left-drawer-brand">
+              <GrokBotAvatar preset={primaryPreset} isPrimary size={34} />
+              <div className="hub-left-drawer-brand-text">
+                <strong>Bot Hub</strong>
+                <span>
+                  {centerConn.connecting
+                    ? t('正在连接中心…', 'Connecting…')
+                    : centerConn.ready
+                      ? t('中心已连接', 'Center Online')
+                      : t('本机模式', 'Local Mode')}
+                </span>
+              </div>
+            </div>
+          </header>
+
+          <nav className="hub-left-drawer-nav" aria-label={t('导航菜单', 'Navigation')}>
+            <button
+              type="button"
+              className="hub-left-nav-btn"
+              onClick={() => {
+                setLeftDrawerOpen(false);
+                setScreen('scopes');
+              }}
+            >
+              <MessageSquare size={19} />
+              <span>{t('群聊与 Bot 私聊', 'Rooms and DMs')}</span>
+              <ChevronRight size={16} className="hub-left-nav-chevron" />
+            </button>
+
+            <button
+              type="button"
+              className="hub-left-nav-btn"
+              onClick={() => {
+                setLeftDrawerOpen(false);
+                setScreen('pending');
+              }}
+            >
+              <Clock size={19} />
+              <span>{t('待发送', 'Pending')}</span>
+              <ChevronRight size={16} className="hub-left-nav-chevron" />
+            </button>
+          </nav>
+
           <div className="hub-left-drawer-spacer" />
-          <button type="button" className="hub-left-settings-btn" onClick={() => { setLeftDrawerOpen(false); setScreen('scopes'); }}>{t('群聊与 Bot 私聊', 'Rooms and DMs')}</button>
-          <button type="button" className="hub-left-settings-btn" onClick={() => { setLeftDrawerOpen(false); setScreen('pending'); }}>{t('待发送', 'Pending')}</button>
+
           <footer className="hub-left-drawer-footer">
             <button
               type="button"
@@ -3645,16 +4195,69 @@ export function HostPage({
   );
 }
 
-function RemotePendingComposer({ api, identity, botId, onAccepted }: { api: DesktopPanelApi; identity: DesktopIdentity; botId: string; onAccepted(): void }) {
+function RemotePendingComposer({
+  api,
+  identity,
+  botId,
+  botRole,
+  isBotBusy,
+  composerMenuOpen,
+  onToggleComposerMenu,
+  onOpenProfile,
+  onClearHistory,
+  onAbort,
+  onAccepted,
+}: {
+  api: DesktopPanelApi;
+  identity: DesktopIdentity;
+  botId: string;
+  botRole: string;
+  isBotBusy: boolean;
+  composerMenuOpen: boolean;
+  onToggleComposerMenu(): void;
+  onOpenProfile(): void;
+  onClearHistory(): void;
+  onAbort(): void;
+  onAccepted(): void;
+}) {
   const t = useText();
   const target = useMemo(() => ({ kind: 'primary' as const, id: botId }), [botId]);
   const drafts = useDrafts({ api, identity, target });
   const [notice, setNotice] = useState('');
   const sending = useRef(false);
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+
+  useEffect(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    if (!drafts.text) {
+      el.style.height = '36px';
+    } else {
+      el.style.height = 'auto';
+      el.style.height = `${Math.min(el.scrollHeight, 110)}px`;
+    }
+  }, [drafts.text]);
+
   const send = async () => {
     if (sending.current || !drafts.text.trim()) return;
-    const text = drafts.text.trim() + (drafts.files.length ? '\n' + drafts.files.map(file => `[文件路径引用，未上传] ${file.path}`).join('\n') : '');
-    const started = drafts.beginSend({ kind: 'primary', targetDeviceId: identity.targetDeviceId, botId, requestId: uuid(), text });
+    const trimmed = drafts.text.trim();
+    if (trimmed === '/clear' || trimmed === '/new') {
+      drafts.editText('');
+      onClearHistory();
+      return;
+    }
+    const text =
+      trimmed +
+      (drafts.files.length
+        ? '\n' + drafts.files.map(file => `[文件路径引用，未上传] ${file.path}`).join('\n')
+        : '');
+    const started = drafts.beginSend({
+      kind: 'primary',
+      targetDeviceId: identity.targetDeviceId,
+      botId,
+      requestId: uuid(),
+      text,
+    });
     if (!started) return;
     sending.current = true;
     setNotice('');
@@ -3673,7 +4276,10 @@ function RemotePendingComposer({ api, identity, botId, onAccepted }: { api: Desk
       drafts.setPending(started.handle, pending.id);
       const cleared = await drafts.confirmCleared(started.handle);
       if (cleared !== 'cleared') {
-        const message = t('草稿未清空，队列未发送；请对账并保留新版草稿。', 'Draft not cleared; queued item not sent. Reconcile before continuing.');
+        const message = t(
+          '草稿未清空，队列未发送；请对账并保留新版草稿。',
+          'Draft not cleared; queued item not sent. Reconcile before continuing.',
+        );
         drafts.markFailed(started.handle, message);
         setNotice(message);
         return;
@@ -3687,33 +4293,222 @@ function RemotePendingComposer({ api, identity, botId, onAccepted }: { api: Desk
         const sent = await api.pending(identity, 'pending_send', { id: pending.id });
         if (sent.state === 'unconfirmed' || sent.state === 'sending') drafts.markUnconfirmed(started.handle);
         else drafts.finishSend(started.handle);
-        setNotice(`${sent.state} · ${pending.id}`);
-        if (sent.state === 'accepted') onAccepted();
+        if (sent.state === 'accepted') {
+          setNotice('');
+          onAccepted();
+        } else {
+          setNotice(`${sent.state} · ${pending.id}`);
+        }
       } catch (error) {
         drafts.markUnconfirmed(started.handle);
         setNotice(`${t('回执未确认，请按原 ID 对账', 'Receipt unconfirmed; reconcile the original ID')} · ${pending.id} · ${errorText(error)}`);
       }
-    } finally { sending.current = false; }
+    } finally {
+      sending.current = false;
+    }
   };
+
   const handle = drafts.key && drafts.attempt ? { key: drafts.key, attemptId: drafts.attempt.id } : null;
-  return <>
-    <ErrorNotice error={drafts.error || notice} />
-    {drafts.attempt && <div className="bot-chat-system-notice">
-      {t('发送已冻结', 'Send frozen')} · {drafts.attempt.phase} · {drafts.attempt.pendingId || ''}
-      {handle && <>
-        <button type="button" onClick={() => void drafts.reconcile(handle).then(result => setNotice(result.note || `${result.action} · ${result.recordId || ''}`))}>{t('按原 ID 对账', 'Reconcile original ID')}</button>
-        <button type="button" onClick={() => { const result = drafts.releaseIfNotSent(handle); setNotice(result.error || ''); }}>{t('释放未入队草稿', 'Release not-sent draft')}</button>
-        <button type="button" onClick={() => void drafts.retryClearAfterVerify(handle).then(result => setNotice(result))}>{t('核实后重试清稿', 'Retry clear after verification')}</button>
-        <button type="button" onClick={() => { const result = drafts.adoptNewerDraftAndFinish(handle); setNotice(result.error || ''); }}>{t('保留新版草稿', 'Keep newer draft')}</button>
-      </>}
-    </div>}
-    {drafts.files.map((file, index) => <div key={`${file.path}:${index}`}>{file.name} <button type="button" disabled={Boolean(drafts.attempt)} onClick={() => drafts.removeFile(index)}>{t('移除', 'Remove')}</button></div>)}
-    {drafts.savePaused && <button type="button" onClick={drafts.retrySave}>{t('重试保存草稿', 'Retry draft save')}</button>}
-    <div className="grok-composer-row"><div className="grok-composer-pill">
-      <textarea rows={1} value={drafts.text} disabled={Boolean(drafts.attempt)} onChange={event => drafts.editText(event.target.value)} aria-label={t('消息', 'Message')} placeholder={t('发消息…', 'Message…')} />
-      <button type="button" className="grok-composer-action-pill send" disabled={!drafts.text.trim() || Boolean(drafts.attempt)} onClick={() => void send()} aria-label={t('发送', 'Send')}><ArrowUp size={18} /></button>
-    </div></div>
-  </>;
+  const showSlashHints = drafts.text.startsWith('/') && drafts.text.length <= 8;
+
+  return (
+    <>
+      <ErrorNotice error={drafts.error || notice} />
+
+      {drafts.attempt && (
+        <section className="grok-card-group grok-pending-freeze-card" style={{ marginBottom: 8 }}>
+          <div className="grok-pending-freeze-head">
+            <span className="grok-pending-freeze-badge">{t('发送已冻结', 'Send Frozen')}</span>
+            <code className="grok-pending-freeze-id">
+              {drafts.attempt.phase}
+              {drafts.attempt.pendingId ? ` · ${drafts.attempt.pendingId.slice(0, 10)}` : ''}
+            </code>
+          </div>
+          {handle && (
+            <div className="grok-pending-freeze-actions">
+              <button
+                type="button"
+                className="grok-done-pill-btn"
+                onClick={() =>
+                  void drafts.reconcile(handle).then(result =>
+                    setNotice(result.note || `${result.action} · ${result.recordId || ''}`),
+                  )
+                }
+              >
+                {t('按原 ID 对账', 'Reconcile ID')}
+              </button>
+              <button
+                type="button"
+                className="hub-outline-btn"
+                onClick={() => {
+                  const result = drafts.releaseIfNotSent(handle);
+                  setNotice(result.error || '');
+                }}
+              >
+                {t('释放未入队草稿', 'Release Draft')}
+              </button>
+              <button
+                type="button"
+                className="hub-outline-btn"
+                onClick={() => void drafts.retryClearAfterVerify(handle).then(result => setNotice(result))}
+              >
+                {t('核实后重试清稿', 'Retry Clear')}
+              </button>
+              <button
+                type="button"
+                className="hub-outline-btn"
+                onClick={() => {
+                  const result = drafts.adoptNewerDraftAndFinish(handle);
+                  setNotice(result.error || '');
+                }}
+              >
+                {t('保留新版草稿', 'Keep Newer')}
+              </button>
+            </div>
+          )}
+        </section>
+      )}
+
+      {drafts.files.length > 0 && (
+        <div className="grok-composer-files-row">
+          {drafts.files.map((file, index) => (
+            <span key={`${file.path}:${index}`} className="grok-model-quick-chip active">
+              <span>{file.name}</span>
+              <button
+                type="button"
+                disabled={Boolean(drafts.attempt)}
+                onClick={() => drafts.removeFile(index)}
+                aria-label={t('移除', 'Remove')}
+              >
+                <X size={12} />
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
+
+      {drafts.savePaused && (
+        <div style={{ marginBottom: 6 }}>
+          <button type="button" className="hub-outline-btn" onClick={drafts.retrySave}>
+            {t('重试保存草稿', 'Retry draft save')}
+          </button>
+        </div>
+      )}
+
+      {showSlashHints && (
+        <div className="bot-slash-popover" role="listbox" aria-label={t('斜杠命令', 'Slash commands')}>
+          <button
+            type="button"
+            className="bot-slash-item"
+            onClick={() => {
+              drafts.editText('');
+              onClearHistory();
+            }}
+          >
+            <code>/clear</code>
+            <span>{t('清空当前对话历史', 'Clear current conversation history')}</span>
+          </button>
+          <button
+            type="button"
+            className="bot-slash-item"
+            onClick={() => {
+              drafts.editText('');
+              onClearHistory();
+            }}
+          >
+            <code>/new</code>
+            <span>{t('清空历史并开启新话题', 'Reset and start fresh')}</span>
+          </button>
+        </div>
+      )}
+
+      {composerMenuOpen && (
+        <div className="bot-plus-popover" role="menu">
+          <button type="button" role="menuitem" onClick={onOpenProfile}>
+            <User size={18} />
+            <span>{t('查看 Bot 资料与设定', 'View Bot Profile & Settings')}</span>
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            className="danger"
+            onClick={() => {
+              drafts.editText('');
+              onClearHistory();
+            }}
+          >
+            <Trash2 size={18} />
+            <span>{t('清空当前对话历史 (/clear)', 'Clear conversation history (/clear)')}</span>
+          </button>
+        </div>
+      )}
+
+      <div className="grok-composer-row">
+        <button
+          type="button"
+          className={`grok-composer-plus-circle${composerMenuOpen ? ' active' : ''}`}
+          aria-label={t('更多操作', 'More actions')}
+          aria-expanded={composerMenuOpen}
+          onClick={onToggleComposerMenu}
+        >
+          <Plus size={22} />
+        </button>
+
+        <div className="grok-composer-pill">
+          <textarea
+            ref={textareaRef}
+            rows={1}
+            className={drafts.text ? 'has-text' : 'is-empty'}
+            value={drafts.text}
+            disabled={Boolean(drafts.attempt)}
+            onChange={event => drafts.editText(event.target.value)}
+            aria-label={t('消息', 'Message')}
+            placeholder={
+              botRole.length > 8
+                ? t('发消息…', 'Message…')
+                : t(`向 ${botRole} 发消息…`, `Message ${botRole}…`)
+            }
+            onKeyDown={e => {
+              if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                void send();
+              }
+            }}
+          />
+
+          {isBotBusy && !drafts.text.trim() ? (
+            <button
+              type="button"
+              className="grok-composer-action-pill stop"
+              aria-label={t('停止生成', 'Stop')}
+              onClick={onAbort}
+            >
+              <Square size={15} />
+            </button>
+          ) : drafts.text.trim() ? (
+            <button
+              type="button"
+              className="grok-composer-action-pill send"
+              disabled={!drafts.text.trim() || Boolean(drafts.attempt)}
+              onClick={() => void send()}
+              aria-label={t('发送', 'Send')}
+            >
+              <ArrowUp size={18} />
+            </button>
+          ) : (
+            <button
+              type="button"
+              className="grok-composer-action-pill voice"
+              aria-label={t('查看资料与语音设定', 'Bot profile & voice')}
+              onClick={onOpenProfile}
+            >
+              <AudioLines size={18} />
+            </button>
+          )}
+        </div>
+      </div>
+    </>
+  );
 }
 
 function HubSettingsView({
@@ -3741,6 +4536,11 @@ function HubSettingsView({
 }) {
   const t = useText();
   const action = useAction();
+  const centerConn = useCenterConnection();
+
+  const [editingCenter, setEditingCenter] = useState(false);
+  const [renamingDeviceId, setRenamingDeviceId] = useState<string | null>(null);
+  const [renameDraft, setRenameDraft] = useState('');
 
   const [selectedProfileId, setSelectedProfileId] = useState<string | null>(remoteIdentity?.profileId ?? null);
   const [token, setToken] = useState('');
@@ -3875,7 +4675,18 @@ function HubSettingsView({
       onRemoteUpdated();
     });
 
-  const toggleLocalConfig = () => { void action.run(openCenterManagement); };
+  const toggleLocalConfig = () => {
+    const next = !showLocalConfig;
+    setShowLocalConfig(next);
+    if (next && !hostSettings) {
+      void BotHost.settingsGet()
+        .then(payload => {
+          setHostSettings(payload);
+          setSettingsJson(JSON.stringify(payload.settings, null, 2));
+        })
+        .catch(() => {});
+    }
+  };
 
   const saveLocalSettings = (e: React.FormEvent) => {
     e.preventDefault();
@@ -3900,6 +4711,7 @@ function HubSettingsView({
   };
 
   const activeProfile = remoteProfiles.find(p => p.id === (selectedProfileId ?? remoteProfiles[0]?.id));
+  const showCenterForm = !centerConn.ready || editingCenter;
 
   return (
     <main className="grok-subpage grok-page-enter">
@@ -3912,6 +4724,210 @@ function HubSettingsView({
       </header>
 
       <div className="grok-subpage-scroll">
+        {/* Section 0: Center Connection (Moved from top of Bot Hub into Settings) */}
+        <div className="grok-field-section">
+          <div className="grok-provider-group-head">
+            <label className="grok-section-label">{t('中心连接', 'Center Connection')}</label>
+            {centerConn.ready && (
+              <button
+                type="button"
+                className="grok-provider-edit-link"
+                onClick={() => setEditingCenter(v => !v)}
+              >
+                {editingCenter ? t('收起', 'Collapse') : t('更换中心连接', 'Change Center')}
+              </button>
+            )}
+          </div>
+
+          <section className="grok-card-group">
+            <div className="grok-card-row no-active">
+              <Globe size={20} className="grok-row-icon" />
+              <div className="grok-model-row-main">
+                <span className="grok-row-label">
+                  {centerConn.ready
+                    ? centerConn.status?.centerUrl || centerConn.url || t('已连接中心', 'Center Connected')
+                    : centerConn.connecting
+                      ? t('正在后台连接中心…', 'Connecting to center…')
+                      : t('未连接中心服务', 'Center Disconnected')}
+                </span>
+                <small className="grok-model-row-sub">
+                  {centerConn.ready
+                    ? `${t('设备标识：', 'Device: ')}${centerConn.deviceId || centerConn.saved?.deviceId || 'android'}`
+                    : centerConn.saved?.url
+                      ? `${t('已保存地址：', 'Saved: ')}${centerConn.saved.url}`
+                      : t('配置中心地址与令牌以同步多端智能体', 'Configure center URL & token to sync bots across devices')}
+                </small>
+              </div>
+              <span className={`hub-online-pill${centerConn.ready ? '' : ' is-offline'}`}>
+                {centerConn.connecting
+                  ? t('连接中', 'Syncing')
+                  : centerConn.ready
+                    ? t('已连接', 'Connected')
+                    : t('未连接', 'Offline')}
+              </span>
+            </div>
+
+            {centerConn.ready && !editingCenter && (
+              <>
+                <button
+                  type="button"
+                  className="grok-card-row"
+                  onClick={() => centerConn.openManagement()}
+                >
+                  <ExternalLink size={19} className="grok-row-icon" />
+                  <span className="grok-row-label">{t('在浏览器中打开中心管理', 'Open Center Management')}</span>
+                  <ChevronRight size={18} className="grok-row-chevron" />
+                </button>
+                <div className="grok-card-row no-active" style={{ justifyContent: 'flex-end', gap: 8 }}>
+                  <button
+                    type="button"
+                    className="hub-outline-btn"
+                    disabled={centerConn.busy}
+                    onClick={() => setEditingCenter(true)}
+                  >
+                    {t('更换中心连接', 'Change Center')}
+                  </button>
+                  <button
+                    type="button"
+                    className="hub-outline-btn"
+                    disabled={centerConn.busy}
+                    onClick={() => void centerConn.disconnect()}
+                  >
+                    {t('断开中心', 'Disconnect')}
+                  </button>
+                </div>
+              </>
+            )}
+
+            {showCenterForm && (
+              <>
+                <label className="grok-card-row grok-input-row">
+                  <span className="grok-input-label">{t('中心地址', 'Center URL')}</span>
+                  <input
+                    className="grok-inline-input"
+                    inputMode="url"
+                    value={centerConn.url}
+                    onChange={e => centerConn.setUrl(e.target.value)}
+                    placeholder="https://127.0.0.1:4318"
+                  />
+                </label>
+
+                <label className="grok-card-row grok-input-row">
+                  <span className="grok-input-label">{t('设备标识', 'Device ID')}</span>
+                  <input
+                    className="grok-inline-input"
+                    value={centerConn.deviceId}
+                    onChange={e => centerConn.setDeviceId(e.target.value)}
+                    placeholder="android-client"
+                  />
+                </label>
+
+                <label className="grok-card-row grok-input-row">
+                  <span className="grok-input-label">{t('客户端令牌', 'Client Token')}</span>
+                  <input
+                    type="password"
+                    autoComplete="new-password"
+                    className="grok-inline-input"
+                    value={centerConn.token}
+                    onChange={e => centerConn.setToken(e.target.value)}
+                    placeholder={
+                      centerConn.matchesSaved
+                        ? t('留空使用已保存令牌', 'Blank to use saved token')
+                        : t('输入中心访问令牌', 'Enter client token')
+                    }
+                  />
+                </label>
+
+                <label className="grok-card-row grok-input-row">
+                  <span className="grok-input-label">{t('本机节点令牌', 'Host Token')}</span>
+                  <input
+                    type="password"
+                    autoComplete="new-password"
+                    className="grok-inline-input"
+                    value={centerConn.hostToken}
+                    onChange={e => centerConn.setHostToken(e.target.value)}
+                    placeholder={t('选填，留空复用客户端令牌', 'Optional, defaults to client token')}
+                  />
+                </label>
+
+                <label className="grok-card-row grok-input-row">
+                  <span className="grok-input-label">{t('CA 证书', 'CA PEM')}</span>
+                  <input
+                    className="grok-inline-input"
+                    value={centerConn.ca}
+                    onChange={e => centerConn.setCa(e.target.value)}
+                    placeholder={t('自签名证书 PEM（选填）', 'Optional self-signed PEM')}
+                  />
+                </label>
+
+                {centerConn.error && (
+                  <div className="grok-card-row no-active">
+                    <ErrorNotice error={centerConn.error} />
+                  </div>
+                )}
+
+                <div className="grok-card-row no-active" style={{ justifyContent: 'flex-end', flexWrap: 'wrap', gap: 8 }}>
+                  {centerConn.saved?.url && (
+                    <button
+                      type="button"
+                      className="hub-outline-btn"
+                      disabled={centerConn.busy}
+                      onClick={() => void centerConn.disconnect()}
+                    >
+                      {t('断开并清除凭据', 'Clear Saved')}
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    className="hub-outline-btn"
+                    disabled={centerConn.busy}
+                    onClick={() => void centerConn.stopLocalHost()}
+                  >
+                    {t('停止本机节点', 'Stop Local Host')}
+                  </button>
+                  {centerConn.matchesSaved && !centerConn.token.trim() && (
+                    <button
+                      type="button"
+                      className="hub-outline-btn"
+                      disabled={centerConn.busy}
+                      onClick={() =>
+                        void centerConn.connect().then(() => {
+                          setEditingCenter(false);
+                        })
+                      }
+                    >
+                      {t('用已存凭据重连', 'Reconnect Saved')}
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    className="grok-done-pill-btn"
+                    disabled={
+                      centerConn.busy ||
+                      !centerConn.url.trim() ||
+                      !centerConn.deviceId.trim() ||
+                      (!centerConn.token.trim() && !centerConn.matchesSaved)
+                    }
+                    onClick={() =>
+                      void centerConn
+                        .connect()
+                        .then(() => {
+                          setEditingCenter(false);
+                        })
+                    }
+                  >
+                    {centerConn.preparing
+                      ? t('正在启动本机节点…', 'Starting Host…')
+                      : centerConn.busy
+                        ? t('连接中…', 'Connecting…')
+                        : t('连接中心', 'Connect Center')}
+                  </button>
+                </div>
+              </>
+            )}
+          </section>
+        </div>
+
         {/* Section 1: Models & Voice */}
         <div className="grok-field-section">
           <label className="grok-section-label">{t('模型与语音', 'Models & Voice')}</label>
@@ -4117,16 +5133,70 @@ function HubSettingsView({
                 </div>
 
                 {remoteConnected && remoteIdentity?.kind === 'relay' && remoteDevices.map(dev => (
-                  <div className="grok-card-row no-active" key={dev.deviceId}>
-                    <span className="grok-row-label">{dev.displayName || dev.deviceId} · {dev.platform || dev.deviceId} {dev.online ? '🟢' : '⚪'}</span>
-                    <button type="button" className="hub-outline-btn" onClick={() => void action.run(async () => {
-                      const name = window.prompt(t('中央节点名称', 'Central device name'), dev.displayName || dev.deviceId);
-                      if (name === null) return;
-                      const api = await ensureRemoteApi();
-                      if (!api || !api.identity) throw new Error('Not connected');
-                      await api.broker(api.identity, 'rename_device', { deviceId: dev.deviceId, displayName: name.trim() });
-                      onRemoteUpdated();
-                    })}>{t('改名', 'Rename')}</button>
+                  <div className="grok-card-row no-active" key={dev.deviceId} style={{ gap: 8 }}>
+                    <span
+                      className={`hub-bot-host-badge remote${dev.online ? '' : ' is-offline'}`}
+                      style={{ maxWidth: 'none' }}
+                    >
+                      <PlatformLogoIcon platform={dev.platform} size={12} />
+                    </span>
+                    {renamingDeviceId === dev.deviceId ? (
+                      <>
+                        <input
+                          className="grok-inline-input"
+                          style={{ textAlign: 'left', flex: 1 }}
+                          value={renameDraft}
+                          onChange={e => setRenameDraft(e.target.value)}
+                          placeholder={dev.deviceId}
+                          autoFocus
+                        />
+                        <button
+                          type="button"
+                          className="grok-done-pill-btn"
+                          disabled={action.busy}
+                          onClick={() =>
+                            void action.run(async () => {
+                              const api = await ensureRemoteApi();
+                              if (!api || !api.identity) throw new Error('Not connected');
+                              await api.broker(api.identity, 'rename_device', {
+                                deviceId: dev.deviceId,
+                                displayName: renameDraft.trim(),
+                              });
+                              setRenamingDeviceId(null);
+                              onRemoteUpdated();
+                            })
+                          }
+                        >
+                          {t('保存', 'Save')}
+                        </button>
+                        <button
+                          type="button"
+                          className="hub-outline-btn"
+                          onClick={() => setRenamingDeviceId(null)}
+                        >
+                          {t('取消', 'Cancel')}
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        <span className="grok-row-label" style={{ flex: 1 }}>
+                          {dev.displayName || dev.deviceId}
+                        </span>
+                        <span className={`hub-online-pill${dev.online ? '' : ' is-offline'}`}>
+                          {dev.online ? t('在线', 'Online') : t('离线', 'Offline')}
+                        </span>
+                        <button
+                          type="button"
+                          className="hub-outline-btn"
+                          onClick={() => {
+                            setRenamingDeviceId(dev.deviceId);
+                            setRenameDraft(dev.displayName || dev.deviceId);
+                          }}
+                        >
+                          {t('改名', 'Rename')}
+                        </button>
+                      </>
+                    )}
                   </div>
                 ))}
 
@@ -4153,6 +5223,17 @@ function HubSettingsView({
                 <ChevronRight size={18} className="grok-row-chevron" />
               </button>
             )}
+
+            <button
+              type="button"
+              className="grok-card-row"
+              onClick={() => void openCenterManagement()}
+            >
+              <ExternalLink size={20} className="grok-row-icon" />
+              <span className="grok-row-label">{t('中心管理控制台', 'Center Management Console')}</span>
+              <span className="grok-row-value">{t('浏览器打开', 'Open in browser')}</span>
+              <ChevronRight size={18} className="grok-row-chevron" />
+            </button>
 
             <button type="button" className="grok-card-row" onClick={toggleLocalConfig}>
               <Code2 size={20} className="grok-row-icon" />
