@@ -2675,7 +2675,7 @@ export function HostPage({
           <header className="grok-chat-floating-header">
             <button
               type="button"
-              className="grok-floating-circle-btn"
+              className="grok-floating-circle-btn grok-chat-header-back"
               aria-label={t('返回主页', 'Back')}
               onClick={() => {
                 chatLoadGeneration.current += 1;
@@ -2725,7 +2725,7 @@ export function HostPage({
 
             <button
               type="button"
-              className="grok-floating-circle-btn"
+              className="grok-floating-circle-btn grok-chat-header-more"
               aria-label={t('更多选项', 'More options')}
               aria-expanded={chatTopMenuOpen}
               onClick={() => setChatTopMenuOpen(v => !v)}
