@@ -1,6 +1,5 @@
 import { defineDoc, configure, AgentDoc } from '@earendil-works/pi-durable';
 import { parseModelRef } from './runtime-models.js';
-import { ContextState, BC_KERNEL_VERSION } from './context-state.js';
 
 function errWithCode(message, code) {
   const err = new Error(message);
@@ -172,27 +171,4 @@ export async function applyAgentProfile(harness, conversationId, profile, contex
   if (!agentProfileChange(state, profile)) return false;
   await harness.commit((tx) => applyAgentProfileInTx(tx, conversationId, profile), context);
   return true;
-}
-
-/**
- * 主动模式初始化已映射会话的 Billion Context 状态，并保留原有工具选择。
- * 调用方只应在显式传入 models 的 active openRuntime 中执行；被动查询不做改造。
- */
-export async function upgradeLegacyContextConversations(harness, context) {
-  const index = await harness.snapshot(PrimaryIndex, context);
-  if (!index) return;
-  for (const conversationId of Object.values(index.byPrimary ?? {})) {
-    const doc = await harness.snapshot(ContextState, conversationId, context);
-    if (doc) {
-      if (doc.kernelVersion !== BC_KERNEL_VERSION) {
-        const err = new Error('kernel version mismatch: expected ' + BC_KERNEL_VERSION + ', found ' + doc.kernelVersion);
-        err.code = 'UNSUPPORTED_SCHEMA';
-        throw err;
-      }
-      continue;
-    }
-    await harness.commit(async (tx) => {
-      await tx.doc(ContextState, conversationId);
-    }, context);
-  }
 }

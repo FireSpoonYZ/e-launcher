@@ -6,7 +6,6 @@ import { Harness, createRegistry, defineExtension, section, hook, GenerationTask
 import { openNodeSqliteStorage } from '@earendil-works/pi-durable/storage/sqlite/node';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { createModels } from '@earendil-works/pi-ai/models';
-import { buildCompressSystemPrompt, countMessageTokens } from 'acp-kernel';
 import { createCodingTools } from '@earendil-works/pi-durable/tools';
 import { createAndroidTools } from './android-tools.js';
 import { createHostExecutionEnv } from './host-environment.js';
@@ -16,11 +15,9 @@ import { parseExecutionOptions, parseModelRef, describeModelCatalog, discoverPro
 import { createGrepTool } from './grep-tool.js';
 import { createFindTool } from './find-tool.js';
 import { createLsTool } from './ls-tool.js';
-import { getPrimaryConversation, RequestKeys, PrimaryIndex, upgradeLegacyContextConversations, applyAgentProfile } from './runtime-docs.js';
+import { getPrimaryConversation, RequestKeys, PrimaryIndex, applyAgentProfile } from './runtime-docs.js';
 import { formatPrimarySubmission, normalizeHistoryOptions, readPrimaryHistory } from './runtime-history.js';
-import { createContextManager } from './context-manager.js';
-import { createContextTools } from './context-tools.js';
-import { ContextState, BC_KERNEL_VERSION } from './context-state.js';
+import { RequestContext, countMessageTokens, countRequestTokens } from './request-context.js';
 import { resolveBotIdentity } from './bot-identity.js';
 import { createPluginManager } from './plugins/manager.js';
 import { createRuntimeLive } from './runtime-live.js';
@@ -155,8 +152,6 @@ export async function openRuntime(options) {
     }
   };
 
-  // 内嵌 Billion Context：每 Host 一个 registry/管理器，hook 仅随生成调度运行。
-  const manager = createContextManager({ getHarness: () => harness, models });
   // 每 Bot 准入队列归本 Runtime：send/设置/工作操作共用，关闭时先拒新准入再排空。
   const bots = createBotAdmission();
   bots.suspend();
@@ -225,7 +220,7 @@ export async function openRuntime(options) {
   }
   let plugins;
   const services = {
-    host, getHarness: () => harness, context: CTX, getWorkContexts: () => workContexts,
+    host, models, getHarness: () => harness, context: CTX, getWorkContexts: () => workContexts,
     getWorkActivity: decisions.getWorkActivity,
     resolveConversationBot: async (id) => {
       const identity = await resolveBotIdentity(host, harness, id, CTX);
@@ -245,7 +240,7 @@ export async function openRuntime(options) {
     assertCapabilityAllowed: (botId, id) => plugins.assertCapabilityAllowed(botId, id),
     getExecutionEnv: async (botId) => envFor({ conversationId: 'plugin:' + botId, cwd: host.getBot(botId).cwd }),
     getBotEntryWatermark: (botId) => getBotEntryWatermark(botId),
-    documents: { PrimaryIndex, RequestKeys, WorkIndex, WorkContextState, WorkDecisionState, ContextState },
+    documents: { PrimaryIndex, RequestKeys, WorkIndex, WorkContextState, WorkDecisionState, RequestContext, ContextState: RequestContext },
     sdk: { ...durable, chord }, countMessageTokens,
     centerClient: {
       listCapabilityTools: (...args) => {
@@ -262,9 +257,7 @@ export async function openRuntime(options) {
   };
   plugins = createPluginManager({ host, registry, installer: centerRuntime.installer, services, isOnline: () => online });
   registry.install(defineExtension({
-    name: 'host.billion-context',
-    tools: createContextTools(manager),
-    sections: [section('billion-context', () => buildCompressSystemPrompt())],
+    name: 'host.request-context',
     hooks: [hook(GenerationTask, {
       async beforeRequest(request, api, context) {
         try {
@@ -277,9 +270,18 @@ export async function openRuntime(options) {
           const actual = task?.state?.checkpoint?.model;
           if (!actual || actual.provider !== expected.provider || actual.modelId !== expected.modelId) throw errWithCode('center model changed', 'INVALID_STATE');
           await decisions.beforeRequest(request, api, context);
-          const prepared = await manager.prepare(request, api, context);
-          // BC 消息作为实际首参：合并 request 与 prepared，不发明第 4 参。
-          const requestView = { ...request, ...prepared };
+          const requestView = await plugins.prepareContext(request, api, context);
+          const checkpoint = task.state.checkpoint;
+          const model = models.getModel(actual.provider, actual.modelId);
+          if (!model || checkpoint.cutoff === undefined) throw errWithCode('request checkpoint is unavailable', 'INVALID_STATE');
+          await harness.commit(async (tx) => {
+            const doc = await tx.doc(RequestContext, api.conversationId);
+            doc.prepared = {
+              taskId: String(api.taskId), cutoff: checkpoint.cutoff,
+              contextWindow: model.contextWindow, tokenCount: countRequestTokens(requestView),
+              messages: requestView.messages,
+            };
+          }, context);
           if (!online) throw errWithCode('center is offline', 'CENTER_OFFLINE');
           return await plugins.beforeRequest(requestView, api, context);
         } catch (err) {
@@ -301,16 +303,9 @@ export async function openRuntime(options) {
     async beforeRequest(request, api, context) {
       try {
         if (!online) throw errWithCode('center is offline', 'CENTER_OFFLINE');
-        const prepared = (await harness.snapshot(ContextState, api.conversationId, context))?.prepared;
+        const prepared = (await harness.snapshot(RequestContext, api.conversationId, context))?.prepared;
         if (!prepared || prepared.taskId !== String(api.taskId)) throw errWithCode('context is not prepared', 'INVALID_STATE');
-        const tokens = (messages) => messages.reduce((sum, message) => {
-          const content = message.content;
-          const pure = (message.role === 'user' || message.role === 'assistant') &&
-            (message.role === 'user' && typeof content === 'string' || Array.isArray(content) && content.every((item) => item.type === 'text'));
-          const text = pure ? (typeof content === 'string' ? content : content.map((item) => item.text).join('\n')) : JSON.stringify(message);
-          return sum + countMessageTokens({ text });
-        }, 0);
-        const added = Math.max(0, tokens(request.messages) - tokens(prepared.messages));
+        const added = Math.max(0, countRequestTokens(request) - countRequestTokens({ messages: prepared.messages }));
         if (prepared.tokenCount + added >= prepared.contextWindow) throw errWithCode('context limit reached', 'CONTEXT_LIMIT');
         await decisions.checkBudget(request, api, context);
       } catch (err) {
@@ -321,8 +316,6 @@ export async function openRuntime(options) {
   })] });
   registry.install(finalBudgetExtension);
   const coreExtensions = registry.snapshot().installed().filter((extension) => extension !== finalBudgetExtension);
-  // 显式传入 models 才是主动模式：初始化旧会话的 ContextState，不改工具选择。
-  const upgradeLegacy = options?.models !== undefined;
   try {
     releaseOwner = acquireRuntimeOwner(host.dataRoot);
     storage = await openNodeSqliteStorage(join(host.dataRoot, 'durable.sqlite'));
@@ -332,9 +325,6 @@ export async function openRuntime(options) {
       settings: { compaction: { enabled: false }, extensions: coreExtensions },
       env: envFor,
     }, CTX);
-    if (upgradeLegacy) {
-      await upgradeLegacyContextConversations(harness, CTX);
-    }
   } catch (err) {
     if (harness) {
       try { await harness.close(CTX); } catch { /* close 失败不掩盖原错误 */ }
@@ -358,7 +348,6 @@ export async function openRuntime(options) {
   workContexts = createWorkContextRuntime({
     host,
     harness,
-    manager,
     context: CTX,
     getProfile: (botId, workMeta) => botProfile(host, plugins, botModels, coreExtensions, finalBudgetExtension, botId, workMeta),
     // sync 提交成功后附着等待中的 work watch（事务外，观察失败不影响导入）。
@@ -370,7 +359,6 @@ export async function openRuntime(options) {
     models,
     defaultModel,
     releaseOwner,
-    manager,
     cleanupEnvs,
     live,
     workContexts,
@@ -422,7 +410,7 @@ function parseBindingKey(key) {
   }
 }
 
-function createRuntime({ host, harness, models, defaultModel, releaseOwner, manager, cleanupEnvs, live, workContexts, decisions, plugins, coreExtensions, finalBudgetExtension, centerRuntime, setOnline, setBotModels, getBotModels, setWatermarkReader, botAdmissions, collaboration, onBotsChanged, shower }) {
+function createRuntime({ host, harness, models, defaultModel, releaseOwner, cleanupEnvs, live, workContexts, decisions, plugins, coreExtensions, finalBudgetExtension, centerRuntime, setOnline, setBotModels, getBotModels, setWatermarkReader, botAdmissions, collaboration, onBotsChanged, shower }) {
   let closePromise = null;
   let closing = false;
   let centerOnline = false;
@@ -854,14 +842,8 @@ function createRuntime({ host, harness, models, defaultModel, releaseOwner, mana
     },
 
     async contextStatus(botId) {
-      assertNonBlank(botId, 'botId');
-      const bot = host.getBot(botId);
-      if (!bot) throw errWithCode(`bot not found: ${botId}`, 'BOT_NOT_FOUND');
-      const conversation = await getPrimaryConversation(harness, bot, {}, CTX);
-      const status = conversation
-        ? await manager.inspect(conversation.id, CTX)
-        : { kernelVersion: BC_KERNEL_VERSION, status: null, blocks: [], messageRefs: { byRaw: {}, byRef: {} }, prepared: null };
-      return { botId, conversationId: bot.primaryConversationId, ...status };
+      await requireBot(botId);
+      return plugins.actionByName(botId, 'contextStatus', {});
     },
 
     memoryStatus: (botId, input) => plugins.actionByName(botId, 'memoryStatus', input),
@@ -877,7 +859,10 @@ function createRuntime({ host, harness, models, defaultModel, releaseOwner, mana
     // 显式同步与发送/设置同队列：决策内部走 raw workContexts.syncWorkContext（已在 Bot 准入内），不会递归取 lane。
     syncWorkContext: (botId, scopeId, options) => admitBot(botId, () => workContexts.syncWorkContext(botId, scopeId, options)),
     workHistory: workContexts.workHistory,
-    workContextStatus: workContexts.workContextStatus,
+    async workContextStatus(botId, scopeId) {
+      await workContexts.resolveWorkContext(botId, scopeId);
+      return plugins.actionByName(botId, 'contextStatus', { scopeId });
+    },
     getWorkActivity: decisions.getWorkActivity,
     stopWork: decisions.stopWork,
     resumeWork: decisions.resumeWork,

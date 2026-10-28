@@ -162,7 +162,7 @@ app-online 启动桥按上述 `center` 形状传递中心 URL、设备 token 和
 
 ## 插件与驱动（host-plugins、mcp-skills）
 
-`host-core/plugins/index.js` 导出 `loadNativePlugin({installationId, version, entry, packageRoot, dataDir, host}) -> Promise<NativePlugin>`。原生包 entry 导出 `createPlugin({installationId, version, packageRoot, dataDir, host}) -> Promise<NativePlugin> | NativePlugin`；packageRoot 是已激活不可变包目录（含代码与 Skill 资源），dataDir 是保留状态目录，不能混同；NativePlugin 为 `{durableTasks?, forBot(context): Promise<BotPlugin> | BotPlugin, close(): Promise<void>}`：durableTasks 每实例只注册一次，其 definition 名称由插件按 installationId 生成，Host 不自动重命名。context 为 `{deviceId, botId, installationId, effectiveConfig, credentials}`，credentials 是按有效引用解析的只读映射；BotPlugin 为 `{durableContributions, requestContributions, actions, prepare(), activate(), quiesce(), close()}`，四个生命周期方法均返回 Promise<void>。`durableContributions` 为 `{tools?, sections?, hooks?, wraps?}`，不含 name 和非空 tasks；每 Bot extension 由 Host 稳定命名和显式选择。`requestContributions` 为 `{beforeRequest?: async (request, api, context) => request | undefined}`；`actions` 为 `Record<id, {inputSchema, execute(input, invocationContext): Promise<JsonValue>}>`，对应 manifest 静态 `ActionDescriptor`。管理动作按真实 Bot 执行，Runtime 先检查策略。贡献使用现有 Durable 类型，不重定义引擎。资源按 Bot 创建复用；全部 direct/nested 工具、后台任务及 hook 在执行入口检查中心在线、实例与 Binding 双开关。Hindsight 作为此契约的普通插件，迁移保留原状态身份。旧 memory RPC 如需兼容，按动作名查找已启用插件，仅唯一匹配时转发；核心不得固定 Hindsight ID 或创建专用 memory 服务。
+`host-core/plugins/index.js` 导出 `loadNativePlugin({installationId, version, entry, packageRoot, dataDir, host}) -> Promise<NativePlugin>`。原生包 entry 导出 `createPlugin({installationId, version, packageRoot, dataDir, host}) -> Promise<NativePlugin> | NativePlugin`；packageRoot 是已激活不可变包目录（含代码与 Skill 资源），dataDir 是保留状态目录，不能混同；NativePlugin 为 `{durableTasks?, forBot(context): Promise<BotPlugin> | BotPlugin, close(): Promise<void>}`：durableTasks 每实例只注册一次，其 definition 名称由插件按 installationId 生成，Host 不自动重命名。context 为 `{deviceId, botId, installationId, effectiveConfig, credentials}`，credentials 是按有效引用解析的只读映射；BotPlugin 为 `{durableContributions, requestContributions, actions, prepare(), activate(), quiesce(), close()}`，四个生命周期方法均返回 Promise<void>。`durableContributions` 为 `{tools?, sections?, hooks?, wraps?}`，不含 name 和非空 tasks；每 Bot extension 由 Host 稳定命名和显式选择。`requestContributions` 为 `{prepareContext?: async (request, api, context) => Partial<Request> | undefined, beforeRequest?: async (request, api, context) => request | undefined}`；每 Bot 最多一个已启用的 prepareContext 提供者，多个时报 `INVALID_STATE`。Host 先执行在线/模型检查与 decisions.beforeRequest，再执行 prepareContext 并合并部分请求、持久化通用预算快照，然后执行插件 beforeRequest、Durable hooks 和最终预算检查；`actions` 为 `Record<id, {inputSchema, execute(input, invocationContext): Promise<JsonValue>}>`，对应 manifest 静态 `ActionDescriptor`。管理动作按真实 Bot 执行，Runtime 先检查策略。贡献使用现有 Durable 类型，不重定义引擎。资源按 Bot 创建复用；全部 direct/nested 工具、后台任务及 hook 在执行入口检查中心在线、实例与 Binding 双开关。Hindsight 作为此契约的普通插件，迁移保留原状态身份。旧 memory RPC 如需兼容，按动作名查找已启用插件，仅唯一匹配时转发；核心不得固定 Hindsight ID 或创建专用 memory 服务。
 
 
 工厂中的 `host` 不是任意对象；由 host-plugins 构造以下最小可信服务，MCP/Skill 和 Hindsight 可共同依赖（类型指向现有 Host/Durable，而不塞入平台无关的 DTO）：
@@ -171,6 +171,9 @@ app-online 启动桥按上述 `center` 形状传递中心 URL、设备 token 和
 interface PluginHostServices {
   host: import('../host-core/index.js').Host;
   getHarness(): import('@earendil-works/pi-durable').Harness;
+  models: /* Host 模型服务（含 getModel） */ unknown;
+  sdk: /* 注入的 Host Durable/Chord 工厂 */ unknown;
+  documents: /* RequestContext；ContextState 是其兼容别名 */ unknown;
   context: typeof import('@earendil-works/chord/context').BACKGROUND_CONTEXT;
   getWorkContexts(): ReturnType<typeof import('../host-core/runtime-work-contexts.js').createWorkContextRuntime>;
   getWorkActivity(botId: string, scopeId: string): Promise<import('../host-core/index.js').WorkActivity>;
@@ -188,6 +191,14 @@ interface PluginHostServices {
 
 
 `host-core/capabilities/mcp.js` 导出 `createMcpDriver({installationId, version, target, packageRoot, dataDir, host}) -> Promise<NativePlugin>`；target 直接来自已认证快照的 EffectiveCapability.target（center 或 host），不得从用户配置推测；target=center 时 packageRoot 为 null、没有 Host 本地 MCP 包，target=host 时 packageRoot 为已激活目录；`host-core/capabilities/skill.js` 导出 `createSkillDriver({installationId, version, packageRoot, dataDir, host}) -> Promise<NativePlugin>`。两者使用相同 `forBot(context)` 和生命周期；MCP 按 target=host 通过本机 pi-mcp，target=center 通过 host.centerClient 的 listCapabilityTools/callCapabilityTool，均在 Host 适配为 Durable 工具；Skill 只加载完整受管目录并输出启用 Bot 的 section；必须保留相对资源路径。驱动不得自行合并 global/overrides、绕过策略或将其他 Bot 客户端复用为当前 Bot。MCP config 使用 url/command/args/cwd/env/headers/timeoutMs 及可选 transport；envRefs/headerRefs/apiKeyRef 的值为 credentialId，refs 覆盖同名普通值，apiKeyRef 仅无显式 Authorization 时生成 Bearer。单一 JS bin 用 process.execPath 启动，多 bin 选择 config.bin。Skill 优先根 SKILL.md，其次 capability.json.skills，再 package.json.pi.skills，最后仅扫描受管根；相对路径都限制在包目录内。
+
+### Billion Context 迁移契约
+
+`@e-launcher/billion-context` 1.0.0 是能力 `e-launcher.billion-context` 的 Host 原生插件，依赖固定 `acp-kernel` 0.0.101；Host 不内嵌该依赖或插件。它保留 `host.bc-context` v1 的 conversation/rewindable/asOf 状态，不重置未知版本。Host 的 `host.request-context` v1 是独立的通用预算快照；`documents.ContextState` 仅为旧 Hindsight 读取 prepared 的兼容别名，不指向 BC 存储。
+
+BC 保留 `compress`、`decompress`、`search_context`、`acp_status` 原名，以便恢复旧的待执行工具任务。工具冲突按每个 Bot 可见范围（core 与该 Bot 已启用的插件）检查：不同 Bot 可以同名，同一 Bot 内冲突则拒绝；会话的 selectedExtensions 与所有权检查维持隔离。
+
+先在中心上传和安装插件实例，保持 Bot 绑定关闭；停止旧 Host 并保留数据后，为目标 Bot 启用绑定，使离线计划生成或排队；更新并启动新 Host，等待安装及 snapshot/profile 应用完成后恢复调度，再检查 Host 回执。不得在旧 Host 运行时下发启用 BC：旧内置工具与插件原名冲突，旧管理器会拒绝注册；忽略 prepareContext 不代表可同时加载插件。新 Host 对未启用 BC 的 Bot 使用未压缩请求，并保留最终预算检查。实例默认启用，Bot 绑定默认关闭，无本地启用回退。`contextStatus` 动作输入是仅有可选非空 `scopeId` 的对象；无 scope 为主会话，有 scope 为工作会话，读取不创建绑定；禁用/卸载返回 `EXTENSION_DISABLED`。详细打包、更新和回滚操作见 [插件 README](../plugins/billion-context/README.md)。
 
 ## 管理前端（admin-shell、plugin-ui）
 

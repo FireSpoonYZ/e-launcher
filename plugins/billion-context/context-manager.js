@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { createCore, defaultConfig, countMessageTokens, parseCompressArgs, collectBlockContent, prune, renderNudgeText, blockDocs, messageDocs, searchBlocks } from 'acp-kernel';
-import { ContextState, BC_KERNEL_VERSION } from './context-state.js';
+import { BC_KERNEL_VERSION } from './context-state.js';
 import { createContextCodec } from './context-codec.js';
 
 function sha256(text) {
@@ -24,8 +24,12 @@ function assertKernelVersion(doc) {
   }
 }
 
-/** 内嵌 Billion Context 控制器：prepare 挂在 generation beforeRequest 钩子上，compress/decompress/search/status 是工具，inspect 供 Runtime 被动查询。全部方法不用 this，可直接解构传给 hook/工具注册。 */
-export function createContextManager({ getHarness, models }) {
+export function emptyContextStatus() {
+  return { kernelVersion: BC_KERNEL_VERSION, status: null, blocks: [], messageRefs: { byRaw: {}, byRef: {} }, prepared: null };
+}
+
+/** 会话投影、压缩工具和只读状态查询。 */
+export function createContextManager({ getHarness, models, ContextState }) {
   const core = createCore();
 
   async function prepare(_request, api, context) {
@@ -207,7 +211,7 @@ export function createContextManager({ getHarness, models }) {
     const harness = getHarness();
     const doc = await harness.snapshot(ContextState, conversationId, context);
     if (!doc) {
-      return { kernelVersion: BC_KERNEL_VERSION, status: null, blocks: [], messageRefs: { byRaw: {}, byRef: {} }, prepared: null };
+      return emptyContextStatus();
     }
     assertKernelVersion(doc);
     const prepared = doc.prepared;

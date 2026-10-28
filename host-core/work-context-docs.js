@@ -1,6 +1,5 @@
 import { randomUUID } from 'node:crypto';
 import { defineDoc, configure } from '@earendil-works/pi-durable';
-import { ContextState } from './context-state.js';
 import { initialToolsChange, applyAgentProfileInTx } from './runtime-docs.js';
 import { workDecisionInstructions } from './work-decision-codec.js';
 
@@ -80,8 +79,6 @@ export async function ensureWorkBinding(tx, deviceId, bot, scope, profile) {
     conversationId,
     createdAt: new Date().toISOString(),
   });
-  // 获取文档即持久化该会话独立的空 BC 状态，不调用 prepare 或压缩投影。
-  await tx.doc(ContextState, nativeId);
   index.byKey[key] = { nativeId, conversationId };
   return { nativeId, conversationId };
 }

@@ -7,7 +7,7 @@ import { inboxQueryKey } from './message-queries.js';
 import { WorkIndex, WorkContextState, ensureWorkBinding, toWorkContextRecord } from './work-context-docs.js';
 import { WorkDecisionState, initialDecisionState, toWorkActivity } from './work-decision-state.js';
 import { createWorkInput } from './work-decision-codec.js';
-import { ContextState, BC_KERNEL_VERSION } from './context-state.js';
+import { RequestContext } from './request-context.js';
 import { parseModelRef } from './runtime-models.js';
 
 const CONTROL_ERRORS = new Set(['INVALID_ARGUMENT', 'BOT_NOT_FOUND', 'SCOPE_NOT_FOUND', 'SCOPE_FORBIDDEN', 'WORK_CONTEXT_INACTIVE', 'NOT_CONNECTED']);
@@ -407,10 +407,6 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
       if (!meta?.scopeId) return;
       assertHealthy();
       toolContext.abortSignal?.throwIfAborted();
-      const bc = await harness.snapshot(ContextState, api.conversationId, toolContext);
-      if (bc && bc.kernelVersion !== BC_KERNEL_VERSION) {
-        throw messageError('UNSUPPORTED_SCHEMA', 'work context kernel version is unsupported');
-      }
       const task = await harness.getTask(api.taskId, toolContext);
       const cutoff = task?.state?.checkpoint?.cutoff;
       if (!Number.isSafeInteger(cutoff)) throw new Error('work generation has no request cutoff');
@@ -451,7 +447,7 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
       const error = await harness.commit(async (tx) => {
         const current = await tx.doc(WorkContextState, api.conversationId);
         const state = await tx.doc(WorkDecisionState, api.conversationId);
-        const prepared = (await tx.doc(ContextState, api.conversationId)).prepared;
+        const prepared = (await tx.doc(RequestContext, api.conversationId)).prepared;
         toolContext.abortSignal?.throwIfAborted();
         const inactive = checkWork(current, state, state.pending?.prepared?.taskId === String(api.taskId));
         if (inactive) return inactive;

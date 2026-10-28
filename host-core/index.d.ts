@@ -1,7 +1,6 @@
 import type { Models, ModelCost, ModelInputLimits, ModelThinkingLevel, ThinkingLevelMap } from '@earendil-works/pi-ai';
 import type { CenterConnectionStatus, Provider, Model as CenterModel, ProviderCheckResult, DiscoveryResult, ActionRequest, ActionResult } from '../center-contract/index.js';
 import type { EntryRecord } from '@earendil-works/pi-durable';
-import type { CompressionBlock, StatusReport } from 'acp-kernel';
 import type {
   ShowerCreateOptions,
   ShowerFrame,
@@ -243,6 +242,39 @@ export interface HistoryPage {
   conversationId: string;
   items: readonly EntryRecord[];
   nextCursor: Record<string, unknown> | null;
+}
+
+/** Billion Context plugin status, returned only when the capability is enabled. */
+interface CompressionBlock {
+  blockId: string;
+  runId: string;
+  tier: 1 | 2 | 3;
+  topic?: string;
+  summary: string;
+  directMessageIds: string[];
+  effectiveMessageIds: string[];
+  directBlockIds: string[];
+  compressedTokens: number;
+  createdAt: number;
+  survivedCount: number;
+  generation: 'young' | 'old';
+  active: boolean;
+  expanded?: boolean;
+  restoredInline?: boolean;
+  durationMs?: number;
+  compressCallId?: string;
+  startRef?: string;
+  endRef?: string;
+}
+
+interface StatusReport {
+  contextUsage: number;
+  tokenCount: number;
+  modelContextLimit: number;
+  activeBlocks: number;
+  totalBlocks: number;
+  tokensCompressed: number;
+  breakdown: Record<string, number>;
 }
 
 export interface ContextStatus {

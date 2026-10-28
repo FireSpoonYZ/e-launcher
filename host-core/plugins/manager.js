@@ -119,10 +119,12 @@ export function createPluginManager({ host, registry, installer, services, isOnl
       new Map(bot.capabilities.map((capability) => [capability.installationId, capability]))]));
     const staged = new Map();
     const oldBindings = new Set([...instances].flatMap(([id, instance]) => [...instance.bots.keys()].map((botId) => JSON.stringify([id, botId]))));
-    const toolNames = new Set(registry.snapshot().installed().flatMap((extension) => (extension.tools ?? []).map((tool) => tool.name)));
-    for (const instance of instances.values()) for (const entry of instance.bots.values()) {
-      for (const tool of entry.extension?.tools ?? []) toolNames.delete(tool.name);
-    }
+    const pluginExtensions = new Set([...instances.values()].flatMap((instance) =>
+      [...instance.bots.values()].map((entry) => entry.extension)));
+    const coreToolNames = registry.snapshot().installed().filter((extension) => !pluginExtensions.has(extension))
+      .flatMap((extension) => (extension.tools ?? []).map((tool) => tool.name));
+    const toolNamesByBot = new Map();
+    const contextProviders = new Set();
     try {
       await dispose(instances, true, nextPolicy);
       for (const instance of instances.values()) {
@@ -208,9 +210,15 @@ export function createPluginManager({ host, registry, installer, services, isOnl
           const entry = { bot: contribution, context, extension: null };
           instance.bots.set(bot.botId, entry);
           await contribution.prepare();
+          if (contribution.requestContributions?.prepareContext) {
+            if (contextProviders.has(bot.botId)) throw error('INVALID_STATE', 'multiple context providers for this Bot');
+            contextProviders.add(bot.botId);
+          }
           entry.extension = defineExtension({ name: nameFor(id, bot.botId), ...guardContributions(contribution, id, bot.botId) });
+          let toolNames = toolNamesByBot.get(bot.botId);
+          if (!toolNames) toolNamesByBot.set(bot.botId, toolNames = new Set(coreToolNames));
           for (const tool of entry.extension.tools ?? []) {
-            if (toolNames.has(tool.name)) throw error('INVALID_STATE', 'capability tool name is not unique');
+            if (toolNames.has(tool.name)) throw error('INVALID_STATE', 'capability tool name is not unique for this Bot');
             toolNames.add(tool.name);
           }
         }
@@ -291,6 +299,27 @@ export function createPluginManager({ host, registry, installer, services, isOnl
     });
   }
 
+  async function prepareContext(request, api, context) {
+    const botId = await services.resolveConversationBot(api.conversationId);
+    const providers = [...instances].flatMap(([id, instance]) => {
+      const hook = instance.bots.get(botId)?.bot.requestContributions?.prepareContext;
+      return hook ? [{ id, hook }] : [];
+    });
+    if (providers.length > 1) throw error('INVALID_STATE', 'multiple context providers for this Bot');
+    if (!providers.length) return request;
+    const { id, hook } = providers[0];
+    return runAccepted(async () => {
+      context.abortSignal?.throwIfAborted();
+      await checkOwner(botId, id, api.conversationId);
+      context.abortSignal?.throwIfAborted();
+      const next = { ...request, ...(await hook(request, api, context)) };
+      context.abortSignal?.throwIfAborted();
+      await checkOwner(botId, id, api.conversationId);
+      context.abortSignal?.throwIfAborted();
+      return next;
+    });
+  }
+
   async function beforeRequest(request, api, context) {
     const botId = await services.resolveConversationBot(api.conversationId);
     let result = request;
@@ -299,9 +328,13 @@ export function createPluginManager({ host, registry, installer, services, isOnl
       const hook = entry?.bot.requestContributions?.beforeRequest;
       if (!hook) continue;
       result = await runAccepted(async () => {
-        assertCapabilityAllowed(botId, id);
+        context.abortSignal?.throwIfAborted();
+        await checkOwner(botId, id, api.conversationId);
+        context.abortSignal?.throwIfAborted();
         const next = { ...result, ...(await hook(result, api, context)) };
-        assertCapabilityAllowed(botId, id);
+        context.abortSignal?.throwIfAborted();
+        await checkOwner(botId, id, api.conversationId);
+        context.abortSignal?.throwIfAborted();
         return next;
       });
     }
@@ -350,11 +383,12 @@ export function createPluginManager({ host, registry, installer, services, isOnl
   async function actionByName(botId, actionId, input) {
     const matches = [...instances].filter(([id, instance]) => instance.bots.has(botId) &&
       instance.manifest.actions?.some((descriptor) => descriptor.id === actionId));
-    if (matches.length !== 1) throw error('INVALID_STATE', 'memory action is unavailable or ambiguous');
+    if (matches.length === 0) throw error('EXTENSION_DISABLED', 'capability action is unavailable');
+    if (matches.length > 1) throw error('INVALID_STATE', 'capability action is ambiguous');
     return (await action(matches[0][0], actionId, { deviceId: host.deviceId, botId, requestId: input?.requestId ?? randomUUID(), input: input ?? {} })).result;
   }
 
-  return { apply, activate, quiesce, assertCapabilityAllowed, extensionsFor, beforeRequest, action, actionByName,
+  return { apply, activate, quiesce, assertCapabilityAllowed, extensionsFor, prepareContext, beforeRequest, action, actionByName,
     hasActiveExecutions: () => activeOperations.size > 0 || activeActions.size > 0,
     suspend() { accepting = false; },
     resumeAdmissions() { accepting = true; },

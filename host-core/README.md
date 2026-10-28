@@ -1,6 +1,6 @@
 # @e-launcher/host-core
 
-本机 Bot/Host 核心。模块 1 提供 Bot 定义与主私聊身份登记；模块 2 接入 Pi Durable 长期主私聊、历史与执行恢复；模块 3 内嵌 Billion Context；模块 4 接入本机工具（read/write/edit/bash 与 grep/find/ls）；模块 5 接入本机长驻控制 API 与客户端；模块 6 接入 Bot 主私聊直播预览（认证本地 SSE、运行时 watch、客户端与 CLI）；模块 7 接入本机持久消息账本（messages.sqlite：作用域/成员修订、不可变信封、outbox、落地去重 ACK、本地收件/历史/缺口、特权离线 CLI）；模块 8 接入认证设备中继与 Host 消息投递（中心只存设备注册；复用模块 7 outbox，本机进程网络端到端）；模块 9 在认证中继上增加固定 10 个 JSON 方法的远程 Host 控制（独立多客户端角色、Node 客户端与一次性 CLI；父助手已完成本机独立进程 171/171 个端到端检查点验收，范围见下文）；模块 10 已完成群与 Bot DM 的独立工作上下文（显式被动导入、独立 Durable/BC、本机 API/CLI；父助手完成 149/149 个检查点，实测范围与限制见下文）。模块 11 已完成自然群聊决策与 Bot 通信工具（父助手完成 161/161 个端到端检查点，含 18 份数据库完整性/外键检查；限定环境与未实测范围见下文）。模块 12（成员范围管理与历史补齐）已完成父助手限定范围验收：实际运行 122/122 个检查点通过，总完成数 **12/20**。模块 13（Hindsight → Pi Durable 可追溯长期记忆）已完成 Host 侧适配及限定范围验收，总完成数 **13/20**。模块 14（统一 Host 服务与设备接入）已完成父助手限定范围验收（139/139 检查点，范围见下文），总完成数 **14/20**。模块 15（Android 本机 Host）已交付并获父助手验收，总完成数 **15/20**；模块 16–20 共 5 个待交付。运行时由单 Host 所有者持有，跨进程身份稳定。包正式名为 `@e-launcher/host-core`；当前仓库尚无 workspace/包安装连接，示例直接从仓库根导入本地文件（见下文）。
+本机 Bot/Host 核心。模块 1 提供 Bot 定义与主私聊身份登记；模块 2 接入 Pi Durable 长期主私聊、历史与执行恢复；模块 3 通过中心受管插件提供 Billion Context；模块 4 接入本机工具（read/write/edit/bash 与 grep/find/ls）；模块 5 接入本机长驻控制 API 与客户端；模块 6 接入 Bot 主私聊直播预览（认证本地 SSE、运行时 watch、客户端与 CLI）；模块 7 接入本机持久消息账本（messages.sqlite：作用域/成员修订、不可变信封、outbox、落地去重 ACK、本地收件/历史/缺口、特权离线 CLI）；模块 8 接入认证设备中继与 Host 消息投递（中心只存设备注册；复用模块 7 outbox，本机进程网络端到端）；模块 9 在认证中继上增加固定 10 个 JSON 方法的远程 Host 控制（独立多客户端角色、Node 客户端与一次性 CLI；父助手已完成本机独立进程 171/171 个端到端检查点验收，范围见下文）；模块 10 已完成群与 Bot DM 的独立工作上下文（显式被动导入、独立 Durable/BC、本机 API/CLI；父助手完成 149/149 个检查点，实测范围与限制见下文）。模块 11 已完成自然群聊决策与 Bot 通信工具（父助手完成 161/161 个端到端检查点，含 18 份数据库完整性/外键检查；限定环境与未实测范围见下文）。模块 12（成员范围管理与历史补齐）已完成父助手限定范围验收：实际运行 122/122 个检查点通过，总完成数 **12/20**。模块 13（Hindsight → Pi Durable 可追溯长期记忆）已完成 Host 侧适配及限定范围验收，总完成数 **13/20**。模块 14（统一 Host 服务与设备接入）已完成父助手限定范围验收（139/139 检查点，范围见下文），总完成数 **14/20**。模块 15（Android 本机 Host）已交付并获父助手验收，总完成数 **15/20**；模块 16–20 共 5 个待交付。运行时由单 Host 所有者持有，跨进程身份稳定。包正式名为 `@e-launcher/host-core`；当前仓库尚无 workspace/包安装连接，示例直接从仓库根导入本地文件（见下文）。
 
 整体方向见 [下一代多端 Bot 架构设计](../docs/next-generation-architecture.md)（目标架构，部分已实现），交付计划与完成/剩余模块见 [重构路线图](../docs/refactor-roadmap.md)。
 
@@ -209,7 +209,7 @@ node host-core/runtime-cli.js wait --data-root "$DATA_ROOT" --config "$CONFIG" -
 
 正常关闭与进程中断都保留 Durable 的受理记录和执行状态。重新打开后可先被动查询，再通过 wait 或 resume 恢复；不要为了恢复编造新请求 ID。请求正文摘要与提交之间存在未确认窗口：若回执未返回，调用方保留原 ID 与正文重试。被中断的模型请求可能重新发送，不承诺外部请求恰好执行一次。
 
-Durable 自动 compaction 保持关闭，模块 3 的 BC 是上下文压缩所有者。本模块没有注册文件、命令或屏幕工具，没有替换旧 Android/Capacitor 运行链路。
+Durable 自动 compaction 保持关闭；模块 3 的 BC 插件启用时负责上下文压缩，未启用时不压缩。本模块没有注册文件、命令或屏幕工具，没有替换旧 Android/Capacitor 运行链路。
 
 ### 模块 2 验收
 
@@ -217,23 +217,25 @@ Durable 自动 compaction 保持关闭，模块 3 的 BC 是上下文压缩所�
 
 验证覆盖跨进程主私聊、原始历史分页、不同 Bot 上下文隔离、持久模型选择、请求去重与冲突、错误回执、单进程所有权、强制结束进程后的同 ID 恢复、主动停止、关闭后释放所有权，以及已结束等待不启动其他待处理工作。报告与验证数据保存在仓库外，没有新增测试文件；Linux、Android 和外部真实模型服务尚未验收。
 
-## 模块 3：内嵌 Billion Context
+## 模块 3：受管 Billion Context 插件
 
-Host 使用 [acp-kernel](https://github.com/ranxianglei/acp-kernel) 0.0.101 管理长期上下文，不需要另外启动 bili 或代理。上游负责范围选择、分层压缩、引用、摘要投影与搜索；摘要由模型通过工具提供。完整条款及署名见 [第三方声明](../THIRD_PARTY_NOTICES.md#acp-kernel)。
+受管插件使用 [acp-kernel](https://github.com/ranxianglei/acp-kernel) 0.0.101 管理长期上下文，不需要另外启动 bili 或代理；新 Host 不内嵌 BC。迁移时先在中心上传并安装插件实例且保持 Bot 绑定关闭，停止旧 Host 并保留数据后才启用目标 Bot 绑定，再更新并启动新 Host，等待安装及 snapshot/profile 应用完成后恢复调度；不要在旧 Host 运行时下发启用，旧内置工具与插件原名冲突。详细步骤见 [插件 README](../plugins/billion-context/README.md)。未启用时使用未压缩请求并执行最终预算检查。上游负责范围选择、分层压缩、引用、摘要投影与搜索；摘要由模型通过工具提供。完整条款及署名见 [第三方声明](../THIRD_PARTY_NOTICES.md#acp-kernel)。
 
 ### 持久状态和请求投影
 
 BC 状态按 Durable conversation 保存，公开 Bot/主私聊身份保持不变。消息身份来自 Durable EntryId 与 entry 内消息下标，不依赖正文哈希或请求数组位置；相同正文的两条消息有不同引用。
 
-每次模型请求前，宿主读取该生成任务 cutoff 对应的历史视图，把 kernel 状态、内容存储和请求投影放在同一次宿主 commit 中。它与随后保存模型回复的 commit 分开。相同逻辑请求的重试/恢复复用持久投影，不重复分配引用、推进块存活次数或追加提醒。缓存值在事务内复制为普通 JSON，不把已结束事务的草稿传给模型。
+每次模型请求前，已启用的插件读取该生成任务 cutoff 对应的历史视图，把 kernel 状态、内容存储和请求投影放在同一次宿主 commit 中。它与随后保存模型回复的 commit 分开。相同逻辑请求的重试/恢复复用持久投影，不重复分配引用、推进块存活次数或追加提醒。缓存值在事务内复制为普通 JSON，不把已结束事务的草稿传给模型。
 
-kernel 的增长/压力决策由宿主渲染为临时上下文提醒；窗口占用估计按已折叠投影计算。原始人类输入不带压缩标签，摘要和提醒不伪装成人类消息写回历史。Durable 自动 compaction 关闭，避免两套压缩策略同时改写上下文。
+kernel 的增长/压力决策由插件渲染为临时上下文提醒；窗口占用估计按已折叠投影计算。原始人类输入不带压缩标签，摘要和提醒不伪装成人类消息写回历史。Durable 自动 compaction 关闭，避免两套压缩策略同时改写上下文。
 
 本模块折叠纯文本 user/assistant 消息。system、thinking、工具调用/结果和图像等复杂内容原样保留并排除折叠，结构化参数与签名不被标签改写；工具结果不进一步卸载，模块 4 保持同一保护。
 
 ### 上下文工具
 
-| 工具 | 当前能力 |
+以下为实际注册的原工具名，保留旧待执行工具任务的名称；会话的 selectedExtensions 与所有权检查隔离 Bot。
+
+| 功能 | 当前能力 |
 | --- | --- |
 | `compress` | 复用上游参数 schema 与解析器，提交模型摘要、范围和来源；以 Durable 工具 taskId 持久去重 |
 | `decompress` | 按 blockId 内联返回真实原文/嵌套块内容，块保持折叠；当前不支持 toFile |
@@ -244,19 +246,15 @@ kernel 的增长/压力决策由宿主渲染为临时上下文提醒；窗口占
 
 ### 被动查询与兼容
 
-Runtime 新增 `contextStatus(botId)`，CLI 对应：
+Runtime 保留 `contextStatus(botId)` 与 `workContextStatus(botId, scopeId)`，通过已启用插件的 `contextStatus` 动作查询。
 
-```bash
-node host-core/runtime-cli.js context --data-root '/path/to/host-data' --bot-id "$BOT_ID"
-```
-
-该查询不需要模型配置、不创建会话或启动调度，返回块、refs 与已准备请求的元信息，不返回缓存模型消息全文。未开始的 Bot 返回空状态。
+插件对该 Bot 启用时，该查询不创建会话或启动调度，返回块、refs 与已准备请求的元信息，不返回缓存模型消息全文；未开始的 Bot 返回空状态。插件禁用或卸载时返回 `EXTENSION_DISABLED`。
 
 模块 2 旧会话在显式提供 models 的主动打开路径中解除旧 tools:[] 限制，身份和历史保留；被动历史/状态读取不执行该升级。未知 kernel 版本被拒绝，不自动重置或套用当前格式，原始历史仍可读取。
 
-### 模块 3 验收
+### 模块 3 历史验收（迁移前内嵌实现）
 
-父助手完成 69 个端到端检查点及公开类型声明检查，使用 Windows / Git Bash、Node 26.8.2 和最低版本 22.19.0，以及本地可控 SSE 模型服务。
+以下是旧实现的历史结果，不代表本次受管插件迁移已通过验收。父助手完成 69 个端到端检查点及公开类型声明检查，使用 Windows / Git Bash、Node 26.8.2 和最低版本 22.19.0，以及本地可控 SSE 模型服务。
 
 验证包括：原文逐条保留、相同正文引用独立、实际请求采用摘要、真实原文展开、摘要与原文检索、Bot 范围隔离、自动提醒进入模型请求但不写原始人类历史，以及进程强杀后复用同一投影。另以 SQLite 故障注入验证：压缩状态已保存但工具回执写入失败，恢复后仍只有原来的摘要块；重复的模型 toolCallId 不会误用其他工具任务的回执。
 
@@ -773,7 +771,7 @@ Entry.model 恰有一条 `role:'user'` 消息，内容为固定的外部事件/�
 | GET `/v1/bots/:botId/work-contexts/:scopeKey/history?limit=&cursor=` | cursor 为上述包装的 JSON | 200 `WorkHistoryPage` |
 | GET `/v1/bots/:botId/work-contexts/:scopeKey/context` | — | 200 `WorkContextStatus` |
 
-新增错误映射 `SCOPE_NOT_FOUND`/`WORK_CONTEXT_NOT_FOUND`→404、`SCOPE_FORBIDDEN`→403；参数/游标错误为 `INVALID_ARGUMENT`→400。共享 history helper 仅转换已识别的 SDK 原生游标错误，不因请求带 cursor 就吞掉存储故障；真实 SQL 读取错误仍保留 `ERR_SQLITE_ERROR`，HTTP 返回 500。未绑定但已授权的 history/context 查询仍成功返回空状态。
+新增错误映射 `SCOPE_NOT_FOUND`/`WORK_CONTEXT_NOT_FOUND`→404、`SCOPE_FORBIDDEN`→403；参数/游标错误为 `INVALID_ARGUMENT`→400。共享 history helper 仅转换已识别的 SDK 原生游标错误，不因请求带 cursor 就吞掉存储故障；真实 SQL 读取错误仍保留 `ERR_SQLITE_ERROR`，HTTP 返回 500。未绑定但已授权的 history 查询仍返回空状态；context 查询仅在 BC 为该 Bot 启用时返回空状态，禁用或卸载返回 `EXTENSION_DISABLED`。
 
 `createControlClient` 增加 `getWorkContext(botId, scopeId, options?)`、`syncWorkContext(botId, scopeId, input?, options?)`、`workHistory(botId, scopeId, options?)`、`workContextStatus(botId, scopeId, options?)`；sync 的 input 为 `WorkSyncOptions`，默认 `{}`。history 的 options 是 `{limit?, cursor?:WorkHistoryCursor|null, signal?}`，其他 options 为 `{signal?}`。signal 仅取消 HTTP 等待，不代表导入未提交、回滚收件或停止推理；不确定时可重查水位或重试 sync。
 
@@ -842,9 +840,9 @@ node host-core/control-cli.js work-context --url http://127.0.0.1:8787 \
 - `STALE_INPUT` 不写入消息/序号/outbox/目标。驱动持久标记 replan，旧生成不再发起下一次 provider 调用，保留未处理水位，随后用新批次重新考虑；不保证远端尚未到达的消息也被看见。
 - 合法的同 messageId、同发布指纹重试在数据库 guard/成员检查前返回原回执；异内容仍报 `REQUEST_CONFLICT`。guard 不进信封或指纹。已落盘发送在停止或崩溃后可对账，不能把失败/中止结果解释为此前绝无发布或其他副作用。
 
-BC 仍是唯一压缩所有者，原文不删。模型调用前检查本次已准备投影的估计 `tokenCount >= contextWindow` 时，以 `CONTEXT_LIMIT` 阻止 provider 调用；不截掉最新大事件来强行发送、不推进 handled 水位，也不自动开启 Durable compaction。小于该估计界限仍可能因 system/tool 等额外开销在 provider 处超窗，不能据此保证必定放得下。
+BC 插件启用时负责压缩，原文不删；禁用时不执行压缩。Host 在插件和 Durable 贡献之后执行最终预算检查，超出上下文窗口时以 `CONTEXT_LIMIT` 阻止 provider 调用；不截掉最新大事件、不自动开启 Durable compaction。窗口估计不是 provider 接受请求的保证。
 
-**原生 beforeRequest 取消修正**：pi-durable 1.3.0 的 HookRunner 会吞掉普通 hook 抛错，单靠 throw 不能阻止 provider 调用。组合 hook 依次执行工作策略、`manager.prepare` 和预算检查；出错且本次 invocation context 尚未取消时，先用**同一个调用 context** 执行 `harness.abortTask(api.taskId, context)`，再抛出错误。它只取消当前生成 task，不 abort 整个 conversation 或队列；context 已因正常关闭取消时不再追加持久 abort，避免把暂停恢复变成永久中止。父助手已实跑旧稿 replan、预算拒绝、工作 schema fatal、主私聊 BC prepare 失败及等待工具关闭/重启路径，不能外推为所有关闭竞态均已覆盖。
+pi-durable 1.3.0 的 HookRunner 会吞掉普通 hook 抛错，因此请求阶段失败需要按当前生成任务的取消保护处理；此前内嵌实现的故障验收不等于新插件链路已验证。
 
 ### 工作状态、逐 scope 停止与恢复
 
@@ -1255,7 +1253,7 @@ node host-core/pending-cli.js reconcile --data-root "$CLIENT_STATE" --device-id 
 
 ### 架构与生命周期
 
-Android 本地 Host 在受监督的独立 Node Mobile 子进程中运行 Durable/chord/pi-ai 1.3.0 + acp-kernel 0.0.101；Capacitor 保留；未做旧数据迁移或 Tauri。仅用户显式开启的 specialUse FGS；无 boot/auto-start/空闲关闭/粘性重启。专用私有 JSONL、onStarting/真实 spawn/reap、生成清理 fence、固定 debug-only stage/exitCode/优雅日志；Capacitor payload loggingBehavior none。
+Android 本地 Host 在受监督的独立 Node Mobile 子进程中运行 Durable/chord/pi-ai 1.3.0；BC 作为单独的受管插件安装，不内嵌 acp-kernel。Capacitor 保留；未做旧数据迁移或 Tauri。仅用户显式开启的 specialUse FGS；无 boot/auto-start/空闲关闭/粘性重启。专用私有 JSONL、onStarting/真实 spawn/reap、生成清理 fence、固定 debug-only stage/exitCode/优雅日志；Capacitor payload loggingBehavior none。
 
 ### 路径、凭据与语音
 

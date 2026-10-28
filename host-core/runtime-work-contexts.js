@@ -4,7 +4,6 @@ import { inboxQueryKey } from './message-queries.js';
 import { getWorkBinding, ensureWorkBinding, WorkContextState, toWorkContextRecord } from './work-context-docs.js';
 import { createWorkMessageEntry } from './work-context-codec.js';
 import { normalizeHistoryOptions, readPrimaryHistory } from './runtime-history.js';
-import { BC_KERNEL_VERSION } from './context-state.js';
 
 function isPlainObject(value) {
   if (typeof value !== 'object' || value === null) return false;
@@ -13,7 +12,7 @@ function isPlainObject(value) {
 }
 
 /** 被动工作上下文：只读取定向账本、追加原文，不提交输入或启动生成。 */
-export function createWorkContextRuntime({ host, harness, manager, context, onBound, getProfile }) {
+export function createWorkContextRuntime({ host, harness, context, onBound, getProfile }) {
   let log = null;
   let closing = false;
   let closed = false;
@@ -156,16 +155,6 @@ export function createWorkContextRuntime({ host, harness, manager, context, onBo
     });
   }
 
-  function workContextStatus(botId, scopeId) {
-    return run(async () => {
-      const { binding } = await authorize(botId, scopeId);
-      const status = binding
-        ? await manager.inspect(binding.nativeId, context)
-        : { kernelVersion: BC_KERNEL_VERSION, status: null, blocks: [], messageRefs: { byRaw: {}, byRef: {} }, prepared: null };
-      return { botId, scopeId, conversationId: binding?.conversationId ?? null, ...status };
-    });
-  }
-
   function quiesce() {
     if (!quiescePromise) {
       closing = true;
@@ -185,5 +174,5 @@ export function createWorkContextRuntime({ host, harness, manager, context, onBo
     return closePromise;
   }
 
-  return { getWorkContext, syncWorkContext, workHistory, workContextStatus, getMessageLog, resolveWorkContext, runMessageOperation, quiesce, close };
+  return { getWorkContext, syncWorkContext, workHistory, getMessageLog, resolveWorkContext, runMessageOperation, quiesce, close };
 }

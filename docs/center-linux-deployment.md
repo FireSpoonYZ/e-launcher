@@ -109,6 +109,12 @@ node host-core/host-service-cli.js serve --data-root "$HOST_DATA_ROOT" \
 创建。部署、版本、状态以中心 operation 和设备实际回执为准，不以请求
 受理或容器启动代替验收。
 
+## Billion Context 受管部署
+
+BC 为独立 Host 原生插件 `@e-launcher/billion-context` 1.0.0（能力 ID `e-launcher.billion-context`），不是中心服务或 Host 内置组件。使用 [插件 README](../plugins/billion-context/README.md) 的打包和上传流程：在中心选择 `plugin`、本地制品、目标 `host`；安装实例默认启用，Bot 绑定默认关闭，逐 Bot 显式启用后检查 operation 与每台设备的实际部署回执。中心生成未随标准 npm 制品携带的依赖锁文件；Host managed installer 用该锁文件安装依赖，中心和 Host 均需可访问依赖源及可用 npm。
+
+升级现有部署时，先在中心上传/安装插件实例并保持 Bot 绑定关闭；停止旧 Host 并保留数据后，在中心启用目标 Bot 绑定，使离线计划生成或排队；更新并启动新 Host，等待安装及 snapshot/profile 应用完成后恢复调度，再检查设备回执。不要在旧 Host 运行时下发启用 BC：旧 Host 内置工具与插件原名冲突，旧管理器会拒绝注册；忽略 `prepareContext` 不代表可同时加载插件。新 Host 不再内嵌 BC，未绑定/未启用时不压缩，但仍做最终预算检查。保留原数据目录和历史，不能以重置状态处理兼容问题。版本更新、回滚及实际 API 请求体见插件 README；回滚插件与回滚 Host 不是同一操作，升级前备份并确认兼容性。
+
 ## 维护和升级
 
 `center-data` Docker volume 保存中心、relay 和受管安装数据；
@@ -131,5 +137,5 @@ docker compose up -d --no-build
 ## 验收边界
 
 本说明是部署入口而不是运行结果。上线前需真实验证登录、设备登记、Host
-连接、两个 Bot 的配置继承与覆盖、Hindsight、HTTP 和 Node MCP、Skill、
+连接、两个 Bot 的配置继承与覆盖、Billion Context 的安装和跨升级状态恢复、Hindsight、HTTP 和 Node MCP、Skill、
 更新/卸载与断线重连。构建和容器启动本身不能证明上述功能正常。

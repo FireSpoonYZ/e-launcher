@@ -5,8 +5,7 @@
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { countMessageTokens } from 'acp-kernel';
-import { ContextState } from './context-state.js';
+import { countMessageTokens, RequestContext as ContextState } from './request-context.js';
 import { messageError } from './message-protocol.js';
 import { createHindsightClient } from './hindsight-client.js';
 import { openHindsightStore } from './hindsight-store.js';

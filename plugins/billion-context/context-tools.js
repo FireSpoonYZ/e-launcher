@@ -1,4 +1,3 @@
-import { defineTool } from '@earendil-works/pi-durable';
 import {
   ACP_STATUS_TOOL,
   COMPRESS_TOOL,
@@ -6,7 +5,7 @@ import {
   SEARCH_CONTEXT_TOOL,
 } from 'acp-kernel';
 
-// 内嵌 Billion Context：四个工具表面直接复用 acp-kernel 原始声明，执行映射到 controller。
+// 四个工具复用 acp-kernel 声明，执行映射到 controller。
 const CONTEXT_TOOLS = [
   { declaration: COMPRESS_TOOL, method: 'compress' },
   { declaration: DECOMPRESS_TOOL, method: 'decompress' },
@@ -14,8 +13,8 @@ const CONTEXT_TOOLS = [
   { declaration: ACP_STATUS_TOOL, method: 'status' },
 ];
 
-/** 注册 Billion Context 工具：name/description/parameters 取自声明，replay 安全。 */
-export function createContextTools(controller) {
+/** 注册原名工具，以便恢复历史排队调用。 */
+export function createContextTools(controller, defineTool) {
   return CONTEXT_TOOLS.map(({ declaration, method }) =>
     defineTool({
       name: declaration.name,
