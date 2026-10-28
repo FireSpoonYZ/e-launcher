@@ -315,6 +315,7 @@ function sessionEnv(state) {
   };
   delete env.WAYLAND_DISPLAY;
   delete env.XDG_ACTIVATION_TOKEN;
+  delete env.SESSION_MANAGER;
   // Never inherit the physical session bus; only our private dbus-daemon bus.
   delete env.DBUS_SESSION_BUS_ADDRESS;
   if (state.dbusAddress) env.DBUS_SESSION_BUS_ADDRESS = state.dbusAddress;

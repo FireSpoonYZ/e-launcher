@@ -221,23 +221,36 @@ API references: [Credential UI](https://learn.microsoft.com/en-us/windows/win32/
 ## Linux provider
 
 The Linux backend (`shower-linux.js`) starts `Xvnc` on a private `DISPLAY` with its
-own `XAUTHORITY` and a private `dbus-daemon` session bus. It never uses `x0vncserver` or any shadow
-of the physical desktop, and it only owns the PID/port it started.
+own `XAUTHORITY`, runtime directory and `dbus-daemon` session bus. It starts a
+lightweight window manager, `xfdesktop` for the desktop background and
+`xfce4-panel` with an applications menu and window task list. Desktop components
+use a session-private configuration directory with a preconfigured panel, avoiding
+the first-run panel dialog and changes to the physical desktop configuration.
+`WAYLAND_DISPLAY` and the physical XSMP `SESSION_MANAGER` are not inherited; the
+physical D-Bus session address is replaced by the private bus. It never uses
+`x0vncserver` or any shadow of the physical desktop, and cleans up only resources
+it started.
 
 Required system programs, which must already be installed (the backend reports an
 explicit dependency error and never installs packages):
 
 - `Xvnc` or `Xtigervnc`
 - a window manager: `xfwm4` or `openbox`
-- `xdotool` (input), `ffmpeg` (frame encoding), `xauth`, `dbus-daemon`
+- `xfdesktop` and `xfce4-panel`, including the applications menu and task list
+  plugins and XFCE configuration service
+- `xdotool` (input), `ffmpeg` with `x11grab` (frame encoding), `xauth`, `dbus-daemon`
 
-Launch uses argument arrays, never shell strings. An optional noVNC view may only
+Ready requires a responsive private display, a running window manager and visible
+`xfdesktop` and `xfce4-panel` windows; key component exits are reported as errors.
+This does not use black pixels as a failure condition, nor does it prove that the
+panel plugins are usable. Launch uses argument arrays, never shell strings. An optional noVNC view may only
 listen on localhost behind the existing authenticated route; no unauthenticated
 remote port is opened.
 
 Acceptance must run on a real Linux desktop machine, not on WSL: WSL has no X
 server of its own and no real seat, so a WSL result proves nothing about the Xvnc,
-window manager and input path. Keep the target address for that check documented
+window manager and input path. The historical Linux results below predate the
+lightweight desktop changes and do not constitute their acceptance. Keep the target address for that check documented
 here (for example `ssh <user>@<linux-desktop-host>`) and never store keys,
 passwords or tokens for it in the repository.
 
