@@ -224,8 +224,11 @@ The Linux backend (`shower-linux.js`) starts `Xvnc` on a private `DISPLAY` with 
 own `XAUTHORITY`, runtime directory and `dbus-daemon` session bus. It starts a
 lightweight window manager, `xfdesktop` for the desktop background and
 `xfce4-panel` with an applications menu and window task list. Desktop components
-use a session-private configuration directory with a preconfigured panel, avoiding
-the first-run panel dialog and changes to the physical desktop configuration.
+use a session-private configuration directory with a preconfigured panel and
+configuration version, avoiding the first-run panel dialog and changes to the
+physical desktop configuration. Workspace 0 on the `VNC-0` monitor defaults to a
+solid dark blue-gray background; other monitor names are not covered by that
+background setting. The XFCE terminal helper defaults to `xfce4-terminal`.
 `WAYLAND_DISPLAY` and the physical XSMP `SESSION_MANAGER` are not inherited; the
 physical D-Bus session address is replaced by the private bus. It never uses
 `x0vncserver` or any shadow of the physical desktop, and cleans up only resources
@@ -238,6 +241,7 @@ explicit dependency error and never installs packages):
 - a window manager: `xfwm4` or `openbox`
 - `xfdesktop` and `xfce4-panel`, including the applications menu and task list
   plugins and XFCE configuration service
+- `xfce4-terminal` (the desktop terminal helper)
 - `xdotool` (input), `ffmpeg` with `x11grab` (frame encoding), `xauth`, `dbus-daemon`
 
 Ready requires a responsive private display, a running window manager and visible

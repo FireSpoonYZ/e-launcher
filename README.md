@@ -40,9 +40,9 @@ Pi 模式接入固定版本 **1.1.0** 的完整 coding-agent SDK，提供模型�
 
 ## Linux Shower 虚拟桌面
 
-Linux Host 的 Shower 在独立 Xvnc 显示中启动轻量桌面，包含 `xfdesktop` 背景和 `xfce4-panel` 的应用菜单、窗口任务切换；应用菜单显示本机已安装且可在该会话运行的应用。必须预先手动安装 `Xvnc` 或 `Xtigervnc`、`xfwm4` 或 `openbox`、`xfdesktop`、`xfce4-panel`（含应用菜单与任务列表插件及其 XFCE 配置服务）、`xauth`、`dbus-daemon`、`xdotool` 和支持 `x11grab` 的 `ffmpeg`。缺少程序时报告依赖错误，不自动安装；具体包名依发行版而异。
+Linux Host 的 Shower 在独立 Xvnc 显示中启动轻量桌面，包含 `xfdesktop` 背景和 `xfce4-panel` 的应用菜单、窗口任务切换；应用菜单显示本机已安装且可在该会话运行的应用。必须预先手动安装 `Xvnc` 或 `Xtigervnc`、`xfwm4` 或 `openbox`、`xfdesktop`、`xfce4-panel`（含应用菜单与任务列表插件及其 XFCE 配置服务）、`xfce4-terminal`、`xauth`、`dbus-daemon`、`xdotool` 和支持 `x11grab` 的 `ffmpeg`。缺少程序时报告依赖错误，不自动安装；具体包名依发行版而异。
 
-每个环境使用私有 DISPLAY、Xauthority、运行目录和 D-Bus；桌面配置放在会话私有目录并预置面板，避免首次配置向导及修改真实桌面设置。面板启动的应用继承该桌面配置目录；通过 Shower 进程启动的应用保留原有配置环境。创建成功需要桌面和面板窗口就绪，关键进程退出会报告错误；不以全黑画面作为故障判据。释放或创建失败时清理本会话启动的组件及私有目录，不连接或回退到物理桌面。背景、菜单、窗口切换与输入仍需在目标 Linux 机器人工验收。
+每个环境使用私有 DISPLAY、Xauthority、运行目录和 D-Bus；桌面配置放在会话私有目录并预置面板和配置版本，避免首次配置向导及修改真实桌面设置；`VNC-0` 显示器的工作区 0 默认使用深灰蓝纯色背景，并将 XFCE 默认终端设为 `xfce4-terminal`。其他显示器名称不受该背景配置覆盖。面板启动的应用继承该桌面配置目录；通过 Shower 进程启动的应用保留原有配置环境。创建成功需要桌面和面板窗口就绪，关键进程退出会报告错误；不以全黑画面作为故障判据。释放或创建失败时清理本会话启动的组件及私有目录，不连接或回退到物理桌面。背景、菜单、窗口切换与输入仍需在目标 Linux 机器人工验收。
 
 ## Android 平台能力
 

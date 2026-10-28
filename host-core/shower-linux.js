@@ -54,6 +54,7 @@ const REQUIREMENTS = [
   { key: 'wm', label: 'xfwm4 or openbox', candidates: ['xfwm4', 'openbox'] },
   { key: 'desktop', label: 'xfdesktop', candidates: ['xfdesktop'] },
   { key: 'panel', label: 'xfce4-panel', candidates: ['xfce4-panel'] },
+  { key: 'terminal', label: 'xfce4-terminal', candidates: ['xfce4-terminal'] },
   { key: 'xauth', label: 'xauth', candidates: ['xauth'] },
   { key: 'dbus', label: 'dbus-daemon', candidates: ['dbus-daemon'] },
   { key: 'xdotool', label: 'xdotool', candidates: ['xdotool'] },
@@ -694,6 +695,7 @@ export function createLinuxShowerBackend({ dataRoot } = {}) {
     // Seed a usable panel rather than the first-run configuration dialog.
     writeFileSync(path.join(xfconfDir, 'xfce4-panel.xml'), `<?xml version="1.0" encoding="UTF-8"?>
 <channel name="xfce4-panel" version="1.0">
+  <property name="configver" type="int" value="2"/>
   <property name="panels" type="array">
     <value type="int" value="1"/>
     <property name="panel-1" type="empty">
@@ -712,6 +714,28 @@ export function createLinuxShowerBackend({ dataRoot } = {}) {
   </property>
 </channel>
 `, { mode: 0o600 });
+    // shortcut: the solid background targets Xvnc's VNC-0 monitor, update if other monitor names are supported.
+    writeFileSync(path.join(xfconfDir, 'xfce4-desktop.xml'), `<?xml version="1.0" encoding="UTF-8"?>
+<channel name="xfce4-desktop" version="1.0">
+  <property name="backdrop" type="empty">
+    <property name="screen0" type="empty">
+      <property name="monitorVNC-0" type="empty">
+        <property name="workspace0" type="empty">
+          <property name="image-style" type="int" value="0"/>
+          <property name="color-style" type="int" value="0"/>
+          <property name="rgba1" type="array">
+            <value type="double" value="0.12"/>
+            <value type="double" value="0.16"/>
+            <value type="double" value="0.20"/>
+            <value type="double" value="1.0"/>
+          </property>
+        </property>
+      </property>
+    </property>
+  </property>
+</channel>
+`, { mode: 0o600 });
+    writeFileSync(path.join(state.configDir, 'xfce4', 'helpers.rc'), '[Helpers]\nTerminalEmulator=xfce4-terminal\n', { mode: 0o600 });
     state.authFile = path.join(state.dir, 'Xauthority');
     state.display = await reserveDisplay();
     checkAborted(signal);
