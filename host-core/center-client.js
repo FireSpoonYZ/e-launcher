@@ -42,6 +42,7 @@ export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, onDi
     const response = await new Promise((resolve, reject) => { req.once('response', resolve); req.once('error', reject); });
     if (response.statusCode < 200 || response.statusCode >= 300) {
       response.resume();
+      if (response.statusCode === 409) throw centerError('REQUEST_CONFLICT', 'center revision conflict; reload before saving');
       throw centerError(response.statusCode === 401 || response.statusCode === 403 ? 'UNAUTHENTICATED' : 'CENTER_REQUEST_FAILED', 'center request failed');
     }
     const chunks = [];
@@ -103,11 +104,16 @@ export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, onDi
     ownerQueue = run.catch(() => {});
     return run;
   };
-  const ownerSession = async (signal) => {
+  const fetchOwnerSession = async (signal) => {
     const session = await ownerRequest('/api/session', { signal });
     return { authenticated: session.authenticated };
   };
+  const ownerSession = async (signal) => {
+    if (closed || signal?.aborted) throw centerError('CENTER_OFFLINE', 'center is disconnected');
+    return { authenticated: true };
+  };
   const botModelPath = (targetDeviceId, botId) => '/api/devices/' + encodeURIComponent(targetDeviceId) + '/bots/' + encodeURIComponent(botId) + '/model-config';
+  const hostBotModelPath = (targetDeviceId, botId) => '/api/host/devices/' + encodeURIComponent(targetDeviceId) + '/bots/' + encodeURIComponent(botId) + '/model-config';
   try {
     const req = start('/api/host/events');
     req.setTimeout(15000, () => req.destroy(centerError('CENTER_OFFLINE', 'center connection timed out')));
@@ -153,13 +159,21 @@ export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, onDi
   return {
     ownerSession,
     async ownerLogin(password, signal) {
-      await ownerSession(signal);
+      await fetchOwnerSession(signal);
       const session = await ownerRequest('/api/session', { method: 'POST', body: { password }, signal });
       return { authenticated: session.authenticated };
     },
-    botModelGet: (targetDeviceId, botId, signal) => ownerRequest(botModelPath(targetDeviceId, botId), { signal }),
-    botModelSet: (targetDeviceId, botId, input, signal) => ownerRequest(botModelPath(targetDeviceId, botId), { method: 'PUT', body: input, signal }),
+    botModelGet: (targetDeviceId, botId, signal) => request(hostBotModelPath(targetDeviceId, botId), { signal }).catch(err => err?.code === 'CENTER_REQUEST_FAILED' ? ownerRequest(botModelPath(targetDeviceId, botId), { signal }) : Promise.reject(err)),
+    botModelSet: (targetDeviceId, botId, input, signal) => request(hostBotModelPath(targetDeviceId, botId), { method: 'PUT', body: input, signal }).catch(err => err?.code === 'CENTER_REQUEST_FAILED' ? ownerRequest(botModelPath(targetDeviceId, botId), { method: 'PUT', body: input, signal }) : Promise.reject(err)),
     bootstrap: (bots) => request('/api/host/bootstrap', { method: 'POST', body: { deviceId, capabilityProtocol: 1, bots } }),
+    syncBots: (bots) => request('/api/host/bots-sync', { method: 'POST', body: { deviceId, bots } }).catch(() => request('/api/host/bootstrap', { method: 'POST', body: { deviceId, capabilityProtocol: 1, bots } })),
+    getBotSync: ({ epoch, sinceSeq } = {}, signal) => {
+      const qs = new URLSearchParams();
+      if (typeof epoch === 'string' && epoch) qs.set('epoch', epoch);
+      if (Number.isSafeInteger(sinceSeq) && sinceSeq >= 0) qs.set('sinceSeq', String(sinceSeq));
+      const query = qs.toString();
+      return request('/api/host/bot-directory' + (query ? '?' + query : ''), { signal });
+    },
     getConnection: () => request('/api/host/connection'),
     getSnapshot: () => request('/api/host/snapshot'),
     reportRuntime: (receipt) => request('/api/host/receipt', { method: 'POST', body: receipt }),

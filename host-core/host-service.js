@@ -37,8 +37,24 @@ export async function openHostService(options) {
   const displayName = options.displayName?.trim() || (platform !== 'android' && os.hostname().trim()) || `${platform}-${deviceId.slice(0, 8)}`;
   function readBots() {
     const host = openHost({ dataRoot });
-    try { return host.listBots().map((bot) => ({ deviceId, botId: bot.botId, name: bot.role })); }
-    finally { host.close(); }
+    try {
+      return host.listBots().map((bot) => ({
+        deviceId,
+        botId: bot.botId,
+        name: bot.role,
+        description: bot.description ?? '',
+        cwd: bot.cwd,
+        modelRef: bot.modelRef ?? null,
+        primaryConversationId: bot.primaryConversationId,
+        createdAt: bot.createdAt,
+        isPrimary: Boolean(bot.isPrimary),
+        lastActivityAt: bot.lastActivityAt ?? null,
+        lastPreview: bot.lastPreview ?? null,
+        archivedAt: bot.archivedAt ?? null,
+        deviceName: displayName,
+        platform,
+      }));
+    } finally { host.close(); }
   }
 
   let settingsStore, control, link, installer, client;
@@ -222,11 +238,21 @@ export async function openHostService(options) {
       centerRuntime: { snapshot, getClient: () => client ?? null, installer },
       collaboration: { displayName, platform, relay: { url: snapshot.linkUrl, token: center.deviceToken, ...(center.ca ? { ca: center.ca } : {}) } },
       onBotsChanged: () => {
+        if (!control) {
+          return enqueue(async () => {
+            if (!client || closed) return;
+            try { await client.syncBots(readBots()); } catch { /* ignore transient sync error */ }
+          });
+        }
         generation++;
         state = { ...state, state: 'connecting', appliedRevision: null };
         void control.setCenterOnline(false).catch(() => {});
         return enqueue(async () => { try { await refresh(true); } catch (err) { disconnect(); throw err; } });
       },
+      onBotsSync: () => enqueue(async () => {
+        if (!client || closed) return;
+        try { await client.syncBots(readBots()); } catch { /* ignore transient sync error */ }
+      }),
     });
     if (current !== client) throw offlineError();
     linkUrl = snapshot.linkUrl;

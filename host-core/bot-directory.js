@@ -20,6 +20,10 @@ export async function collectBotDirectory({ listDevices, listBots }) {
         botsByDevice[index] = bots.map((bot) => ({
           ...bot,
           description: bot.description ?? '',
+          isPrimary: Boolean(bot.isPrimary),
+          lastActivityAt: bot.lastActivityAt ?? null,
+          lastPreview: bot.lastPreview ?? null,
+          archivedAt: bot.archivedAt ?? null,
           deviceName: device.displayName || device.deviceId,
           ...(device.platform ? { platform: device.platform } : {}),
           online: true,
@@ -34,5 +38,18 @@ export async function collectBotDirectory({ listDevices, listBots }) {
     }
   }
   await Promise.all(Array.from({ length: Math.min(4, devices.length) }, readDevices));
-  return { devices, bots: botsByDevice.flatMap((items) => items ?? []), errors: errorsByDevice.filter(Boolean) };
+  const bots = botsByDevice.flatMap((items) => items ?? []);
+  bots.sort((a, b) => {
+    const aArchived = a.archivedAt !== null && a.archivedAt !== undefined;
+    const bArchived = b.archivedAt !== null && b.archivedAt !== undefined;
+    if (aArchived !== bArchived) return aArchived ? 1 : -1;
+    const aPrimary = a.isPrimary === true;
+    const bPrimary = b.isPrimary === true;
+    if (aPrimary !== bPrimary) return aPrimary ? -1 : 1;
+    const aTime = Date.parse(a.lastActivityAt || a.createdAt || '') || 0;
+    const bTime = Date.parse(b.lastActivityAt || b.createdAt || '') || 0;
+    if (bTime !== aTime) return bTime - aTime;
+    return a.botId < b.botId ? -1 : a.botId > b.botId ? 1 : 0;
+  });
+  return { devices, bots, errors: errorsByDevice.filter(Boolean) };
 }

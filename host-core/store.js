@@ -1,9 +1,9 @@
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 5;
 const DB_FILE = 'host.sqlite';
 const PRIMARY_KIND = 'primary';
 
@@ -29,7 +29,7 @@ function errWithCode(message, code) {
   return err;
 }
 
-function toBot(row) {
+function toBot(row, primaryBotId) {
   if (!row) return null;
   return {
     botId: row.bot_id,
@@ -40,14 +40,18 @@ function toBot(row) {
     modelRef: row.model_ref,
     primaryConversationId: row.primary_conversation_id,
     createdAt: row.created_at,
+    isPrimary: Boolean(primaryBotId && row.bot_id === primaryBotId),
+    lastActivityAt: row.last_activity_at ?? null,
+    lastPreview: row.last_preview ?? null,
+    archivedAt: row.archived_at ?? null,
   };
 }
 
-// v3：每 Bot 扩展设置。revision 从 0 起，每次成功 CAS +1；retention_floor 由 Runtime
+// v3+：每 Bot 扩展设置。revision 从 0 起，每次成功 CAS +1；retention_floor 由 Runtime
 // 在离开关闭/只读期时写入，默认 0 表示不裁剪既有条目。
 const BOT_EXTENSION_SETTINGS_DDL = `
   CREATE TABLE bot_extension_settings (
-    bot_id TEXT PRIMARY KEY REFERENCES bots(bot_id),
+    bot_id TEXT PRIMARY KEY REFERENCES bots(bot_id) ON DELETE CASCADE,
     revision INTEGER NOT NULL,
     extensions_json TEXT NOT NULL,
     retention_floor INTEGER NOT NULL DEFAULT 0
@@ -64,14 +68,14 @@ function toBotExtensionSettings(row) {
   };
 }
 
-function toLegacyImport(row) {
+function toLegacyImport(row, primaryBotId) {
   if (!row) return null;
   return {
     sourceKey: row.source_key,
     requestId: row.request_id,
     snapshotId: row.snapshot_id,
     phase: row.phase,
-    bot: toBot(row),
+    bot: toBot(row, primaryBotId),
   };
 }
 
@@ -79,13 +83,43 @@ function toLegacyImport(row) {
 function initSchema(db) {
   db.exec('BEGIN IMMEDIATE');
   let committed = false;
+  let rebuilt = false;
   try {
     const version = db.prepare('PRAGMA user_version').get().user_version;
     // 仅接受已知版本；负数/未知版本一律拒绝，不迁移。
-    if (version !== 0 && version !== 1 && version !== 2 && version !== 3 && version !== SCHEMA_VERSION) {
+    if (
+      version !== 0 &&
+      version !== 1 &&
+      version !== 2 &&
+      version !== 3 &&
+      version !== 4 &&
+      version !== SCHEMA_VERSION
+    ) {
       throw errWithCode('database schema version is not supported', 'UNSUPPORTED_SCHEMA');
     }
-    if (version === 0) {
+    if (version < SCHEMA_VERSION) {
+      let existingDeviceId = null;
+      if (version > 0) {
+        rebuilt = true;
+        try {
+          const row = db.prepare('SELECT device_id FROM host_identity WHERE id = 1').get();
+          if (row && typeof row.device_id === 'string' && row.device_id.trim() !== '') {
+            existingDeviceId = row.device_id;
+          }
+        } catch {
+          existingDeviceId = null;
+        }
+        db.exec(`
+          DROP TABLE IF EXISTS bot_extension_settings;
+          DROP TABLE IF EXISTS legacy_imports;
+          DROP TABLE IF EXISTS bot_create_requests;
+          DROP TABLE IF EXISTS conversations;
+          DROP TABLE IF EXISTS host_profile;
+          DROP TABLE IF EXISTS bots;
+          DROP TABLE IF EXISTS host_identity;
+        `);
+      }
+      const deviceId = existingDeviceId ?? randomUUID();
       db.exec(`
         CREATE TABLE host_identity (
           id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -99,16 +133,24 @@ function initSchema(db) {
           cwd TEXT NOT NULL,
           model_ref TEXT,
           primary_conversation_id TEXT NOT NULL UNIQUE,
-          created_at TEXT NOT NULL
+          created_at TEXT NOT NULL,
+          last_activity_at TEXT,
+          last_preview TEXT,
+          archived_at TEXT
+        );
+        CREATE TABLE host_profile (
+          id INTEGER PRIMARY KEY CHECK (id = 1),
+          primary_bot_id TEXT REFERENCES bots(bot_id) ON DELETE SET NULL,
+          updated_at TEXT NOT NULL
         );
         CREATE TABLE conversations (
           conversation_id TEXT PRIMARY KEY,
-          bot_id TEXT NOT NULL UNIQUE REFERENCES bots(bot_id),
+          bot_id TEXT NOT NULL UNIQUE REFERENCES bots(bot_id) ON DELETE CASCADE,
           kind TEXT NOT NULL CHECK (kind = 'primary')
         );
         CREATE TABLE bot_create_requests (
           request_id TEXT PRIMARY KEY,
-          bot_id TEXT NOT NULL REFERENCES bots(bot_id),
+          bot_id TEXT NOT NULL REFERENCES bots(bot_id) ON DELETE CASCADE,
           role TEXT NOT NULL,
           description TEXT NOT NULL DEFAULT '',
           cwd TEXT NOT NULL,
@@ -117,34 +159,27 @@ function initSchema(db) {
         ${LEGACY_IMPORTS_DDL}
         ${BOT_EXTENSION_SETTINGS_DDL}
       `);
-      db.prepare('INSERT INTO host_identity (id, device_id) VALUES (1, ?)').run(randomUUID());
+      db.prepare('INSERT INTO host_identity (id, device_id) VALUES (1, ?)').run(deviceId);
+      db.prepare('INSERT INTO host_profile (id, primary_bot_id, updated_at) VALUES (1, NULL, ?)').run(new Date().toISOString());
       db.exec('PRAGMA user_version = ' + SCHEMA_VERSION);
     } else {
-      // 升级前同一事务内核原 4 表必要列可读取且身份行存在；损坏库在此报错回滚，不推进版本。
+      // 已是 v5 的库校验必要列可读取且身份行与 profile 行存在；损坏库在此报错回滚。
       db.prepare('SELECT id, device_id FROM host_identity LIMIT 0').all();
-      db.prepare('SELECT bot_id, device_id, role, cwd, model_ref, primary_conversation_id, created_at FROM bots LIMIT 0').all();
+      db.prepare('SELECT bot_id, device_id, role, description, cwd, model_ref, primary_conversation_id, created_at, last_activity_at, last_preview, archived_at FROM bots LIMIT 0').all();
+      db.prepare('SELECT id, primary_bot_id, updated_at FROM host_profile LIMIT 0').all();
       db.prepare('SELECT conversation_id, bot_id, kind FROM conversations LIMIT 0').all();
-      db.prepare('SELECT request_id, bot_id, role, cwd, model_ref FROM bot_create_requests LIMIT 0').all();
+      db.prepare('SELECT request_id, bot_id, role, description, cwd, model_ref FROM bot_create_requests LIMIT 0').all();
+      db.prepare('SELECT bot_id, revision, extensions_json, retention_floor FROM bot_extension_settings LIMIT 0').all();
       if (!db.prepare('SELECT 1 AS x FROM host_identity WHERE id = 1').get()) {
         throw new Error('host database is missing identity row');
       }
-      // 已是 v3 的库先验列，缺列/损坏在此报错回滚。
-      if (version >= 3) {
-        db.prepare('SELECT bot_id, revision, extensions_json, retention_floor FROM bot_extension_settings LIMIT 0').all();
+      if (!db.prepare('SELECT 1 AS x FROM host_profile WHERE id = 1').get()) {
+        throw new Error('host database is missing profile row');
       }
-      // 逐版本只追加本版本的表，不重建既有表、不删行。
-      if (version < 2) db.exec(LEGACY_IMPORTS_DDL);
-      if (version < 3) db.exec(BOT_EXTENSION_SETTINGS_DDL);
-      if (version < 4) {
-        db.exec("ALTER TABLE bots ADD COLUMN description TEXT NOT NULL DEFAULT ''; ALTER TABLE bot_create_requests ADD COLUMN description TEXT NOT NULL DEFAULT '';");
-      } else {
-        db.prepare('SELECT description FROM bots LIMIT 0').all();
-        db.prepare('SELECT description FROM bot_create_requests LIMIT 0').all();
-      }
-      if (version < SCHEMA_VERSION) db.exec('PRAGMA user_version = ' + SCHEMA_VERSION);
     }
     db.exec('COMMIT');
     committed = true;
+    return { rebuilt };
   } finally {
     if (!committed) {
       try { db.exec('ROLLBACK'); } catch { /* rollback 失败不掩盖原错误 */ }
@@ -164,11 +199,22 @@ export function openStore(dataRoot) {
   try {
     db.exec('PRAGMA foreign_keys = ON;');
     db.exec('PRAGMA busy_timeout = 5000;');
-    initSchema(db);
+    const { rebuilt } = initSchema(db);
+    if (rebuilt) {
+      for (const entry of ['bots', 'durable.sqlite', 'durable.sqlite-wal', 'durable.sqlite-shm', 'hindsight.sqlite', 'scopes', 'messages.sqlite', 'messages.sqlite-wal', 'messages.sqlite-shm', 'messages.sqlite-journal']) {
+        try {
+          rmSync(join(dataRoot, entry), { recursive: true, force: true });
+        } catch {
+          /* ignore cleanup errors */
+        }
+      }
+    }
 
     const deviceId = db.prepare('SELECT device_id FROM host_identity WHERE id = 1').get().device_id;
 
     const stmtGetBot = db.prepare('SELECT * FROM bots WHERE bot_id = ?');
+    const stmtGetHostProfile = db.prepare('SELECT primary_bot_id, updated_at FROM host_profile WHERE id = 1');
+    const stmtSetPrimaryBot = db.prepare('UPDATE host_profile SET primary_bot_id = ?, updated_at = ? WHERE id = 1');
     const stmtGetRequest = db.prepare('SELECT * FROM bot_create_requests WHERE request_id = ?');
     const stmtListBots = db.prepare('SELECT * FROM bots ORDER BY created_at ASC, bot_id ASC');
     const stmtInsertBot = db.prepare(
@@ -179,6 +225,14 @@ export function openStore(dataRoot) {
     );
     const stmtInsertRequest = db.prepare(
       'INSERT INTO bot_create_requests (request_id, bot_id, role, cwd, model_ref, description) VALUES (?, ?, ?, ?, ?, ?)'
+    );
+    const stmtArchiveBot = db.prepare('UPDATE bots SET archived_at = COALESCE(archived_at, ?) WHERE bot_id = ?');
+    const stmtUnarchiveBot = db.prepare('UPDATE bots SET archived_at = NULL WHERE bot_id = ?');
+    const stmtDeleteLegacyImportByBot = db.prepare('DELETE FROM legacy_imports WHERE bot_id = ?');
+    const stmtDeleteBot = db.prepare('DELETE FROM bots WHERE bot_id = ?');
+    const stmtRecordBotActivity = db.prepare('UPDATE bots SET last_activity_at = ?, last_preview = ? WHERE bot_id = ?');
+    const stmtListExpiredArchivedBots = db.prepare(
+      'SELECT * FROM bots WHERE archived_at IS NOT NULL AND archived_at <= ? ORDER BY archived_at ASC, bot_id ASC'
     );
     const stmtGetLegacyImport = db.prepare('SELECT * FROM legacy_imports WHERE source_key = ?');
     const stmtInsertLegacyImport = db.prepare(
@@ -195,7 +249,21 @@ export function openStore(dataRoot) {
 
     const stmtUpdateBotModel = db.prepare('UPDATE bots SET model_ref = ? WHERE bot_id = ?');
     const stmtUpdateBotProfile = db.prepare('UPDATE bots SET role = COALESCE(?, role), description = COALESCE(?, description) WHERE bot_id = ?');
-    const getBot = (botId) => toBot(stmtGetBot.get(botId));
+
+    const getPrimaryBotId = () => {
+      const profile = stmtGetHostProfile.get();
+      if (!profile || !profile.primary_bot_id) return null;
+      return stmtGetBot.get(profile.primary_bot_id) ? profile.primary_bot_id : null;
+    };
+    const getHostProfile = () => {
+      const profile = stmtGetHostProfile.get();
+      return {
+        deviceId,
+        primaryBotId: getPrimaryBotId(),
+        updatedAt: profile?.updated_at ?? null,
+      };
+    };
+    const getBot = (botId) => toBot(stmtGetBot.get(botId), getPrimaryBotId());
     const setBotModel = (botId, modelRef) => {
       stmtUpdateBotModel.run(modelRef == null ? null : modelRef, botId);
       return getBot(botId);
@@ -208,7 +276,10 @@ export function openStore(dataRoot) {
       const row = stmtGetRequest.get(requestId);
       return row ? getBot(row.bot_id) : null;
     };
-    const listBots = () => stmtListBots.all().map(toBot);
+    const listBots = () => {
+      const primaryBotId = getPrimaryBotId();
+      return stmtListBots.all().map((row) => toBot(row, primaryBotId));
+    };
 
     const createBot = (input) => {
       const requestId = input.requestId;
@@ -235,6 +306,9 @@ export function openStore(dataRoot) {
         stmtUpdateBotProfile.run(null, description, botId);
         stmtInsertConversation.run(conversationId, botId, PRIMARY_KIND);
         stmtInsertRequest.run(requestId, botId, role, cwd, modelRef, description);
+        if (getPrimaryBotId() === null || input.makePrimary === true) {
+          stmtSetPrimaryBot.run(botId, createdAt);
+        }
         db.exec('COMMIT');
         committed = true;
         return getBot(botId);
@@ -245,7 +319,102 @@ export function openStore(dataRoot) {
       }
     };
 
-    const getLegacyImport = (sourceKey) => toLegacyImport(stmtGetLegacyImport.get(sourceKey));
+    const setPrimaryBot = (botId) => {
+      db.exec('BEGIN IMMEDIATE');
+      let committed = false;
+      try {
+        const row = stmtGetBot.get(botId);
+        if (!row) throw errWithCode(`bot not found: ${botId}`, 'BOT_NOT_FOUND');
+        if (row.archived_at !== null) {
+          throw errWithCode('archived bot cannot be set as primary', 'BOT_ARCHIVED');
+        }
+        stmtSetPrimaryBot.run(botId, new Date().toISOString());
+        db.exec('COMMIT');
+        committed = true;
+        return getBot(botId);
+      } finally {
+        if (!committed) {
+          try { db.exec('ROLLBACK'); } catch { /* rollback 失败不掩盖原错误 */ }
+        }
+      }
+    };
+
+    const archiveBot = (botId) => {
+      db.exec('BEGIN IMMEDIATE');
+      let committed = false;
+      try {
+        const row = stmtGetBot.get(botId);
+        if (!row) throw errWithCode(`bot not found: ${botId}`, 'BOT_NOT_FOUND');
+        if (getPrimaryBotId() === botId) {
+          throw errWithCode('primary bot cannot be archived', 'PRIMARY_BOT_PROTECTED');
+        }
+        stmtArchiveBot.run(new Date().toISOString(), botId);
+        db.exec('COMMIT');
+        committed = true;
+        return getBot(botId);
+      } finally {
+        if (!committed) {
+          try { db.exec('ROLLBACK'); } catch { /* rollback 失败不掩盖原错误 */ }
+        }
+      }
+    };
+
+    const unarchiveBot = (botId) => {
+      db.exec('BEGIN IMMEDIATE');
+      let committed = false;
+      try {
+        const row = stmtGetBot.get(botId);
+        if (!row) throw errWithCode(`bot not found: ${botId}`, 'BOT_NOT_FOUND');
+        stmtUnarchiveBot.run(botId);
+        db.exec('COMMIT');
+        committed = true;
+        return getBot(botId);
+      } finally {
+        if (!committed) {
+          try { db.exec('ROLLBACK'); } catch { /* rollback 失败不掩盖原错误 */ }
+        }
+      }
+    };
+
+    const deleteBot = (botId) => {
+      db.exec('BEGIN IMMEDIATE');
+      let committed = false;
+      try {
+        const row = stmtGetBot.get(botId);
+        if (!row) throw errWithCode(`bot not found: ${botId}`, 'BOT_NOT_FOUND');
+        if (getPrimaryBotId() === botId) {
+          throw errWithCode('primary bot cannot be deleted', 'PRIMARY_BOT_PROTECTED');
+        }
+        stmtDeleteLegacyImportByBot.run(botId);
+        stmtDeleteBot.run(botId);
+        db.exec('COMMIT');
+        committed = true;
+        return { botId, deleted: true };
+      } finally {
+        if (!committed) {
+          try { db.exec('ROLLBACK'); } catch { /* rollback 失败不掩盖原错误 */ }
+        }
+      }
+    };
+
+    const recordBotActivity = (botId, { lastActivityAt, lastPreview } = {}) => {
+      const activityAt = typeof lastActivityAt === 'string' && lastActivityAt.trim() !== ''
+        ? lastActivityAt
+        : new Date().toISOString();
+      const preview = typeof lastPreview === 'string' ? lastPreview.slice(0, 160) : (lastPreview ?? null);
+      stmtRecordBotActivity.run(activityAt, preview, botId);
+      return getBot(botId);
+    };
+
+    const listExpiredArchivedBots = (cutoffIso) => {
+      const primaryBotId = getPrimaryBotId();
+      return stmtListExpiredArchivedBots
+        .all(cutoffIso)
+        .filter((row) => row.bot_id !== primaryBotId)
+        .map((row) => toBot(row, primaryBotId));
+    };
+
+    const getLegacyImport = (sourceKey) => toLegacyImport(stmtGetLegacyImport.get(sourceKey), getPrimaryBotId());
 
     const getBotExtensionSettings = (botId) => toBotExtensionSettings(stmtGetBotExtensionSettings.get(botId));
 
@@ -296,7 +465,7 @@ export function openStore(dataRoot) {
             existing.cwd === cwd &&
             existing.model_ref === modelRef
           ) {
-            return toLegacyImport(existing);
+            return toLegacyImport(existing, getPrimaryBotId());
           }
           throw errWithCode('sourceKey already used with different request definition', 'REQUEST_CONFLICT');
         }
@@ -330,7 +499,7 @@ export function openStore(dataRoot) {
           // 幂等：已完成且同 requestId，直接返回已完成行。
           db.exec('COMMIT');
           committed = true;
-          return toLegacyImport(row);
+          return toLegacyImport(row, getPrimaryBotId());
         }
         // 同一事务发布预留Bot并置 completed；不写 bot_create_requests。
         stmtInsertBot.run(row.bot_id, row.device_id, row.role, row.cwd, row.model_ref, row.primary_conversation_id, row.created_at);
@@ -338,7 +507,7 @@ export function openStore(dataRoot) {
         stmtSetLegacyPhase.run('completed', sourceKey);
         db.exec('COMMIT');
         committed = true;
-        return toLegacyImport(stmtGetLegacyImport.get(sourceKey));
+        return toLegacyImport(stmtGetLegacyImport.get(sourceKey), getPrimaryBotId());
       } finally {
         if (!committed) {
           try { db.exec('ROLLBACK'); } catch { /* rollback 失败不掩盖原错误 */ }
@@ -347,7 +516,9 @@ export function openStore(dataRoot) {
     };
 
     return {
-      deviceId, createBot, getBot, setBotModel, updateBotProfile, findByRequest, listBots,
+      deviceId, getPrimaryBotId, getHostProfile,
+      createBot, getBot, setBotModel, updateBotProfile, findByRequest, listBots,
+      setPrimaryBot, archiveBot, unarchiveBot, deleteBot, recordBotActivity, listExpiredArchivedBots,
       ensureBotExtensionSettings, getBotExtensionSettings, updateBotExtensionSettings,
       reserveLegacyImport, getLegacyImport, completeLegacyImport, close,
     };

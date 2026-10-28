@@ -68,7 +68,84 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
   route('GET', '/api/model-config', () => store.getModelConfig());
   route('PUT', '/api/model-config', req => { const body = object(req.body); return changed(store.putModelConfig(body.expectedRevision, validate(selectionSchema, body.value))); }, true);
   route('GET', '/api/devices', () => bridge.listDevices());
+  route('GET', '/api/bot-sync', req => store.getBotSync({
+    epoch: typeof req.query?.epoch === 'string' ? req.query.epoch : undefined,
+    sinceSeq: req.query?.sinceSeq !== undefined ? Number(req.query.sinceSeq) : undefined,
+    devices: bridge.listDevices(),
+  }));
   route('GET', '/api/devices/:deviceId/bots', req => store.listDeviceBots(req.params.deviceId));
+  route('POST', '/api/devices/:deviceId/bots', async (req, reply) => {
+    const { deviceId } = req.params;
+    const created = await bridge.call(deviceId, 'createBot', {
+      requestId: req.body?.requestId || randomUUID(),
+      role: text(req.body?.role, 'role'),
+      ...(req.body?.description !== undefined ? { description: String(req.body.description) } : {}),
+      ...(req.body?.cwd ? { cwd: text(req.body.cwd, 'cwd') } : {}),
+      ...(typeof req.body?.makePrimary === 'boolean' ? { makePrimary: req.body.makePrimary } : {}),
+    });
+    const bot = store.upsertDeviceBot(deviceId, {
+      ...created,
+      deviceId,
+      name: typeof created?.name === 'string' ? created.name : created?.role ?? text(req.body?.role, 'role'),
+      ...(typeof req.body?.makePrimary === 'boolean' && created?.isPrimary === undefined ? { isPrimary: req.body.makePrimary } : {}),
+    });
+
+    return reply.code(201).send(bot);
+  }, true);
+  route('PATCH', '/api/devices/:deviceId/bots/:botId', async req => {
+    const { deviceId, botId } = req.params;
+    const updated = await bridge.call(deviceId, 'updateBotProfile', {
+      botId,
+      ...(req.body?.name !== undefined ? { name: req.body.name } : {}),
+      ...(req.body?.description !== undefined ? { description: req.body.description } : {}),
+    });
+    return store.upsertDeviceBot(deviceId, {
+      ...updated,
+      deviceId,
+      botId,
+      ...(typeof updated?.name === 'string' ? { name: updated.name } : typeof updated?.role === 'string' ? { name: updated.role } : {}),
+    });
+  }, true);
+  route('POST', '/api/devices/:deviceId/bots/:botId/primary', async req => {
+    const { deviceId, botId } = req.params;
+    const updated = await bridge.call(deviceId, 'setPrimaryBot', { botId });
+    return store.upsertDeviceBot(deviceId, {
+      ...updated,
+      deviceId,
+      botId,
+      ...(typeof updated?.name === 'string' ? { name: updated.name } : typeof updated?.role === 'string' ? { name: updated.role } : {}),
+      isPrimary: true,
+    });
+  }, true);
+  route('POST', '/api/devices/:deviceId/bots/:botId/archive', async req => {
+    const { deviceId, botId } = req.params;
+    const updated = await bridge.call(deviceId, 'archiveBot', { botId });
+    return store.upsertDeviceBot(deviceId, {
+      ...updated,
+      deviceId,
+      botId,
+      ...(typeof updated?.name === 'string' ? { name: updated.name } : typeof updated?.role === 'string' ? { name: updated.role } : {}),
+      ...(updated?.archivedAt !== undefined ? { archivedAt: updated.archivedAt } : { archivedAt: new Date().toISOString() }),
+    });
+  }, true);
+  route('POST', '/api/devices/:deviceId/bots/:botId/unarchive', async req => {
+    const { deviceId, botId } = req.params;
+    const updated = await bridge.call(deviceId, 'unarchiveBot', { botId });
+    return store.upsertDeviceBot(deviceId, {
+      ...updated,
+      deviceId,
+      botId,
+      ...(typeof updated?.name === 'string' ? { name: updated.name } : typeof updated?.role === 'string' ? { name: updated.role } : {}),
+      archivedAt: updated?.archivedAt ?? null,
+    });
+  }, true);
+  route('DELETE', '/api/devices/:deviceId/bots/:botId', async (req, reply) => {
+    const { deviceId, botId } = req.params;
+    await bridge.call(deviceId, 'deleteBot', { botId });
+    store.removeDeviceBot(deviceId, botId);
+
+    return reply.code(204).send();
+  }, true);
   route('GET', '/api/devices/:deviceId/bots/:botId/model-config', req => store.getBotModelConfig(req.params.deviceId, req.params.botId));
   route('PUT', '/api/devices/:deviceId/bots/:botId/model-config', req => { const b = object(req.body); return changed(store.putBotModelConfig(req.params.deviceId, req.params.botId, b.expectedRevision, validate(selectionSchema, b.value)), req.params.deviceId); }, true);
   const credentialId = assertPublicCredentialId;
@@ -175,11 +252,23 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
   host('POST', '/api/host/bootstrap', async req => {
     const body = object(req.body); const id = req.centerDevice.deviceId;
     if (body.deviceId !== id || body.capabilityProtocol !== 1 || !Array.isArray(body.bots) || body.bots.some(bot => !bot || bot.deviceId !== id || typeof bot.botId !== 'string' || !bot.botId || typeof bot.name !== 'string')) fail('INVALID_ARGUMENT', 'Invalid bootstrap');
-    store.replaceDeviceBots(id, body.bots);
+    store.replaceDeviceBots(id, body.bots.filter(bot => typeof bot.isPrimary === 'boolean'), { bumpRevision: true });
     await packages.reconcileDevice(id);
     return { snapshot: snapshot(id) };
   });
+  host('POST', '/api/host/bots-sync', req => {
+    const body = object(req.body); const id = req.centerDevice.deviceId;
+    if (body.deviceId !== id || !Array.isArray(body.bots)) fail('INVALID_ARGUMENT', 'Invalid bots sync');
+    return store.replaceDeviceBots(id, body.bots, { bumpRevision: false });
+  });
+  host('GET', '/api/host/bot-directory', req => {
+    const epoch = typeof req.query?.epoch === 'string' ? req.query.epoch : undefined;
+    const sinceSeq = req.query?.sinceSeq !== undefined ? Number(req.query.sinceSeq) : undefined;
+    return store.getBotSync({ epoch, sinceSeq, devices: bridge.listDevices() });
+  });
   host('GET', '/api/host/connection', req => ({ protocol: 1, deviceId: req.centerDevice.deviceId, linkUrl }));
+  host('GET', '/api/host/devices/:deviceId/bots/:botId/model-config', req => store.getBotModelConfig(req.params.deviceId, req.params.botId));
+  host('PUT', '/api/host/devices/:deviceId/bots/:botId/model-config', req => { const b = object(req.body); return changed(store.putBotModelConfig(req.params.deviceId, req.params.botId, b.expectedRevision, validate(selectionSchema, b.value)), req.params.deviceId); });
   host('GET', '/api/host/snapshot', req => snapshot(req.centerDevice.deviceId));
   host('POST', '/api/host/receipt', (req, reply) => {
     const body = object(req.body);

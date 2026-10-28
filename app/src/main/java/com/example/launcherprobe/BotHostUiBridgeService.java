@@ -434,9 +434,13 @@ public final class BotHostUiBridgeService extends Service {
                 int business = 0;
                 boolean watch = false;
                 for (Observation item : observations.values()) {
-                    if (item.connection) watch = true;
+                    if (item.connection) {
+                        if (connection && !item.id.equals(observationId)) item.closed = true;
+                        else watch = true;
+                    }
                     else business++;
                 }
+                if (connection) observations.values().removeIf(item -> item.connection && item.closed);
                 if (connection ? watch : business >= MAX_OBSERVATIONS) throw new IllegalStateException("观察数已达上限");
                 if (observations.containsKey(observationId)) throw new IllegalArgumentException("observationId 已存在");
                 observations.put(observationId, record);
@@ -594,16 +598,21 @@ public final class BotHostUiBridgeService extends Service {
             closeObservation(handle);
         }
 
-        /** 一次性释放本会话全部观察与捕获；notify 仅用于 pause（关闭时 peer 已不可读）。 */
+        /** pause 保留连接状态监听；close 释放全部观察。两者均结束捕获。 */
         private void releaseOwnedResources(BridgeException failure, boolean notify) {
             List<Observation> records;
             BotHostVoice capturing;
             String botId;
             String requestId;
             synchronized (resources) {
-                records = new ArrayList<>(observations.values());
-                observations.clear();
-                for (Observation record : records) record.closed = true;
+                records = new ArrayList<>();
+                for (Observation record : observations.values()) {
+                    // 页面暂停不等于中继断线，连接监听必须继续报告真实断线。
+                    if (notify && record.connection) continue;
+                    record.closed = true;
+                    records.add(record);
+                }
+                for (Observation record : records) observations.remove(record.id);
                 capturing = voice;
                 botId = voiceBotId;
                 requestId = voiceRequestId;

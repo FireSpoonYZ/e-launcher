@@ -1,5 +1,6 @@
 import { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  Archive,
   ArrowLeft,
   ArrowUp,
   AudioLines,
@@ -22,11 +23,13 @@ import {
   Plus,
   Puzzle,
   RefreshCw,
+  RotateCcw,
   Search,
   Server,
   Settings,
   Sparkles,
   Square,
+  Star,
   Trash2,
   User,
   X,
@@ -81,12 +84,31 @@ const uuid = () =>
     ? crypto.randomUUID()
     : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
+const V5_CLEANUP_KEY = 'bot-hub-v5-cleaned';
 const BOT_META_CACHE_KEY = 'bot-hub-bot-meta-v2';
 const BOT_CLEAR_MAP_KEY = 'bot-hub-cleared-v1';
 const REMOTE_PROFILES_FLAG_KEY = 'bot-hub-has-remote-v1';
+const REMOTE_BOTS_CACHE_KEY = 'bot-hub-remote-bots-cache-v1';
+const REMOTE_DEVICES_CACHE_KEY = 'bot-hub-remote-devices-cache-v1';
 const PRIMARY_ROLE_OVERRIDE_KEY = 'bot-hub-primary-name-v2';
 const DEFAULT_PRIMARY_ROLE = '主助手';
 const CREATE_ATTEMPT_KEY = 'bot-hub-create-attempt-v1';
+const ARCHIVE_RETENTION_MS = 14 * 24 * 60 * 60 * 1000;
+
+try {
+  if (typeof window !== 'undefined' && window.localStorage.getItem(V5_CLEANUP_KEY) !== '1') {
+    window.localStorage.removeItem(BOT_META_CACHE_KEY);
+    window.localStorage.removeItem(BOT_CLEAR_MAP_KEY);
+    window.localStorage.removeItem(PRIMARY_ROLE_OVERRIDE_KEY);
+    window.localStorage.removeItem('bot-hub-primary-role-v1');
+    window.localStorage.removeItem(CREATE_ATTEMPT_KEY);
+    window.localStorage.removeItem(REMOTE_BOTS_CACHE_KEY);
+    window.localStorage.removeItem(REMOTE_DEVICES_CACHE_KEY);
+    window.localStorage.setItem(V5_CLEANUP_KEY, '1');
+  }
+} catch {
+  // Ignore storage errors
+}
 
 const SOUL_MAX_BYTES = 65536;
 const SOUL_SNIPPETS: { zh: string; en: string; text: string }[] = [
@@ -131,6 +153,9 @@ export interface UnifiedBotItem {
   cwd: string;
   modelRef: string | null;
   createdAt: string;
+  lastActivityAt?: string;
+  lastPreview?: string;
+  archivedAt?: string | null;
   hostKind: 'local' | 'remote';
   hostId: string;
   hostLabel: string;
@@ -381,20 +406,52 @@ function writeHasRemoteFlag(hasRemote: boolean): void {
   }
 }
 
-function readPrimaryRoleOverride(): string {
+type CachedRemoteBot = HostBot & { deviceName: string; platform?: string; description?: string };
+
+function readCachedRemoteBots(): CachedRemoteBot[] {
   try {
-    return window.localStorage.getItem(PRIMARY_ROLE_OVERRIDE_KEY) || DEFAULT_PRIMARY_ROLE;
+    const raw = window.localStorage.getItem(REMOTE_BOTS_CACHE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? (parsed as CachedRemoteBot[]) : [];
   } catch {
-    return DEFAULT_PRIMARY_ROLE;
+    return [];
   }
 }
 
-function writePrimaryRoleOverride(name: string): void {
+function writeCachedRemoteBots(bots: CachedRemoteBot[]): void {
   try {
-    window.localStorage.setItem(PRIMARY_ROLE_OVERRIDE_KEY, name);
+    window.localStorage.setItem(REMOTE_BOTS_CACHE_KEY, JSON.stringify(bots));
   } catch {
     // Ignore storage errors
   }
+}
+
+function readCachedRemoteDevices(): DevicesDirectoryItem[] {
+  try {
+    const raw = window.localStorage.getItem(REMOTE_DEVICES_CACHE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? (parsed as DevicesDirectoryItem[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeCachedRemoteDevices(devices: DevicesDirectoryItem[]): void {
+  try {
+    window.localStorage.setItem(REMOTE_DEVICES_CACHE_KEY, JSON.stringify(devices));
+  } catch {
+    // Ignore storage errors
+  }
+}
+
+function formatArchivedRemainingDays(archivedAt: string | null | undefined): number {
+  if (!archivedAt) return 14;
+  const archivedMs = Date.parse(archivedAt);
+  if (!Number.isFinite(archivedMs)) return 14;
+  const remainingMs = archivedMs + ARCHIVE_RETENTION_MS - Date.now();
+  return Math.max(1, Math.ceil(remainingMs / (24 * 60 * 60 * 1000)));
 }
 
 function formatBotListTime(
@@ -540,13 +597,21 @@ export function HostPage({
   // Left drawer (always mounted in DOM for smooth slide-in & slide-out animation)
   const [leftDrawerOpen, setLeftDrawerOpen] = useState(false);
 
-  // Hub search
+  // Hub search & Archived section
   const [searchQuery, setSearchQuery] = useState('');
-  const [primaryRoleName, setPrimaryRoleName] = useState<string>(() => readPrimaryRoleOverride());
+  const [archivedExpanded, setArchivedExpanded] = useState(false);
 
   // Local Host state (managed transparently in background)
   const [localHost, setLocalHost] = useState<HostSnapshot>();
-  const [localBots, setLocalBots] = useState<HostBot[]>([]);
+  const [localBots, setLocalBots] = useState<HostBot[]>(() => {
+    try {
+      const raw = localStorage.getItem('e-launcher:cached-local-bots-v1');
+      return raw ? array<HostBot>(JSON.parse(raw)) : [];
+    } catch {
+      return [];
+    }
+  });
+  const [localBotsLoaded, setLocalBotsLoaded] = useState(false);
   const localBotsGeneration = useRef(0);
   const startingLocalRef = useRef<Promise<HostSnapshot | undefined> | null>(null);
 
@@ -555,7 +620,7 @@ export function HostPage({
   const [remoteProfiles, setRemoteProfiles] = useState<DesktopUiProfile[]>([]);
   const [remoteIdentity, setRemoteIdentity] = useState<DesktopIdentity | null>(null);
   const [remoteConnected, setRemoteConnected] = useState(false);
-  const [remoteBots, setRemoteBots] = useState<Array<HostBot & { deviceName: string; platform?: string; description?: string }>>([]);
+  const [remoteBots, setRemoteBots] = useState<CachedRemoteBot[]>(() => readCachedRemoteBots());
   const [directoryError, setDirectoryError] = useState('');
   const directoryFlight = useRef(false);
   const directoryGeneration = useRef(0);
@@ -570,7 +635,7 @@ export function HostPage({
     else localStorage.removeItem(CREATE_ATTEMPT_KEY);
     setCreateAttemptState(attempt);
   };
-  const [remoteDevices, setRemoteDevices] = useState<DevicesDirectoryItem[]>([]);
+  const [remoteDevices, setRemoteDevices] = useState<DevicesDirectoryItem[]>(() => readCachedRemoteDevices());
   const remoteClientRef = useRef<{ api: DesktopPanelApi; invalidate(): void; dispose(): void } | null>(null);
 
   // Bot preview metadata & clear cutoff map
@@ -594,6 +659,7 @@ export function HostPage({
 
   // Bot Edit / Create mode state (15847.jpg)
   const [editMode, setEditMode] = useState<'create' | 'edit'>('edit');
+  const [editMakePrimary, setEditMakePrimary] = useState(false);
   const [editName, setEditName] = useState('');
   const [editSubtitle, setEditSubtitle] = useState('');
   const [editCwd, setEditCwd] = useState('');
@@ -664,12 +730,16 @@ export function HostPage({
       const currentSnap = snap ?? (await BotHost.snapshot());
       if (generation !== localBotsGeneration.current) return [];
       setLocalHost(currentSnap);
-      if (currentSnap.phase !== 'running') { setLocalBots([]); return []; }
+      if (currentSnap.phase !== 'running') {
+        setLocalBotsLoaded(false);
+        return [];
+      }
       if (activeCenter) {
         try {
           const status = await BotHost.status();
           if (status.center?.centerUrl && new URL(status.center.centerUrl).origin !== new URL(activeCenter).origin) {
             setLocalBots([]);
+            setLocalBotsLoaded(false);
             return [];
           }
         } catch {
@@ -680,9 +750,10 @@ export function HostPage({
       const list = array<HostBot>(envelope.result);
       if (generation !== localBotsGeneration.current) return [];
       setLocalBots(list);
+      try { localStorage.setItem('e-launcher:cached-local-bots-v1', JSON.stringify(list)); } catch { /* ignore */ }
+      setLocalBotsLoaded(true);
       return list;
     } catch {
-      setLocalBots([]);
       return [];
     }
   }, [activeCenter]);
@@ -754,7 +825,7 @@ export function HostPage({
 
   useEffect(() => {
     if (!active) return;
-    const timer = window.setInterval(() => { if (!document.hidden) void syncLocalBots(); }, 5000);
+    const timer = window.setInterval(() => { if (!document.hidden) void syncLocalBots(); }, 2000);
     return () => { window.clearInterval(timer); };
   }, [active, syncLocalBots]);
 
@@ -807,9 +878,16 @@ export function HostPage({
       const directory = await api.broker(identity, 'bot_directory', {});
       if (generation !== directoryGeneration.current || api.identity?.generation !== identity.generation) return;
       setRemoteDevices(directory.devices);
+      writeCachedRemoteDevices(directory.devices);
       setRemoteBots(previous => {
         const failed = new Set(directory.errors.map(error => error.deviceId));
-        return [...directory.bots, ...previous.filter(bot => failed.has(bot.deviceId))];
+        const returnedKeys = new Set(directory.bots.map(b => `${b.deviceId}:${b.botId}`));
+        const merged = [
+          ...directory.bots,
+          ...previous.filter(bot => failed.has(bot.deviceId) && !returnedKeys.has(`${bot.deviceId}:${bot.botId}`)),
+        ];
+        writeCachedRemoteBots(merged);
+        return merged;
       });
       setDirectoryError(directory.errors.map(error => `${error.deviceId}: ${error.message || error.code}`).join(' · '));
     } catch (error) {
@@ -823,7 +901,7 @@ export function HostPage({
     directoryGeneration.current += 1;
     if (!active || !remoteConnected || !remoteIdentity) return;
     void syncRemoteBots();
-    const timer = window.setInterval(() => { if (!document.hidden) void syncRemoteBots(); }, 5000);
+    const timer = window.setInterval(() => { if (!document.hidden) void syncRemoteBots(); }, 2000);
     return () => { window.clearInterval(timer); directoryGeneration.current += 1; };
   }, [active, remoteConnected, remoteIdentity?.profileId, remoteIdentity?.generation, syncRemoteBots]);
 
@@ -839,8 +917,8 @@ export function HostPage({
     }
   }, [remoteBots, remoteIdentity, botMetaMap, updateBotMeta]);
 
-  // Build unified Bot list (Primary Jarvis + Local Bots + Remote Bots)
-  const { primaryBot, listBotItems } = useMemo(() => {
+  // Build unified Bot list (Local Primary Bot + Pinned Remote Main Bots + Regular Bots + Archived Bots)
+  const { primaryBot, pinnedRemoteMainBots, listBotItems, archivedBots, allBotItems } = useMemo(() => {
     void avatarVersion;
     const localByIdentity = new Map(localBots.map(bot => [JSON.stringify([bot.deviceId, bot.botId]), bot] as const));
     for (const bot of remoteBots) {
@@ -856,78 +934,91 @@ export function HostPage({
         botId: b.botId,
         primaryConversationId: b.primaryConversationId,
         role: b.role,
-        description: (b as HostBot & {description?: string}).description ?? '',
+        description: (b as HostBot & { description?: string }).description ?? '',
         cwd: b.cwd,
         modelRef: b.modelRef,
         createdAt: b.createdAt,
+        lastActivityAt: b.lastActivityAt || b.createdAt,
+        lastPreview: b.lastPreview || '',
+        archivedAt: b.archivedAt ?? null,
         hostKind: 'local',
         hostId: 'local',
         hostLabel: matchedDevice?.displayName || t('本机', 'Local'),
         platform: matchedDevice?.platform || 'android',
         online: true,
+        isPrimary: Boolean(b.isPrimary),
       };
     });
 
     const api = remoteClientRef.current?.api;
+    const activeProfileId = remoteIdentity?.profileId || remoteProfiles[0]?.id || 'default';
     const remoteByIdentity = new Map(remoteBots
       .filter(bot => bot.deviceId !== localHost?.deviceId && !localByIdentity.has(JSON.stringify([bot.deviceId, bot.botId])))
       .map(bot => [JSON.stringify([bot.deviceId, bot.botId]), bot] as const));
-    const allRemote: UnifiedBotItem[] = remoteIdentity && api
-      ? [...remoteByIdentity.values()].map(b => {
-          const key = `remote:${remoteIdentity.profileId}:${b.deviceId}:${b.botId}`;
-          const matchedDevice = remoteDevices.find(device => device.deviceId === b.deviceId);
-          const isOnline = Boolean(remoteConnected && matchedDevice?.online);
-          const shortHostName = b.deviceName || matchedDevice?.displayName || b.deviceId.slice(0, 10);
-          return {
-            key, botId: b.botId, primaryConversationId: b.primaryConversationId,
-            role: b.role, description: b.description ?? '', cwd: b.cwd, modelRef: b.modelRef,
-            createdAt: b.createdAt, hostKind: 'remote' as const, hostId: b.deviceId,
-            hostLabel: shortHostName,
-            platform: b.platform || matchedDevice?.platform,
-            online: isOnline,
-            remoteIdentity: api.identityForTarget(b.deviceId),
-          };
-        }) : [];
-
-    const jarvisIdx = allLocal.findIndex(
-      b =>
-        b.role === primaryRoleName ||
-        b.role === DEFAULT_PRIMARY_ROLE ||
-        b.role.toLowerCase() === 'jarvis',
-    );
-    let primary: UnifiedBotItem;
-    const restLocal = [...allLocal];
-
-    if (jarvisIdx >= 0) {
-      primary = { ...restLocal[jarvisIdx], isPrimary: true };
-      restLocal.splice(jarvisIdx, 1);
-    } else {
-      const jarvisKey = 'local:local:__jarvis__';
-      primary = {
-        key: jarvisKey,
-        botId: '__jarvis__',
-        role: primaryRoleName,
-        cwd: localHost?.workspace ?? '',
-        modelRef: null,
-        createdAt: '',
-        hostKind: 'local',
-        hostId: 'local',
-        hostLabel: t('本机', 'Local'),
-        platform: 'android',
-        online: true,
-        isPrimary: true,
+    const allRemote: UnifiedBotItem[] = [...remoteByIdentity.values()].map(b => {
+      const key = `remote:${activeProfileId}:${b.deviceId}:${b.botId}`;
+      const matchedDevice = remoteDevices.find(device => device.deviceId === b.deviceId);
+      const isOnline = Boolean(remoteConnected && matchedDevice?.online);
+      const shortHostName = b.deviceName || matchedDevice?.displayName || b.deviceId.slice(0, 10);
+      return {
+        key,
+        botId: b.botId,
+        primaryConversationId: b.primaryConversationId,
+        role: b.role,
+        description: b.description ?? '',
+        cwd: b.cwd,
+        modelRef: b.modelRef,
+        createdAt: b.createdAt,
+        lastActivityAt: b.lastActivityAt || b.createdAt,
+        lastPreview: b.lastPreview || '',
+        archivedAt: b.archivedAt ?? null,
+        hostKind: 'remote' as const,
+        hostId: b.deviceId,
+        hostLabel: shortHostName,
+        platform: b.platform || matchedDevice?.platform,
+        online: isOnline,
+        isPrimary: Boolean(b.isPrimary),
+        remoteIdentity: remoteIdentity && api ? api.identityForTarget(b.deviceId) : undefined,
       };
-    }
+    });
 
-    const combined = [...restLocal, ...allRemote];
-    return { primaryBot: primary, listBotItems: combined };
-  }, [localBots, remoteBots, remoteDevices, remoteConnected, remoteIdentity, localHost?.deviceId, localHost?.workspace, primaryRoleName, botMetaMap, avatarVersion, t]);
+    const getSortTime = (item: UnifiedBotItem): number => {
+      const serverMs = Date.parse(item.lastActivityAt || item.createdAt) || 0;
+      const metaMs = botMetaMap[item.key]?.updatedAt || 0;
+      return Math.max(serverMs, metaMs);
+    };
+
+    const unarchivedLocal = allLocal.filter(b => !b.archivedAt);
+    const unarchivedRemote = allRemote.filter(b => !b.archivedAt);
+
+    const primary =
+      unarchivedLocal.find(b => b.isPrimary) ??
+      null;
+
+    const pinnedRemoteMainBots = unarchivedRemote
+      .filter(b => b.isPrimary)
+      .sort((a, b) => getSortTime(b) - getSortTime(a) || a.botId.localeCompare(b.botId));
+
+    const regularBots = [
+      ...unarchivedLocal.filter(b => b.key !== primary?.key),
+      ...unarchivedRemote.filter(b => !b.isPrimary),
+    ].sort((a, b) => getSortTime(b) - getSortTime(a) || a.botId.localeCompare(b.botId));
+
+    const archived = [...allLocal.filter(b => Boolean(b.archivedAt)), ...allRemote.filter(b => Boolean(b.archivedAt))]
+      .sort((a, b) => (Date.parse(b.archivedAt || '') || 0) - (Date.parse(a.archivedAt || '') || 0));
+
+    const combined = [...pinnedRemoteMainBots, ...regularBots];
+    const allItems = [...(primary ? [primary] : []), ...combined, ...archived];
+    return { primaryBot: primary, pinnedRemoteMainBots, listBotItems: combined, archivedBots: archived, allBotItems: allItems };
+  }, [localBots, remoteBots, remoteDevices, remoteProfiles, remoteConnected, remoteIdentity, localHost?.deviceId, botMetaMap, avatarVersion, t]);
 
   const activeBot = useMemo<UnifiedBotItem | null>(() => {
     if (!activeBotKey) return null;
-    if (activeBotKey === primaryBot.key || activeBotKey === 'local:local:__jarvis__') return primaryBot;
-    return listBotItems.find(b => b.key === activeBotKey) ?? null;
-  }, [activeBotKey, primaryBot, listBotItems]);
+    if (primaryBot && activeBotKey === primaryBot.key) return primaryBot;
+    return allBotItems.find(b => b.key === activeBotKey) ?? null;
+  }, [activeBotKey, primaryBot, allBotItems]);
+
+  const mustCreatePrimaryBot = Boolean(localHost?.phase === 'running' && localBotsLoaded && !primaryBot);
 
   const filteredBotItems = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
@@ -937,7 +1028,7 @@ export function HostPage({
       return (
         item.role.toLowerCase().includes(q) ||
         item.hostLabel.toLowerCase().includes(q) ||
-        (meta?.lastText ?? '').toLowerCase().includes(q) ||
+        (item.lastPreview ?? meta?.lastText ?? '').toLowerCase().includes(q) ||
         (item.description ?? '').toLowerCase().includes(q)
       );
     });
@@ -1020,16 +1111,6 @@ export function HostPage({
         });
         return;
       }
-      if (bot.botId === '__jarvis__') {
-        setBotScheduleState({
-          tasks: [],
-          exactAlarmGranted: true,
-          schedulingError: '',
-          timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Shanghai',
-          now: Date.now(),
-        });
-        return;
-      }
       const snap = await ensureLocalHostRunning();
       if (!snap || snap.phase !== 'running') return;
       const latestBots = await syncLocalBots(snap);
@@ -1073,17 +1154,6 @@ export function HostPage({
     async (bot: UnifiedBotItem) => {
       const generation = ++profileLoadGeneration.current;
       const current = () => generation === profileLoadGeneration.current;
-      if (bot.botId === '__jarvis__') {
-        setBotSoul({
-          botId: '__jarvis__',
-          path: 'SOUL.md',
-          revision: 'initial',
-          text: editInitialSoul,
-        });
-        setSoulDraft(editInitialSoul);
-        setSoulDirty(false);
-        return;
-      }
       if (bot.hostKind === 'local') {
         const snap = await ensureLocalHostRunning();
         if (!snap || snap.phase !== 'running') return;
@@ -1115,7 +1185,7 @@ export function HostPage({
         }
       }
     },
-    [ensureLocalHostRunning, editInitialSoul],
+    [ensureLocalHostRunning],
   );
 
   // Load history and observe when entering Chat View
@@ -1129,10 +1199,6 @@ export function HostPage({
       setChatReceipt(undefined);
 
       if (bot.hostKind === 'local') {
-        if (bot.botId === '__jarvis__') {
-          setChatHistory([]);
-          return;
-        }
         const snap = await ensureLocalHostRunning();
         if (!snap || snap.phase !== 'running') return;
         try {
@@ -1233,7 +1299,6 @@ export function HostPage({
           }
         : null;
     if (chatHostKind === 'remote' && !remoteTarget) return;
-    if (chatHostKind === 'local' && chatBotId === '__jarvis__') return;
 
     const readSubmission = async (): Promise<HostSubmission | null> => {
       if (chatHostKind === 'local') {
@@ -1285,6 +1350,8 @@ export function HostPage({
         if (next.answerText) {
           updateBotMeta(chatBotKey, { lastText: next.answerText, updatedAt: Date.now(), unread: false });
         }
+        if (chatHostKind === 'local') void syncLocalBots();
+        else void syncRemoteBots();
       } catch {
         // Ignore transient poll error
       }
@@ -1296,7 +1363,7 @@ export function HostPage({
   }, [
     screen, chatBotKey, chatBotId, chatHostKind, chatProfileId, chatDeviceId, chatGeneration,
     chatConnectionKind, chatRemoteApi, chatRemoteConnected, connectionEpoch,
-    chatRequestId, chatReceiptStatus, updateBotMeta,
+    chatRequestId, chatReceiptStatus, updateBotMeta, syncLocalBots, syncRemoteBots,
   ]);
 
   const openBotChat = (bot: UnifiedBotItem) => {
@@ -1340,6 +1407,7 @@ export function HostPage({
     const meta = botMetaMap[bot.key];
     const preset = resolveBotAvatarPreset(bot.key, bot.role, bot.isPrimary);
     setEditMode('edit');
+    setEditMakePrimary(Boolean(bot.isPrimary));
     setEditName(bot.role);
     setEditSubtitle(bot.description ?? '');
     setEditCwd(bot.cwd || localHost?.workspace || '');
@@ -1351,10 +1419,13 @@ export function HostPage({
     void loadBotSoul(bot);
   };
 
-  const openCreateBotPage = () => {
-    const nextPreset = GROK_AVATAR_PRESETS[listBotItems.length % GROK_AVATAR_PRESETS.length];
+  const openCreateBotPage = useCallback((forcePrimary = false) => {
+    const nextPreset = forcePrimary
+      ? JARVIS_AVATAR_PRESET
+      : GROK_AVATAR_PRESETS[listBotItems.length % GROK_AVATAR_PRESETS.length];
     setEditMode('create');
-    setEditName('');
+    setEditMakePrimary(forcePrimary);
+    setEditName(forcePrimary ? DEFAULT_PRIMARY_ROLE : '');
     setEditSubtitle('');
     setEditCwd('');
     setEditTargetHost('local');
@@ -1366,7 +1437,13 @@ export function HostPage({
     setEditVoiceSpeed('1x');
     setEditVoiceLang('自动');
     setScreen('bot-edit');
-  };
+  }, [listBotItems.length]);
+
+  useEffect(() => {
+    if (mustCreatePrimaryBot && screen === 'hub') {
+      openCreateBotPage(true);
+    }
+  }, [mustCreatePrimaryBot, screen, openCreateBotPage]);
 
   const openAvatarPicker = (fromScreen: HubScreen, currentPreset: GrokAvatarPreset) => {
     setAvatarReturnScreen(fromScreen);
@@ -1401,43 +1478,12 @@ export function HostPage({
     window.setTimeout(() => setClearNotice(''), 2500);
   }, [activeBot, chatHistory, chatLive, clearedMap, t, updateBotMeta]);
 
-  // Materialize virtual Jarvis into a real Bot when needed
-  const materializeJarvisIfNeeded = async (snap: HostSnapshot): Promise<{ botId: string; key: string }> => {
-    const defaultCwd = snap.workspace || '/data/user/0/com.example.launcherprobe/files/bot-host/workspace';
-    const jarvisModelRef = primaryBot.modelRef || null;
-    const createdEnv = await BotHost.call({
-      method: 'createBot',
-      params: { requestId: uuid(), role: primaryRoleName, cwd: defaultCwd, modelRef: jarvisModelRef },
-    });
-    const createdBot = createdEnv.result as HostBot;
-    const newKey = `local:local:${createdBot.botId}`;
-    const currentAvatar = resolveBotAvatarPreset(primaryBot.key, primaryRoleName, true);
-    saveBotAvatarConfig(newKey, currentAvatar);
-    if (jarvisModelRef) {
-      updateBotMeta(newKey, { modelOverride: jarvisModelRef });
-    }
-    if (editInitialSoul.trim()) {
-      try {
-        const soulEnv = await BotHost.call({ method: 'getBotSoul', params: { botId: createdBot.botId } });
-        const s = parseBotSoul(soulEnv.result);
-        if (s) {
-          await BotHost.call({
-            method: 'setBotSoul',
-            params: { botId: createdBot.botId, input: { expectedRevision: s.revision, text: editInitialSoul } },
-          });
-        }
-      } catch {
-        // Ignore initial soul error
-      }
-    }
-    await syncLocalBots(snap);
-    setActiveBotKey(newKey);
-    return { botId: createdBot.botId, key: newKey };
-  };
-
   const sendMessage = () =>
     action.run(async () => {
       if (!activeBot) return;
+      if (activeBot.archivedAt) {
+        throw new Error(t('该智能体已归档，请先恢复后再发送消息', 'This bot is archived. Unarchive it first to send messages.'));
+      }
       const trimmed = chatDraft.trim();
       if (!trimmed) return;
 
@@ -1466,16 +1512,8 @@ export function HostPage({
           setChatDraft(trimmed);
           throw new Error(t('本机服务正在启动，请稍后重试', 'Local service is starting, please try again'));
         }
-        let targetBotId = activeBot.botId;
-        let targetKey = activeBot.key;
-
-        if (targetBotId === '__jarvis__') {
-          const mat = await materializeJarvisIfNeeded(snap);
-          targetBotId = mat.botId;
-          targetKey = mat.key;
-          submission.botKey = targetKey;
-        }
-        if (chatSubmissionRef.current !== submission) return;
+        const targetBotId = activeBot.botId;
+        const targetKey = activeBot.key;
 
         updateBotMeta(targetKey, { lastText: trimmed, updatedAt: Date.now(), unread: false });
         const reqId = submission.requestId;
@@ -1498,7 +1536,6 @@ export function HostPage({
             observeIdRef.current = undefined;
           });
         }
-
       }
     });
 
@@ -1509,7 +1546,8 @@ export function HostPage({
       if (!roleName) return;
 
       if (editMode === 'create') {
-        const targetHost = editTargetHost;
+        const targetHost = mustCreatePrimaryBot ? 'local' : editTargetHost;
+        const shouldMakePrimary = editMakePrimary || mustCreatePrimaryBot;
         if (targetHost !== 'local' && (!remoteConnected || !remoteIdentity || !remoteClientRef.current || !remoteDevices.some(device => device.deviceId === targetHost && device.online))) throw new Error(t('所选设备不可用，未创建 Bot', 'Selected device unavailable; bot was not created'));
         if (createAttempt) throw new Error(t('创建回执未确认，请在待发送中按原 ID 对账', 'Creation unconfirmed; reconcile the original ID in Pending'));
         if (targetHost === 'local') {
@@ -1532,6 +1570,7 @@ export function HostPage({
               description: editSubtitle.trim(),
               ...(editCwd.trim() ? { cwd: editCwd.trim() } : {}),
               modelRef: null,
+              ...(shouldMakePrimary ? { makePrimary: true } : {}),
             },
           }).catch(error => { if (error?.outcome === 'not-sent') setCreateAttempt(null); throw error; });
           setCreateAttempt(null);
@@ -1571,6 +1610,7 @@ export function HostPage({
             cwd: created.cwd,
             modelRef: created.modelRef,
             createdAt: created.createdAt,
+            isPrimary: created.isPrimary ?? shouldMakePrimary,
             hostKind: 'local',
             hostId: 'local',
             hostLabel: t('本机', 'Local'),
@@ -1584,6 +1624,7 @@ export function HostPage({
             description: editSubtitle.trim(),
             ...(editCwd.trim() ? { cwd: editCwd.trim() } : {}),
             modelRef: null,
+            ...(shouldMakePrimary ? { makePrimary: true } : {}),
           }).catch(error => { if (error?.outcome === 'not-sent') setCreateAttempt(null); throw error; })) as unknown as HostBot;
           setCreateAttempt(null);
           const key = `remote:${remoteIdentity.profileId}:${targetHost}:${created.botId}`;
@@ -1604,22 +1645,13 @@ export function HostPage({
         }
       } else if (activeBot) {
         // Editing an existing Bot updates the authoritative shared profile.
-        if (activeBot.botId === '__jarvis__') {
-          const snap = await ensureLocalHostRunning();
-          if (!snap || snap.phase !== 'running') throw new Error('Host unavailable');
-          const materialized = await materializeJarvisIfNeeded(snap);
-          await BotHost.call({ method: 'updateBotProfile', params: { botId: materialized.botId, name: roleName, description: editSubtitle.trim() } });
-          await syncLocalBots(snap);
-        } else if (activeBot.hostKind === 'local') {
+        if (activeBot.hostKind === 'local') {
           await BotHost.call({ method: 'updateBotProfile', params: { botId: activeBot.botId, name: roleName, description: editSubtitle.trim() } });
           await syncLocalBots();
         } else if (activeBot.remoteIdentity && remoteClientRef.current) {
           await remoteClientRef.current.api.call(activeBot.remoteIdentity, 'updateBotProfile', { botId: activeBot.botId, name: roleName, description: editSubtitle.trim() });
+          await syncRemoteBots();
         } else throw new Error('Remote target unavailable');
-        if (activeBot.isPrimary) {
-          setPrimaryRoleName(roleName);
-          writePrimaryRoleOverride(roleName);
-        }
         saveBotAvatarConfig(activeBot.key, editAvatarPreset);
         setAvatarVersion(v => v + 1);
         updateBotMeta(activeBot.key, {
@@ -1633,8 +1665,106 @@ export function HostPage({
       }
     });
 
+  const handleSetPrimaryBot = (bot: UnifiedBotItem) =>
+    action.run(async () => {
+      setChatTopMenuOpen(false);
+      if (bot.archivedAt) {
+        throw new Error(t('已归档的智能体不能直接设为主智能体，请先恢复', 'Archived bot cannot be set as primary. Unarchive it first.'));
+      }
+      if (bot.hostKind === 'local') {
+        const snap = await ensureLocalHostRunning();
+        if (!snap || snap.phase !== 'running') throw new Error(t('本机服务未运行', 'Local host not running'));
+        await BotHost.call({ method: 'setPrimaryBot', params: { botId: bot.botId } });
+        await syncLocalBots(snap);
+      } else if (bot.remoteIdentity && remoteClientRef.current) {
+        if (!remoteConnected || bot.online === false) {
+          throw new Error(t('目标设备离线，已拒绝修改', 'Target device is offline; operation rejected'));
+        }
+        await remoteClientRef.current.api.call(bot.remoteIdentity, 'setPrimaryBot', { botId: bot.botId });
+        await syncRemoteBots();
+      } else {
+        throw new Error(t('无法连接目标节点', 'Target host unavailable'));
+      }
+    });
+
+  const handleArchiveBot = (bot: UnifiedBotItem) =>
+    action.run(async () => {
+      setChatTopMenuOpen(false);
+      if (bot.isPrimary) {
+        throw new Error(t('主智能体受保护，请先将其他智能体设为主智能体后再归档', 'Primary bot is protected. Switch primary bot before archiving.'));
+      }
+      if (bot.hostKind === 'local') {
+        const snap = await ensureLocalHostRunning();
+        if (!snap || snap.phase !== 'running') throw new Error(t('本机服务未运行', 'Local host not running'));
+        await BotHost.call({ method: 'archiveBot', params: { botId: bot.botId } });
+        await syncLocalBots(snap);
+      } else if (bot.remoteIdentity && remoteClientRef.current) {
+        if (!remoteConnected || bot.online === false) {
+          throw new Error(t('目标设备离线，已拒绝修改', 'Target device is offline; operation rejected'));
+        }
+        await remoteClientRef.current.api.call(bot.remoteIdentity, 'archiveBot', { botId: bot.botId });
+        await syncRemoteBots();
+      } else {
+        throw new Error(t('无法连接目标节点', 'Target host unavailable'));
+      }
+      setScreen('hub');
+    });
+
+  const handleUnarchiveBot = (bot: UnifiedBotItem) =>
+    action.run(async () => {
+      setChatTopMenuOpen(false);
+      if (bot.hostKind === 'local') {
+        const snap = await ensureLocalHostRunning();
+        if (!snap || snap.phase !== 'running') throw new Error(t('本机服务未运行', 'Local host not running'));
+        await BotHost.call({ method: 'unarchiveBot', params: { botId: bot.botId } });
+        await syncLocalBots(snap);
+      } else if (bot.remoteIdentity && remoteClientRef.current) {
+        if (!remoteConnected || bot.online === false) {
+          throw new Error(t('目标设备离线，已拒绝修改', 'Target device is offline; operation rejected'));
+        }
+        await remoteClientRef.current.api.call(bot.remoteIdentity, 'unarchiveBot', { botId: bot.botId });
+        await syncRemoteBots();
+      } else {
+        throw new Error(t('无法连接目标节点', 'Target host unavailable'));
+      }
+    });
+
+  const handleDeleteBot = (bot: UnifiedBotItem) =>
+    action.run(async () => {
+      setChatTopMenuOpen(false);
+      if (bot.isPrimary) {
+        throw new Error(t('主智能体受保护，不能直接删除。请先将其他智能体设为主智能体。', 'Primary bot is protected. Switch primary bot before deleting.'));
+      }
+      const confirmed = window.confirm(
+        t(
+          `确定要永久删除「${bot.role}」及其所有历史对话与人设文档吗？此操作不可恢复。`,
+          `Permanently delete "${bot.role}" and all its conversation history? This cannot be undone.`,
+        ),
+      );
+      if (!confirmed) return;
+      if (bot.hostKind === 'local') {
+        const snap = await ensureLocalHostRunning();
+        if (!snap || snap.phase !== 'running') throw new Error(t('本机服务未运行', 'Local host not running'));
+        await BotHost.call({ method: 'deleteBot', params: { botId: bot.botId } });
+        await syncLocalBots(snap);
+      } else if (bot.remoteIdentity && remoteClientRef.current) {
+        if (!remoteConnected || bot.online === false) {
+          throw new Error(t('目标设备离线，已拒绝修改', 'Target device is offline; operation rejected'));
+        }
+        await remoteClientRef.current.api.call(bot.remoteIdentity, 'deleteBot', { botId: bot.botId });
+        await syncRemoteBots();
+      } else {
+        throw new Error(t('无法连接目标节点', 'Target host unavailable'));
+      }
+      if (activeBotKey === bot.key) {
+        cancelActiveObservation();
+        setActiveBotKey(null);
+      }
+      setScreen('hub');
+    });
+
   const openModelPickerSheet = (_target: 'bot-edit' | 'bot-profile') => {
-    if (!activeBot || activeBot.botId === '__jarvis__' || !remoteIdentity || !remoteConnected || !remoteClientRef.current) return;
+    if (!activeBot || !remoteIdentity || !remoteConnected || !remoteClientRef.current) return;
     const deviceId = activeBot.hostKind === 'local' ? localHost?.deviceId : activeBot.hostId;
     if (!deviceId) return;
     const api = remoteClientRef.current.api;
@@ -1661,11 +1791,7 @@ export function HostPage({
       if (activeBot.hostKind === 'local') {
         const snap = await ensureLocalHostRunning();
         if (!snap || snap.phase !== 'running') return;
-        let targetBotId = activeBot.botId;
-        if (targetBotId === '__jarvis__') {
-          const mat = await materializeJarvisIfNeeded(snap);
-          targetBotId = mat.botId;
-        }
+        const targetBotId = activeBot.botId;
         const currentSoul =
           botSoul && botSoul.botId === targetBotId
             ? botSoul
@@ -1711,13 +1837,8 @@ export function HostPage({
     if (!snap || snap.phase !== 'running') {
       throw new Error(t('正在启动本机运行环境，请稍后重试', 'Starting local runtime, please try again'));
     }
-    let targetBotId = activeBot.botId;
-    let targetKey = activeBot.key;
-    if (targetBotId === '__jarvis__') {
-      const mat = await materializeJarvisIfNeeded(snap);
-      targetBotId = mat.botId;
-      targetKey = mat.key;
-    }
+    const targetBotId = activeBot.botId;
+    const targetKey = activeBot.key;
     const latestBots = await syncLocalBots(snap);
     const matched = latestBots.find(b => b.botId === targetBotId);
     const convId = activeBot.primaryConversationId || matched?.primaryConversationId || '';
@@ -2031,6 +2152,9 @@ export function HostPage({
       return true;
     }
     if (screen === 'bot-edit') {
+      if (mustCreatePrimaryBot && editMode === 'create') {
+        return true;
+      }
       setScreen(editMode === 'create' ? 'hub' : 'bot-profile');
       return true;
     }
@@ -2067,6 +2191,7 @@ export function HostPage({
     subPageReturnScreen,
     scheduleEditing,
     editMode,
+    mustCreatePrimaryBot,
     searchQuery,
     cancelActiveObservation,
   ]);
@@ -2174,11 +2299,12 @@ export function HostPage({
 
   const showSlashHints = chatDraft.startsWith('/') && chatDraft.length <= 8;
   const anyDrawerOpen = leftDrawerOpen;
-  const primaryPreset = resolveBotAvatarPreset(primaryBot.key, primaryBot.role, true);
+  const primaryPreset = primaryBot
+    ? resolveBotAvatarPreset(primaryBot.key, primaryBot.role, true)
+    : JARVIS_AVATAR_PRESET;
 
   // 电脑全屏视图（Grok Bot 风格）：本机与远程 Bot 共用同一全屏组件。
-  // target 是当前已选真实 Bot 的主会话（无 scopeId）；合成主助手 __jarvis__ 在用到屏幕时自动物化。
-  const showerBotId = activeBot && activeBot.botId !== '__jarvis__' ? activeBot.botId : null;
+  const showerBotId = activeBot ? activeBot.botId : null;
   const showerHostKind = activeBot?.hostKind;
   const showerIdentity = activeBot?.remoteIdentity;
   const showerTarget = useMemo<ShowerTarget | null>(
@@ -2276,7 +2402,7 @@ export function HostPage({
               type="button"
               className="hub-circle-btn hub-add-btn"
               aria-label={t('新建 Bot', 'New Bot')}
-              onClick={openCreateBotPage}
+              onClick={() => openCreateBotPage(false)}
             >
               <Plus size={22} strokeWidth={2.2} />
             </button>
@@ -2290,20 +2416,70 @@ export function HostPage({
             onTouchEnd={onHubScrollTouchEnd}
             onTouchCancel={onHubScrollTouchEnd}
           >
-            {/* Hero Spotlight: Primary Assistant */}
-            <section className="hub-hero-section">
-              <button
-                type="button"
-                className="hub-hero-button"
-                onClick={() => openBotChat(primaryBot)}
-                aria-label={`${primaryBot.role} - ${t('点击进入文字对话', 'Tap to chat')}`}
-              >
-                <GrokBotAvatar preset={primaryPreset} isPrimary starBadge size={88} />
-                <span className="hub-hero-name">{primaryBot.role}</span>
-              </button>
+            {/* Hero Spotlight: Local + Remote Primary Assistants */}
+            <section className="hub-hero-section" style={{ flexDirection: 'row', justifyContent: 'center', flexWrap: 'wrap', gap: 12 }}>
+              {primaryBot ? (
+                <button
+                  type="button"
+                  className="hub-hero-button"
+                  onClick={() => openBotChat(primaryBot)}
+                  aria-label={`${primaryBot.role} - ${t('点击进入文字对话', 'Tap to chat')}`}
+                >
+                  <GrokBotAvatar
+                    preset={primaryPreset}
+                    isPrimary
+                    starBadge
+                    platformBadge={<PlatformLogoIcon platform={primaryBot.platform} size={11} />}
+                    size={88}
+                  />
+                  <span className="hub-hero-name">{primaryBot.role}</span>
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className="hub-hero-button"
+                  onClick={() => {
+                    void (async () => {
+                      const snap = await ensureLocalHostRunning();
+                      const bots = snap?.phase === 'running' ? await syncLocalBots(snap) : [];
+                      if (!bots.some(b => b.isPrimary && !b.archivedAt)) {
+                        openCreateBotPage(true);
+                      }
+                    })();
+                  }}
+                  aria-label={t('创建主智能体', 'Create Primary Bot')}
+                >
+                  <GrokBotAvatar
+                    preset={JARVIS_AVATAR_PRESET}
+                    isPrimary
+                    starBadge
+                    platformBadge={<PlatformLogoIcon platform="android" size={11} />}
+                    size={88}
+                  />
+                  <span className="hub-hero-name">{t('创建主智能体', 'Create Primary Bot')}</span>
+                </button>
+              )}
+              {pinnedRemoteMainBots.map(remoteMain => (
+                <button
+                  key={remoteMain.key}
+                  type="button"
+                  className="hub-hero-button"
+                  onClick={() => openBotChat(remoteMain)}
+                  aria-label={`${remoteMain.role} - ${t('点击进入文字对话', 'Tap to chat')}`}
+                >
+                  <GrokBotAvatar
+                    preset={resolveBotAvatarPreset(remoteMain.key, remoteMain.role, true)}
+                    isPrimary
+                    starBadge
+                    platformBadge={<PlatformLogoIcon platform={remoteMain.platform} size={11} />}
+                    size={88}
+                  />
+                  <span className="hub-hero-name">{remoteMain.role}</span>
+                </button>
+              ))}
             </section>
 
-            {/* Unified Bot List (Local + Remote) */}
+            {/* Unified Bot List (Pinned Remote Main Bots + Regular Bots) */}
             <section className="hub-bot-list" aria-label={t('智能体列表', 'Bots')}>
               <ErrorNotice error={directoryError} />
               {filteredBotItems.length === 0 ? (
@@ -2317,21 +2493,35 @@ export function HostPage({
               ) : (
                 filteredBotItems.map(item => {
                   const meta = botMetaMap[item.key];
+                  const isPinnedMain = Boolean(item.isPrimary && !item.archivedAt);
                   const snippet =
-                    item.description ||
+                    item.lastPreview ||
                     meta?.lastText ||
+                    item.description ||
                     t('点击开始文字对话…', 'Tap to start chatting…');
-                  const timeLabel = formatBotListTime(meta?.updatedAt, item.createdAt, t);
-                  const preset = resolveBotAvatarPreset(item.key, item.role);
+                  const activityMs = Math.max(
+                    Date.parse(item.lastActivityAt || item.createdAt) || 0,
+                    meta?.updatedAt || 0,
+                  );
+                  const timeLabel = formatBotListTime(activityMs || undefined, item.createdAt, t);
+                  const preset = resolveBotAvatarPreset(item.key, item.role, isPinnedMain);
                   return (
                     <button
                       key={item.key}
                       type="button"
-                      className="hub-bot-row"
+                      className={`hub-bot-row${isPinnedMain ? ' is-pinned-main' : ''}${item.online === false ? ' is-offline' : ''}`}
                       onClick={() => openBotChat(item)}
                     >
                       <div className="hub-bot-avatar-col">
-                        <GrokBotAvatar preset={preset} size={52} />
+                        <GrokBotAvatar
+                          preset={preset}
+                          isPrimary={isPinnedMain}
+                          starBadge={isPinnedMain}
+                          platformBadge={
+                            isPinnedMain ? <PlatformLogoIcon platform={item.platform} size={10} /> : undefined
+                          }
+                          size={52}
+                        />
                       </div>
                       <div className="hub-bot-content-col">
                         <div className="hub-bot-title-line">
@@ -2355,6 +2545,95 @@ export function HostPage({
                     </button>
                   );
                 })
+              )}
+
+              {/* Archived Bots Collapsible Section */}
+              {archivedBots.length > 0 && (
+                <div className="hub-archived-section" style={{ marginTop: 12 }}>
+                  <button
+                    type="button"
+                    className="grok-card-row"
+                    style={{ borderRadius: 14, opacity: 0.82 }}
+                    onClick={() => setArchivedExpanded(v => !v)}
+                  >
+                    <Archive size={17} className="grok-row-icon" />
+                    <span className="grok-row-label">
+                      {t(`已归档智能体 (${archivedBots.length})`, `Archived (${archivedBots.length})`)}
+                    </span>
+                    <span className="grok-row-value">{t('14 天后自动清理', '14d auto-delete')}</span>
+                    {archivedExpanded ? (
+                      <ChevronDown size={17} className="grok-row-chevron" />
+                    ) : (
+                      <ChevronRight size={17} className="grok-row-chevron" />
+                    )}
+                  </button>
+                  {archivedExpanded &&
+                    archivedBots.map(item => {
+                      const daysLeft = formatArchivedRemainingDays(item.archivedAt);
+                      const preset = resolveBotAvatarPreset(item.key, item.role, false);
+                      return (
+                        <div
+                          key={item.key}
+                          className="hub-bot-row is-archived"
+                          style={{ opacity: 0.72 }}
+                          onClick={() => openBotChat(item)}
+                          role="button"
+                          tabIndex={0}
+                          onKeyDown={e => {
+                            if (e.key === 'Enter' || e.key === ' ') {
+                              e.preventDefault();
+                              openBotChat(item);
+                            }
+                          }}
+                        >
+                          <div className="hub-bot-avatar-col">
+                            <GrokBotAvatar preset={preset} size={46} />
+                          </div>
+                          <div className="hub-bot-content-col">
+                            <div className="hub-bot-title-line">
+                              <span className="hub-bot-title">{item.role}</span>
+                              {hasRemoteConfigured && (
+                                <span className={`hub-bot-host-badge ${item.hostKind}${item.online === false ? ' is-offline' : ''}`}>
+                                  <PlatformLogoIcon platform={item.platform} size={11} />
+                                  <span className="hub-bot-host-text">{item.hostLabel}</span>
+                                </span>
+                              )}
+                              <span className="hub-bot-time">
+                                {t(`${daysLeft} 天后删除`, `${daysLeft}d left`)}
+                              </span>
+                            </div>
+                            <div className="hub-bot-subtitle-line" style={{ gap: 8 }}>
+                              <span className="hub-bot-snippet">
+                                {item.lastPreview || item.description || t('已归档 · 只读历史', 'Archived · Read-only')}
+                              </span>
+                              <button
+                                type="button"
+                                className="hub-outline-btn"
+                                style={{ padding: '2px 8px', fontSize: '0.75rem' }}
+                                onClick={e => {
+                                  e.stopPropagation();
+                                  void handleUnarchiveBot(item);
+                                }}
+                              >
+                                {t('恢复', 'Restore')}
+                              </button>
+                              <button
+                                type="button"
+                                className="hub-outline-btn"
+                                style={{ padding: '2px 8px', fontSize: '0.75rem' }}
+                                onClick={e => {
+                                  e.stopPropagation();
+                                  void handleDeleteBot(item);
+                                }}
+                              >
+                                {t('删除', 'Delete')}
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                </div>
               )}
             </section>
           </div>
@@ -2489,6 +2768,36 @@ export function HostPage({
                     <Search size={19} />
                     <span>{t('在聊天中查找', 'Search in Chat')}</span>
                   </button>
+                  {!activeBot.isPrimary && !activeBot.archivedAt && (
+                    <button
+                      type="button"
+                      role="menuitem"
+                      onClick={() => void handleSetPrimaryBot(activeBot)}
+                    >
+                      <Star size={19} />
+                      <span>{t('设为主智能体', 'Set as Primary Bot')}</span>
+                    </button>
+                  )}
+                  {!activeBot.isPrimary && !activeBot.archivedAt && (
+                    <button
+                      type="button"
+                      role="menuitem"
+                      onClick={() => void handleArchiveBot(activeBot)}
+                    >
+                      <Archive size={19} />
+                      <span>{t('归档智能体', 'Archive Bot')}</span>
+                    </button>
+                  )}
+                  {Boolean(activeBot.archivedAt) && (
+                    <button
+                      type="button"
+                      role="menuitem"
+                      onClick={() => void handleUnarchiveBot(activeBot)}
+                    >
+                      <RotateCcw size={19} />
+                      <span>{t('恢复智能体', 'Unarchive Bot')}</span>
+                    </button>
+                  )}
                   <button
                     type="button"
                     role="menuitem"
@@ -2498,6 +2807,17 @@ export function HostPage({
                     <Trash2 size={19} />
                     <span>{t('清空当前对话', 'Clear History')}</span>
                   </button>
+                  {!activeBot.isPrimary && (
+                    <button
+                      type="button"
+                      role="menuitem"
+                      className="danger"
+                      onClick={() => void handleDeleteBot(activeBot)}
+                    >
+                      <Trash2 size={19} />
+                      <span>{t('永久删除智能体', 'Delete Bot')}</span>
+                    </button>
+                  )}
                 </div>
               </>
             )}
@@ -2544,6 +2864,9 @@ export function HostPage({
                     preset={resolveBotAvatarPreset(activeBot.key, activeBot.role, activeBot.isPrimary)}
                     isPrimary={activeBot.isPrimary}
                     starBadge={activeBot.isPrimary}
+                    platformBadge={
+                      activeBot.isPrimary ? <PlatformLogoIcon platform={activeBot.platform} size={11} /> : undefined
+                    }
                     size={76}
                   />
                 </button>
@@ -2614,7 +2937,24 @@ export function HostPage({
 
           {/* 15845.jpg / 15866.jpg Bottom Composer Bar */}
           <footer className="grok-chat-composer-area">
-            {activeBot.hostKind === 'remote' && activeBot.remoteIdentity && remoteClientRef.current ? (
+            {activeBot.archivedAt ? (
+              <div className="grok-card-group" style={{ padding: '10px 14px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
+                <span style={{ fontSize: '0.86rem', opacity: 0.85 }}>
+                  {t(
+                    `该智能体已归档（${formatArchivedRemainingDays(activeBot.archivedAt)} 天后自动删除），只读历史`,
+                    `Archived (${formatArchivedRemainingDays(activeBot.archivedAt)}d until auto-delete) · Read-only`,
+                  )}
+                </span>
+                <button
+                  type="button"
+                  className="grok-done-pill-btn"
+                  disabled={action.busy}
+                  onClick={() => void handleUnarchiveBot(activeBot)}
+                >
+                  {t('立即恢复', 'Unarchive')}
+                </button>
+              </div>
+            ) : activeBot.hostKind === 'remote' && activeBot.remoteIdentity && remoteClientRef.current ? (
               <RemotePendingComposer
                 key={activeBot.key}
                 api={remoteClientRef.current.api}
@@ -2739,13 +3079,7 @@ export function HostPage({
                           setChatReceipt(undefined);
                           const snap = await ensureLocalHostRunning();
                           if (!snap || snap.phase !== 'running' || chatSubmissionRef.current !== submission) return;
-                          let targetBotId = activeBot.botId;
-                          if (targetBotId === '__jarvis__') {
-                            const mat = await materializeJarvisIfNeeded(snap);
-                            targetBotId = mat.botId;
-                          }
-                          if (chatSubmissionRef.current !== submission) return;
-                          submission.botKey = targetBotId === activeBot.botId ? activeBot.key : `local:local:${targetBotId}`;
+                          const targetBotId = activeBot.botId;
                           const cap = { botId: targetBotId, requestId: submission.requestId };
                           setVoiceCapturing(cap);
                           await BotHost.startVoice(cap);
@@ -2764,7 +3098,7 @@ export function HostPage({
                     aria-label={t('停止生成', 'Stop')}
                     onClick={() =>
                       action.run(async () => {
-                        if (activeBot.hostKind === 'local' && activeBot.botId !== '__jarvis__') {
+                        if (activeBot.hostKind === 'local') {
                           await BotHost.call({ method: 'abort', params: { botId: activeBot.botId } });
                         } else if (activeBot.hostKind === 'remote' && activeBot.remoteIdentity && remoteClientRef.current) {
                           await remoteClientRef.current.api.call(activeBot.remoteIdentity, 'abort', {
@@ -2844,6 +3178,9 @@ export function HostPage({
                   preset={resolveBotAvatarPreset(activeBot.key, activeBot.role, activeBot.isPrimary)}
                   isPrimary={activeBot.isPrimary}
                   starBadge={activeBot.isPrimary}
+                  platformBadge={
+                    activeBot.isPrimary ? <PlatformLogoIcon platform={activeBot.platform} size={11} /> : undefined
+                  }
                   size={104}
                 />
               </button>
@@ -2866,7 +3203,7 @@ export function HostPage({
                 type="button"
                 className="grok-card-row"
                 onClick={() => openModelPickerSheet('bot-profile')}
-                disabled={!getOrCreateRemoteClient || !remoteConnected || !remoteIdentity || activeBot.botId === '__jarvis__' || (activeBot.hostKind === 'local' && !localHost?.deviceId)}
+                disabled={!getOrCreateRemoteClient || !remoteConnected || !remoteIdentity || (activeBot.hostKind === 'local' && !localHost?.deviceId)}
               >
                 <Cpu size={20} className="grok-row-icon" />
                 <span className="grok-row-label">{t('模型', 'Model')}</span>
@@ -2969,6 +3306,73 @@ export function HostPage({
             <p className="grok-card-footnote">
               {t('Bot 完成任务或等你处理时通知你', 'Notify you when the Bot finishes work or needs your input')}
             </p>
+
+            {/* Grouped Card 3: Primary Bot Switch, Archive & Delete Lifecycle */}
+            <div className="grok-field-section" style={{ marginTop: 12 }}>
+              <label className="grok-section-label">{t('节点与生命周期管理', 'Lifecycle Management')}</label>
+              <section className="grok-card-group">
+                {activeBot.isPrimary ? (
+                  <div className="grok-card-row no-active">
+                    <Star size={19} className="grok-row-icon" />
+                    <span className="grok-row-label">
+                      {t('当前为主智能体（切换主智能体后可归档或删除）', 'Current Primary Bot (switch primary to archive/delete)')}
+                    </span>
+                  </div>
+                ) : (
+                  <>
+                    {!activeBot.archivedAt && (
+                      <button
+                        type="button"
+                        className="grok-card-row"
+                        disabled={action.busy}
+                        onClick={() => void handleSetPrimaryBot(activeBot)}
+                      >
+                        <Star size={19} className="grok-row-icon" />
+                        <span className="grok-row-label">{t('设为主智能体', 'Set as Primary Bot')}</span>
+                        <ChevronRight size={18} className="grok-row-chevron" />
+                      </button>
+                    )}
+                    {!activeBot.archivedAt ? (
+                      <button
+                        type="button"
+                        className="grok-card-row"
+                        disabled={action.busy}
+                        onClick={() => void handleArchiveBot(activeBot)}
+                      >
+                        <Archive size={19} className="grok-row-icon" />
+                        <span className="grok-row-label">{t('归档智能体', 'Archive Bot')}</span>
+                        <span className="grok-row-value">{t('14 天后自动清理', '14d auto-delete')}</span>
+                        <ChevronRight size={18} className="grok-row-chevron" />
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        className="grok-card-row"
+                        disabled={action.busy}
+                        onClick={() => void handleUnarchiveBot(activeBot)}
+                      >
+                        <RotateCcw size={19} className="grok-row-icon" />
+                        <span className="grok-row-label">{t('恢复智能体（解除归档）', 'Unarchive Bot')}</span>
+                        <span className="grok-row-value">
+                          {t(`剩余 ${formatArchivedRemainingDays(activeBot.archivedAt)} 天`, `${formatArchivedRemainingDays(activeBot.archivedAt)}d left`)}
+                        </span>
+                        <ChevronRight size={18} className="grok-row-chevron" />
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      className="grok-card-row danger-text"
+                      disabled={action.busy}
+                      onClick={() => void handleDeleteBot(activeBot)}
+                    >
+                      <Trash2 size={19} />
+                      <span className="grok-row-label">{t('永久删除智能体', 'Permanently Delete Bot')}</span>
+                    </button>
+                  </>
+                )}
+              </section>
+              <ErrorNotice error={action.error} />
+            </div>
           </div>
         </main>
       )}
@@ -2989,7 +3393,7 @@ export function HostPage({
           showerCall={showerCall}
           showerConnected={showerConnected}
           onInterrupt={async () => {
-            if (activeBot.hostKind === 'local' && activeBot.botId !== '__jarvis__') {
+            if (activeBot.hostKind === 'local') {
               await BotHost.call({ method: 'abort', params: { botId: activeBot.botId } });
             }
           }}
@@ -3000,16 +3404,24 @@ export function HostPage({
       {screen === 'bot-edit' && (
         <main className="grok-subpage grok-page-enter">
           <header className="grok-subpage-topbar">
-            <button
-              type="button"
-              className="grok-floating-circle-btn"
-              aria-label={t('返回', 'Back')}
-              onClick={() => setScreen(editMode === 'create' ? 'hub' : 'bot-profile')}
-            >
-              <ArrowLeft size={20} />
-            </button>
+            {mustCreatePrimaryBot && editMode === 'create' ? (
+              <span style={{ width: 40 }} />
+            ) : (
+              <button
+                type="button"
+                className="grok-floating-circle-btn"
+                aria-label={t('返回', 'Back')}
+                onClick={() => setScreen(editMode === 'create' ? 'hub' : 'bot-profile')}
+              >
+                <ArrowLeft size={20} />
+              </button>
+            )}
             <h2 className="grok-subpage-header-title">
-              {editMode === 'create' ? t('新建 Bot', 'New Bot') : t('编辑 Bot', 'Edit Bot')}
+              {editMode === 'create'
+                ? mustCreatePrimaryBot || editMakePrimary
+                  ? t('创建主智能体', 'Create Primary Bot')
+                  : t('新建 Bot', 'New Bot')
+                : t('编辑 Bot', 'Edit Bot')}
             </h2>
             <button
               type="button"
@@ -3022,6 +3434,21 @@ export function HostPage({
           </header>
 
           <div className="grok-subpage-scroll">
+            {mustCreatePrimaryBot && editMode === 'create' && (
+              <div className="grok-field-section">
+                <section className="grok-card-group" style={{ padding: '12px 14px' }}>
+                  <strong style={{ display: 'block', marginBottom: 4 }}>
+                    {t('当前设备尚未创建主智能体', 'Primary Bot Required')}
+                  </strong>
+                  <span style={{ fontSize: '0.85rem', opacity: 0.82 }}>
+                    {t(
+                      '每台设备至少需要一个主智能体。请先创建本机主智能体后再进入主页。',
+                      'Every device requires at least one primary bot. Create one to enter the hub.',
+                    )}
+                  </span>
+                </section>
+              </div>
+            )}
             {editMode === 'create' && createAttempt && (
               <div className="grok-field-section">
                 <section className="grok-card-group grok-pending-freeze-card">
@@ -3149,7 +3576,7 @@ export function HostPage({
               </div>
             </div>
 
-            {editMode === 'create' && hasRemoteConfigured && (
+            {editMode === 'create' && hasRemoteConfigured && !mustCreatePrimaryBot && (
               <div className="grok-field-section">
                 <label className="grok-section-label">{t('运行节点', 'Host')}</label>
                 <div className="grok-card-group">
@@ -3172,12 +3599,32 @@ export function HostPage({
               </div>
             )}
 
+            {editMode === 'create' && !mustCreatePrimaryBot && (
+              <div className="grok-field-section">
+                <label className="grok-section-label">{t('主智能体设置', 'Primary Role')}</label>
+                <div className="grok-card-group">
+                  <div className="grok-card-row no-active">
+                    <span className="grok-row-label">{t('创建后设为该节点的主智能体', 'Set as Primary Bot on this host')}</span>
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-checked={editMakePrimary}
+                      className={`grok-toggle-switch${editMakePrimary ? ' checked' : ''}`}
+                      onClick={() => setEditMakePrimary(v => !v)}
+                    >
+                      <span className="grok-toggle-knob" />
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+
             <div className="grok-field-section">
               <label className="grok-section-label">{t('模型', 'Model')}</label>
               <div className="grok-card-group">
                 {editMode === 'create' ? <div className="grok-card-row no-active">{t('创建后在模型设置中选择，默认继承中心', 'Choose a model after creation; inherits from the center by default')}</div>
                   : !getOrCreateRemoteClient ? <div className="grok-card-row no-active">{t('请在独立助手中设置 Bot 模型', 'Set the bot model in the standalone assistant')}</div>
-                  : <button type="button" className="grok-card-row" onClick={() => openModelPickerSheet('bot-edit')} disabled={!remoteConnected || !remoteIdentity || !activeBot || activeBot.botId === '__jarvis__' || (activeBot.hostKind === 'local' && !localHost?.deviceId)}>
+                  : <button type="button" className="grok-card-row" onClick={() => openModelPickerSheet('bot-edit')} disabled={!remoteConnected || !remoteIdentity || !activeBot || (activeBot.hostKind === 'local' && !localHost?.deviceId)}>
                     <Cpu size={18} className="grok-row-icon"/><span className="grok-row-label">{t('Bot 模型设置', 'Bot model settings')}</span><ChevronRight size={18} className="grok-row-chevron"/>
                   </button>}
               </div>
@@ -3488,7 +3935,7 @@ export function HostPage({
               )}
             </p>
 
-            {soulDirty && activeBot && activeBot.botId !== '__jarvis__' && (
+            {soulDirty && activeBot && (
               <section className="grok-card-group">
                 <button
                   type="button"

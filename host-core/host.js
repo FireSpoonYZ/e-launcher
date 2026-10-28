@@ -27,17 +27,31 @@ export function openHost(options) {
     return bot;
   };
 
+  const extractBotId = (input) => {
+    if (typeof input === 'string') {
+      assertId(input, 'botId');
+      return input;
+    }
+    if (typeof input !== 'object' || input === null) throw invalidArgument('input must be an object');
+    assertId(input.botId, 'botId');
+    return input.botId;
+  };
+
   return {
     deviceId: store.deviceId,
     dataRoot: root,
     defaultWorkspace,
+    getHostProfile() {
+      return store.getHostProfile();
+    },
     createBot(input) {
       if (typeof input !== 'object' || input === null) throw invalidArgument('input must be an object');
-      const { requestId, role, cwd, modelRef, description = '' } = input;
+      const { requestId, role, cwd, modelRef, description = '', makePrimary } = input;
       if (typeof requestId !== 'string' || requestId.trim() === '') throw invalidArgument('requestId must be a non-empty string');
       if (typeof role !== 'string' || role.trim() === '') throw invalidArgument('role must be non-blank text');
       if (cwd !== undefined && (typeof cwd !== 'string' || !path.isAbsolute(cwd))) throw invalidArgument('cwd must be an absolute path');
       if (typeof description !== 'string' || description.length > 2000) throw invalidArgument('description must be a string of at most 2000 characters');
+      if (makePrimary !== undefined && typeof makePrimary !== 'boolean') throw invalidArgument('makePrimary must be a boolean');
       let resolvedModelRef = null;
       if (modelRef !== undefined && modelRef !== null) {
         if (typeof modelRef !== 'string' || modelRef.trim() === '') throw invalidArgument('modelRef must be null or a non-blank string');
@@ -45,7 +59,14 @@ export function openHost(options) {
       }
       const normalizedCwd = cwd === undefined ? defaultWorkspace : path.resolve(cwd);
 
-      const request = { requestId, role, cwd: normalizedCwd, modelRef: resolvedModelRef, description };
+      const request = {
+        requestId,
+        role,
+        cwd: normalizedCwd,
+        modelRef: resolvedModelRef,
+        description,
+        ...(makePrimary !== undefined ? { makePrimary } : {}),
+      };
       // Retries for an already-accepted request must not fail when the original
       // cwd has since disappeared; store.createBot does the consistency check.
       if (store.findByRequest(requestId) !== null) {
@@ -87,6 +108,36 @@ export function openHost(options) {
         throw invalidArgument('description must be a string of at most 2000 characters');
       }
       return store.updateBotProfile(input.botId, name, input.description);
+    },
+    setPrimaryBot(input) {
+      const botId = extractBotId(input);
+      return store.setPrimaryBot(botId);
+    },
+    archiveBot(input) {
+      const botId = extractBotId(input);
+      return store.archiveBot(botId);
+    },
+    unarchiveBot(input) {
+      const botId = extractBotId(input);
+      return store.unarchiveBot(botId);
+    },
+    deleteBot(input) {
+      const botId = extractBotId(input);
+      store.deleteBot(botId);
+      try {
+        fs.rmSync(path.join(root, 'bots', botId), { recursive: true, force: true });
+      } catch {
+        /* ignore cleanup errors */
+      }
+      return { botId, deleted: true };
+    },
+    recordBotActivity(botId, activity) {
+      assertId(botId, 'botId');
+      return store.recordBotActivity(botId, activity ?? {});
+    },
+    listExpiredArchivedBots(cutoffIso) {
+      assertId(cutoffIso, 'cutoffIso');
+      return store.listExpiredArchivedBots(cutoffIso);
     },
     getBot(botId) {
       assertId(botId, 'botId');

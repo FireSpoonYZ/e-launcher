@@ -1,15 +1,17 @@
-// Bot 设置（desktop/远程页）：SOUL.md 编辑。
+// Bot 设置（desktop/远程页）：SOUL.md 编辑与 CPA 模型配置。
 // 显式读取 + CAS 保存：冲突/结果未确认只锁保存，只有显式“采用远端设置（丢弃本地修改）”才换基线；
 // 未保存草稿连同其原始基线（含 revision）按 profile+target+bot 保留，自动读取绝不替换 dirty 部分的基线，
 // 因此旧草稿不会拿到未看过的远端 revision 去覆盖远端；不自动重放、不跨 Host 串数据。
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { BotSoul } from '../../../host-core/index.js';
-import { toError } from './api';
+import type { CenterBotModelConfig, CenterModelSelection } from '../../../host-core/desktop-client.js';
+import type { BotSoul, ModelCatalog } from '../../../host-core/index.js';
+import { request, toError } from './api';
 import { openCenterManagement } from './CenterGate';
 import type { DesktopIdentity, DesktopViewApi } from './types';
 
 /** 与 Host 的公开上限一致（UTF-8 字节）。 */
 const SOUL_MAX_BYTES = 64 * 1024;
+const THINKING_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
 
 const SOUL_SNIPPETS: { label: string; content: string }[] = [
   {
@@ -72,7 +74,13 @@ export function BotSettings({
   const [saving, setSaving] = useState<'soul' | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const [studioTab, setStudioTab] = useState<'all' | 'soul' | 'extensions'>('soul');
+  const [studioTab, setStudioTab] = useState<'all' | 'soul' | 'extensions'>('all');
+
+  const [modelConfig, setModelConfig] = useState<CenterBotModelConfig | null>(null);
+  const [modelDraft, setModelDraft] = useState<CenterModelSelection>({});
+  const [modelCatalog, setModelCatalog] = useState<ModelCatalog | null>(null);
+  const [modelQuery, setModelQuery] = useState('');
+  const [modelSaving, setModelSaving] = useState(false);
 
   const mountedRef = useRef(true);
   /** 读取代次：同一选择内只应用最后一次读取。 */
@@ -127,6 +135,19 @@ export function BotSettings({
     setLoading(true);
     try {
       const doc = await api.call(id, 'getBotSoul', { botId });
+      void Promise.all([
+        api.call(id, 'getModelCatalog', {}).catch(() => null),
+        id.targetDeviceId
+          ? request('center_bot_model_get', { deviceId: id.targetDeviceId, botId }).catch(() => null)
+          : Promise.resolve(null),
+      ]).then(([catalogRes, cfgRes]) => {
+        if (stale(sel)) return;
+        if (catalogRes) setModelCatalog(catalogRes);
+        if (cfgRes) {
+          setModelConfig(cfgRes);
+          setModelDraft({ ...cfgRes.overrides });
+        }
+      });
       if (stale(sel) || seq !== seqRef.current || writesAtStart !== writeSeqRef.current) return;
       if (adoptRemote) {
         // 唯一允许更新基线并丢弃本地草稿的入口（显式动作）。
@@ -170,6 +191,8 @@ export function BotSettings({
     setError(null);
     setNotice(null);
     setSaving(null);
+    setModelConfig(null);
+    setModelDraft({});
     if (key) void load(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key]);
@@ -184,7 +207,7 @@ export function BotSettings({
   const soulValue = soulDraft ?? soul?.text ?? '';
   const soulDirty = soulDraft !== null && !!soul && soulDraft !== soul.text;
   // 读取（含“采用远端”）在途时同样锁住编辑与保存：点击后才输入的内容不会被迟到的采用结果清掉。
-  const busy = saving !== null || loading;
+  const busy = saving !== null || loading || modelSaving;
   const saveBusy = busy || !online;
   const canSaveSoul = !saveBusy && !!soul && soulDirty && !locked;
   const dirty = soulDirty;
@@ -246,7 +269,47 @@ export function BotSettings({
     }
   }
 
+  function updateModelDraft(k: keyof CenterModelSelection, v: string | null | undefined): void {
+    setModelDraft((prev) => {
+      const next = { ...prev };
+      if (v === undefined) delete next[k];
+      else next[k] = v;
+      return next;
+    });
+    setNotice(null);
+  }
+
+  async function saveModelConfig(): Promise<void> {
+    const id = api.identity;
+    if (!id || !id.targetDeviceId || !modelConfig || busy || !online) return;
+    const sel = cacheKey(id, botId);
+    setModelSaving(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const updated = await request('center_bot_model_set', {
+        deviceId: id.targetDeviceId,
+        botId,
+        expectedRevision: modelConfig.revision,
+        value: modelDraft,
+      });
+      if (stale(sel)) return;
+      setModelConfig(updated);
+      setModelDraft({ ...updated.overrides });
+      setNotice('Bot 模型与思考档位已保存并同步至中心。');
+    } catch (e) {
+      if (!stale(sel)) setError(`保存模型配置失败：${toError(e).message}`);
+    } finally {
+      if (mountedRef.current) setModelSaving(false);
+    }
+  }
+
+  const describeVal = (v: string | null | undefined) =>
+    v === undefined ? '继承全局' : v === null ? '显式清空' : v;
+
   const showSoulPanel = studioTab === 'all' || studioTab === 'soul';
+  const showModelPanel = studioTab === 'all' || studioTab === 'extensions';
+  const q = modelQuery.trim().toLowerCase();
 
   return (
     <details
@@ -258,11 +321,16 @@ export function BotSettings({
     >
       <summary className="soul-studio-summary">
         <div className="soul-studio-summary-main">
-          <h4>{`✨ Bot 设置（SOUL）${dirty ? ' · 已修改' : ''}`}</h4>
+          <h4>{`✨ Bot 设置（SOUL 与模型）${dirty ? ' · 已修改' : ''}`}</h4>
           <span className="soul-studio-badges">
             {soul ? (
               <span className={`studio-pill ${soulDirty ? 'amber' : 'purple'}`}>
                 {`SOUL.md · ${currentBytes} B`}
+              </span>
+            ) : null}
+            {modelConfig ? (
+              <span className="studio-pill emerald">
+                {`模型: ${describeVal(modelConfig.effective.modelRef)}`}
               </span>
             ) : null}
             {locked ? <span className="studio-pill coral">🔒 冲突锁定</span> : null}
@@ -272,7 +340,13 @@ export function BotSettings({
       <div className="raw-history-content soul-studio-body">
         <div className="soul-studio-topbar">
           <div className="studio-seg" role="tablist" aria-label="灵魂与扩展视图切换">
-
+            <button
+              type="button"
+              className={studioTab === 'all' ? 'active' : undefined}
+              onClick={() => setStudioTab('all')}
+            >
+              全部视图
+            </button>
             <button
               type="button"
               className={studioTab === 'soul' ? 'active' : undefined}
@@ -280,7 +354,14 @@ export function BotSettings({
             >
               {`🎭 灵魂文档 (SOUL.md)${soulDirty ? ' ●' : ''}`}
             </button>
-            <button type="button" onClick={() => void openCenterManagement()}>插件与模型在中心管理</button>
+            <button
+              type="button"
+              className={studioTab === 'extensions' ? 'active' : undefined}
+              onClick={() => setStudioTab('extensions')}
+            >
+              🤖 模型与思考 (CPA)
+            </button>
+            <button type="button" onClick={() => void openCenterManagement()}>插件与中心管理</button>
           </div>
           <div className="soul-studio-actions">
             <button type="button" onClick={() => void load(false)} disabled={!online || loading || busy}>
@@ -380,6 +461,118 @@ export function BotSettings({
                 </>
               ) : (
                 <div className="metadata">{loading ? '读取中…' : '尚未读取'}</div>
+              )}
+            </div>
+          ) : null}
+
+          {showModelPanel ? (
+            <div className="field studio-card">
+              <div className="studio-card-header">
+                <label>🤖 Bot 模型与思考档位（CPA 中心下发）</label>
+                {modelConfig ? (
+                  <span className="studio-pill emerald">
+                    {`有效模型: ${describeVal(modelConfig.effective.modelRef)}`}
+                  </span>
+                ) : null}
+              </div>
+              {modelConfig ? (
+                <>
+                  <div className="metadata">
+                    {`中心全局: ${describeVal(modelConfig.global.modelRef)} (${describeVal(modelConfig.global.thinkingLevel)}) · 当前覆盖: ${describeVal(modelConfig.overrides.modelRef)} (${describeVal(modelConfig.overrides.thinkingLevel)}) · revision ${modelConfig.revision}`}
+                  </div>
+                  <label>
+                    搜索过滤模型
+                    <input
+                      type="search"
+                      value={modelQuery}
+                      placeholder="输入模型名称或 provider/modelId 过滤…"
+                      disabled={busy}
+                      onChange={(e) => setModelQuery(e.target.value)}
+                    />
+                  </label>
+                  <label>
+                    选择模型（共 {modelCatalog?.models.length ?? 0} 个可用模型）
+                    <select
+                      disabled={busy || !online}
+                      value={
+                        modelDraft.modelRef === undefined
+                          ? '__inherit'
+                          : modelDraft.modelRef === null
+                            ? '__null'
+                            : modelDraft.modelRef
+                      }
+                      onChange={(e) =>
+                        updateModelDraft(
+                          'modelRef',
+                          e.target.value === '__inherit'
+                            ? undefined
+                            : e.target.value === '__null'
+                              ? null
+                              : e.target.value,
+                        )
+                      }
+                    >
+                      <option value="__inherit">继承中心全局 ({describeVal(modelConfig.global.modelRef)})</option>
+                      <option value="__null">显式清空</option>
+                      {modelDraft.modelRef &&
+                      !modelCatalog?.models.some((m) => m.modelRef === modelDraft.modelRef) ? (
+                        <option value={modelDraft.modelRef}>{modelDraft.modelRef}（当前配置）</option>
+                      ) : null}
+                      {(modelCatalog?.models ?? [])
+                        .filter(
+                          (m) =>
+                            !q || `${m.name} ${m.modelRef}`.toLowerCase().includes(q),
+                        )
+                        .map((m) => (
+                          <option key={m.modelRef} value={m.modelRef}>
+                            {m.name} · {m.modelRef}
+                          </option>
+                        ))}
+                    </select>
+                  </label>
+                  <label>
+                    思考档位 (Thinking Level)
+                    <select
+                      disabled={busy || !online}
+                      value={
+                        modelDraft.thinkingLevel === undefined
+                          ? '__inherit'
+                          : modelDraft.thinkingLevel === null
+                            ? '__null'
+                            : modelDraft.thinkingLevel
+                      }
+                      onChange={(e) =>
+                        updateModelDraft(
+                          'thinkingLevel',
+                          e.target.value === '__inherit'
+                            ? undefined
+                            : e.target.value === '__null'
+                              ? null
+                              : e.target.value,
+                        )
+                      }
+                    >
+                      <option value="__inherit">继承中心全局 ({describeVal(modelConfig.global.thinkingLevel)})</option>
+                      <option value="__null">显式清空</option>
+                      {THINKING_LEVELS.map((lv) => (
+                        <option key={lv} value={lv}>
+                          {lv}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <div className="form-actions">
+                    <button
+                      type="button"
+                      disabled={busy || !online}
+                      onClick={() => void saveModelConfig()}
+                    >
+                      {modelSaving ? '保存模型中…' : '保存模型配置'}
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <div className="metadata">{loading ? '读取模型配置中…' : '尚未加载模型配置'}</div>
               )}
             </div>
           ) : null}

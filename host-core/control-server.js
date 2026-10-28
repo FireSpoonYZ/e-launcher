@@ -32,6 +32,12 @@ const HTTP_IDLE_TIMEOUT_MS = 30000;
 const JOB_STATE_RE = /^(pending|accepted|completed|failed)$/;
 const MAX_STATUS_LIMIT = 200;
 
+const EXTRA_ERROR_STATUS = Object.freeze({
+  PRIMARY_BOT_PROTECTED: 409,
+  BOT_ARCHIVED: 409,
+  INVALID_STATE: 409,
+});
+
 const routes = [
   { method: 'POST', key: '/v1/center/provider/validate', pattern: /^\/v1\/center\/provider\/validate\/?$/, params: [], hasBody: true, handler: centerValidateProvider },
   { method: 'POST', key: '/v1/center/provider/discover', pattern: /^\/v1\/center\/provider\/discover\/?$/, params: [], hasBody: true, handler: centerDiscoverProvider },
@@ -40,7 +46,11 @@ const routes = [
   { method: 'GET', key: '/v1/bots', pattern: /^\/v1\/bots\/?$/, params: [], hasBody: false, handler: listBots },
   { method: 'POST', key: '/v1/bots', pattern: /^\/v1\/bots\/?$/, params: [], hasBody: true, handler: createBot },
   { method: 'GET', key: '/v1/bots/:botId', pattern: /^\/v1\/bots\/([^/]+)\/?$/, params: ['botId'], hasBody: false, handler: getBot },
+  { method: 'DELETE', key: '/v1/bots/:botId', pattern: /^\/v1\/bots\/([^/]+)\/?$/, params: ['botId'], hasBody: false, handler: deleteBot },
   { method: 'PUT', key: '/v1/bots/:botId/profile', pattern: /^\/v1\/bots\/([^/]+)\/profile\/?$/, params: ['botId'], hasBody: true, handler: updateBotProfile },
+  { method: 'POST', key: '/v1/bots/:botId/primary', pattern: /^\/v1\/bots\/([^/]+)\/primary\/?$/, params: ['botId'], hasBody: true, handler: setPrimaryBot },
+  { method: 'POST', key: '/v1/bots/:botId/archive', pattern: /^\/v1\/bots\/([^/]+)\/archive\/?$/, params: ['botId'], hasBody: true, handler: archiveBot },
+  { method: 'POST', key: '/v1/bots/:botId/unarchive', pattern: /^\/v1\/bots\/([^/]+)\/unarchive\/?$/, params: ['botId'], hasBody: true, handler: unarchiveBot },
   { method: 'GET', key: '/v1/bots/:botId/live', pattern: /^\/v1\/bots\/([^/]+)\/live\/?$/, params: ['botId'], hasBody: false, handler: live },
   { method: 'GET', key: '/v1/bot-requests/:requestId', pattern: /^\/v1\/bot-requests\/([^/]+)\/?$/, params: ['requestId'], hasBody: false, handler: findByRequest },
   { method: 'POST', key: '/v1/bots/:botId/submissions', pattern: /^\/v1\/bots\/([^/]+)\/submissions\/?$/, params: ['botId'], hasBody: true, handler: submit },
@@ -111,7 +121,7 @@ const MEMORY_ROUTE_KEYS = new Set([
  * 只固定绑定 127.0.0.1；单个 openRuntime + 单独 openHost 登记连接。
  */
 export async function openControlServer(options) {
-  const { token, port = DEFAULT_PORT, settings, getServiceStatus, deferResume, onBotsChanged, ...runtimeOptions } = options ?? {};
+  const { token, port = DEFAULT_PORT, settings, getServiceStatus, deferResume, onBotsChanged, onBotsSync, ...runtimeOptions } = options ?? {};
   // 可选 settings/callback 一旦提供必须完整合法，否则 INVALID_ARGUMENT，不静默当未配置。
   let settingsStore = null;
   let activeRevision = null;
@@ -139,6 +149,7 @@ export async function openControlServer(options) {
     getServiceStatus: getServiceStatus ?? null,
     centerManaged: Boolean(runtimeOptions.centerRuntime),
     onBotsChanged,
+    onBotsSync,
   };
   assertPort(port);
   // token 格式由 createControlAuthorizer 校验；在打开任何数据前调用并保留结果。
@@ -160,7 +171,7 @@ export async function openControlServer(options) {
   const host = openHost({ dataRoot: runtimeOptions.dataRoot });
   let runtime;
   try {
-    runtime = await openRuntime({ ...runtimeOptions, onBotsChanged });
+    runtime = await openRuntime({ ...runtimeOptions, onBotsChanged, onBotsSync });
   } catch (err) {
     try { host.close(); } catch { /* 打开失败清理不掩盖原错误 */ }
     throw err;
@@ -183,7 +194,10 @@ export async function openControlServer(options) {
         await dispatch(host, runtime, authorize, req, res, ctx);
       } catch (err) {
         if (!res.writableEnded) {
-          try { writeControlError(res, err); } catch { res.destroy(); }
+          const mapped = !(err instanceof ControlHttpError) && typeof err?.code === 'string' && EXTRA_ERROR_STATUS[err.code]
+            ? new ControlHttpError(EXTRA_ERROR_STATUS[err.code], err.code, err.message)
+            : err;
+          try { writeControlError(res, mapped); } catch { res.destroy(); }
         }
       }
     })());
@@ -332,8 +346,25 @@ async function createBot(host, runtime, params, body, req, res) {
 
 async function updateBotProfile(host, runtime, params, body, req, res, ctx) {
   const bot = host.updateBotProfile({ ...body, botId: params.botId });
-  if (ctx.onBotsChanged) await ctx.onBotsChanged();
+  if (ctx.onBotsSync) await ctx.onBotsSync();
+  else if (ctx.onBotsChanged) await ctx.onBotsChanged();
   writeControlJson(res, 200, bot);
+}
+
+async function setPrimaryBot(host, runtime, params, body, req, res) {
+  writeControlJson(res, 200, await runtime.setPrimaryBot(params.botId));
+}
+
+async function archiveBot(host, runtime, params, body, req, res) {
+  writeControlJson(res, 200, await runtime.archiveBot(params.botId));
+}
+
+async function unarchiveBot(host, runtime, params, body, req, res) {
+  writeControlJson(res, 200, await runtime.unarchiveBot(params.botId));
+}
+
+async function deleteBot(host, runtime, params, body, req, res) {
+  writeControlJson(res, 200, await runtime.deleteBot(params.botId));
 }
 
 async function getBot(host, runtime, params, body, req, res) {

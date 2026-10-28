@@ -33,6 +33,39 @@ function assertObject(value) {
 function assertRevision(expected, actual) {
   if (expected !== actual) throw error('REVISION_CONFLICT', 'Revision does not match');
 }
+function normalizeBotRef(deviceId, bot) {
+  assertObject(bot);
+  assertId(bot.botId);
+  if (bot.deviceId !== deviceId || typeof bot.name !== 'string') throw error('INVALID_ARGUMENT', 'Invalid bot directory');
+  return {
+    deviceId,
+    botId: bot.botId,
+    name: bot.name,
+    ...(typeof bot.description === 'string' ? { description: bot.description } : {}),
+    ...(typeof bot.cwd === 'string' ? { cwd: bot.cwd } : {}),
+    ...(bot.modelRef !== undefined ? { modelRef: bot.modelRef } : {}),
+    ...(typeof bot.primaryConversationId === 'string' ? { primaryConversationId: bot.primaryConversationId } : {}),
+    ...(typeof bot.createdAt === 'string' ? { createdAt: bot.createdAt } : {}),
+    ...(typeof bot.isPrimary === 'boolean' ? { isPrimary: bot.isPrimary } : {}),
+    ...(bot.lastActivityAt !== undefined ? { lastActivityAt: bot.lastActivityAt } : {}),
+    ...(bot.lastPreview !== undefined ? { lastPreview: bot.lastPreview } : {}),
+    ...(bot.archivedAt !== undefined ? { archivedAt: bot.archivedAt } : {}),
+    ...(typeof bot.deviceName === 'string' ? { deviceName: bot.deviceName } : {}),
+    ...(typeof bot.platform === 'string' ? { platform: bot.platform } : {}),
+  };
+}
+function compareBotRefs(a, b) {
+  const aArchived = Boolean(a.archivedAt);
+  const bArchived = Boolean(b.archivedAt);
+  if (aArchived !== bArchived) return aArchived ? 1 : -1;
+  const aPrimary = a.isPrimary === true;
+  const bPrimary = b.isPrimary === true;
+  if (aPrimary !== bPrimary) return aPrimary ? -1 : 1;
+  const aTime = Date.parse(a.lastActivityAt || a.createdAt || '') || 0;
+  const bTime = Date.parse(b.lastActivityAt || b.createdAt || '') || 0;
+  if (bTime !== aTime) return bTime - aTime;
+  return a.botId < b.botId ? -1 : a.botId > b.botId ? 1 : 0;
+}
 
 function collectCredentialRefs(schema, value, refs) {
   if (!schema || typeof schema !== 'object' || value == null) return;
@@ -173,7 +206,7 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
     db.exec('PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON;');
     transaction(() => {
       const version = db.prepare('PRAGMA user_version').get().user_version;
-      if (version !== 0 && version !== 1) throw error('UNSUPPORTED_SCHEMA', 'Unsupported center database schema');
+      if (version !== 0 && version !== 1 && version !== 2) throw error('UNSUPPORTED_SCHEMA', 'Unsupported center database schema');
       if (version === 0) {
         db.exec(`
           CREATE TABLE metadata (id INTEGER PRIMARY KEY CHECK(id = 1), revision INTEGER NOT NULL);
@@ -183,7 +216,9 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
           CREATE TABLE model_config (id INTEGER PRIMARY KEY CHECK(id = 1), json TEXT NOT NULL, revision INTEGER NOT NULL);
           INSERT INTO model_config VALUES (1, '{}', 0);
           CREATE TABLE bot_models (device_id TEXT NOT NULL, bot_id TEXT NOT NULL, json TEXT NOT NULL, revision INTEGER NOT NULL, PRIMARY KEY(device_id, bot_id));
-          CREATE TABLE device_bots (device_id TEXT NOT NULL, bot_id TEXT NOT NULL, json TEXT NOT NULL, PRIMARY KEY(device_id, bot_id));
+          CREATE TABLE sync_meta (id INTEGER PRIMARY KEY CHECK(id = 1), epoch TEXT NOT NULL, seq INTEGER NOT NULL);
+          CREATE TABLE device_bots (device_id TEXT NOT NULL, bot_id TEXT NOT NULL, json TEXT NOT NULL, seq INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(device_id, bot_id));
+          CREATE TABLE bot_events (seq INTEGER PRIMARY KEY, device_id TEXT NOT NULL, bot_id TEXT NOT NULL, op TEXT NOT NULL CHECK(op IN ('upsert', 'delete')), json TEXT, updated_at TEXT NOT NULL);
           CREATE TABLE package_versions (package_id TEXT NOT NULL, version TEXT NOT NULL, json TEXT NOT NULL, PRIMARY KEY(package_id, version));
           CREATE TABLE installations (id TEXT PRIMARY KEY, json TEXT NOT NULL);
           CREATE TABLE installation_configs (installation_id TEXT PRIMARY KEY REFERENCES installations(id), json TEXT NOT NULL, revision INTEGER NOT NULL);
@@ -193,8 +228,22 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
           CREATE TABLE deployment_receipts (device_id TEXT NOT NULL, installation_id TEXT NOT NULL, operation_id TEXT NOT NULL, json TEXT NOT NULL, PRIMARY KEY(device_id, installation_id, operation_id));
           CREATE TABLE deployment_plans (device_id TEXT NOT NULL, installation_id TEXT NOT NULL, json TEXT NOT NULL, PRIMARY KEY(device_id, installation_id));
           CREATE TABLE runtime_receipts (device_id TEXT PRIMARY KEY, json TEXT NOT NULL);
-          PRAGMA user_version = 1;
+          PRAGMA user_version = 2;
         `);
+        db.prepare('INSERT INTO sync_meta VALUES (1, ?, 0)').run(randomUUID());
+      } else if (version === 1) {
+        db.exec(`
+          DROP TABLE IF EXISTS device_bots;
+          DROP TABLE IF EXISTS bot_events;
+          DROP TABLE IF EXISTS sync_meta;
+          DELETE FROM bot_models;
+          DELETE FROM bindings;
+          CREATE TABLE sync_meta (id INTEGER PRIMARY KEY CHECK(id = 1), epoch TEXT NOT NULL, seq INTEGER NOT NULL);
+          CREATE TABLE device_bots (device_id TEXT NOT NULL, bot_id TEXT NOT NULL, json TEXT NOT NULL, seq INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(device_id, bot_id));
+          CREATE TABLE bot_events (seq INTEGER PRIMARY KEY, device_id TEXT NOT NULL, bot_id TEXT NOT NULL, op TEXT NOT NULL CHECK(op IN ('upsert', 'delete')), json TEXT, updated_at TEXT NOT NULL);
+          PRAGMA user_version = 2;
+        `);
+        db.prepare('INSERT INTO sync_meta VALUES (1, ?, 0)').run(randomUUID());
       }
     });
 
@@ -260,24 +309,182 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
           bump(); return store.getBotModelConfig(deviceId, botId);
         });
       },
-      replaceDeviceBots(deviceId, bots) {
+      replaceDeviceBots(deviceId, bots, { bumpRevision = true } = {}) {
         assertId(deviceId);
         if (!Array.isArray(bots)) throw error('INVALID_ARGUMENT', 'bots must be an array');
+        const seen = new Set();
+        const normalizedList = [];
+        for (const bot of bots) {
+          const normalized = normalizeBotRef(deviceId, bot);
+          if (seen.has(normalized.botId)) throw error('INVALID_ARGUMENT', 'Invalid bot directory');
+          seen.add(normalized.botId);
+          normalizedList.push(normalized);
+        }
         return transaction(() => {
-          db.prepare('DELETE FROM device_bots WHERE device_id = ?').run(deviceId);
-          const insert = db.prepare('INSERT INTO device_bots VALUES (?, ?, ?)');
-          const seen = new Set();
-          for (const bot of bots) {
-            assertObject(bot); assertId(bot.botId);
-            if (bot.deviceId !== deviceId || seen.has(bot.botId) || typeof bot.name !== 'string') throw error('INVALID_ARGUMENT', 'Invalid bot directory');
-            seen.add(bot.botId);
-            insert.run(deviceId, bot.botId, json({ deviceId, botId: bot.botId, name: bot.name }));
+          const existingRows = db.prepare('SELECT bot_id, json FROM device_bots WHERE device_id = ?').all(deviceId);
+          const existingMap = new Map(existingRows.map((row) => [row.bot_id, row.json]));
+          const meta = db.prepare('SELECT epoch, seq FROM sync_meta WHERE id = 1').get();
+          let seq = meta.seq;
+          const nowIso = new Date().toISOString();
+          const upsertBotStmt = db.prepare('INSERT INTO device_bots (device_id, bot_id, json, seq) VALUES (?, ?, ?, ?) ON CONFLICT(device_id, bot_id) DO UPDATE SET json = excluded.json, seq = excluded.seq');
+          const insertEventStmt = db.prepare('INSERT INTO bot_events (seq, device_id, bot_id, op, json, updated_at) VALUES (?, ?, ?, ?, ?, ?)');
+          for (const normalized of normalizedList) {
+            const serialized = json(normalized);
+            const oldSerialized = existingMap.get(normalized.botId);
+            if (oldSerialized !== serialized) {
+              seq += 1;
+              upsertBotStmt.run(deviceId, normalized.botId, serialized, seq);
+              insertEventStmt.run(seq, deviceId, normalized.botId, 'upsert', serialized, nowIso);
+            }
+            existingMap.delete(normalized.botId);
+          }
+          const deleteBotStmt = db.prepare('DELETE FROM device_bots WHERE device_id = ? AND bot_id = ?');
+          const deleteModelStmt = db.prepare('DELETE FROM bot_models WHERE device_id = ? AND bot_id = ?');
+          const deleteBindingStmt = db.prepare('DELETE FROM bindings WHERE device_id = ? AND bot_id = ?');
+          for (const removedBotId of existingMap.keys()) {
+            seq += 1;
+            deleteBotStmt.run(deviceId, removedBotId);
+            deleteModelStmt.run(deviceId, removedBotId);
+            deleteBindingStmt.run(deviceId, removedBotId);
+            insertEventStmt.run(seq, deviceId, removedBotId, 'delete', null, nowIso);
+          }
+          if (seq !== meta.seq) {
+            db.prepare('UPDATE sync_meta SET seq = ? WHERE id = 1').run(seq);
+            if (seq > 5000) {
+              db.prepare('DELETE FROM bot_events WHERE seq <= ?').run(seq - 5000);
+            }
+          }
+          if (bumpRevision) bump();
+          return { epoch: meta.epoch, seq };
+        });
+      },
+      upsertDeviceBot(deviceId, bot) {
+        assertId(deviceId);
+        assertObject(bot);
+        assertId(bot.botId);
+        return transaction(() => {
+          const existingRow = db.prepare('SELECT json, seq FROM device_bots WHERE device_id = ? AND bot_id = ?').get(deviceId, bot.botId);
+          const existing = existingRow ? JSON.parse(existingRow.json) : null;
+          const rawName = typeof bot.name === 'string' ? bot.name : typeof bot.role === 'string' ? bot.role : existing?.name;
+          const merged = normalizeBotRef(deviceId, {
+            ...(existing || {}),
+            ...bot,
+            deviceId,
+            ...(rawName !== undefined ? { name: rawName } : {}),
+          });
+          const meta = db.prepare('SELECT epoch, seq FROM sync_meta WHERE id = 1').get();
+          let seq = meta.seq;
+          const nowIso = new Date().toISOString();
+          const upsertBotStmt = db.prepare('INSERT INTO device_bots (device_id, bot_id, json, seq) VALUES (?, ?, ?, ?) ON CONFLICT(device_id, bot_id) DO UPDATE SET json = excluded.json, seq = excluded.seq');
+          const insertEventStmt = db.prepare('INSERT INTO bot_events (seq, device_id, bot_id, op, json, updated_at) VALUES (?, ?, ?, ?, ?, ?)');
+          if (merged.isPrimary === true) {
+            const otherRows = db.prepare('SELECT bot_id, json FROM device_bots WHERE device_id = ? AND bot_id != ?').all(deviceId, merged.botId);
+            for (const row of otherRows) {
+              const other = JSON.parse(row.json);
+              if (other.isPrimary === true) {
+                const demoted = { ...other, isPrimary: false };
+                const demotedJson = json(demoted);
+                seq += 1;
+                upsertBotStmt.run(deviceId, row.bot_id, demotedJson, seq);
+                insertEventStmt.run(seq, deviceId, row.bot_id, 'upsert', demotedJson, nowIso);
+              }
+            }
+          }
+          const serialized = json(merged);
+          let targetSeq = existingRow?.seq ?? seq;
+          if (!existingRow || existingRow.json !== serialized) {
+            seq += 1;
+            targetSeq = seq;
+            upsertBotStmt.run(deviceId, merged.botId, serialized, seq);
+            insertEventStmt.run(seq, deviceId, merged.botId, 'upsert', serialized, nowIso);
+          }
+          if (seq !== meta.seq) {
+            db.prepare('UPDATE sync_meta SET seq = ? WHERE id = 1').run(seq);
+            if (seq > 5000) {
+              db.prepare('DELETE FROM bot_events WHERE seq <= ?').run(seq - 5000);
+            }
+            bump();
+          }
+          return { ...merged, seq: targetSeq };
+        });
+      },
+      removeDeviceBot(deviceId, botId) {
+        assertId(deviceId);
+        assertId(botId);
+        return transaction(() => {
+          const meta = db.prepare('SELECT epoch, seq FROM sync_meta WHERE id = 1').get();
+          const seq = meta.seq + 1;
+          const nowIso = new Date().toISOString();
+          db.prepare('DELETE FROM device_bots WHERE device_id = ? AND bot_id = ?').run(deviceId, botId);
+          db.prepare('DELETE FROM bot_models WHERE device_id = ? AND bot_id = ?').run(deviceId, botId);
+          db.prepare('DELETE FROM bindings WHERE device_id = ? AND bot_id = ?').run(deviceId, botId);
+          db.prepare('INSERT INTO bot_events (seq, device_id, bot_id, op, json, updated_at) VALUES (?, ?, ?, ?, ?, ?)').run(seq, deviceId, botId, 'delete', null, nowIso);
+          db.prepare('UPDATE sync_meta SET seq = ? WHERE id = 1').run(seq);
+          if (seq > 5000) {
+            db.prepare('DELETE FROM bot_events WHERE seq <= ?').run(seq - 5000);
           }
           bump();
+          return { epoch: meta.epoch, seq };
         });
       },
       listDeviceBots(deviceId) {
-        return db.prepare('SELECT json FROM device_bots WHERE device_id = ? ORDER BY bot_id').all(deviceId).map(parse);
+        return db.prepare('SELECT json FROM device_bots WHERE device_id = ?').all(deviceId).map(parse).sort(compareBotRefs);
+      },
+      getBotSync({ epoch, sinceSeq, devices = [] } = {}) {
+        return transaction(() => {
+          const meta = db.prepare('SELECT epoch, seq FROM sync_meta WHERE id = 1').get();
+          const curEpoch = meta.epoch;
+          const curSeq = meta.seq;
+          const minRow = db.prepare('SELECT MIN(seq) AS min_seq FROM bot_events').get();
+          const minSeq = minRow?.min_seq ?? null;
+          const onlineMap = new Map(
+            Array.isArray(devices)
+              ? devices.filter((d) => d && typeof d.deviceId === 'string').map((d) => [d.deviceId, Boolean(d.online)])
+              : [],
+          );
+          const deviceMap = new Map(
+            Array.isArray(devices)
+              ? devices.filter((d) => d && typeof d.deviceId === 'string').map((d) => [d.deviceId, d])
+              : [],
+          );
+          if (
+            !epoch ||
+            epoch !== curEpoch ||
+            !Number.isSafeInteger(sinceSeq) ||
+            sinceSeq < 0 ||
+            sinceSeq > curSeq ||
+            (minSeq !== null && sinceSeq < minSeq - 1)
+          ) {
+            const bots = db.prepare('SELECT json, seq FROM device_bots').all()
+              .map((row) => {
+                const parsed = JSON.parse(row.json);
+                const devInfo = deviceMap.get(parsed.deviceId);
+                return {
+                  ...parsed,
+                  ...(parsed.deviceName ? {} : devInfo?.displayName ? { deviceName: devInfo.displayName } : {}),
+                  ...(parsed.platform ? {} : devInfo?.platform ? { platform: devInfo.platform } : {}),
+                  online: onlineMap.get(parsed.deviceId) ?? false,
+                  seq: row.seq,
+                };
+              })
+              .sort((a, b) => (a.deviceId < b.deviceId ? -1 : a.deviceId > b.deviceId ? 1 : compareBotRefs(a, b)));
+            return { epoch: curEpoch, seq: curSeq, mode: 'snapshot', devices, bots };
+          }
+          const events = db.prepare('SELECT seq, device_id, bot_id, op, json, updated_at FROM bot_events WHERE seq > ? ORDER BY seq ASC').all(sinceSeq)
+            .map((row) => ({
+              seq: row.seq,
+              deviceId: row.device_id,
+              botId: row.bot_id,
+              op: row.op,
+              bot: row.json ? {
+                ...JSON.parse(row.json),
+                online: onlineMap.get(row.device_id) ?? false,
+                seq: row.seq,
+              } : null,
+              updatedAt: row.updated_at,
+            }));
+          return { epoch: curEpoch, seq: curSeq, mode: 'diff', devices, events };
+        }, 'DEFERRED');
       },
       listBotBindings(filter = {}) {
         return db.prepare('SELECT json FROM bindings WHERE (? IS NULL OR device_id = ?) AND (? IS NULL OR installation_id = ?) ORDER BY device_id, bot_id, installation_id').all(filter.deviceId ?? null, filter.deviceId ?? null, filter.installationId ?? null, filter.installationId ?? null).map(parse);

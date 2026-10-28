@@ -21,6 +21,7 @@ import type {
 export const DESKTOP_MAX_IN_FLIGHT_REQUESTS: 8;
 export const DESKTOP_MAX_OBSERVATIONS: 8;
 export const DESKTOP_CALL_TIMEOUT_MS: 25000;
+export const INTENT_METHODS: ReadonlySet<DesktopIntentMethod>;
 
 export type DesktopConnectionInput =
   | {
@@ -98,7 +99,10 @@ export interface DesktopDraftEntry {
   files: DesktopDraftFileRef[];
 }
 
-export type DesktopIntentMethod = 'createBot' | 'createScope' | 'updateScope';
+export type DesktopIntentMethod =
+  | 'createBot'
+  | 'createScope'
+  | 'updateScope';
 
 export interface DesktopUiIntent<M extends DesktopIntentMethod = DesktopIntentMethod> {
   id: string;

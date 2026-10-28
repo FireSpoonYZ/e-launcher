@@ -110,7 +110,51 @@ export interface BotCapabilityConfig extends BotBinding {
 }
 export interface PutBotCapability { expectedRevision: number; enabled: boolean; overrides: JsonObject }
 export interface Device { deviceId: string; name: string; online: boolean }
-export interface BotRef { deviceId: string; botId: string; name: string }
+export interface BotRef {
+  deviceId: string;
+  botId: string;
+  name: string;
+  description?: string;
+  cwd?: string;
+  modelRef?: string | null;
+  primaryConversationId?: string;
+  createdAt?: string;
+  isPrimary?: boolean;
+  lastActivityAt?: string | null;
+  lastPreview?: string | null;
+  archivedAt?: string | null;
+  deviceName?: string;
+  platform?: string;
+  online?: boolean;
+  seq?: number;
+}
+export interface BotSyncEvent {
+  seq: number;
+  deviceId: string;
+  botId: string;
+  op: 'upsert' | 'delete';
+  bot: BotRef | null;
+  updatedAt: string;
+}
+export interface BotSyncResponse {
+  epoch: string;
+  seq: number;
+  mode: 'snapshot' | 'diff';
+  devices: Device[];
+  bots?: BotRef[];
+  events?: BotSyncEvent[];
+}
+export interface CenterCreateBotRequest {
+  requestId?: string;
+  role: string;
+  description?: string;
+  cwd?: string;
+  makePrimary?: boolean;
+}
+export interface CenterUpdateBotRequest {
+  name?: string;
+  description?: string;
+}
 export interface DeploymentReceipt {
   /** null denotes the center execution target; otherwise the assigned Host. */
   deviceId: string | null;

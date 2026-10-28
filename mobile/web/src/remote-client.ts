@@ -91,6 +91,14 @@ export function createMobileRemoteClient(): MobileRemoteClient {
     async observe(observationId, targetDeviceId, target, onEvent) {
       // 任何 await 之前预占 8 槽之一：opening/已关闭未确认都算，满则明确未派发。
       const connection = target.kind === 'connection';
+      if (connection) {
+        for (const [id, sink] of sinks.entries()) {
+          if (sink.connection && id !== observationId) {
+            sinks.delete(id);
+            void closeOwned(sink).catch(() => undefined);
+          }
+        }
+      }
       if ((connection ? [...sinks.values()].some((sink) => sink.connection)
         : [...sinks.values()].filter((sink) => !sink.connection).length >= MAX_OWNED_OBSERVATIONS) || sinks.has(observationId)) {
         throw new DesktopRemoteError({

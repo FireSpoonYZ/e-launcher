@@ -172,6 +172,18 @@ export function createControlClient({ url, token, fetch: fetchImpl = globalThis.
       const { botId, ...profile } = input;
       return request('PUT', ['v1', 'bots', botId, 'profile'], { ...callOptions(options), body: profile });
     },
+    setPrimaryBot(botId, options) {
+      return request('POST', ['v1', 'bots', botId, 'primary'], { ...callOptions(options), body: {} });
+    },
+    archiveBot(botId, options) {
+      return request('POST', ['v1', 'bots', botId, 'archive'], { ...callOptions(options), body: {} });
+    },
+    unarchiveBot(botId, options) {
+      return request('POST', ['v1', 'bots', botId, 'unarchive'], { ...callOptions(options), body: {} });
+    },
+    deleteBot(botId, options) {
+      return request('DELETE', ['v1', 'bots', botId], callOptions(options));
+    },
     getBot(botId, options) {
       return request('GET', ['v1', 'bots', botId], callOptions(options));
     },

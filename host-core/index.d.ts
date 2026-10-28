@@ -19,6 +19,10 @@ export interface BotRecord {
   modelRef: string | null;
   primaryConversationId: string;
   createdAt: string;
+  isPrimary: boolean;
+  lastActivityAt: string | null;
+  lastPreview: string | null;
+  archivedAt: string | null;
 }
 
 export interface CreateBotInput {
@@ -27,6 +31,7 @@ export interface CreateBotInput {
   description?: string;
   cwd?: string;
   modelRef?: string | null;
+  makePrimary?: boolean;
 }
 
 export interface UpdateBotProfileInput {
@@ -35,13 +40,37 @@ export interface UpdateBotProfileInput {
   description?: string;
 }
 
+export interface HostProfile {
+  deviceId: string;
+  primaryBotId: string | null;
+  updatedAt: string;
+}
+
+export interface DeleteBotResult {
+  botId: string;
+  deleted: true;
+}
+
+export interface BotActivityInput {
+  lastActivityAt?: string;
+  lastPreview?: string | null;
+}
+
 export interface Host {
   readonly deviceId: string;
   readonly dataRoot: string;
   readonly defaultWorkspace: string;
   createBot(input: CreateBotInput): BotRecord;
   updateBotProfile(input: UpdateBotProfileInput): BotRecord;
+  getHostProfile(): HostProfile;
+  setPrimaryBot(input: { botId: string }): BotRecord;
+  archiveBot(input: { botId: string }): BotRecord;
+  unarchiveBot(input: { botId: string }): BotRecord;
+  deleteBot(input: { botId: string }): DeleteBotResult;
+  recordBotActivity(botId: string, activity?: BotActivityInput): BotRecord | null;
+  listExpiredArchivedBots(cutoffIso: string): BotRecord[];
   getBot(botId: string): BotRecord | null;
+  setBotModel(botId: string, input: { modelRef?: string | null }): BotRecord;
   findByRequest(requestId: string): BotRecord | null;
   listBots(): BotRecord[];
   /*
@@ -639,11 +668,19 @@ export interface OpenRuntimeOptions {
   extensions?: RuntimeExtensionsConfig;
   /** Optional trusted JS native bridge for Android tools; never persisted as a settings field. */
   nativeBridge?: NativeBridge;
+  /** Optional callback invoked when the Bot inventory structurally changes (create/delete/purge). */
+  onBotsChanged?: () => void | Promise<void>;
+  /** Optional callback invoked on lightweight Bot metadata updates (primary, archive, profile, activity). */
+  onBotsSync?: () => void | Promise<void>;
 }
 
 export interface Runtime {
   getCurrentDevice(): Promise<{ deviceId: string; displayName: string; platform: string; arch: string }>;
   createBot(input: CreateBotInput): Promise<BotRecord>;
+  setPrimaryBot(botId: string): Promise<BotRecord>;
+  archiveBot(botId: string): Promise<BotRecord>;
+  unarchiveBot(botId: string): Promise<BotRecord>;
+  deleteBot(botId: string): Promise<DeleteBotResult>;
   submit(botId: string, input: SubmissionInput): Promise<PrimarySubmission>;
   wait(botId: string, requestId: string): Promise<PrimarySubmission>;
   getSubmission(botId: string, requestId: string): Promise<PrimarySubmission | null>;
@@ -914,6 +951,70 @@ export interface ControlServer {
 }
 
 export function openControlServer(options: OpenControlServerOptions): Promise<ControlServer>;
+
+export interface ControlClientCallOptions {
+  signal?: AbortSignal;
+}
+
+export interface ControlClient {
+  getHostInfo(options?: ControlClientCallOptions): Promise<ControlHostInfo>;
+  listBots(options?: ControlClientCallOptions): Promise<BotRecord[]>;
+  createBot(input: CreateBotInput, options?: ControlClientCallOptions): Promise<BotRecord>;
+  updateBotProfile(input: UpdateBotProfileInput, options?: ControlClientCallOptions): Promise<BotRecord>;
+  setPrimaryBot(botId: string, options?: ControlClientCallOptions): Promise<BotRecord>;
+  archiveBot(botId: string, options?: ControlClientCallOptions): Promise<BotRecord>;
+  unarchiveBot(botId: string, options?: ControlClientCallOptions): Promise<BotRecord>;
+  deleteBot(botId: string, options?: ControlClientCallOptions): Promise<DeleteBotResult>;
+  getBot(botId: string, options?: ControlClientCallOptions): Promise<BotRecord>;
+  findByRequest(requestId: string, options?: ControlClientCallOptions): Promise<BotRecord>;
+  submit(botId: string, input: SubmissionInput, options?: ControlClientCallOptions): Promise<PrimarySubmission>;
+  getSubmission(botId: string, requestId: string, options?: ControlClientCallOptions): Promise<PrimarySubmission>;
+  history(botId: string, options?: HistoryOptions & ControlClientCallOptions): Promise<HistoryPage>;
+  abort(botId: string, options?: ControlClientCallOptions): Promise<{ botId: string }>;
+  contextStatus(botId: string, options?: ControlClientCallOptions): Promise<ContextStatus>;
+  memoryStatus(botId: string, input?: MemoryStatusInput, options?: ControlClientCallOptions): Promise<MemoryStatus>;
+  recallMemory(botId: string, input: MemoryQueryInput, options?: ControlClientCallOptions): Promise<MemoryRecallResult>;
+  reflectMemory(botId: string, input: MemoryQueryInput, options?: ControlClientCallOptions): Promise<MemoryReflectResult>;
+  retainMemory(botId: string, input: MemoryRetainInput, options?: ControlClientCallOptions): Promise<MemoryRetainReceipt>;
+  getMemory(botId: string, input: MemoryLookupInput, options?: ControlClientCallOptions): Promise<MemoryGetResult>;
+  getMemorySource(botId: string, input: MemorySourceInput, options?: ControlClientCallOptions): Promise<MemorySourceResult>;
+  correctMemory(botId: string, input: MemoryCorrectionInput, options?: ControlClientCallOptions): Promise<MemoryCorrectionReceipt>;
+  retryMemory(botId: string, input: MemoryRetryInput, options?: ControlClientCallOptions): Promise<MemoryReceipt>;
+  getWorkContext(botId: string, scopeId: string, options?: ControlClientCallOptions): Promise<WorkContextRecord>;
+  syncWorkContext(botId: string, scopeId: string, input?: WorkSyncOptions, options?: ControlClientCallOptions): Promise<WorkSyncResult>;
+  workHistory(botId: string, scopeId: string, options?: { limit?: number; cursor?: WorkHistoryCursor | null } & ControlClientCallOptions): Promise<WorkHistoryPage>;
+  workContextStatus(botId: string, scopeId: string, options?: ControlClientCallOptions): Promise<WorkContextStatus>;
+  getWorkActivity(botId: string, scopeId: string, options?: ControlClientCallOptions): Promise<WorkActivity>;
+  stopWork(botId: string, scopeId: string, options?: ControlClientCallOptions): Promise<WorkActivity>;
+  resumeWork(botId: string, scopeId: string, options?: ControlClientCallOptions): Promise<WorkActivity>;
+  listScopeStates(options?: ScopeListOptions & ControlClientCallOptions): Promise<ScopeListPage>;
+  createScope(input: ScopeCreateInput, options?: ControlClientCallOptions): Promise<ScopeInfo>;
+  getScopeState(scopeId: string, options?: ControlClientCallOptions): Promise<ScopeInfo>;
+  updateScope(scopeId: string, input: ScopeUpdateInput, options?: ControlClientCallOptions): Promise<ScopeInfo>;
+  publishUserMessage(scopeId: string, input: UserMessageInput, options?: ControlClientCallOptions): Promise<StoredMessage>;
+  listScopeReplicas(scopeId: string, options?: ReplicaListOptions & ControlClientCallOptions): Promise<ReplicaListPage>;
+  live(botId: string, options?: ControlClientCallOptions): AsyncIterable<BotLiveFrame>;
+  workLive(botId: string, scopeId: string, options?: ControlClientCallOptions): AsyncIterable<WorkLiveFrame>;
+  getModelCatalog(options?: ControlClientCallOptions): Promise<ModelCatalog>;
+  scopeHistory(scopeId: string, options?: MessagePageOptions & ControlClientCallOptions): Promise<MessageHistoryPage>;
+  getScopeMessage(scopeId: string, messageId: string, options?: ControlClientCallOptions): Promise<StoredMessage>;
+  getScopeMessageDelivery(scopeId: string, messageId: string, options?: ControlClientCallOptions): Promise<MessageDeliveryStatus>;
+  getLocalSettings(options?: ControlClientCallOptions): Promise<LocalSettingsSnapshot>;
+  replaceLocalSettings(input: SettingsUpdate, options?: ControlClientCallOptions): Promise<LocalSettingsSnapshot>;
+  getServiceStatus(options?: ControlClientCallOptions): Promise<HostServiceStatus>;
+  getExtensionCatalog(options?: ControlClientCallOptions): Promise<ExtensionCatalog>;
+  getBotExtensions(botId: string, options?: ControlClientCallOptions): Promise<BotExtensionSnapshot>;
+  setBotExtensions(botId: string, input: BotExtensionsUpdate, options?: ControlClientCallOptions): Promise<BotExtensionSnapshot>;
+  getBotSoul(botId: string, options?: ControlClientCallOptions): Promise<BotSoul>;
+  setBotSoul(botId: string, input: BotSoulUpdate, options?: ControlClientCallOptions): Promise<BotSoul>;
+  setBotModel(botId: string, input: { modelRef?: string | null }, options?: ControlClientCallOptions): Promise<BotRecord>;
+  getShowerStatus(target: ShowerTarget, options?: ControlClientCallOptions): Promise<ShowerSession>;
+  createShowerSession(target: ShowerTarget, input?: ShowerCreateOptions, options?: ControlClientCallOptions): Promise<ShowerSession>;
+  getShowerFrame(target: ShowerTarget, sessionId: string, limits?: ShowerFrameLimits, options?: ControlClientCallOptions): Promise<ShowerFrame>;
+  sendShowerInput(target: ShowerTarget, sessionId: string, input: ShowerInput, options?: ControlClientCallOptions): Promise<Record<string, unknown>>;
+  takeoverShower(target: ShowerTarget, sessionId: string, options?: ControlClientCallOptions): Promise<ShowerSession>;
+  releaseShowerSession(target: ShowerTarget, sessionId: string, options?: ControlClientCallOptions): Promise<Record<string, unknown>>;
+}
 
 /**
  * Module 14 types: host settings store, unified local service and runtime config helpers.
@@ -1709,6 +1810,10 @@ export interface RemoteControlMethodMap {
   listBots: { params: Record<string, never>; result: BotRecord[] };
   createBot: { params: CreateBotInput; result: BotRecord };
   updateBotProfile: { params: UpdateBotProfileInput; result: BotRecord };
+  setPrimaryBot: { params: { botId: string }; result: BotRecord };
+  archiveBot: { params: { botId: string }; result: BotRecord };
+  unarchiveBot: { params: { botId: string }; result: BotRecord };
+  deleteBot: { params: { botId: string }; result: DeleteBotResult };
   getBot: { params: { botId: string }; result: BotRecord };
   findByRequest: { params: { requestId: string }; result: BotRecord };
   submit: { params: { botId: string; requestId: string; text: string }; result: PrimarySubmission };

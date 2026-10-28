@@ -2,7 +2,7 @@
 // 导航与面板渲染。token/CA 仅输入态存在，连接尝试结束后立即清空。
 import { Component } from 'react';
 import type { ReactNode } from 'react';
-import { DesktopRemoteError, toError } from './api';
+import { DesktopRemoteError, request, toError } from './api';
 import type {
   DesktopClientStatus,
   DesktopConnectionInput,
@@ -311,11 +311,44 @@ export class App extends Component<AppProps, AppState> {
     try {
       await this.props.api.init();
       const snap = this.props.api.snapshot;
-      this.setState({
+      let profiles = snap ? snap.state.profiles : [];
+      let adoptedProfileId: string | null = null;
+      let adoptedStatus: DesktopClientStatus | null = null;
+      if (!this.props.api.identity) {
+        try {
+          const st = await request('status', {});
+          const conn = st?.connection;
+          if (st?.phase === 'connected' && conn?.kind === 'relay') {
+            let relayProf = profiles.find((p) => p.kind === 'relay' && p.url === conn.url && p.deviceId === conn.deviceId)
+              ?? profiles.find((p) => p.kind === 'relay');
+            if (!relayProf) {
+              const next: DesktopUiProfile = {
+                id: runId(),
+                title: 'Center Relay',
+                kind: 'relay',
+                url: conn.url,
+                deviceId: conn.deviceId ?? '',
+              };
+              const updated = await this.props.api.queueWrite((state) => ({ ...state, profiles: [...state.profiles, next] }));
+              profiles = updated.state.profiles;
+              relayProf = profiles.find((p) => p.id === next.id) ?? next;
+            }
+            this.props.api.setIdentity({ profileId: relayProf.id, targetDeviceId: '', kind: 'relay' });
+            this.props.api.setTransportConnected(true);
+            adoptedProfileId = relayProf.id;
+            adoptedStatus = st;
+          }
+        } catch {
+          /* ignore status read failure on cold init */
+        }
+      }
+      this.setState((s) => ({
         busy: false,
-        profiles: snap ? snap.state.profiles : [],
+        profiles,
+        selectedProfileId: adoptedProfileId ?? (s.selectedProfileId && profiles.some((p) => p.id === s.selectedProfileId) ? s.selectedProfileId : (profiles.find((p) => p.kind === 'relay')?.id ?? profiles[0]?.id ?? null)),
+        status: adoptedStatus ?? s.status,
         profilesError: null,
-      });
+      }));
     } catch (e) {
       this.setState({ busy: false, profilesError: `无法读取配置：${toError(e).message}` });
     }
@@ -330,7 +363,7 @@ export class App extends Component<AppProps, AppState> {
     const token = this.state.token;
     const previousIdentity = this.state.identity;
     const previousDeviceId = this.state.selectedDeviceId;
-    if (this.actionInFlight || !profile || !token) return;
+    if (this.actionInFlight || !profile) return;
     let input: DesktopConnectionInput;
     if (profile.kind === 'local') {
       input = { kind: 'local', url: profile.url, token };
@@ -613,7 +646,7 @@ export class App extends Component<AppProps, AppState> {
     return (
       <div className="settings-side">
         <label>
-          连接 token（仅本次会话，不保存）
+          连接 token（留空使用已保存中心令牌）
           <input
             type="password"
             value={this.state.token}
@@ -636,7 +669,7 @@ export class App extends Component<AppProps, AppState> {
         ) : (
           <button
             onClick={() => void this.connect()}
-            disabled={this.state.busy || !this.state.token}
+            disabled={this.state.busy}
           >
             {identity ? '重新连接' : '连接'}
           </button>

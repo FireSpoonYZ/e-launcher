@@ -105,6 +105,10 @@ export const CONTROL_V1_METHODS = Object.freeze([
 const CONTROL_V2_METHODS = Object.freeze([
   'getServiceStatus',
   'updateBotProfile',
+  'setPrimaryBot',
+  'archiveBot',
+  'unarchiveBot',
+  'deleteBot',
   'getModelCatalog',
   'getWorkContext',
   'syncWorkContext',
@@ -172,6 +176,9 @@ export const CONTROL_ERROR_CODES = new Set([
   'MODEL_REQUIRED',
   'MODEL_NOT_FOUND',
   'RUNTIME_BUSY',
+  'PRIMARY_BOT_PROTECTED',
+  'BOT_ARCHIVED',
+  'INVALID_STATE',
   'UNSUPPORTED_SCHEMA',
   'INTERNAL',
   'REQUEST_TOO_LARGE',
@@ -285,17 +292,25 @@ function normalizeControlParams(method, params) {
       return {};
     }
     case 'createBot': {
-      rejectUnknownFields(params, new Set(['requestId', 'role', 'cwd', 'modelRef', 'description']), 'params');
+      rejectUnknownFields(params, new Set(['requestId', 'role', 'cwd', 'modelRef', 'description', 'makePrimary']), 'params');
       assertId(params.requestId, 'requestId');
       assertNonEmptyString(params.role, 'role');
       if (params.cwd !== undefined) assertNonEmptyString(params.cwd, 'cwd');
       if (params.description !== undefined && (typeof params.description !== 'string' || params.description.length > 2000)) throw invalid('description must be a string of at most 2000 characters');
+      if (params.makePrimary !== undefined && typeof params.makePrimary !== 'boolean') throw invalid('makePrimary must be a boolean');
       let modelRef = null;
       if (params.modelRef !== undefined && params.modelRef !== null) {
         assertNonEmptyString(params.modelRef, 'modelRef');
         modelRef = params.modelRef;
       }
-      return { requestId: params.requestId, role: params.role, cwd: params.cwd, modelRef, description: params.description };
+      return {
+        requestId: params.requestId,
+        role: params.role,
+        cwd: params.cwd,
+        modelRef,
+        description: params.description,
+        ...(params.makePrimary !== undefined ? { makePrimary: params.makePrimary } : {}),
+      };
     }
     case 'updateBotProfile': {
       rejectUnknownFields(params, new Set(['botId', 'name', 'description']), 'params');
@@ -305,6 +320,10 @@ function normalizeControlParams(method, params) {
       return { botId: params.botId, name: params.name, description: params.description };
     }
     case 'getBot':
+    case 'setPrimaryBot':
+    case 'archiveBot':
+    case 'unarchiveBot':
+    case 'deleteBot':
     case 'abort':
     case 'contextStatus': {
       rejectUnknownFields(params, new Set(['botId']), 'params');

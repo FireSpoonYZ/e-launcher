@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState, type ReactNode } from 'react';
 import {
   GROK_EXPRESSIONS,
   GROK_HEAD_CENTER,
@@ -162,25 +162,78 @@ export function resolveBotAvatarPreset(botKey: string, roleName?: string, isPrim
   return getDefaultBotAvatarPreset(botKey, roleName, isPrimary);
 }
 
+export interface GrokBotAvatarProps {
+  preset?: GrokAvatarPreset;
+  botKey?: string;
+  roleName?: string;
+  isPrimary?: boolean;
+  starBadge?: boolean;
+  platformBadge?: string | ReactNode;
+  busy?: boolean;
+  size?: number;
+  className?: string;
+}
+
+type AvatarPlatformKind = 'android' | 'windows' | 'linux' | 'macos' | 'globe';
+
+function normalizeAvatarPlatform(platform?: string): AvatarPlatformKind | null {
+  if (!platform || !platform.trim()) return null;
+  const p = platform.trim().toLowerCase();
+  if (p.includes('android')) return 'android';
+  if (p.includes('win')) return 'windows';
+  if (p.includes('darwin') || p.includes('mac') || p.includes('ios') || p.includes('apple')) return 'macos';
+  if (p.includes('linux') || p.includes('ubuntu') || p.includes('debian') || p.includes('arch')) return 'linux';
+  return 'globe';
+}
+
+function AvatarPlatformGlyph({ kind }: { kind: AvatarPlatformKind }) {
+  if (kind === 'android') {
+    return (
+      <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+        <path d="M17.523 15.341a1.003 1.003 0 0 1-1.002-1.002c0-.553.45-1.002 1.002-1.002.553 0 1.002.45 1.002 1.002 0 .553-.449 1.002-1.002 1.002m-11.046 0a1.003 1.003 0 0 1-1.002-1.002c0-.553.45-1.002 1.002-1.002.553 0 1.002.45 1.002 1.002 0 .553-.449 1.002-1.002 1.002m11.405-6.02 1.997-3.46a.416.416 0 0 0-.152-.567.416.416 0 0 0-.568.152L17.137 8.95c-1.547-.704-3.28-1.097-5.137-1.097-1.857 0-3.59.393-5.137 1.097L4.841 5.446a.416.416 0 0 0-.568-.152.416.416 0 0 0-.152.567l1.997 3.46C2.688 11.186.343 14.658 0 18.761h24c-.343-4.103-2.688-7.575-6.118-9.44" />
+      </svg>
+    );
+  }
+  if (kind === 'windows') {
+    return (
+      <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+        <path d="M0 3.449L9.75 2.1v9.451H0m10.949-9.602L24 0v11.4H10.949M0 12.6h9.75v9.451L0 20.699M10.949 12.6H24V24l-12.9-1.801" />
+      </svg>
+    );
+  }
+  if (kind === 'linux') {
+    return (
+      <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+        <path d="M12 2C9.24 2 7 4.24 7 7v4.27c-1.21 1.48-2 3.32-2 5.23 0 2.76 2.24 5.5 7 5.5s7-2.74 7-5.5c0-1.91-.79-3.75-2-5.23V7c0-2.76-2.24-5-5-5zm-2 4.5a1.25 1.25 0 1 1 0 2.5 1.25 1.25 0 0 1 0-2.5zm4 0a1.25 1.25 0 1 1 0 2.5 1.25 1.25 0 0 1 0-2.5zM12 10c1.38 0 2.5.67 2.5 1.5S13.38 13 12 13s-2.5-.67-2.5-1.5S10.62 10 12 10zm0 4.5c2.21 0 4 1.34 4 3s-1.79 3-4 3-4-1.34-4-3 1.79-3 4-3z" />
+      </svg>
+    );
+  }
+  if (kind === 'macos') {
+    return (
+      <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+        <path d="M18.71 19.5c-.83 1.24-1.71 2.45-3.05 2.47-1.34.03-1.77-.79-3.29-.79-1.53 0-2 .77-3.27.82-1.31.05-2.3-1.32-3.14-2.53C4.25 17 2.94 12.45 4.7 9.39c.87-1.52 2.43-2.48 4.12-2.51 1.28-.02 2.5.87 3.29.87.78 0 2.26-1.07 3.81-.91.65.03 2.47.26 3.64 1.98-.09.06-2.17 1.28-2.15 3.81.03 3.02 2.65 4.03 2.68 4.04-.03.07-.42 1.44-1.38 2.83M15.96 6.33c.67-.81 1.12-1.94 1-3.08-.96.04-2.13.64-2.82 1.45-.61.7-.115 1.85-.99 2.97 1.08.08 2.14-.53 2.81-1.34" />
+      </svg>
+    );
+  }
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" aria-hidden="true">
+      <circle cx="12" cy="12" r="9" />
+      <path d="M3.6 9h16.8M3.6 15h16.8M12 3a14.5 14.5 0 0 0 0 18M12 3a14.5 14.5 0 0 1 0 18" />
+    </svg>
+  );
+}
+
 export function GrokBotAvatar({
   preset,
   botKey,
   roleName,
   isPrimary = false,
   starBadge = false,
+  platformBadge,
   busy = false,
   size = 52,
   className = '',
-}: {
-  preset?: GrokAvatarPreset;
-  botKey?: string;
-  roleName?: string;
-  isPrimary?: boolean;
-  starBadge?: boolean;
-  busy?: boolean;
-  size?: number;
-  className?: string;
-}) {
+}: GrokBotAvatarProps) {
   const clipId = useId().replace(/:/g, '_');
   const resolved = preset ?? resolveBotAvatarPreset(botKey || roleName || 'bot', roleName, isPrimary);
   const shape = GROK_SHAPES[resolved.shape] ?? GROK_SHAPES.blob;
@@ -193,6 +246,8 @@ export function GrokBotAvatar({
     : undefined;
   const leftTransform = `translate(${leftEye.x} ${leftEye.y}) scale(${leftEye.scale} ${leftEye.scale}) translate(${-leftEye.cx} ${-leftEye.cy})`;
   const rightTransform = `translate(${rightEye.x} ${rightEye.y}) scale(${rightEye.scale} ${rightEye.scale}) translate(${-rightEye.cx} ${-rightEye.cy})`;
+  const platformKind = typeof platformBadge === 'string' ? normalizeAvatarPlatform(platformBadge) : null;
+  const badgeSize = Math.max(15, Math.round(size * 0.27));
 
   return (
     <span
@@ -227,6 +282,30 @@ export function GrokBotAvatar({
           </g>
         )}
       </svg>
+      {(platformKind || (platformBadge && typeof platformBadge !== 'string')) && (
+        <span
+          className={`grok-bot-platform-badge grok-bot-avatar-platform-badge${platformKind ? ` is-${platformKind}` : ''}`}
+          data-platform={platformKind || 'custom'}
+          style={{
+            position: 'absolute',
+            left: -2,
+            bottom: -2,
+            width: `${badgeSize}px`,
+            height: `${badgeSize}px`,
+            borderRadius: '50%',
+            background: 'var(--bg, #ffffff)',
+            border: '1.5px solid var(--line, rgba(0, 0, 0, 0.12))',
+            display: 'inline-flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            color: 'var(--text, #1d1d1f)',
+            boxShadow: '0 1px 4px rgba(0, 0, 0, 0.16)',
+            pointerEvents: 'none',
+          }}
+        >
+          {platformKind ? <AvatarPlatformGlyph kind={platformKind} /> : platformBadge}
+        </span>
+      )}
     </span>
   );
 }

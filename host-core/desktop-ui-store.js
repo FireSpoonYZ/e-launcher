@@ -29,7 +29,7 @@ const MAX_TITLE_BYTES = 256;
 const MAX_PATH_BYTES = 4096;
 const MAX_ERROR_MESSAGE_BYTES = 512;
 const LOOPBACK_HOSTNAMES = new Set(['127.0.0.1', '[::1]']);
-const INTENT_METHODS = new Set(['createBot', 'createScope', 'updateScope']);
+const INTENT_METHODS = new Set(['createBot', 'setPrimaryBot', 'archiveBot', 'unarchiveBot', 'deleteBot', 'updateBotProfile', 'createScope', 'updateScope']);
 const INITIAL_STATE = Object.freeze({
   version: 1,
   profiles: [],

@@ -4,6 +4,7 @@
 // openRemoteControl), pending outbox (openPendingClient), and private UI state
 // store (openDesktopUiStore). Never starts a Host, Runtime, or model loop;
 // close/disconnect aborts client transports and observations only.
+import fs from 'node:fs';
 import path from 'node:path';
 import { connectCenter } from './center-client.js';
 import { createHash } from 'node:crypto';
@@ -35,6 +36,15 @@ import {
 export const DESKTOP_MAX_IN_FLIGHT_REQUESTS = CONTROL_MAX_CLIENT_CALLS; // 8
 export const DESKTOP_MAX_OBSERVATIONS = LIVE_MAX_CLIENT_SUBSCRIPTIONS; // 8
 export const DESKTOP_CALL_TIMEOUT_MS = CONTROL_CLIENT_TIMEOUT_MS; // 25000 for ordinary calls
+export const INTENT_METHODS = new Set([
+  'createBot',
+  'createScope',
+  'updateScope',
+  'setPrimaryBot',
+  'archiveBot',
+  'unarchiveBot',
+  'deleteBot',
+]);
 const MAX_CA_PEM_BYTES = 65536; // 64 KiB
 const MAX_ERROR_MESSAGE_BYTES = 512;
 const STABLE_ERROR_CODES = new Set([...CONTROL_ERROR_CODES, 'REPLACED', 'PENDING_BUSY']);
@@ -85,7 +95,15 @@ export function normalizeDesktopError(err, fallbackOutcome = 'unconfirmed') {
     outcome = err.outcome;
   } else if (code === 'INVALID_ARGUMENT' || code === 'REQUEST_TOO_LARGE' || code === 'NOT_CONNECTED' || code === 'RPC_BUSY') {
     outcome = 'not-sent';
-  } else if (code === 'REQUEST_CONFLICT' || code === 'UNSUPPORTED_SCHEMA' || code === 'STORE_FAILED' || code === 'PENDING_BUSY') {
+  } else if (
+    code === 'REQUEST_CONFLICT' ||
+    code === 'UNSUPPORTED_SCHEMA' ||
+    code === 'STORE_FAILED' ||
+    code === 'PENDING_BUSY' ||
+    code === 'PRIMARY_BOT_PROTECTED' ||
+    code === 'BOT_ARCHIVED' ||
+    code === 'INVALID_STATE'
+  ) {
     outcome = 'responded';
   }
   const defaultMsg = `desktop client ${code.toLowerCase().replace(/_/g, ' ')} (${outcome})`;
@@ -252,9 +270,52 @@ export function openDesktopClient(options) {
   let centerGeneration = 0;
   let centerState = 'disconnected';
   let centerUrl = '';
+  const credentialsFile = path.join(resolvedDataRoot, 'center-credentials.json');
+
+  function readSavedCenterCredentials() {
+    try {
+      if (!fs.existsSync(credentialsFile)) return null;
+      const parsed = JSON.parse(fs.readFileSync(credentialsFile, 'utf8'));
+      if (!isPlainObject(parsed) || typeof parsed.url !== 'string' || typeof parsed.deviceId !== 'string' || typeof parsed.deviceToken !== 'string') {
+        return null;
+      }
+      return {
+        url: parsed.url,
+        deviceId: parsed.deviceId,
+        deviceToken: parsed.deviceToken,
+        ca: typeof parsed.ca === 'string' ? parsed.ca : '',
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  function writeSavedCenterCredentials(record) {
+    try {
+      fs.mkdirSync(resolvedDataRoot, { recursive: true });
+      fs.writeFileSync(credentialsFile, JSON.stringify(record), { encoding: 'utf8', mode: 0o600 });
+    } catch {
+      /* ignore write errors */
+    }
+  }
+
+  function clearSavedCenterCredentials() {
+    try {
+      if (fs.existsSync(credentialsFile)) fs.unlinkSync(credentialsFile);
+    } catch {
+      /* ignore unlink errors */
+    }
+  }
 
   async function opCenterConnect(params, reqSignal, rec) {
     rejectUnknownFields(params, new Set(['url', 'deviceId', 'deviceToken', 'ca']), 'center_connect params');
+    let effectiveToken = params.deviceToken;
+    if (effectiveToken === '' || effectiveToken === undefined) {
+      const saved = readSavedCenterCredentials();
+      if (saved && saved.url === params.url && saved.deviceId === params.deviceId && saved.ca === (params.ca || '') && saved.deviceToken) {
+        effectiveToken = saved.deviceToken;
+      }
+    }
     const myGeneration = ++centerGeneration;
     const previous = centerClient;
     centerClient = null;
@@ -271,7 +332,7 @@ export function openDesktopClient(options) {
     if (previous) await previous.close();
     try {
       const client = await connectCenter({ centerUrl: params.url, deviceId: params.deviceId,
-        deviceToken: params.deviceToken, ca: params.ca,
+        deviceToken: effectiveToken, ca: params.ca,
         onDisconnect: () => {
           if (myGeneration !== centerGeneration) return;
           centerClient = null;
@@ -292,11 +353,17 @@ export function openDesktopClient(options) {
         throw brokerError('NOT_CONNECTED', 'not-sent', 'center connection superseded');
       }
       await opConnect({ connection: { kind: 'relay', url: linkUrl, deviceId: params.deviceId,
-        token: params.deviceToken, ...(params.ca ? { ca: params.ca } : {}) } }, reqSignal, rec);
+        token: effectiveToken, ...(params.ca ? { ca: params.ca } : {}) } }, reqSignal, rec);
       if (closed || myGeneration !== centerGeneration || centerClient !== client) {
         await client.close();
         throw brokerError('NOT_CONNECTED', 'not-sent', 'center connection superseded');
       }
+      writeSavedCenterCredentials({
+        url: params.url,
+        deviceId: params.deviceId,
+        deviceToken: effectiveToken,
+        ca: params.ca || '',
+      });
       centerState = 'ready';
       return centerStatus();
     } catch {
@@ -312,7 +379,15 @@ export function openDesktopClient(options) {
   }
 
   function centerStatus() {
-    return { state: centerState, centerUrl, appliedRevision: null, error: null, clientId };
+    const saved = readSavedCenterCredentials();
+    return {
+      state: centerState,
+      centerUrl,
+      appliedRevision: null,
+      error: null,
+      clientId,
+      ...(saved ? { savedConnection: { url: saved.url, deviceId: saved.deviceId, ca: saved.ca } } : {}),
+    };
   }
   async function opCenterStatus(params) {
     rejectUnknownFields(params, new Set(), 'center_status params');
@@ -320,6 +395,7 @@ export function openDesktopClient(options) {
   }
   async function opCenterDisconnect(params) {
     rejectUnknownFields(params, new Set(), 'center_disconnect params');
+    clearSavedCenterCredentials();
     centerGeneration += 1;
     centerState = 'disconnected';
     dropTransportForCenter();
@@ -541,7 +617,14 @@ export function openDesktopClient(options) {
     switching = true;
     try {
       rejectUnknownFields(params, new Set(['connection']), 'connect params');
-      const conn = normalizeConnectionInput(params.connection);
+      let rawConnection = params.connection;
+      if (isPlainObject(rawConnection) && (rawConnection.token === '' || rawConnection.token === undefined)) {
+        const saved = readSavedCenterCredentials();
+        if (saved?.deviceToken) {
+          rawConnection = { ...rawConnection, token: saved.deviceToken };
+        }
+      }
+      const conn = normalizeConnectionInput(rawConnection);
       const profileKey = derivePendingProfileKey(conn);
 
       // Update phase after validation but before the first await so concurrent
@@ -795,6 +878,22 @@ export function openDesktopClient(options) {
       listDevices: (options) => opDevices(options, reqSignal),
       listBots: (deviceId) => opCall({ targetDeviceId: deviceId, method: 'listBots', params: {} }, reqSignal),
     });
+  }
+
+  async function opBotSync(params, reqSignal) {
+    rejectUnknownFields(params, new Set(['epoch', 'sinceSeq']), 'bot_sync params');
+    requireCenter();
+    const client = centerClient;
+    if (!client || typeof client.getBotSync !== 'function') {
+      throw brokerError('NOT_CONNECTED', 'not-sent', 'center is disconnected');
+    }
+    return client.getBotSync(
+      {
+        epoch: typeof params.epoch === 'string' ? params.epoch : undefined,
+        sinceSeq: Number.isSafeInteger(params.sinceSeq) ? params.sinceSeq : undefined,
+      },
+      reqSignal,
+    );
   }
 
   async function opRenameDevice(params, reqSignal) {
@@ -1076,8 +1175,15 @@ export function openDesktopClient(options) {
     if (observations.has(params.observationId)) {
       throw invalid(`observationId already active: ${params.observationId}`);
     }
-    if (connection ? [...observations.values()].some((obs) => obs.connection)
-      : [...observations.values()].filter((obs) => !obs.connection).length >= DESKTOP_MAX_OBSERVATIONS) {
+    if (connection) {
+      for (const obs of observations.values()) {
+        if (obs.connection) {
+          obs.settled = true;
+          obs.controller.abort();
+          observations.delete(obs.id);
+        }
+      }
+    } else if ([...observations.values()].filter((obs) => !obs.connection).length >= DESKTOP_MAX_OBSERVATIONS) {
       throw brokerError('RPC_BUSY', 'not-sent', 'maximum concurrent observations reached');
     }
 
@@ -1200,6 +1306,7 @@ export function openDesktopClient(options) {
     ['status', opStatus],
     ['devices', opDevices],
     ['bot_directory', opBotDirectory],
+    ['bot_sync', opBotSync],
     ['rename_device', opRenameDevice],
     ['call', opCall],
     ['settings_get', opSettingsGet],

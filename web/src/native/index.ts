@@ -204,7 +204,20 @@ export type HostRuntimeSettings = {
 };
 export type HostSettings = { runtime: HostRuntimeSettings; relay: HostRelayConfig|null };
 export type HostSettingsPayload = { deviceId: string; revision: number; settings: HostSettings; activeRevision?: number; restartRequired?: boolean };
-export type HostBot = { botId: string; deviceId: string; role: string; cwd: string; modelRef: string|null; primaryConversationId: string; createdAt: string };
+export interface HostBot {
+  botId: string;
+  deviceId: string;
+  role: string;
+  description?: string;
+  cwd: string;
+  modelRef: string | null;
+  primaryConversationId: string;
+  createdAt: string;
+  isPrimary?: boolean;
+  lastActivityAt?: string | null;
+  lastPreview?: string | null;
+  archivedAt?: string | null;
+}
 export type HostSubmission = { botId: string; conversationId: string; requestId: string; submissionId: number; status: 'queued'|'placed'|'done'|'unanswered'; answerText: string|null; reason: string|null };
 export type HostHistoryPage = { botId: string; conversationId: string; items: Array<Record<string, unknown>>; nextCursor: Record<string, unknown>|null };
 export type HostCallResult = { type: 'result'; id: string; result: unknown };

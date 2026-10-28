@@ -11,7 +11,7 @@ export async function registerAuth(app, { sessionKey, ownerPasswordHash }) {
   if (!match) throw new Error('invalid owner password hash');
   const salt = Buffer.from(match[1], 'hex');
   const expected = Buffer.from(match[2], 'hex');
-  await app.register(secureSession, { key: sessionKey, cookie: { path: '/', httpOnly: true, secure: true, sameSite: 'strict' } });
+  await app.register(secureSession, { key: sessionKey, cookie: { path: '/', httpOnly: true, secure: true, sameSite: 'strict', maxAge: 30 * 24 * 60 * 60 } });
   await app.register(csrfProtection, { sessionPlugin: '@fastify/secure-session', getToken: req => req.headers['x-csrf-token'] });
   await app.register(rateLimit, { global: false });
   app.get('/api/session', async (req, reply) => ({ authenticated: req.session.get('owner') === true, csrfToken: reply.generateCsrf() }));

@@ -14,7 +14,7 @@ import { openCenterExecution } from './execution.js';
 import { openMcpOAuth } from './oauth/index.js';
 
 const require = createRequire(import.meta.url);
-const status = { INVALID_ARGUMENT: 400, UNSUPPORTED_TARGET: 400, VALIDATION_FAILED: 400, UNAUTHENTICATED: 401, FORBIDDEN: 403, CSRF_INVALID: 403, NOT_FOUND: 404, REVISION_CONFLICT: 409, REQUEST_CONFLICT: 409, INVALID_STATE: 409, PAYLOAD_TOO_LARGE: 413, RATE_LIMITED: 429, CENTER_OFFLINE: 503, DEVICE_OFFLINE: 503 };
+const status = { INVALID_ARGUMENT: 400, INVALID_CWD: 400, UNSUPPORTED_TARGET: 400, VALIDATION_FAILED: 400, UNAUTHENTICATED: 401, FORBIDDEN: 403, CSRF_INVALID: 403, NOT_FOUND: 404, BOT_NOT_FOUND: 404, REVISION_CONFLICT: 409, REQUEST_CONFLICT: 409, INVALID_STATE: 409, PRIMARY_BOT_PROTECTED: 409, BOT_ARCHIVED: 409, PAYLOAD_TOO_LARGE: 413, RATE_LIMITED: 429, CENTER_OFFLINE: 503, DEVICE_OFFLINE: 503 };
 
 export async function openCenterServer({ dataRoot, encryptionKey, sessionKey, ownerPasswordHash, https, listenHost = '127.0.0.1', port = 8443, relay: relayOptions, webRoot, npmPath, publicUrl }) {
   if (!relayOptions?.tls?.cert || !relayOptions?.tls?.key || !https?.cert || !https?.key || !publicUrl || new URL(publicUrl).protocol !== 'https:' || new URL(relayOptions.linkUrl).protocol !== 'wss:') throw new Error('HTTPS and TLS relay are required');

@@ -41,6 +41,9 @@ import { createShowerTools } from './shower-tools.js';
 import { createRuntimeShower } from './runtime-shower.js';
 
 const CTX = BACKGROUND_CONTEXT;
+const BOTS_SYNC_THROTTLE_MS = 1000;
+const ARCHIVE_RETENTION_MS = 14 * 24 * 60 * 60 * 1000;
+const ARCHIVE_PURGE_INTERVAL_MS = 6 * 3600 * 1000;
 
 function errWithCode(message, code) {
   const err = new Error(message);
@@ -373,6 +376,7 @@ export async function openRuntime(options) {
     setWatermarkReader: (fn) => { getBotEntryWatermark = fn; },
     botAdmissions: bots,
     onBotsChanged: options?.onBotsChanged,
+    onBotsSync: options?.onBotsSync,
     collaboration,
     shower,
   });
@@ -410,7 +414,7 @@ function parseBindingKey(key) {
   }
 }
 
-function createRuntime({ host, harness, models, defaultModel, releaseOwner, cleanupEnvs, live, workContexts, decisions, plugins, coreExtensions, finalBudgetExtension, centerRuntime, setOnline, setBotModels, getBotModels, setWatermarkReader, botAdmissions, collaboration, onBotsChanged, shower }) {
+function createRuntime({ host, harness, models, defaultModel, releaseOwner, cleanupEnvs, live, workContexts, decisions, plugins, coreExtensions, finalBudgetExtension, centerRuntime, setOnline, setBotModels, getBotModels, setWatermarkReader, botAdmissions, collaboration, onBotsChanged, onBotsSync, shower }) {
   let closePromise = null;
   let closing = false;
   let centerOnline = false;
@@ -427,6 +431,131 @@ function createRuntime({ host, harness, models, defaultModel, releaseOwner, clea
   const admitBot = botAdmissions.admit;
   // 本运行时已初始化过人格/工具的 Bot；新 Bot 经 initializeBot 增量加入。
   const initializedBots = new Set();
+
+  // >= 1000ms 尾沿节流（trailing throttle）同步 Bot 元数据。
+  const syncBotsCallback = onBotsSync ?? onBotsChanged ?? null;
+  let botsSyncTimer = null;
+  let botsSyncPending = false;
+  let botsSyncRunning = false;
+  let lastBotsSyncAt = 0;
+
+  function runBotsSync() {
+    if (closing || !syncBotsCallback) return;
+    if (botsSyncRunning) {
+      botsSyncPending = true;
+      return;
+    }
+    botsSyncRunning = true;
+    lastBotsSyncAt = Date.now();
+    Promise.resolve()
+      .then(() => syncBotsCallback())
+      .catch(() => {})
+      .finally(() => {
+        botsSyncRunning = false;
+        if (botsSyncPending && !closing) {
+          botsSyncPending = false;
+          scheduleBotsSync();
+        }
+      });
+  }
+
+  function scheduleBotsSync() {
+    if (closing || !syncBotsCallback) return;
+    if (botsSyncTimer !== null) return;
+    const elapsed = Date.now() - lastBotsSyncAt;
+    const delay = Math.max(BOTS_SYNC_THROTTLE_MS, BOTS_SYNC_THROTTLE_MS - elapsed);
+    botsSyncTimer = setTimeout(() => {
+      botsSyncTimer = null;
+      runBotsSync();
+    }, delay);
+    botsSyncTimer.unref?.();
+  }
+
+  // 跟踪在飞的主会话提交：完成时记录 lastActivityAt 与 lastPreview。
+  const trackedSubmissions = new Map(); // submissionId -> { botId, nativeId }
+  const completedSubmissions = new Set(); // submissionId
+  let submissionCheckPromise = null;
+  let checkSubmissionsAgain = false;
+
+  function recordCompletedSubmission(botId, formatted) {
+    if (!formatted || formatted.status !== 'done') return;
+    const submissionId = formatted.submissionId;
+    if (submissionId !== undefined && submissionId !== null) {
+      trackedSubmissions.delete(submissionId);
+      if (completedSubmissions.has(submissionId)) return;
+      completedSubmissions.add(submissionId);
+    }
+    try {
+      host.recordBotActivity(botId, {
+        lastActivityAt: new Date().toISOString(),
+        lastPreview: formatted.answerText || '',
+      });
+      scheduleBotsSync();
+    } catch {
+      /* ignore activity update error if bot was deleted or store closed */
+    }
+  }
+
+  function checkTrackedSubmissions() {
+    if (closing || trackedSubmissions.size === 0) return;
+    if (submissionCheckPromise) {
+      checkSubmissionsAgain = true;
+      return;
+    }
+    submissionCheckPromise = (async () => {
+      try {
+        do {
+          checkSubmissionsAgain = false;
+          if (closing || trackedSubmissions.size === 0) break;
+          for (const [submissionId, info] of [...trackedSubmissions.entries()]) {
+            if (closing) break;
+            try {
+              const sub = await harness.submission(submissionId, CTX);
+              if (!sub) {
+                trackedSubmissions.delete(submissionId);
+                continue;
+              }
+              const statusRecord = await sub.status(CTX);
+              if (statusRecord.status === 'done') {
+                const bot = host.getBot(info.botId);
+                if (bot) {
+                  const formatted = await formatPrimarySubmission(harness, bot, statusRecord, CTX);
+                  recordCompletedSubmission(info.botId, formatted);
+                } else {
+                  trackedSubmissions.delete(submissionId);
+                }
+              } else if (statusRecord.status === 'unanswered') {
+                trackedSubmissions.delete(submissionId);
+              }
+            } catch {
+              /* ignore transient/closing errors */
+            }
+          }
+        } while (checkSubmissionsAgain && !closing);
+      } finally {
+        submissionCheckPromise = null;
+      }
+    })();
+  }
+
+  let unsubscribeCommits = null;
+  try {
+    unsubscribeCommits = harness.subscribeCommits((publication) => {
+      if (closing || trackedSubmissions.size === 0) return;
+      if (publication && Array.isArray(publication.changes) && publication.changes.some((c) => c?.type === 'submission')) {
+        queueMicrotask(() => checkTrackedSubmissions());
+      }
+    });
+  } catch {
+    /* ignore if harness does not support subscribeCommits */
+  }
+
+  // 14 天归档自动删除定时器（每 6 小时检查一次）。
+  let archivePurgeTimer = setInterval(() => {
+    void purgeExpiredArchivedBots();
+  }, ARCHIVE_PURGE_INTERVAL_MS);
+  archivePurgeTimer.unref?.();
+
   // 已接纳的异步迁移操作（preview/status/import/draft）：closing 关准入，
   // close 在 harness/host 关闭前排空，避免半完成的导入或读取悬空。
   const legacyOps = new Set();
@@ -447,6 +576,18 @@ function createRuntime({ host, harness, models, defaultModel, releaseOwner, clea
     ++epoch;
     centerOnline = false;
     setOnline(false);
+    if (botsSyncTimer !== null) {
+      clearTimeout(botsSyncTimer);
+      botsSyncTimer = null;
+    }
+    if (archivePurgeTimer !== null) {
+      clearInterval(archivePurgeTimer);
+      archivePurgeTimer = null;
+    }
+    if (unsubscribeCommits) {
+      try { unsubscribeCommits(); } catch { /* ignore */ }
+      unsubscribeCommits = null;
+    }
     botAdmissions.suspend();
     plugins.suspend();
     plugins.abortActions();
@@ -460,6 +601,9 @@ function createRuntime({ host, harness, models, defaultModel, releaseOwner, clea
       try { await decisions.close(); } catch (err) { errors.push(err); }
       // 已接纳 Bot 操作在 harness/store 释放前排空。
       try { await botClose; } catch (err) { errors.push(err); }
+      if (submissionCheckPromise) {
+        try { await submissionCheckPromise; } catch { /* ignore */ }
+      }
       // 再关闭 Shower：丢弃排队操作并释放本 Host 拥有的图形环境，不把在飞结果留到关库之后。
       try { await shower.close(); } catch (err) { errors.push(err); }
       // 排空已接纳迁移操作：必须在 harness/host 关闭前等待完成。
@@ -549,8 +693,9 @@ function createRuntime({ host, harness, models, defaultModel, releaseOwner, clea
     if (closing) throw errWithCode('host is closing', 'NOT_CONNECTED');
     if (input?.modelRef != null) throw errWithCode('bot models are managed by the center', 'INVALID_ARGUMENT');
     const bot = host.createBot(input);
-    if (onBotsChanged) await onBotsChanged();
     await initializeBot(bot.botId);
+    if (onBotsChanged) await onBotsChanged();
+    else scheduleBotsSync();
     return bot;
   }
 
@@ -566,6 +711,40 @@ function createRuntime({ host, harness, models, defaultModel, releaseOwner, clea
     for (const nativeId of nativeIds) {
       const state = await harness.snapshot(WorkDecisionState, nativeId, CTX);
       if (state?.pending) throw errWithCode('bot has an active work decision', 'RUNTIME_BUSY');
+    }
+  }
+
+  async function purgeOneExpiredBot(botId) {
+    const bot = host.getBot(botId);
+    if (!bot || bot.isPrimary || !bot.archivedAt) return false;
+    await assertBotIdle(bot);
+    host.deleteBot({ botId });
+    initializedBots.delete(botId);
+    return true;
+  }
+
+  async function purgeExpiredArchivedBots() {
+    if (closing) return;
+    const cutoffIso = new Date(Date.now() - ARCHIVE_RETENTION_MS).toISOString();
+    const expired = host.listExpiredArchivedBots(cutoffIso);
+    if (expired.length === 0) return;
+    let deletedAny = false;
+    for (const bot of expired) {
+      if (closing) break;
+      try {
+        const runPurge = () => purgeOneExpiredBot(bot.botId);
+        const didDelete = centerOnline ? await admitBot(bot.botId, runPurge) : await runPurge();
+        if (didDelete) deletedAny = true;
+      } catch {
+        /* 忙或出错忽略 */
+      }
+    }
+    if (deletedAny) {
+      if (onBotsSync) {
+        try { await onBotsSync(); } catch { /* ignore */ }
+      } else {
+        scheduleBotsSync();
+      }
     }
   }
 
@@ -692,8 +871,45 @@ function createRuntime({ host, harness, models, defaultModel, releaseOwner, clea
     initializeBot,
 
     async initializeBots() {
+      await purgeExpiredArchivedBots();
       for (const bot of host.listBots()) await initializeBot(bot.botId);
     },
+
+    setPrimaryBot: (botId) => admitBot(botId, async () => {
+      const updated = host.setPrimaryBot({ botId });
+      if (onBotsSync) await onBotsSync();
+      else scheduleBotsSync();
+      return updated;
+    }),
+
+    archiveBot: (botId) => admitBot(botId, async () => {
+      const bot = await requireBot(botId);
+      if (bot.isPrimary) throw errWithCode('primary bot cannot be archived', 'PRIMARY_BOT_PROTECTED');
+      await assertBotIdle(bot);
+      const updated = host.archiveBot({ botId });
+      if (onBotsSync) await onBotsSync();
+      else scheduleBotsSync();
+      return updated;
+    }),
+
+    unarchiveBot: (botId) => admitBot(botId, async () => {
+      await requireBot(botId);
+      const updated = host.unarchiveBot({ botId });
+      if (onBotsSync) await onBotsSync();
+      else scheduleBotsSync();
+      return updated;
+    }),
+
+    deleteBot: (botId) => admitBot(botId, async () => {
+      const bot = await requireBot(botId);
+      if (bot.isPrimary) throw errWithCode('primary bot cannot be deleted', 'PRIMARY_BOT_PROTECTED');
+      await assertBotIdle(bot);
+      const res = host.deleteBot({ botId });
+      initializedBots.delete(botId);
+      if (onBotsSync) await onBotsSync();
+      else scheduleBotsSync();
+      return res;
+    }),
 
     getExtensionCatalog() { throw errWithCode('capabilities are managed by the center', 'INVALID_STATE'); },
     getBotExtensions() { throw errWithCode('capabilities are managed by the center', 'INVALID_STATE'); },
@@ -723,6 +939,9 @@ function createRuntime({ host, harness, models, defaultModel, releaseOwner, clea
       assertNonBlank(text, 'text');
       const bot = host.getBot(botId);
       if (!bot) throw errWithCode(`bot not found: ${botId}`, 'BOT_NOT_FOUND');
+      if (bot.archivedAt !== null && bot.archivedAt !== undefined) {
+        throw errWithCode('bot is archived and read-only', 'BOT_ARCHIVED');
+      }
       // 遗留 Bot 在首次运行使用前完成 SOUL 回填。
       await initializeBot(botId);
       const profile = profileFor(botId, null);
@@ -765,7 +984,12 @@ function createRuntime({ host, harness, models, defaultModel, releaseOwner, clea
       // 已有提交：比较摘要后直接返回原回执，不再次调用模型。
       const record = await harness.commit((tx) => tx.submissionByRequest(conversation.id, requestId), CTX);
       if (record !== undefined) {
-        return formatPrimarySubmission(harness, bot, record, CTX);
+        if (record.status === 'queued' || record.status === 'placed') {
+          trackedSubmissions.set(record.id, { botId, nativeId: conversation.id });
+        }
+        const formatted = await formatPrimarySubmission(harness, bot, record, CTX);
+        if (formatted.status === 'done') recordCompletedSubmission(botId, formatted);
+        return formatted;
       }
 
       // 发新输入前验证会话实际（已持久化）模型仍在当前 models 中。
@@ -777,7 +1001,11 @@ function createRuntime({ host, harness, models, defaultModel, releaseOwner, clea
       }
 
       const submission = await conversation.submit({ type: 'input', content: text, requestId }, CTX);
-      return formatPrimarySubmission(harness, bot, await submission.status(CTX), CTX);
+      const statusRecord = await submission.status(CTX);
+      trackedSubmissions.set(statusRecord.id, { botId, nativeId: conversation.id });
+      const formatted = await formatPrimarySubmission(harness, bot, statusRecord, CTX);
+      if (formatted.status === 'done') recordCompletedSubmission(botId, formatted);
+      return formatted;
     }),
 
     async wait(botId, requestId) {
@@ -791,11 +1019,17 @@ function createRuntime({ host, harness, models, defaultModel, releaseOwner, clea
       if (!record) throw errWithCode('submission not found', 'SUBMISSION_NOT_FOUND');
       // 已完结回执直接返回，不调用 Submission.wait（其上开头无条件 resume，会意外调度其他待处理任务）。
       if (record.status === 'done' || record.status === 'unanswered') {
-        return formatPrimarySubmission(harness, bot, record, CTX);
+        const formatted = await formatPrimarySubmission(harness, bot, record, CTX);
+        if (formatted.status === 'done') recordCompletedSubmission(botId, formatted);
+        return formatted;
       }
       const submission = await harness.submission(record.id, CTX);
       if (!submission) throw errWithCode('submission not found', 'SUBMISSION_NOT_FOUND');
-      return formatPrimarySubmission(harness, bot, await submission.wait(CTX), CTX);
+      trackedSubmissions.set(record.id, { botId, nativeId: conversation.id });
+      const finalRecord = await submission.wait(CTX);
+      const formatted = await formatPrimarySubmission(harness, bot, finalRecord, CTX);
+      if (formatted.status === 'done') recordCompletedSubmission(botId, formatted);
+      return formatted;
     },
 
     async getSubmission(botId, requestId) {
@@ -807,7 +1041,9 @@ function createRuntime({ host, harness, models, defaultModel, releaseOwner, clea
       if (!conversation) return null;
       const record = await harness.commit((tx) => tx.submissionByRequest(conversation.id, requestId), CTX);
       if (!record) return null;
-      return formatPrimarySubmission(harness, bot, record, CTX);
+      const formatted = await formatPrimarySubmission(harness, bot, record, CTX);
+      if (formatted.status === 'done') recordCompletedSubmission(botId, formatted);
+      return formatted;
     },
 
     async history(botId, options = {}) {

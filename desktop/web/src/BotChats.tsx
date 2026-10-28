@@ -18,6 +18,67 @@ import { targetApi } from './targetApi';
 
 type AnyRawEntry = { id: unknown; kind: string; model?: unknown; data?: unknown };
 
+const ARCHIVE_RETENTION_DAYS = 14;
+const MS_PER_DAY = 24 * 60 * 60 * 1000;
+const DIRECTORY_POLL_INTERVAL_MS = 2000;
+
+interface CachedBotDirectory {
+  bots: BotDirectoryEntry[];
+  devices: DevicesDirectoryItem[];
+  updatedAt: string;
+}
+
+function directoryCacheKey(profileKey: string): string {
+  return `desktop-bot-dir-v5:${profileKey}`;
+}
+
+function readDirectoryCache(profileKey: string): CachedBotDirectory | null {
+  if (!profileKey || typeof window === 'undefined' || !window.localStorage) return null;
+  try {
+    const raw = window.localStorage.getItem(directoryCacheKey(profileKey));
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<CachedBotDirectory>;
+    if (!Array.isArray(parsed.bots) || !Array.isArray(parsed.devices)) return null;
+    return {
+      bots: parsed.bots,
+      devices: parsed.devices,
+      updatedAt: typeof parsed.updatedAt === 'string' ? parsed.updatedAt : '',
+    };
+  } catch {
+    return null;
+  }
+}
+
+function writeDirectoryCache(
+  profileKey: string,
+  bots: BotDirectoryEntry[],
+  devices: DevicesDirectoryItem[],
+): void {
+  if (!profileKey || typeof window === 'undefined' || !window.localStorage) return;
+  try {
+    const payload: CachedBotDirectory = {
+      bots,
+      devices,
+      updatedAt: new Date().toISOString(),
+    };
+    window.localStorage.setItem(directoryCacheKey(profileKey), JSON.stringify(payload));
+  } catch {
+    // 忽略 localStorage 配额或权限限制
+  }
+}
+
+function remainingArchiveDays(archivedAt: string | null | undefined): number {
+  if (!archivedAt) return ARCHIVE_RETENTION_DAYS;
+  const archivedMs = Date.parse(archivedAt);
+  if (Number.isNaN(archivedMs)) return ARCHIVE_RETENTION_DAYS;
+  const expireMs = archivedMs + ARCHIVE_RETENTION_DAYS * MS_PER_DAY;
+  return Math.max(0, Math.ceil((expireMs - Date.now()) / MS_PER_DAY));
+}
+
+function botSortTimestamp(b: Pick<BotRecord, 'lastActivityAt' | 'createdAt'>): number {
+  return Date.parse(b.lastActivityAt || b.createdAt || '') || 0;
+}
+
 function sessionKey(id: DesktopIdentity | null): string {
   return id ? `${id.profileId}|${id.generation}|${id.targetDeviceId}` : '';
 }
@@ -135,21 +196,66 @@ function RawHistoryPane({ items, loading, error, onLoadMore, hasMore, onRetry, o
   );
 }
 
-function CreateBotForm({ api, devices, onCreated }: {
+function CreateBotForm({
+  api,
+  devices,
+  bots,
+  initialDeviceId = '',
+  onCreated,
+}: {
   api: DesktopPanelApi;
   devices: DevicesDirectoryItem[];
+  bots: BotDirectoryEntry[];
+  initialDeviceId?: string;
   onCreated: (deviceId: string, bot: BotRecord) => void;
 }) {
-  const [deviceId, setDeviceId] = useState('');
+  const [deviceId, setDeviceId] = useState(initialDeviceId);
   const [role, setRole] = useState('');
   const [description, setDescription] = useState('');
   const [cwd, setCwd] = useState('');
+  const [makePrimary, setMakePrimary] = useState(true);
   const [busy, setBusy] = useState(false);
   const [locked, setLocked] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const mountedRef = useRef(true);
   const sendingRef = useRef(false);
-  useEffect(() => { mountedRef.current = true; return () => { mountedRef.current = false; }; }, []);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (initialDeviceId) {
+      setDeviceId(initialDeviceId);
+      const hasPrimary = bots.some(
+        (b) => b.deviceId === initialDeviceId && b.isPrimary && !b.archivedAt,
+      );
+      setMakePrimary(!hasPrimary);
+    }
+  }, [initialDeviceId, bots]);
+
+  const targetHasPrimary = useMemo(
+    () =>
+      Boolean(
+        deviceId &&
+          bots.some((b) => b.deviceId === deviceId && b.isPrimary && !b.archivedAt),
+      ),
+    [deviceId, bots],
+  );
+  const forcePrimary = Boolean(deviceId && !targetHasPrimary);
+  const effectiveMakePrimary = forcePrimary ? true : makePrimary;
+
+  function handleSelectDevice(nextDeviceId: string) {
+    setDeviceId(nextDeviceId);
+    const hasPrimary = Boolean(
+      nextDeviceId &&
+        bots.some((b) => b.deviceId === nextDeviceId && b.isPrimary && !b.archivedAt),
+    );
+    setMakePrimary(!hasPrimary);
+  }
 
   async function submit() {
     if (sendingRef.current || busy || locked) return;
@@ -157,7 +263,10 @@ function CreateBotForm({ api, devices, onCreated }: {
       setError('请选择在线目标设备；目标失效时不会改用本机。');
       return;
     }
-    if (!role.trim()) { setError('Bot 名称必填'); return; }
+    if (!role.trim()) {
+      setError('Bot 名称必填');
+      return;
+    }
     sendingRef.current = true;
     setBusy(true);
     setError(null);
@@ -165,17 +274,29 @@ function CreateBotForm({ api, devices, onCreated }: {
     try {
       const identity = api.identityForTarget(deviceId);
       const bot = await api.mutateIntent(identity, 'createBot', {
-        requestId, role: role.trim(), description: description.trim(),
+        requestId,
+        role: role.trim(),
+        description: description.trim(),
         ...(cwd.trim() ? { cwd: cwd.trim() } : {}),
         modelRef: null,
+        ...(effectiveMakePrimary ? { makePrimary: true } : {}),
       });
       if (!mountedRef.current) return;
-      setRole(''); setDescription(''); setCwd('');
-      onCreated(deviceId, bot);
+      setRole('');
+      setDescription('');
+      setCwd('');
+      onCreated(deviceId, effectiveMakePrimary ? { ...bot, isPrimary: true } : bot);
     } catch (e) {
       if (!mountedRef.current) return;
-      if (!isNotSent(e) && !(e && typeof e === 'object' && (e as { outcome?: string }).outcome === 'responded')) setLocked(true);
-      setError(`${errText(e)}（原 requestId: ${requestId}；未确认结果请在待发送面板选择原设备对账，不会自动重发）`);
+      if (
+        !isNotSent(e) &&
+        !(e && typeof e === 'object' && (e as { outcome?: string }).outcome === 'responded')
+      ) {
+        setLocked(true);
+      }
+      setError(
+        `${errText(e)}（原 requestId: ${requestId}；未确认结果请在待发送面板选择原设备对账，不会自动重发）`,
+      );
       api.reportError(e);
     } finally {
       sendingRef.current = false;
@@ -184,19 +305,76 @@ function CreateBotForm({ api, devices, onCreated }: {
   }
 
   return (
-    <form className="form-grid" onSubmit={(ev) => { ev.preventDefault(); void submit(); }}>
-      <label className="field">目标设备
-        <select value={deviceId} onChange={(e) => setDeviceId(e.target.value)} disabled={busy || locked}>
+    <form
+      className="form-grid"
+      onSubmit={(ev) => {
+        ev.preventDefault();
+        void submit();
+      }}
+    >
+      <label className="field">
+        目标设备
+        <select
+          value={deviceId}
+          onChange={(e) => handleSelectDevice(e.target.value)}
+          disabled={busy || locked}
+        >
           <option value="">请选择设备</option>
-          {devices.map((d) => <option key={d.deviceId} value={d.deviceId} disabled={!d.online}>{d.displayName || d.deviceId} · {d.deviceId} {d.online ? '在线' : '离线'}</option>)}
+          {devices.map((d) => (
+            <option key={d.deviceId} value={d.deviceId} disabled={!d.online}>
+              {d.displayName || d.deviceId} · {d.deviceId} {d.online ? '在线' : '离线'}
+            </option>
+          ))}
         </select>
       </label>
-      <label className="field">Bot 名称<input value={role} onChange={(e) => setRole(e.target.value)} disabled={busy || locked} /></label>
-      <label className="field">职责<textarea value={description} onChange={(e) => setDescription(e.target.value)} maxLength={2000} disabled={busy || locked} /></label>
-      <label className="field">cwd（可选；留空使用目标默认工作区）<input value={cwd} onChange={(e) => setCwd(e.target.value)} disabled={busy || locked} /></label>
+      <label className="field">
+        Bot 名称
+        <input
+          value={role}
+          onChange={(e) => setRole(e.target.value)}
+          disabled={busy || locked}
+        />
+      </label>
+      <label className="field">
+        职责
+        <textarea
+          value={description}
+          onChange={(e) => setDescription(e.target.value)}
+          maxLength={2000}
+          disabled={busy || locked}
+        />
+      </label>
+      <label className="field">
+        cwd（可选；留空使用目标默认工作区）
+        <input
+          value={cwd}
+          onChange={(e) => setCwd(e.target.value)}
+          disabled={busy || locked}
+        />
+      </label>
+      <label className="field checkbox-field">
+        <input
+          type="checkbox"
+          checked={effectiveMakePrimary}
+          disabled={busy || locked || forcePrimary}
+          onChange={(e) => setMakePrimary(e.target.checked)}
+        />
+        <span>设为主 Bot (makePrimary)</span>
+      </label>
+      {forcePrimary ? (
+        <p className="hint">该设备当前尚无未归档的主 Bot，已强制勾选并锁定设为主 Bot。</p>
+      ) : null}
       <p>模型由中心管理，新 Bot 使用中心默认配置。</p>
-      {error ? <div className="error-banner" role="alert">{error}</div> : null}
-      <div className="form-actions"><button type="submit" disabled={busy || locked || !api.transportConnected}>{busy ? '创建中…' : '创建 Bot'}</button></div>
+      {error ? (
+        <div className="error-banner" role="alert">
+          {error}
+        </div>
+      ) : null}
+      <div className="form-actions">
+        <button type="submit" disabled={busy || locked || !api.transportConnected}>
+          {busy ? '创建中…' : effectiveMakePrimary ? '创建主 Bot' : '创建 Bot'}
+        </button>
+      </div>
     </form>
   );
 }
@@ -304,13 +482,14 @@ function BotProfile({ api, bot, onSaved }: { api: DesktopViewApi; bot: BotRecord
   const [error, setError] = useState<string | null>(null);
   const inFlight = useRef(false);
   const dirty = useRef(false);
+  const isArchived = Boolean(bot.archivedAt);
   useEffect(() => {
     if (!dirty.current && !locked) { setName(bot.role); setDescription(bot.description ?? ''); }
   }, [bot.role, bot.description, locked]);
 
   async function save() {
     const identity = api.identity;
-    if (!identity || !api.transportConnected || inFlight.current || locked) return;
+    if (!identity || !api.transportConnected || inFlight.current || locked || isArchived) return;
     if (!name.trim()) { setError('Bot 名称必填'); return; }
     inFlight.current = true;
     setBusy(true);
@@ -359,19 +538,37 @@ function BotProfile({ api, bot, onSaved }: { api: DesktopViewApi; bot: BotRecord
   return <details className="raw-history">
     <summary>Bot 名称与职责</summary>
     <div className="form-grid raw-history-content">
-      <label>名称<input value={name} maxLength={120} disabled={busy || locked} onChange={(e) => { dirty.current = true; setName(e.target.value); }} /></label>
-      <label>职责<textarea value={description} maxLength={2000} disabled={busy || locked} onChange={(e) => { dirty.current = true; setDescription(e.target.value); }} /></label>
+      <label>名称<input value={name} maxLength={120} disabled={busy || locked || isArchived} onChange={(e) => { dirty.current = true; setName(e.target.value); }} /></label>
+      <label>职责<textarea value={description} maxLength={2000} disabled={busy || locked || isArchived} onChange={(e) => { dirty.current = true; setDescription(e.target.value); }} /></label>
       {error ? <div className="error-banner" role="alert">{error}</div> : null}
       {locked ? <button type="button" disabled={busy || !api.transportConnected} onClick={() => void adoptRemote()}>读取并采用远端资料（丢弃草稿）</button> : null}
-      <button onClick={() => void save()} disabled={busy || locked || !api.transportConnected}>保存资料</button>
+      <button onClick={() => void save()} disabled={busy || locked || isArchived || !api.transportConnected}>保存资料</button>
     </div>
   </details>;
 }
 
-function PrimaryChatPane({ api, bot, onProfileSaved, pageActive = true }: { api: DesktopViewApi; bot: BotRecord; onProfileSaved: (bot: BotRecord) => void; pageActive?: boolean }) {
+function PrimaryChatPane({
+  api,
+  bot,
+  onProfileSaved,
+  onBotUpdated,
+  onBotDeleted,
+  onLiveActivity,
+  pageActive = true,
+}: {
+  api: DesktopViewApi;
+  bot: BotRecord;
+  onProfileSaved: (bot: BotRecord) => void;
+  onBotUpdated: (patch: Partial<BotRecord> & { botId: string }) => void;
+  onBotDeleted: (botId: string) => void;
+  onLiveActivity?: () => void;
+  pageActive?: boolean;
+}) {
   const identity = api.identity;
   const sess = sessionKey(identity);
   const online = api.transportConnected;
+  const isArchived = Boolean(bot.archivedAt);
+  const isPrimary = Boolean(bot.isPrimary);
   const draftTarget = useMemo(() => ({ kind: 'primary' as const, id: bot.botId }), [bot.botId]);
   const drafts = useDrafts({ api, identity, target: draftTarget });
 
@@ -380,6 +577,21 @@ function PrimaryChatPane({ api, bot, onProfileSaved, pageActive = true }: { api:
   const [recOutcome, setRecOutcome] = useState<{ action: string; found: boolean; recordId: string | null; recordState: string | null } | null>(null);
   const lockedRef = useRef(false);
   const [showerOpen, setShowerOpen] = useState(false);
+
+  const [manageAction, setManageAction] = useState<'setPrimary' | 'archive' | 'unarchive' | 'delete' | null>(null);
+  const [manageError, setManageError] = useState<string | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const manageInFlightRef = useRef(false);
+  const manageBusy = manageAction !== null;
+
+  const onLiveActivityRef = useRef(onLiveActivity);
+  onLiveActivityRef.current = onLiveActivity;
+
+  useEffect(() => {
+    setManageError(null);
+    setConfirmDelete(false);
+  }, [bot.botId]);
+
   /** 统一 Shower 面板的平台无关 RPC 适配：方法名/扁平参数由面板给出，身份仍取当前连接。 */
   const callShower = useCallback(
     (method: string, params: Record<string, unknown>): Promise<unknown> => {
@@ -400,6 +612,107 @@ function PrimaryChatPane({ api, bot, onProfileSaved, pageActive = true }: { api:
     return () => { mountedRef.current = false; };
   }, []);
 
+  async function handleSetPrimary() {
+    if (!identity || !online || manageInFlightRef.current || isPrimary || isArchived) return;
+    manageInFlightRef.current = true;
+    setManageAction('setPrimary');
+    setManageError(null);
+    try {
+      const updated = await api.call(identity, 'setPrimaryBot', { botId: bot.botId });
+      if (!mountedRef.current || sessionKey(api.identity) !== sess) return;
+      onBotUpdated({
+        ...(updated && typeof updated === 'object' ? (updated as Partial<BotRecord>) : {}),
+        botId: bot.botId,
+        isPrimary: true,
+      });
+    } catch (e) {
+      if (mountedRef.current && sessionKey(api.identity) === sess) {
+        setManageError(`设为主 Bot 失败：${errText(e)}`);
+        api.reportError(e);
+      }
+    } finally {
+      manageInFlightRef.current = false;
+      if (mountedRef.current) setManageAction(null);
+    }
+  }
+
+  async function handleArchive() {
+    if (!identity || !online || manageInFlightRef.current || isPrimary || isArchived) return;
+    manageInFlightRef.current = true;
+    setManageAction('archive');
+    setManageError(null);
+    try {
+      const updated = await api.call(identity, 'archiveBot', { botId: bot.botId });
+      if (!mountedRef.current || sessionKey(api.identity) !== sess) return;
+      const archivedAt =
+        updated &&
+        typeof updated === 'object' &&
+        'archivedAt' in updated &&
+        typeof (updated as { archivedAt?: unknown }).archivedAt === 'string'
+          ? (updated as { archivedAt: string }).archivedAt
+          : new Date().toISOString();
+      onBotUpdated({
+        ...(updated && typeof updated === 'object' ? (updated as Partial<BotRecord>) : {}),
+        botId: bot.botId,
+        archivedAt,
+        isPrimary: false,
+      });
+    } catch (e) {
+      if (mountedRef.current && sessionKey(api.identity) === sess) {
+        setManageError(`归档失败：${errText(e)}`);
+        api.reportError(e);
+      }
+    } finally {
+      manageInFlightRef.current = false;
+      if (mountedRef.current) setManageAction(null);
+    }
+  }
+
+  async function handleUnarchive() {
+    if (!identity || !online || manageInFlightRef.current || !isArchived) return;
+    manageInFlightRef.current = true;
+    setManageAction('unarchive');
+    setManageError(null);
+    try {
+      const updated = await api.call(identity, 'unarchiveBot', { botId: bot.botId });
+      if (!mountedRef.current || sessionKey(api.identity) !== sess) return;
+      onBotUpdated({
+        ...(updated && typeof updated === 'object' ? (updated as Partial<BotRecord>) : {}),
+        botId: bot.botId,
+        archivedAt: null,
+      });
+    } catch (e) {
+      if (mountedRef.current && sessionKey(api.identity) === sess) {
+        setManageError(`恢复失败：${errText(e)}`);
+        api.reportError(e);
+      }
+    } finally {
+      manageInFlightRef.current = false;
+      if (mountedRef.current) setManageAction(null);
+    }
+  }
+
+  async function handleDelete() {
+    if (!identity || !online || manageInFlightRef.current || isPrimary) return;
+    manageInFlightRef.current = true;
+    setManageAction('delete');
+    setManageError(null);
+    try {
+      await api.call(identity, 'deleteBot', { botId: bot.botId });
+      if (!mountedRef.current || sessionKey(api.identity) !== sess) return;
+      setConfirmDelete(false);
+      onBotDeleted(bot.botId);
+    } catch (e) {
+      if (mountedRef.current && sessionKey(api.identity) === sess) {
+        setManageError(`删除失败：${errText(e)}`);
+        api.reportError(e);
+      }
+    } finally {
+      manageInFlightRef.current = false;
+      if (mountedRef.current) setManageAction(null);
+    }
+  }
+
   function onChangeText(v: string) {
     drafts.editText(v);
     if (sendError) setSendError(null);
@@ -414,7 +727,7 @@ function PrimaryChatPane({ api, bot, onProfileSaved, pageActive = true }: { api:
   }
 
   async function pickFile() {
-    if (!identity || lockedRef.current) return;
+    if (!identity || lockedRef.current || isArchived) return;
     try {
       const ref = await api.pickFile();
       if (ref && !lockedRef.current) addFile(ref);
@@ -425,7 +738,7 @@ function PrimaryChatPane({ api, bot, onProfileSaved, pageActive = true }: { api:
   }
 
   async function handleSend() {
-    if (!identity || sendState !== 'idle' || lockedRef.current) return;
+    if (!identity || sendState !== 'idle' || lockedRef.current || isArchived) return;
     const msg = drafts.text.trim();
     if (!msg) return;
     const filesNow = drafts.files;
@@ -505,6 +818,7 @@ function PrimaryChatPane({ api, bot, onProfileSaved, pageActive = true }: { api:
       drafts.finishSend(handle);
       // 受理只说明已受理；完成与否以 live/原回执为准，界面不断言。
       setSendError(`已受理（accepted）。结果以 live 或原回执为准。`);
+      onLiveActivityRef.current?.();
     } else if (rec.state === 'rejected') {
       // 确定终态：本地 attempt 结束，原记录保留在待发送面板
       drafts.finishSend(handle);
@@ -611,15 +925,22 @@ function PrimaryChatPane({ api, bot, onProfileSaved, pageActive = true }: { api:
           if (f.type === 'end') {
             setLiveEnded(true);
             setLiveLast(new Date().toISOString());
+            onLiveActivityRef.current?.();
             return;
           }
           if ('scopeId' in f) return;
           setLiveLast(new Date().toISOString());
           if (f.type === 'snapshot') {
             setLive(f.state);
+            onLiveActivityRef.current?.();
           } else {
             const changes = (f as { changes?: Partial<BotLiveState> }).changes;
-            if (changes) setLive((prev) => (prev ? { ...prev, ...changes } : prev));
+            if (changes) {
+              setLive((prev) => (prev ? { ...prev, ...changes } : prev));
+              if ('history' in changes || 'busy' in changes || 'generation' in changes) {
+                onLiveActivityRef.current?.();
+              }
+            }
           }
         });
         h.ready.catch((e) => {
@@ -698,18 +1019,85 @@ function PrimaryChatPane({ api, bot, onProfileSaved, pageActive = true }: { api:
     if (identity && api.transportConnected) void loadRaw(true);
   }, [loadRaw, identity, online]);
 
-  const disabled = sendState === 'sending' || lockedRef.current || drafts.busy || !!drafts.attempt;
+  const disabled =
+    isArchived || sendState === 'sending' || lockedRef.current || drafts.busy || !!drafts.attempt;
 
   return (
     <div className="chat-pane-inner">
       <header className="chat-pane-header chat-pane-header-row">
         <div>
-          <div className="chat-title">{bot.role}</div>
+          <div className="chat-title-row">
+            <span className="chat-title">{bot.role}</span>
+            {isPrimary && !isArchived ? (
+              <span className="primary-star-pill" title="当前设备主 Bot">★ 主 Bot</span>
+            ) : null}
+            {isArchived ? (
+              <span className="archived-pill">已归档</span>
+            ) : null}
+          </div>
           <div className="metadata">
             <span>{bot.botId}</span> · <span>cwd: {bot.cwd}</span> · <span>模型: {bot.modelRef ?? '默认'}</span>
           </div>
+          {isPrimary && !isArchived ? (
+            <div className="primary-guard-hint">
+              主 Bot 不可归档，请先切换主 Bot · 主 Bot 不可删除，请先切换主 Bot
+            </div>
+          ) : null}
         </div>
         <div className="chat-header-actions">
+          {!isPrimary && !isArchived ? (
+            <button
+              type="button"
+              className="toolbar-btn"
+              disabled={!online || manageBusy}
+              onClick={() => void handleSetPrimary()}
+              title={!online ? '设备离线，不可切换主 Bot' : '将此 Bot 设为所属设备的主 Bot'}
+            >
+              {manageAction === 'setPrimary' ? '设置中…' : '★ 设为主 Bot'}
+            </button>
+          ) : null}
+          {!isArchived ? (
+            <button
+              type="button"
+              className="toolbar-btn"
+              disabled={!online || manageBusy || isPrimary}
+              title={
+                isPrimary
+                  ? '主 Bot 不可归档，请先切换主 Bot'
+                  : !online
+                    ? '设备离线，不可归档'
+                    : '归档此 Bot（14 天后自动删除）'
+              }
+              onClick={() => void handleArchive()}
+            >
+              {manageAction === 'archive' ? '归档中…' : '归档'}
+            </button>
+          ) : (
+            <button
+              type="button"
+              className="toolbar-btn"
+              disabled={!online || manageBusy}
+              title={!online ? '设备离线，不可恢复' : '恢复此 Bot'}
+              onClick={() => void handleUnarchive()}
+            >
+              {manageAction === 'unarchive' ? '恢复中…' : '恢复'}
+            </button>
+          )}
+          <button
+            type="button"
+            className="toolbar-btn danger-outline-btn"
+            disabled={!online || manageBusy || isPrimary}
+            title={
+              isPrimary
+                ? '主 Bot 不可删除，请先切换主 Bot'
+                : !online
+                  ? '设备离线，不可删除'
+                  : '删除此 Bot'
+            }
+            onClick={() => setConfirmDelete(true)}
+          >
+            {manageAction === 'delete' ? '删除中…' : '删除'}
+          </button>
           <button
             type="button"
             className={`soul-studio-trigger ${showerOpen ? 'active' : ''}`}
@@ -726,6 +1114,54 @@ function PrimaryChatPane({ api, bot, onProfileSaved, pageActive = true }: { api:
           </button>
         </div>
       </header>
+
+      {confirmDelete && !isPrimary ? (
+        <div className="confirm-delete-banner" role="alert">
+          <span>确定要永久删除 Bot「{bot.role}」（{bot.botId}）吗？此操作不可撤销。</span>
+          <div className="confirm-delete-actions">
+            <button
+              type="button"
+              className="toolbar-btn danger-btn"
+              disabled={!online || manageBusy}
+              onClick={() => void handleDelete()}
+            >
+              {manageAction === 'delete' ? '删除中…' : '确认删除'}
+            </button>
+            <button
+              type="button"
+              className="toolbar-btn"
+              disabled={manageBusy}
+              onClick={() => setConfirmDelete(false)}
+            >
+              取消
+            </button>
+          </div>
+        </div>
+      ) : null}
+
+      {manageError ? (
+        <div className="error-banner" role="alert">
+          {manageError}
+          <button type="button" onClick={() => setManageError(null)}>关闭</button>
+        </div>
+      ) : null}
+
+      {isArchived ? (
+        <div className="archived-readonly-banner" role="status">
+          <span>
+            此 Bot 已归档（只读模式，不可发送消息）· 剩余 {remainingArchiveDays(bot.archivedAt)} 天后自动删除
+            {bot.archivedAt ? `（归档于 ${formatTime(bot.archivedAt)}）` : ''}
+          </span>
+          <button
+            type="button"
+            className="toolbar-btn"
+            disabled={!online || manageBusy}
+            onClick={() => void handleUnarchive()}
+          >
+            {manageAction === 'unarchive' ? '恢复中…' : '恢复 Bot'}
+          </button>
+        </div>
+      ) : null}
 
       <div className="live-status status" aria-live="polite">
         {!online ? <span>离线：显示最后读取的数据，不自动请求。</span>
@@ -810,15 +1246,28 @@ function PrimaryChatPane({ api, bot, onProfileSaved, pageActive = true }: { api:
         files={drafts.files}
         onAddFile={addFile}
         onRemoveFile={removeFile}
-        canPick={identity?.kind === 'local'}
+        canPick={!isArchived && identity?.kind === 'local'}
         onPick={pickFile}
         draftError={drafts.error}
-        draftHint={identity?.kind !== 'local' ? 'Relay 模式不可选本机文件；可将目标 Host 上已存在的路径作为普通文本引用。' : null}
+        draftHint={
+          isArchived
+            ? '此 Bot 已归档，当前为只读模式，恢复后可继续发送消息。'
+            : identity?.kind !== 'local'
+              ? 'Relay 模式不可选本机文件；可将目标 Host 上已存在的路径作为普通文本引用。'
+              : null
+        }
         draftConflict={drafts.conflict}
         sendState={sendState}
         sendError={sendError}
         onSend={handleSend}
-        canSend={!!identity && !!drafts.key && drafts.text.trim().length > 0 && !drafts.attempt && !drafts.savePaused}
+        canSend={
+          !isArchived &&
+          !!identity &&
+          !!drafts.key &&
+          drafts.text.trim().length > 0 &&
+          !drafts.attempt &&
+          !drafts.savePaused
+        }
         disabled={disabled}
         onRetryDraft={drafts.retrySave}
         attempt={drafts.attempt ? {
@@ -839,12 +1288,17 @@ export function BotChats({ api, pageActive = true }: { api: DesktopPanelApi; pag
   const identity = api.identity;
   const sess = sessionKey(identity);
   const online = api.transportConnected;
-  const [bots, setBots] = useState<BotDirectoryEntry[]>([]);
-  const [devices, setDevices] = useState<DevicesDirectoryItem[]>([]);
+  const profileKey = identity ? `${identity.profileId}|${identity.kind}` : '';
+  const profileRef = useRef(profileKey);
+  const initialCache = useMemo(() => readDirectoryCache(profileKey), [profileKey]);
+
+  const [bots, setBots] = useState<BotDirectoryEntry[]>(() => initialCache?.bots ?? []);
+  const [devices, setDevices] = useState<DevicesDirectoryItem[]>(() => initialCache?.devices ?? []);
   const [botsError, setBotsError] = useState<string | null>(null);
-  const [loaded, setLoaded] = useState(false);
+  const [loaded, setLoaded] = useState<boolean>(() => Boolean(initialCache));
   const [selected, setSelected] = useState<{ deviceId: string; botId: string } | null>(null);
   const [showCreate, setShowCreate] = useState(false);
+  const [createTargetDeviceId, setCreateTargetDeviceId] = useState('');
   const [loading, setLoading] = useState(false);
   const [visible, setVisible] = useState(!document.hidden);
   const [refreshVersion, setRefreshVersion] = useState(0);
@@ -853,12 +1307,12 @@ export function BotChats({ api, pageActive = true }: { api: DesktopPanelApi; pag
   const seq = useRef(0);
   const sessionRef = useRef(sess);
   sessionRef.current = sess;
-  const profileKey = identity ? `${identity.profileId}|${identity.kind}` : '';
-  const profileRef = useRef(profileKey);
+  const lastLiveRefreshRef = useRef(0);
 
   const loadBots = useCallback(async () => {
     if (!identity || !api.transportConnected || !pageActive || !visible || inFlight.current) return;
     const localSess = sess;
+    const localProfileKey = profileKey;
     const n = ++seq.current;
     inFlight.current = true;
     setLoading(true);
@@ -867,71 +1321,381 @@ export function BotChats({ api, pageActive = true }: { api: DesktopPanelApi; pag
       if (seq.current !== n || sessionRef.current !== localSess) return;
       const unavailable = new Set(directory.devices.filter((d) => !d.online).map((d) => d.deviceId));
       for (const error of directory.errors) unavailable.add(error.deviceId);
-      setBots((old) => [
-        ...directory.bots,
-        ...old.filter((b) => unavailable.has(b.deviceId) && !directory.bots.some((next) => next.deviceId === b.deviceId && next.botId === b.botId))
-          .map((b) => ({ ...b, online: false })),
-      ]);
+      setBots((old) => {
+        const merged = [
+          ...directory.bots,
+          ...old
+            .filter(
+              (b) =>
+                (unavailable.has(b.deviceId) ||
+                  !directory.devices.some((d) => d.deviceId === b.deviceId)) &&
+                !directory.bots.some(
+                  (next) => next.deviceId === b.deviceId && next.botId === b.botId,
+                ),
+            )
+            .map((b) => ({ ...b, online: false })),
+        ];
+        writeDirectoryCache(localProfileKey, merged, directory.devices);
+        return merged;
+      });
       setDevices(directory.devices);
       setLoaded(true);
-      setBotsError(directory.errors.length ? directory.errors.map((e) => `${e.deviceId}: ${e.code}${e.message ? ' ' + e.message : ''}`).join('；') : null);
+      setBotsError(
+        directory.errors.length
+          ? directory.errors
+              .map((e) => `${e.deviceId}: ${e.code}${e.message ? ' ' + e.message : ''}`)
+              .join('；')
+          : null,
+      );
     } catch (e) {
-      if (seq.current === n && sessionRef.current === localSess) setBotsError(`目录读取失败：${errText(e)}`);
+      if (seq.current === n && sessionRef.current === localSess) {
+        setBotsError(`目录读取失败：${errText(e)}`);
+      }
     } finally {
       inFlight.current = false;
       if (seq.current === n && sessionRef.current === localSess) setLoading(false);
-      if (refreshQueued.current) { refreshQueued.current = false; setRefreshVersion((v) => v + 1); }
+      if (refreshQueued.current) {
+        refreshQueued.current = false;
+        setRefreshVersion((v) => v + 1);
+      }
     }
-  }, [api, sess, online, pageActive, visible]);
+  }, [api, sess, profileKey, online, pageActive, visible]);
+
+  const triggerLoadBots = useCallback(() => {
+    if (inFlight.current) {
+      refreshQueued.current = true;
+    } else {
+      void loadBots();
+    }
+  }, [loadBots]);
+
+  const handleLiveActivity = useCallback(() => {
+    const now = Date.now();
+    if (now - lastLiveRefreshRef.current < 400) {
+      refreshQueued.current = true;
+      return;
+    }
+    lastLiveRefreshRef.current = now;
+    triggerLoadBots();
+  }, [triggerLoadBots]);
 
   useEffect(() => {
-    const onVisibility = () => setVisible(!document.hidden);
+    if (loaded && profileKey) {
+      writeDirectoryCache(profileKey, bots, devices);
+    }
+  }, [loaded, profileKey, bots, devices]);
+
+  useEffect(() => {
+    const onVisibility = () => {
+      const nextVisible = !document.hidden;
+      setVisible(nextVisible);
+      if (nextVisible) triggerLoadBots();
+    };
+    const onFocus = () => {
+      const nextVisible = !document.hidden;
+      setVisible(nextVisible);
+      if (nextVisible) triggerLoadBots();
+    };
     document.addEventListener('visibilitychange', onVisibility);
-    return () => document.removeEventListener('visibilitychange', onVisibility);
-  }, []);
+    window.addEventListener('focus', onFocus);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibility);
+      window.removeEventListener('focus', onFocus);
+    };
+  }, [triggerLoadBots]);
 
   useEffect(() => {
     if (profileRef.current !== profileKey) {
       profileRef.current = profileKey;
-      setBots([]); setDevices([]); setSelected(null); setLoaded(false); setBotsError(null);
+      const cached = readDirectoryCache(profileKey);
+      setBots(cached?.bots ?? []);
+      setDevices(cached?.devices ?? []);
+      setSelected(null);
+      setLoaded(Boolean(cached));
+      setBotsError(null);
     }
     seq.current += 1;
     setLoading(false);
     if (online && pageActive && visible) void loadBots();
-    const timer = online && pageActive && visible ? window.setInterval(() => void loadBots(), 5000) : null;
-    return () => { seq.current += 1; if (timer !== null) window.clearInterval(timer); };
+    const timer =
+      online && pageActive && visible
+        ? window.setInterval(() => void loadBots(), DIRECTORY_POLL_INTERVAL_MS)
+        : null;
+    return () => {
+      seq.current += 1;
+      if (timer !== null) window.clearInterval(timer);
+    };
   }, [loadBots, profileKey, online, pageActive, visible, refreshVersion]);
 
-  const selectedBot = selected ? bots.find((b) => b.deviceId === selected.deviceId && b.botId === selected.botId) ?? null : null;
-  const scopedApi = useMemo(() => identity && selectedBot ? targetApi(api, selectedBot.deviceId, selectedBot.online) : null,
-    [api, sess, selectedBot?.deviceId, selectedBot?.online]);
+  const missingPrimaryDevices = useMemo(
+    () =>
+      devices.filter(
+        (d) =>
+          d.online &&
+          !bots.some((b) => b.deviceId === d.deviceId && b.isPrimary && !b.archivedAt),
+      ),
+    [devices, bots],
+  );
+
+  const { primaryBots, regularBots, archivedBots } = useMemo(() => {
+    const sortByRecent = (a: BotDirectoryEntry, b: BotDirectoryEntry) =>
+      botSortTimestamp(b) - botSortTimestamp(a);
+    const primary = bots
+      .filter((b) => !b.archivedAt && b.isPrimary)
+      .slice()
+      .sort(sortByRecent);
+    const regular = bots
+      .filter((b) => !b.archivedAt && !b.isPrimary)
+      .slice()
+      .sort(sortByRecent);
+    const archived = bots
+      .filter((b) => Boolean(b.archivedAt))
+      .slice()
+      .sort(sortByRecent);
+    return { primaryBots: primary, regularBots: regular, archivedBots: archived };
+  }, [bots]);
+
+  const selectedBot = selected
+    ? bots.find((b) => b.deviceId === selected.deviceId && b.botId === selected.botId) ?? null
+    : null;
+  const scopedApi = useMemo(
+    () =>
+      identity && selectedBot
+        ? targetApi(api, selectedBot.deviceId, selectedBot.online)
+        : null,
+    [api, sess, selectedBot?.deviceId, selectedBot?.online],
+  );
+
+  function renderBotRow(b: BotDirectoryEntry, isArchivedSection = false) {
+    const isSelected = selected?.deviceId === b.deviceId && selected.botId === b.botId;
+    const isBotOnline = Boolean(b.online && online);
+    const platformLabel = b.platform || 'host';
+    const activityIso = b.lastActivityAt || b.createdAt;
+    const isPrimaryActive = Boolean(b.isPrimary && !b.archivedAt);
+    return (
+      <li key={`${b.deviceId}:${b.botId}`}>
+        <button
+          type="button"
+          className={`entity-row bot-entity-row ${isSelected ? 'selected' : ''} ${!isBotOnline ? 'offline' : ''} ${isPrimaryActive ? 'is-primary' : ''} ${b.archivedAt ? 'is-archived' : ''}`}
+          onClick={() => setSelected({ deviceId: b.deviceId, botId: b.botId })}
+        >
+          <span className={`bot-avatar ${isPrimaryActive ? 'primary' : ''}`}>
+            <span className="bot-avatar-initial">
+              {(b.role || 'B').slice(0, 1).toUpperCase()}
+            </span>
+            {isPrimaryActive ? (
+              <>
+                <span className="bot-badge-platform" title={`平台: ${platformLabel}`}>
+                  {platformLabel}
+                </span>
+                <span className="bot-badge-star" title="主 Bot" aria-label="主 Bot">
+                  ★
+                </span>
+              </>
+            ) : null}
+          </span>
+          <span className="entity-main">
+            <span className="entity-title-row">
+              <span className="entity-title">
+                {isPrimaryActive ? `★ ${b.role}` : b.role}
+              </span>
+              {activityIso ? (
+                <span className="entity-time" title={formatTime(activityIso)}>
+                  {formatTime(activityIso)}
+                </span>
+              ) : null}
+            </span>
+            <span className="entity-sub">
+              {b.deviceName || b.deviceId} · {b.deviceId} · {isBotOnline ? '在线' : '离线或不可读取'}
+            </span>
+            {b.lastPreview ? (
+              <span className="entity-sub entity-preview">{truncate(b.lastPreview, 80)}</span>
+            ) : b.description ? (
+              <span className="entity-sub">{b.description}</span>
+            ) : null}
+            {isArchivedSection && b.archivedAt ? (
+              <span className="entity-sub archive-countdown">
+                已归档 · 剩余 {remainingArchiveDays(b.archivedAt)} 天自动删除
+              </span>
+            ) : null}
+          </span>
+        </button>
+      </li>
+    );
+  }
 
   return (
     <div className="conversation-layout">
       <aside className="entity-list">
         <div className="entity-list-head">
           <h2>Bot私聊</h2>
-          <button className="toolbar-btn" onClick={() => void loadBots()} disabled={!online || loading}>刷新</button>
-          <button className="toolbar-btn" onClick={() => setShowCreate((v) => !v)} disabled={!identity}>{showCreate ? '取消' : '新建 Bot'}</button>
+          <button
+            className="toolbar-btn"
+            onClick={() => triggerLoadBots()}
+            disabled={!online || loading}
+          >
+            刷新
+          </button>
+          <button
+            className="toolbar-btn"
+            onClick={() => {
+              setShowCreate((v) => !v);
+              if (!showCreate && missingPrimaryDevices.length > 0) {
+                setCreateTargetDeviceId(missingPrimaryDevices[0].deviceId);
+              }
+            }}
+            disabled={!identity}
+          >
+            {showCreate ? '取消' : '新建 Bot'}
+          </button>
         </div>
-        {botsError ? <div className="error-banner" role="alert">{botsError}<button onClick={() => void loadBots()}>重试</button></div> : null}
+
+        {missingPrimaryDevices.length > 0 ? (
+          <div className="primary-onboarding-banner" role="region" aria-label="创建主 Bot 引导">
+            <div className="primary-onboarding-title">⚠️ 在线设备缺少主 Bot</div>
+            <div className="primary-onboarding-desc">
+              以下在线设备尚未拥有未归档的主 Bot：
+              {missingPrimaryDevices
+                .map((d) => `${d.displayName || d.deviceId} (${d.deviceId})`)
+                .join('、')}
+            </div>
+            <div className="primary-onboarding-actions">
+              {missingPrimaryDevices.map((d) => (
+                <button
+                  key={d.deviceId}
+                  type="button"
+                  className="toolbar-btn primary-cta-btn"
+                  onClick={() => {
+                    setCreateTargetDeviceId(d.deviceId);
+                    setShowCreate(true);
+                  }}
+                >
+                  创建主 Bot（{d.displayName || d.deviceId}）
+                </button>
+              ))}
+            </div>
+          </div>
+        ) : null}
+
+        {botsError ? (
+          <div className="error-banner" role="alert">
+            {botsError}
+            <button onClick={() => triggerLoadBots()}>重试</button>
+          </div>
+        ) : null}
         {!online ? <div className="status">离线：显示最后读取的 Bot 列表。</div> : null}
-        {showCreate && identity ? <CreateBotForm api={api} devices={devices} onCreated={(deviceId, bot) => {
-          setSelected({ deviceId, botId: bot.botId });
-          setBots((old) => [...old.filter((b) => b.deviceId !== deviceId || b.botId !== bot.botId),
-            { ...bot, deviceName: devices.find((d) => d.deviceId === deviceId)?.displayName || deviceId, online: true }]);
-          if (inFlight.current) { seq.current += 1; refreshQueued.current = true; } else void loadBots();
-        }} /> : null}
-        {loading && !loaded ? <div className="status">加载中…</div> : !loaded ? <div className="status">目录尚未读取。</div> : bots.length === 0 && !botsError ? <div className="empty-state">暂无 Bot，点击“新建 Bot”创建。</div> : (
-          <ul className="entity-list-items">{bots.map((b) => <li key={`${b.deviceId}:${b.botId}`}>
-            <button className={`entity-row ${selected?.deviceId === b.deviceId && selected.botId === b.botId ? 'selected' : ''}`} onClick={() => setSelected({ deviceId: b.deviceId, botId: b.botId })}>
-              <span className="entity-title">{b.role}</span>
-              <span className="entity-sub">{b.deviceName || b.deviceId} · {b.deviceId} · {b.online && online ? '在线' : '离线或不可读取'}</span>
-              {b.description ? <span className="entity-sub">{b.description}</span> : null}
-            </button></li>)}</ul>
+
+        {showCreate && identity ? (
+          <CreateBotForm
+            api={api}
+            devices={devices}
+            bots={bots}
+            initialDeviceId={createTargetDeviceId}
+            onCreated={(deviceId, bot) => {
+              setSelected({ deviceId, botId: bot.botId });
+              const dev = devices.find((d) => d.deviceId === deviceId);
+              setBots((old) => {
+                const cleared = bot.isPrimary
+                  ? old.map((b) => (b.deviceId === deviceId ? { ...b, isPrimary: false } : b))
+                  : old;
+                return [
+                  ...cleared.filter((b) => b.deviceId !== deviceId || b.botId !== bot.botId),
+                  {
+                    ...bot,
+                    deviceName: dev?.displayName || deviceId,
+                    platform: dev?.platform,
+                    online: true,
+                  },
+                ];
+              });
+              triggerLoadBots();
+            }}
+          />
+        ) : null}
+
+        {loading && !loaded ? (
+          <div className="status">加载中…</div>
+        ) : !loaded ? (
+          <div className="status">目录尚未读取。</div>
+        ) : bots.length === 0 && !botsError ? (
+          <div className="empty-state">暂无 Bot，点击“新建 Bot”创建。</div>
+        ) : (
+          <div className="bot-sections-container">
+            {primaryBots.length > 0 ? (
+              <div className="bot-list-section primary-section">
+                <div className="bot-section-header">★ 置顶主 Bot ({primaryBots.length})</div>
+                <ul className="entity-list-items">
+                  {primaryBots.map((b) => renderBotRow(b, false))}
+                </ul>
+              </div>
+            ) : null}
+
+            {regularBots.length > 0 ? (
+              <div className="bot-list-section regular-section">
+                <div className="bot-section-header">普通 Bot ({regularBots.length})</div>
+                <ul className="entity-list-items">
+                  {regularBots.map((b) => renderBotRow(b, false))}
+                </ul>
+              </div>
+            ) : null}
+
+            {archivedBots.length > 0 ? (
+              <details className="bot-archived-details">
+                <summary>已归档 ({archivedBots.length}) · 14 天倒计时</summary>
+                <ul className="entity-list-items">
+                  {archivedBots.map((b) => renderBotRow(b, true))}
+                </ul>
+              </details>
+            ) : null}
+          </div>
         )}
       </aside>
-      <section className="chat-pane">{scopedApi && selectedBot ? <PrimaryChatPane key={`${sess}:${selectedBot.deviceId}:${selectedBot.botId}`} api={scopedApi} bot={selectedBot} onProfileSaved={(updated) => { setBots((old) => old.map((b) => b.deviceId === updated.deviceId && b.botId === updated.botId ? { ...b, ...updated } : b)); if (inFlight.current) { seq.current += 1; refreshQueued.current = true; } else void loadBots(); }} pageActive={pageActive} /> : <div className="empty-state">选择左侧 Bot 查看聊天。</div>}</section>
+
+      <section className="chat-pane">
+        {scopedApi && selectedBot ? (
+          <PrimaryChatPane
+            key={`${sess}:${selectedBot.deviceId}:${selectedBot.botId}`}
+            api={scopedApi}
+            bot={selectedBot}
+            onProfileSaved={(updated) => {
+              setBots((old) =>
+                old.map((b) =>
+                  b.deviceId === updated.deviceId && b.botId === updated.botId
+                    ? { ...b, ...updated }
+                    : b,
+                ),
+              );
+              triggerLoadBots();
+            }}
+            onBotUpdated={(patch) => {
+              const targetDeviceId = selectedBot.deviceId;
+              setBots((old) =>
+                old.map((b) => {
+                  if (b.deviceId !== targetDeviceId) return b;
+                  if (b.botId === patch.botId) return { ...b, ...patch };
+                  if (patch.isPrimary) return { ...b, isPrimary: false };
+                  return b;
+                }),
+              );
+              triggerLoadBots();
+            }}
+            onBotDeleted={(deletedBotId) => {
+              const targetDeviceId = selectedBot.deviceId;
+              setSelected(null);
+              setBots((old) =>
+                old.filter(
+                  (b) => !(b.deviceId === targetDeviceId && b.botId === deletedBotId),
+                ),
+              );
+              triggerLoadBots();
+            }}
+            onLiveActivity={handleLiveActivity}
+            pageActive={pageActive}
+          />
+        ) : (
+          <div className="empty-state">选择左侧 Bot 查看聊天。</div>
+        )}
+      </section>
     </div>
   );
 }

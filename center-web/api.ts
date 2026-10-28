@@ -1,6 +1,6 @@
 import type {
   Accepted, ActionRequest, ActionResult, ApiError, ArtifactUploadReceipt, BotCapabilityConfig, CapabilityToolsListResponse,
-  BotModelConfig, BotRef, CredentialInfo, CredentialWrite, DeploymentReceipt, Device, DiscoveryResult,
+  BotModelConfig, BotRef, BotSyncResponse, CenterCreateBotRequest, CenterUpdateBotRequest, CredentialInfo, CredentialWrite, DeploymentReceipt, Device, DiscoveryResult,
   InstallRequest, Installation, InstallationConfig, LoginRequest, Model, ModelConfig, ModelSelection,
   Operation, OperationRequest, PackageVersion, Provider, ProviderCheckRequest, ProviderCheckResult, JsonSchema,
   PutBotCapability, PutInstallationConfig, RevisionWrite, SessionInfo, UpdateRequest,
@@ -59,7 +59,20 @@ export const api = {
   getModelConfig: () => request<ModelConfig>('/api/model-config'),
   putModelConfig: (body: RevisionWrite<ModelSelection>) => request<ModelConfig>('/api/model-config', 'PUT', body),
   listDevices: () => request<Device[]>('/api/devices'),
+  getBotSync: (params?: { epoch?: string; sinceSeq?: number }) => {
+    const query = new URLSearchParams();
+    if (params?.epoch) query.set('epoch', params.epoch);
+    if (params?.sinceSeq !== undefined) query.set('sinceSeq', String(params.sinceSeq));
+    const qs = query.toString();
+    return request<BotSyncResponse>(`/api/bot-sync${qs ? `?${qs}` : ''}`);
+  },
   listBots: (deviceId: string) => request<BotRef[]>(`/api/devices/${id(deviceId)}/bots`),
+  createBot: (deviceId: string, body: CenterCreateBotRequest) => request<BotRef>(`/api/devices/${id(deviceId)}/bots`, 'POST', body),
+  updateBot: (deviceId: string, botId: string, body: CenterUpdateBotRequest) => request<BotRef>(botPath(deviceId, botId), 'PATCH', body),
+  setPrimaryBot: (deviceId: string, botId: string) => request<BotRef>(`${botPath(deviceId, botId)}/primary`, 'POST'),
+  archiveBot: (deviceId: string, botId: string) => request<BotRef>(`${botPath(deviceId, botId)}/archive`, 'POST'),
+  unarchiveBot: (deviceId: string, botId: string) => request<BotRef>(`${botPath(deviceId, botId)}/unarchive`, 'POST'),
+  deleteBot: (deviceId: string, botId: string) => request<void>(botPath(deviceId, botId), 'DELETE'),
   getBotModelConfig: (deviceId: string, botId: string) => request<BotModelConfig>(`${botPath(deviceId, botId)}/model-config`),
   putBotModelConfig: (deviceId: string, botId: string, body: RevisionWrite<ModelSelection>) => request<BotModelConfig>(`${botPath(deviceId, botId)}/model-config`, 'PUT', body),
   getCredential: (credentialId: string) => request<CredentialInfo>(`/api/credentials/${id(credentialId)}`),

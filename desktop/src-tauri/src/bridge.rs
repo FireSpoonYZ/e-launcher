@@ -62,6 +62,7 @@ const PUBLIC_OPERATIONS: &[&str] = &[
   "status",
   "devices",
   "bot_directory",
+  "bot_sync",
   "rename_device",
   "call",
   "settings_get",

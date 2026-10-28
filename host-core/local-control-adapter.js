@@ -28,6 +28,9 @@ const LOCAL_DOMAIN_CODES = new Set([
   'MODEL_REQUIRED',
   'MODEL_NOT_FOUND',
   'RUNTIME_BUSY',
+  'PRIMARY_BOT_PROTECTED',
+  'BOT_ARCHIVED',
+  'INVALID_STATE',
   'UNSUPPORTED_SCHEMA',
   'INTERNAL',
   'REQUEST_TOO_LARGE',
@@ -210,6 +213,10 @@ const METHOD_HANDLERS = new Map([
   ['listBots', (control, params, signal) => control.listBots({ signal })],
   ['createBot', (control, params, signal) => control.createBot(params, { signal })],
   ['updateBotProfile', (control, params, signal) => control.updateBotProfile(params, { signal })],
+  ['setPrimaryBot', (control, params, signal) => control.setPrimaryBot(params.botId, { signal })],
+  ['archiveBot', (control, params, signal) => control.archiveBot(params.botId, { signal })],
+  ['unarchiveBot', (control, params, signal) => control.unarchiveBot(params.botId, { signal })],
+  ['deleteBot', (control, params, signal) => control.deleteBot(params.botId, { signal })],
   ['getBot', (control, params, signal) => control.getBot(params.botId, { signal })],
   ['findByRequest', (control, params, signal) => control.findByRequest(params.requestId, { signal })],
   ['submit', (control, params, signal) =>
@@ -312,7 +319,7 @@ function dispatchError(err, state, signal) {
 
 async function executeCall(config, expectedDeviceId, method, params, { signal } = {}) {
   requireValidId(expectedDeviceId);
-  // 先按协议表规范化（含 48 方法参数形状/未知键/1 MiB 限制）再映射。
+  // 先按协议表规范化（含方法参数形状/未知键/1 MiB 限制）再映射。
   let normalized;
   try {
     normalized = normalizeControlCall(method, params);
