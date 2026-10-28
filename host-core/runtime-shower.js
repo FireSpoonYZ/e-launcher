@@ -3,7 +3,8 @@
 // status/frame 不创建会话也不启动模型；takeover 只复用既有 conversation.abort，
 // 不写工作停止标记，因此接管后下一轮不需要 resumeWork，也不重放任何输入。
 import { randomUUID } from 'node:crypto';
-import { getPrimaryConversation } from './runtime-docs.js';
+import { PrimaryIndex } from './runtime-docs.js';
+import { WorkIndex } from './work-context-docs.js';
 import { messageError } from './message-protocol.js';
 import { normalizeShowerSessionId, normalizeShowerTarget } from './shower-protocol.js';
 
@@ -52,11 +53,24 @@ export function createRuntimeShower({ host, getHarness, resolveWorkContext, mana
     };
   }
 
-  /** 该目标正在运行的生成所属本地会话；主会话未创建时为 null（只读，不创建）。 */
-  async function runningConversation({ bot, binding }) {
+  /** 同 Bot 的既有主会话和工作会话都能使用共享屏幕；只读索引，不创建会话。 */
+  async function botConversations(bot) {
     const harness = getHarness();
-    if (binding) return harness.conversation(binding.nativeId, context);
-    return getPrimaryConversation(harness, bot, {}, context);
+    const [primaryIndex, workIndex] = await Promise.all([
+      harness.snapshot(PrimaryIndex, context),
+      harness.snapshot(WorkIndex, context),
+    ]);
+    const ids = new Set();
+    const primary = primaryIndex?.byPrimary?.[bot.primaryConversationId];
+    if (primary !== undefined) ids.add(primary);
+    for (const [key, binding] of Object.entries(workIndex?.byKey ?? {})) {
+      let pair;
+      try { pair = JSON.parse(key); } catch { continue; }
+      if (Array.isArray(pair) && pair.length === 2 && pair[0] === bot.botId && typeof pair[1] === 'string') {
+        ids.add(binding.nativeId);
+      }
+    }
+    return (await Promise.all([...ids].map((id) => harness.conversation(id, context)))).filter(Boolean);
   }
 
   return {
@@ -82,7 +96,7 @@ export function createRuntimeShower({ host, getHarness, resolveWorkContext, mana
 
     /**
      * 人工接管：先把 sessionId 对到本目标的当前会话（不误停其他生成），
-     * 再丢弃该会话排队未发送的工具操作、请求在途停止，最后中止匹配会话的现有生成。
+     * 再丢弃共享屏幕排队未发送的工具操作、请求在途停止，并中止同 Bot 的现有生成。
      */
     async takeoverShower(target, sessionId) {
       const resolved = await resolve(target);
@@ -94,10 +108,11 @@ export function createRuntimeShower({ host, getHarness, resolveWorkContext, mana
       if (current.sessionId !== normalizeShowerSessionId(sessionId)) {
         throw messageError('SHOWER_SESSION_MISMATCH', '预览画面不属于当前会话，请刷新后再接管');
       }
-      manager.cancel(actor);
-      const conversation = await runningConversation(resolved);
-      // abort 等待普通工作静默；不设 stopped 标记，下一轮用户消息照常生成。
-      if (conversation) await conversation.abort(context);
+      // cancel 同步重新校验归属及 sessionId，避免 status 返回期间旧屏幕被替换后误停。
+      manager.cancel(actor, sessionId);
+      const conversations = await botConversations(resolved.bot);
+      // 并发请求停止所有既有会话；不设 stopped 标记，下一轮用户消息照常生成。
+      await Promise.all(conversations.map((conversation) => conversation.abort(context)));
       // 停止后重新读状态，不把中止前的阶段当成当前结果。
       return manager.status(actor, humanOptions());
     },
