@@ -1,7 +1,7 @@
 // host-core/shower-linux.js
 // Linux Shower backend: one private Xvnc (Xvnc/Xtigervnc) DISPLAY per session, with
 // its own Xauthority, 0700 runtime dir and own dbus-daemon session bus, a
-// lightweight WM, and xdotool/ffmpeg bound to that DISPLAY only. The physical
+// lightweight desktop, and xdotool/ffmpeg bound to that DISPLAY only. The physical
 // desktop is never captured, injected or shadowed (no x0vncserver/shadow, never
 // :0). Programs must already be installed; nothing is ever installed
 // automatically. Cleanup stops only the process groups this backend started and
@@ -19,6 +19,7 @@ import {
   readFileSync,
   rmSync,
   statSync,
+  writeFileSync,
 } from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
@@ -51,6 +52,8 @@ const MAX_WHEEL_NOTCHES = 20;
 const REQUIREMENTS = [
   { key: 'server', label: 'Xvnc or Xtigervnc', candidates: ['Xtigervnc', 'Xvnc'] },
   { key: 'wm', label: 'xfwm4 or openbox', candidates: ['xfwm4', 'openbox'] },
+  { key: 'desktop', label: 'xfdesktop', candidates: ['xfdesktop'] },
+  { key: 'panel', label: 'xfce4-panel', candidates: ['xfce4-panel'] },
   { key: 'xauth', label: 'xauth', candidates: ['xauth'] },
   { key: 'dbus', label: 'dbus-daemon', candidates: ['dbus-daemon'] },
   { key: 'xdotool', label: 'xdotool', candidates: ['xdotool'] },
@@ -318,6 +321,10 @@ function sessionEnv(state) {
   return env;
 }
 
+function desktopEnv(state) {
+  return { ...sessionEnv(state), XDG_CONFIG_HOME: state.configDir, XDG_CURRENT_DESKTOP: 'XFCE' };
+}
+
 function keysymFor(key) {
   if (Object.hasOwn(KEYSYM_BY_KEY, key)) return KEYSYM_BY_KEY[key];
   if (/^[A-Z]$/.test(key)) return key.toLowerCase();
@@ -441,16 +448,20 @@ export function createLinuxShowerBackend({ dataRoot } = {}) {
     return view;
   }
 
-  /** Reflect a dead Xvnc without doing any work; used by status/frame/input/launch. */
+  /** Reflect dead session components without starting any work. */
   function observe(state) {
-    if (state.phase === 'closed' || state.phase === 'error' || !state.xvnc) return state;
-    if (isExited(state.xvnc)) {
-      state.phase = 'error';
-      state.error = {
-        code: 'SHOWER_BACKEND_FAILED',
-        message: 'the private Xvnc server exited' + logSuffix(state.xvncLog),
-      };
-      state.updatedAt = new Date().toISOString();
+    if (state.phase === 'closed' || state.phase === 'error') return state;
+    for (const [key, label] of [['xvnc', 'private Xvnc server'], ['bus', 'private dbus-daemon'],
+      ['wm', 'window manager'], ['desktop', 'xfdesktop'], ['panel', 'xfce4-panel']]) {
+      if (state[key] && (state[key].showerError || isExited(state[key]))) {
+        state.phase = 'error';
+        state.error = {
+          code: 'SHOWER_BACKEND_FAILED',
+          message: `the ${label} exited` + summary(state[key].showerError?.message) + logSuffix(state[`${key}Log`]),
+        };
+        state.updatedAt = new Date().toISOString();
+        break;
+      }
     }
     return state;
   }
@@ -536,9 +547,8 @@ export function createLinuxShowerBackend({ dataRoot } = {}) {
     const deadline = Date.now() + READY_TIMEOUT_MS;
     for (;;) {
       checkAborted(signal);
-      if (isExited(state.xvnc)) {
-        throw messageError('SHOWER_BACKEND_FAILED', 'Xvnc exited before the private display became ready' + logSuffix(state.xvncLog));
-      }
+      observe(state);
+      if (state.error) throw messageError(state.error.code, state.error.message);
       if (existsSync(path.join(X11_SOCKET_DIR, `X${state.display}`)) && (await probeDisplay(state, signal))) return;
       if (Date.now() >= deadline) {
         throw messageError('SHOWER_NOT_READY', `the private X display :${state.display} did not become ready`);
@@ -579,7 +589,7 @@ export function createLinuxShowerBackend({ dataRoot } = {}) {
     } finally {
       closeSync(logFd);
     }
-    state.xvnc.on('error', () => {});
+    state.xvnc.on('error', (error) => { state.xvnc.showerError = error; });
     state.xvnc.unref();
   }
 
@@ -590,14 +600,14 @@ export function createLinuxShowerBackend({ dataRoot } = {}) {
     const logFd = openSync(state.busLog, 'a', 0o600);
     try {
       state.bus = spawn(state.programs.dbus, ['--session', '--nofork', '--print-address=1', '--nopidfile'], {
-        env: sessionEnv(state),
+        env: desktopEnv(state),
         detached: true,
         stdio: ['ignore', 'pipe', logFd],
       });
     } finally {
       closeSync(logFd);
     }
-    state.bus.on('error', () => {});
+    state.bus.on('error', (error) => { state.bus.showerError = error; });
     let busOutput = '';
     state.bus.stdout.on('data', (chunk) => {
       if (state.dbusAddress) return;
@@ -616,9 +626,8 @@ export function createLinuxShowerBackend({ dataRoot } = {}) {
     const deadline = Date.now() + DBUS_ADDRESS_TIMEOUT_MS;
     while (!state.dbusAddress) {
       checkAborted(signal);
-      if (isExited(state.bus)) {
-        throw messageError('SHOWER_BACKEND_FAILED', 'the private dbus-daemon exited' + logSuffix(state.busLog));
-      }
+      observe(state);
+      if (state.error) throw messageError(state.error.code, state.error.message);
       if (Date.now() >= deadline) {
         throw messageError('SHOWER_BACKEND_FAILED', 'the private dbus-daemon printed no bus address' + logSuffix(state.busLog));
       }
@@ -626,28 +635,49 @@ export function createLinuxShowerBackend({ dataRoot } = {}) {
     }
   }
 
-  function startWindowManager(state) {
-    // The WM is the first client of the private bus; launched apps inherit the same
-    // DBUS_SESSION_BUS_ADDRESS through sessionEnv.
-    state.wmLog = path.join(state.dir, 'wm.log');
-    const logFd = openSync(state.wmLog, 'a', 0o600);
+  function startDesktopComponent(state, key) {
+    state[`${key}Log`] = path.join(state.dir, `${key}.log`);
+    const logFd = openSync(state[`${key}Log`], 'a', 0o600);
     try {
-      state.wm = spawn(state.programs.wm, [], {
-        env: sessionEnv(state),
+      state[key] = spawn(state.programs[key], [], {
+        env: desktopEnv(state),
         detached: true,
-        stdio: ['ignore', 'ignore', logFd],
+        stdio: ['ignore', logFd, logFd],
       });
     } finally {
       closeSync(logFd);
     }
-    state.wm.on('error', () => {});
-    state.wm.unref();
+    state[key].on('error', (error) => { state[key].showerError = error; });
+    state[key].unref();
   }
 
   async function waitForWindowManager(state, { signal }) {
     await delay(WM_START_GRACE_MS, signal);
-    if (isExited(state.wm)) {
-      throw messageError('SHOWER_BACKEND_FAILED', 'the lightweight window manager exited' + logSuffix(state.wmLog));
+    observe(state);
+    if (state.error) throw messageError(state.error.code, state.error.message);
+  }
+
+  async function waitForDesktop(state, { signal }) {
+    const deadline = Date.now() + READY_TIMEOUT_MS;
+    for (;;) {
+      checkAborted(signal);
+      observe(state);
+      if (state.error) throw messageError(state.error.code, state.error.message);
+      let visible = true;
+      for (const name of ['xfdesktop', 'xfce4-panel']) {
+        const probe = await runCommand(state.programs.xdotool, ['search', '--onlyvisible', '--class', name], {
+          env: sessionEnv(state), signal, timeoutMs: PROBE_TIMEOUT_MS,
+        });
+        if (probe.code !== 0) visible = false;
+      }
+      observe(state);
+      if (state.error) throw messageError(state.error.code, state.error.message);
+      if (visible) return;
+      if (Date.now() >= deadline) {
+        throw messageError('SHOWER_NOT_READY', 'xfdesktop and xfce4-panel windows did not become ready' +
+          logSuffix(state.desktopLog) + logSuffix(state.panelLog));
+      }
+      await delay(100, signal);
     }
   }
 
@@ -657,6 +687,30 @@ export function createLinuxShowerBackend({ dataRoot } = {}) {
     mkdirSync(state.dir, { mode: 0o700 });
     state.runtimeDir = path.join(state.dir, 'runtime');
     mkdirSync(state.runtimeDir, { mode: 0o700 });
+    state.configDir = path.join(state.dir, 'config');
+    const xfconfDir = path.join(state.configDir, 'xfce4', 'xfconf', 'xfce-perchannel-xml');
+    mkdirSync(xfconfDir, { recursive: true, mode: 0o700 });
+    // Seed a usable panel rather than the first-run configuration dialog.
+    writeFileSync(path.join(xfconfDir, 'xfce4-panel.xml'), `<?xml version="1.0" encoding="UTF-8"?>
+<channel name="xfce4-panel" version="1.0">
+  <property name="panels" type="array">
+    <value type="int" value="1"/>
+    <property name="panel-1" type="empty">
+      <property name="position" type="string" value="p=6;x=0;y=0"/>
+      <property name="length" type="uint" value="100"/>
+      <property name="size" type="uint" value="32"/>
+      <property name="plugin-ids" type="array">
+        <value type="int" value="1"/>
+        <value type="int" value="2"/>
+      </property>
+    </property>
+  </property>
+  <property name="plugins" type="empty">
+    <property name="plugin-1" type="string" value="applicationsmenu"/>
+    <property name="plugin-2" type="string" value="tasklist"/>
+  </property>
+</channel>
+`, { mode: 0o600 });
     state.authFile = path.join(state.dir, 'Xauthority');
     state.display = await reserveDisplay();
     checkAborted(signal);
@@ -674,8 +728,11 @@ export function createLinuxShowerBackend({ dataRoot } = {}) {
     await waitForDisplay(state, { signal });
     startBus(state);
     await waitForBusAddress(state, { signal });
-    startWindowManager(state);
+    startDesktopComponent(state, 'wm');
     await waitForWindowManager(state, { signal });
+    startDesktopComponent(state, 'desktop');
+    startDesktopComponent(state, 'panel');
+    await waitForDesktop(state, { signal });
     state.phase = 'ready';
     state.updatedAt = new Date().toISOString();
   }
@@ -688,6 +745,8 @@ export function createLinuxShowerBackend({ dataRoot } = {}) {
     // Only children this backend spawned: their own process groups, nothing else.
     for (const app of [...state.apps]) await stopChild(app);
     state.apps.clear();
+    await stopChild(state.panel);
+    await stopChild(state.desktop);
     await stopChild(state.wm);
     await stopChild(state.bus);
     await stopChild(state.xvnc);
@@ -702,6 +761,7 @@ export function createLinuxShowerBackend({ dataRoot } = {}) {
     state.dir = null;
     state.authFile = null;
     state.runtimeDir = null;
+    state.configDir = null;
   }
 
   function createState({ sessionId, width, height, programs }) {
@@ -713,13 +773,18 @@ export function createLinuxShowerBackend({ dataRoot } = {}) {
       phase: 'starting',
       dir: null,
       runtimeDir: null,
+      configDir: null,
       authFile: null,
       display: null,
       xvnc: null,
       wm: null,
+      desktop: null,
+      panel: null,
       bus: null,
       xvncLog: null,
       wmLog: null,
+      desktopLog: null,
+      panelLog: null,
       busLog: null,
       dbusAddress: null,
       apps: new Set(),
