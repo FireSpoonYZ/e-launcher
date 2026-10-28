@@ -510,6 +510,7 @@ function createRuntime({ host, harness, models, defaultModel, releaseOwner, mana
     host,
     getHarness: () => harness,
     resolveWorkContext: (botId, scopeId) => workContexts.resolveWorkContext(botId, scopeId),
+    takeoverWork: decisions.takeoverShower,
     manager: shower,
     context: CTX,
   });

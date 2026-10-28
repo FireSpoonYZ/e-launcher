@@ -1,6 +1,6 @@
 // host-core/runtime-shower.js
 // 统一 Shower 运行时门面：只用可信主会话或工作绑定解析 Actor，再转发给 Shower 管理器。
-// status/frame 不创建会话也不启动模型；takeover 只复用既有 conversation.abort，
+// status/frame 不创建会话也不启动模型；takeover 复用工作决策边界和 conversation.abort，
 // 不写工作停止标记，因此接管后下一轮不需要 resumeWork，也不重放任何输入。
 import { randomUUID } from 'node:crypto';
 import { PrimaryIndex } from './runtime-docs.js';
@@ -13,7 +13,7 @@ function humanOptions() {
   return { taskId: 'human:' + randomUUID(), source: 'human' };
 }
 
-export function createRuntimeShower({ host, getHarness, resolveWorkContext, manager, context }) {
+export function createRuntimeShower({ host, getHarness, resolveWorkContext, takeoverWork, manager, context }) {
   /** 目标 → 可信 Actor：主会话用 Bot 公开 UUID，工作会话用绑定后的公开 UUID。 */
   async function resolve(target) {
     const { botId, scopeId } = normalizeShowerTarget(target);
@@ -108,11 +108,13 @@ export function createRuntimeShower({ host, getHarness, resolveWorkContext, mana
       if (current.sessionId !== normalizeShowerSessionId(sessionId)) {
         throw messageError('SHOWER_SESSION_MISMATCH', '预览画面不属于当前会话，请刷新后再接管');
       }
-      // cancel 同步重新校验归属及 sessionId，避免 status 返回期间旧屏幕被替换后误停。
-      manager.cancel(actor, sessionId);
-      const conversations = await botConversations(resolved.bot);
-      // 并发请求停止所有既有会话；不设 stopped 标记，下一轮用户消息照常生成。
-      await Promise.all(conversations.map((conversation) => conversation.abort(context)));
+      await takeoverWork(actor.botId,
+        // 在 Bot 准入内同步重新校验，避免等待期间旧屏幕被替换后误停。
+        () => manager.cancel(actor, sessionId),
+        async () => {
+          const conversations = await botConversations(resolved.bot);
+          await Promise.all(conversations.map((conversation) => conversation.abort(context)));
+        });
       // 停止后重新读状态，不把中止前的阶段当成当前结果。
       return manager.status(actor, humanOptions());
     },
