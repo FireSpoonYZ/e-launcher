@@ -37,7 +37,6 @@ import {
   type HostFrameEvent,
   type HostHistoryPage,
   type HostLiveFrame,
-  type HostProviderConfig,
   type HostSettings,
   type HostSettingsPayload,
   type HostSnapshot,
@@ -57,6 +56,7 @@ import type { DevicesDirectoryItem, ShowerTarget } from '../../host-core/index.j
 import type { ShowerCall } from './ShowerPreview';
 import { Markdown } from './Markdown';
 import { BotScreenPanel } from './BotScreenPanel';
+import { BotModelSheet } from './BotModelSheet';
 import {
   GROK_AVATAR_PRESETS,
   GROK_COLOR_PALETTE,
@@ -101,80 +101,6 @@ const SOUL_SNIPPETS: { zh: string; en: string; text: string }[] = [
     zh: '＋ 群聊准则',
     en: '+ Room Rules',
     text: '\n## 协作准则\n- 仅在掌握关键上下文时主动给出结构化建议\n',
-  },
-];
-
-const STARRED_MODELS_CACHE_KEY = 'bot-hub-starred-models-v1';
-
-const PI_PROVIDER_PROTOCOLS = [
-  { id: 'openai-completions', label: 'openai-completions (OpenAI / 通用兼容)' },
-  { id: 'openai-responses', label: 'openai-responses (OpenAI Responses)' },
-  { id: 'pi-messages', label: 'pi-messages (Pi Gateway 协议)' },
-  { id: 'anthropic-messages', label: 'anthropic-messages (Anthropic Messages)' },
-] as const;
-
-const MODEL_PROVIDER_PRESETS: {
-  id: string;
-  label: string;
-  api: string;
-  baseUrl: string;
-  apiKeyEnv: string;
-  defaultModelId: string;
-  modelsText: string;
-}[] = [
-  {
-    id: 'deepseek',
-    label: 'DeepSeek',
-    api: 'openai-completions',
-    baseUrl: 'https://api.deepseek.com/v1',
-    apiKeyEnv: 'DEEPSEEK_API_KEY',
-    defaultModelId: 'deepseek-chat',
-    modelsText: 'deepseek-chat\ndeepseek-reasoner',
-  },
-  {
-    id: 'openai',
-    label: 'OpenAI',
-    api: 'openai-completions',
-    baseUrl: 'https://api.openai.com/v1',
-    apiKeyEnv: 'OPENAI_API_KEY',
-    defaultModelId: 'gpt-4o',
-    modelsText: 'gpt-4o\ngpt-4o-mini\no3-mini',
-  },
-  {
-    id: 'anthropic',
-    label: 'Anthropic',
-    api: 'openai-completions',
-    baseUrl: 'https://api.anthropic.com/v1',
-    apiKeyEnv: 'ANTHROPIC_API_KEY',
-    defaultModelId: 'claude-3-7-sonnet-latest',
-    modelsText: 'claude-3-7-sonnet-latest\nclaude-3-5-haiku-latest',
-  },
-  {
-    id: 'google',
-    label: 'Gemini',
-    api: 'openai-completions',
-    baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai',
-    apiKeyEnv: 'GEMINI_API_KEY',
-    defaultModelId: 'gemini-2.5-pro',
-    modelsText: 'gemini-2.5-pro\ngemini-2.5-flash',
-  },
-  {
-    id: 'siliconflow',
-    label: 'SiliconFlow',
-    api: 'openai-completions',
-    baseUrl: 'https://api.siliconflow.cn/v1',
-    apiKeyEnv: 'SILICONFLOW_API_KEY',
-    defaultModelId: 'deepseek-ai/DeepSeek-V3',
-    modelsText: 'deepseek-ai/DeepSeek-V3\ndeepseek-ai/DeepSeek-R1',
-  },
-  {
-    id: 'openrouter',
-    label: 'OpenRouter',
-    api: 'openai-completions',
-    baseUrl: 'https://openrouter.ai/api/v1',
-    apiKeyEnv: 'OPENROUTER_API_KEY',
-    defaultModelId: 'anthropic/claude-3.7-sonnet',
-    modelsText: 'anthropic/claude-3.7-sonnet\nopenai/gpt-4o\ngoogle/gemini-2.5-pro',
   },
 ];
 
@@ -411,128 +337,6 @@ function writePrimaryRoleOverride(name: string): void {
   }
 }
 
-const CREDENTIAL_ALIASES_CACHE_KEY = 'elauncher.credential_aliases.v1';
-
-function readCredentialAliases(): Record<string, string> {
-  try {
-    const raw = window.localStorage.getItem(CREDENTIAL_ALIASES_CACHE_KEY);
-    if (!raw) return {};
-    const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
-    const out: Record<string, string> = {};
-    for (const [k, v] of Object.entries(parsed)) {
-      if (typeof v === 'string' && v.trim() !== '') out[k] = v;
-    }
-    return out;
-  } catch {
-    return {};
-  }
-}
-
-function writeCredentialAliases(aliases: Record<string, string>): void {
-  try {
-    window.localStorage.setItem(CREDENTIAL_ALIASES_CACHE_KEY, JSON.stringify(aliases));
-  } catch {
-    // Ignore storage errors
-  }
-}
-
-const NON_CHAT_MODEL_FILTER_RE =
-  /(?:^|[-_/])(embedding|text-embedding|rerank|whisper|tts|dall-e|moderation|omni-moderation|babbage|davinci)(?:$|[-_/.])/i;
-
-async function fetchModelsClientFallback(input: {
-  baseUrl: string;
-  apiKey?: string;
-  api?: string;
-}): Promise<{ id: string; name: string; reasoning: boolean; contextWindow: number }[]> {
-  const cleanBase = input.baseUrl.trim().replace(/\/+$/, '');
-  const headers: Record<string, string> = { Accept: 'application/json' };
-  const token = (input.apiKey ?? '').trim();
-  if (token) {
-    headers.Authorization = `Bearer ${token}`;
-    headers['x-api-key'] = token;
-  }
-  const urls = [`${cleanBase}/models`];
-  if (!/\/v\d+(?:beta\d*)?(?:\/openai)?$/i.test(cleanBase)) {
-    urls.push(`${cleanBase}/v1/models`);
-  }
-  let rows: unknown[] | null = null;
-  let lastErr: Error | null = null;
-  for (const url of urls) {
-    try {
-      const res = await fetch(url, { method: 'GET', headers });
-      if (!res.ok) {
-        const text = await res.text().catch(() => '');
-        lastErr = new Error(`HTTP ${res.status}${text ? `: ${text.slice(0, 120)}` : ''}`);
-        if (res.status === 404 && urls.length > 1) continue;
-        break;
-      }
-      const json = (await res.json()) as Record<string, unknown> | unknown[];
-      if (Array.isArray(json)) rows = json;
-      else if (json && typeof json === 'object') {
-        if (Array.isArray(json.data)) rows = json.data;
-        else if (Array.isArray(json.models)) rows = json.models;
-        else if (Array.isArray(json.result)) rows = json.result;
-      }
-      break;
-    } catch (err) {
-      lastErr = err instanceof Error ? err : new Error(String(err));
-    }
-  }
-  if (!rows) {
-    throw lastErr ?? new Error('无法连接服务商 /models 接口');
-  }
-  const seen = new Set<string>();
-  const out: { id: string; name: string; reasoning: boolean; contextWindow: number }[] = [];
-  for (const raw of rows) {
-    if (!raw || typeof raw !== 'object') continue;
-    const item = raw as Record<string, unknown>;
-    let id =
-      typeof item.id === 'string'
-        ? item.id.trim()
-        : typeof item.name === 'string'
-          ? item.name.trim()
-          : typeof item.model === 'string'
-            ? item.model.trim()
-            : '';
-    if (id.startsWith('models/')) id = id.slice('models/'.length);
-    if (!id || seen.has(id) || NON_CHAT_MODEL_FILTER_RE.test(id)) continue;
-    seen.add(id);
-    const name =
-      typeof item.display_name === 'string' && item.display_name.trim()
-        ? item.display_name.trim()
-        : typeof item.displayName === 'string' && item.displayName.trim()
-          ? item.displayName.trim()
-          : id;
-    const reasoning = Boolean(
-      item.reasoning || /(?:reasoner|[-_/]r1\b|[-_/]o1\b|[-_/]o3\b|[-_/]o4\b|thinking|qwq)/i.test(id),
-    );
-    const contextWindow =
-      typeof item.context_length === 'number' && item.context_length > 0 ? item.context_length : 32768;
-    out.push({ id, name, reasoning, contextWindow });
-  }
-  return out;
-}
-
-function readStarredModels(): string[] {
-  try {
-    const raw = window.localStorage.getItem(STARRED_MODELS_CACHE_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === 'string' && x.includes('/')) : [];
-  } catch {
-    return [];
-  }
-}
-
-function writeStarredModels(models: string[]): void {
-  try {
-    window.localStorage.setItem(STARRED_MODELS_CACHE_KEY, JSON.stringify(models));
-  } catch {
-    // Ignore storage errors
-  }
-}
-
 function formatBotListTime(
   timestampMs: number | undefined,
   createdAt: string | undefined,
@@ -732,7 +536,6 @@ export function HostPage({
   const [editName, setEditName] = useState('');
   const [editSubtitle, setEditSubtitle] = useState('');
   const [editCwd, setEditCwd] = useState('');
-  const [editModel, setEditModel] = useState('');
   const [editTargetHost, setEditTargetHost] = useState('local');
   const [editAvatarPreset, setEditAvatarPreset] = useState<GrokAvatarPreset>(GROK_AVATAR_PRESETS[0]);
   const [editInitialSoul, setEditInitialSoul] = useState('');
@@ -748,7 +551,6 @@ export function HostPage({
   const [botSoul, setBotSoul] = useState<BotSoul | null>(null);
   const [soulDraft, setSoulDraft] = useState('');
   const [soulDirty, setSoulDirty] = useState(false);
-  const [hindsightSettingsPayload, setHindsightSettingsPayload] = useState<HostSettingsPayload | null>(null);
 
   // Per-Bot Scheduled Tasks state
   const [botScheduleState, setBotScheduleState] = useState<BotScheduleState>({
@@ -773,26 +575,7 @@ export function HostPage({
     deleteAfterRun: false,
   });
 
-  // Per-Bot Model & Provider Popup Sheet state
-  const [starredModels, setStarredModels] = useState<string[]>(() => readStarredModels());
-  const [modelSheetOpen, setModelSheetOpen] = useState(false);
-  const [modelSheetTarget, setModelSheetTarget] = useState<'bot-edit' | 'bot-profile'>('bot-edit');
-  const [modelSheetView, setModelSheetView] = useState<'list' | 'provider'>('list');
-  const [modelSearchQuery, setModelSearchQuery] = useState('');
-  const [providerEditId, setProviderEditId] = useState<string | null>(null);
-  const [providerFormId, setProviderFormId] = useState('deepseek');
-  const [providerFormName, setProviderFormName] = useState('DeepSeek');
-  const [providerFormApi, setProviderFormApi] = useState('openai-completions');
-  const [providerFormBaseUrl, setProviderFormBaseUrl] = useState('https://api.deepseek.com/v1');
-  const [providerFormModelsText, setProviderFormModelsText] = useState('deepseek-chat\ndeepseek-reasoner');
-  const [providerFormApiKey, setProviderFormApiKey] = useState('');
-  const [providerFormSetDefault, setProviderFormSetDefault] = useState(true);
-  const [discoveringModels, setDiscoveringModels] = useState(false);
-  const [discoveredModels, setDiscoveredModels] = useState<
-    { id: string; name: string; reasoning: boolean; contextWindow: number }[]
-  >([]);
-  const [discoveredSearch, setDiscoveredSearch] = useState('');
-  const [discoverHint, setDiscoverHint] = useState('');
+  const [modelTarget, setModelTarget] = useState<{ botKey: string; botId: string; center: string; identity: DesktopIdentity; api: DesktopPanelApi } | null>(null);
 
   const observeIdRef = useRef<string | undefined>(undefined);
   const remoteObserveRef = useRef<{ close(): Promise<void> } | null>(null);
@@ -1479,7 +1262,6 @@ export function HostPage({
     setEditName(bot.role);
     setEditSubtitle(bot.description ?? '');
     setEditCwd(bot.cwd || localHost?.workspace || '');
-    setEditModel(bot.modelRef ?? '');
     setEditAvatarPreset(preset);
     setEditVoiceTone(meta?.voiceTone ?? '未设置');
     setEditVoiceSpeed(meta?.voiceSpeed ?? '1x');
@@ -1494,7 +1276,6 @@ export function HostPage({
     setEditName('');
     setEditSubtitle('');
     setEditCwd('');
-    setEditModel('');
     setEditTargetHost('local');
     setEditAvatarPreset(nextPreset);
     setEditInitialSoul('');
@@ -1771,391 +1552,17 @@ export function HostPage({
       }
     });
 
-  // Configured providers & models from HostSettings
-  const configuredProviders = useMemo<HostProviderConfig[]>(
-    () => hindsightSettingsPayload?.settings?.runtime?.providers ?? [],
-    [hindsightSettingsPayload],
-  );
-  const globalDefaultModel = hindsightSettingsPayload?.settings?.runtime?.defaultModel ?? null;
-
-  const allConfiguredModels = useMemo(() => {
-    const items: {
-      modelRef: string;
-      providerId: string;
-      providerName: string;
-      modelId: string;
-      name: string;
-      reasoning: boolean;
-    }[] = [];
-    for (const p of configuredProviders) {
-      for (const m of p.models ?? []) {
-        items.push({
-          modelRef: `${p.id}/${m.id}`,
-          providerId: p.id,
-          providerName: p.name || p.id,
-          modelId: m.id,
-          name: m.name || m.id,
-          reasoning: Boolean(m.reasoning),
-        });
-      }
-    }
-    return items;
-  }, [configuredProviders]);
-
-  const quickModelsForBot = useMemo(() => {
-    const byRef = new Map(allConfiguredModels.map(m => [m.modelRef, m]));
-    const starred = starredModels
-      .map(ref => byRef.get(ref) ?? {
-        modelRef: ref,
-        providerId: ref.split('/')[0] || 'provider',
-        providerName: ref.split('/')[0] || 'provider',
-        modelId: ref.slice(ref.indexOf('/') + 1) || ref,
-        name: ref.slice(ref.indexOf('/') + 1) || ref,
-        reasoning: false,
-      });
-    if (starred.length > 0) return starred.slice(0, 6);
-    return allConfiguredModels.slice(0, 3);
-  }, [allConfiguredModels, starredModels]);
-
-  const toggleStarModel = useCallback((modelRef: string) => {
-    setStarredModels(prev => {
-      const next = prev.includes(modelRef) ? prev.filter(x => x !== modelRef) : [...prev, modelRef];
-      writeStarredModels(next);
-      return next;
-    });
-  }, []);
-
-  const openModelPickerSheet = useCallback((_target: 'bot-edit' | 'bot-profile') => {
-    void openCenterManagement().catch(() => {});
-  }, []);
-
-  const selectModelFromSheet = (nextModelRef: string) =>
-    action.run(async () => {
-      const cleanRef = nextModelRef.trim();
-      if (modelSheetTarget === 'bot-edit') {
-        setEditModel(cleanRef);
-        setModelSheetOpen(false);
-        return;
-      }
-      if (!activeBot) {
-        setModelSheetOpen(false);
-        return;
-      }
-      updateBotMeta(activeBot.key, { modelOverride: cleanRef });
-      setEditModel(cleanRef);
-      setModelSheetOpen(false);
-
-      await openCenterManagement();
-    });
-
-  const applyProviderPreset = (presetId: string) => {
-    const preset = MODEL_PROVIDER_PRESETS.find(p => p.id === presetId);
-    setDiscoveredModels([]);
-    setDiscoveredSearch('');
-    setDiscoverHint('');
-    if (!preset) {
-      setProviderFormId('');
-      setProviderFormName('');
-      setProviderFormApi('openai-completions');
-      setProviderFormBaseUrl('');
-      setProviderFormModelsText('');
-      setProviderFormApiKey('');
-      return;
-    }
-    const existing = configuredProviders.find(p => p.id === preset.id);
-    setProviderFormId(preset.id);
-    setProviderFormName(existing?.name || preset.label);
-    setProviderFormApi(existing?.api || preset.api);
-    setProviderFormBaseUrl(existing?.baseUrl || preset.baseUrl);
-    setProviderFormModelsText(
-      existing && existing.models.length > 0
-        ? existing.models.map(m => m.id).join('\n')
-        : preset.modelsText,
-    );
-    setProviderFormApiKey('');
+  const openModelPickerSheet = (_target: 'bot-edit' | 'bot-profile') => {
+    if (!activeBot || activeBot.botId === '__jarvis__' || !remoteIdentity || !remoteConnected || !remoteClientRef.current) return;
+    const deviceId = activeBot.hostKind === 'local' ? localHost?.deviceId : activeBot.hostId;
+    if (!deviceId) return;
+    const api = remoteClientRef.current.api;
+    setModelTarget({ botKey: activeBot.key, botId: activeBot.botId, center: activeCenter, identity: api.identityForTarget(deviceId), api });
   };
 
-  const openProviderFormInSheet = (provider?: HostProviderConfig) => {
-    setDiscoveredModels([]);
-    setDiscoveredSearch('');
-    setDiscoverHint('');
-    if (provider) {
-      setProviderEditId(provider.id);
-      setProviderFormId(provider.id);
-      setProviderFormName(provider.name || provider.id);
-      setProviderFormApi(provider.api || 'openai-completions');
-      setProviderFormBaseUrl(provider.baseUrl);
-      setProviderFormModelsText((provider.models ?? []).map(m => m.id).join('\n'));
-      setProviderFormApiKey('');
-      setProviderFormSetDefault(false);
-    } else {
-      setProviderEditId(null);
-      const firstPreset = MODEL_PROVIDER_PRESETS[0];
-      const existing = configuredProviders.find(p => p.id === firstPreset.id);
-      setProviderFormId(firstPreset.id);
-      setProviderFormName(existing?.name || firstPreset.label);
-      setProviderFormApi(existing?.api || firstPreset.api);
-      setProviderFormBaseUrl(existing?.baseUrl || firstPreset.baseUrl);
-      setProviderFormModelsText(
-        existing && existing.models.length > 0
-          ? existing.models.map(m => m.id).join('\n')
-          : firstPreset.modelsText,
-      );
-      setProviderFormApiKey('');
-      setProviderFormSetDefault(!globalDefaultModel);
-    }
-    setModelSheetView('provider');
-  };
-
-  const toggleDiscoveredModelInForm = (modelId: string) => {
-    const currentLines = providerFormModelsText
-      .split('\n')
-      .map(s => s.trim())
-      .filter(Boolean);
-    const exists = currentLines.includes(modelId);
-    const nextLines = exists ? currentLines.filter(id => id !== modelId) : [...currentLines, modelId];
-    setProviderFormModelsText(nextLines.join('\n'));
-  };
-
-  const handleDiscoverProviderModels = () =>
-    action.run(async () => {
-      const baseUrl = providerFormBaseUrl.trim();
-      if (!baseUrl.startsWith('http://') && !baseUrl.startsWith('https://')) {
-        throw new Error(t('请先填写有效的 Base URL（http:// 或 https://）', 'Please enter a valid Base URL first'));
-      }
-      const id = providerFormId.trim() || 'custom';
-      const prevProvider = configuredProviders.find(p => p.id === id);
-      const preset = MODEL_PROVIDER_PRESETS.find(p => p.id === id);
-      const apiKeyEnv =
-        prevProvider?.apiKeyEnv ||
-        preset?.apiKeyEnv ||
-        `${id.toUpperCase().replace(/[^A-Z0-9_]/g, '_')}_API_KEY`;
-      const effectiveApiKey = providerFormApiKey.trim() || readCredentialAliases()[apiKeyEnv] || '';
-
-      setDiscoveringModels(true);
-      setDiscoverHint('');
-      try {
-        let list: { id: string; name: string; reasoning: boolean; contextWindow: number }[] = [];
-        let fetchedViaHost = false;
-        try {
-          const snap = await BotHost.snapshot();
-          if (snap.phase === 'running') {
-            const res = await BotHost.call({
-              method: 'discoverProviderModels',
-              params: {
-                input: {
-                  baseUrl,
-                  ...(effectiveApiKey ? { apiKey: effectiveApiKey } : {}),
-                  apiKeyEnv,
-                  api: providerFormApi,
-                },
-              },
-            });
-            const payload = record(res.result);
-            if (Array.isArray(payload.models)) {
-              list = payload.models as { id: string; name: string; reasoning: boolean; contextWindow: number }[];
-              fetchedViaHost = true;
-            }
-          }
-        } catch (err) {
-          // If Host is not running or bridge rejected before HTTP, try direct fetch fallback;
-          // if Host returned an HTTP/auth error from /models, rethrow it clearly.
-          const msg = errorText(err);
-          if (msg.includes('拉取模型失败') || msg.includes('HTTP ')) {
-            throw err;
-          }
-        }
-
-        if (!fetchedViaHost) {
-          list = await fetchModelsClientFallback({
-            baseUrl,
-            apiKey: effectiveApiKey,
-            api: providerFormApi,
-          });
-        }
-
-        if (list.length === 0) {
-          throw new Error(t('服务商未返回任何可用对话模型', 'No chat models returned by provider'));
-        }
-
-        setDiscoveredModels(list);
-        setDiscoveredSearch('');
-        const currentIds = providerFormModelsText
-          .split('\n')
-          .map(s => s.trim())
-          .filter(Boolean);
-        // When <= 12 models returned (or current textarea is empty), auto-populate/merge so it works in 1 tap
-        if (currentIds.length === 0 || list.length <= 12) {
-          const merged = Array.from(new Set([...currentIds, ...list.map(m => m.id)]));
-          setProviderFormModelsText(merged.join('\n'));
-          setDiscoverHint(
-            t(
-              `已自动拉取并填入 ${list.length} 个可用模型（点击下方标签可增删）`,
-              `Fetched and populated ${list.length} models (tap chips to toggle)`,
-            ),
-          );
-        } else {
-          setDiscoverHint(
-            t(
-              `已拉取 ${list.length} 个可用模型，点击下方模型即可加入列表`,
-              `Fetched ${list.length} models — tap below to add/remove`,
-            ),
-          );
-        }
-      } finally {
-        setDiscoveringModels(false);
-      }
-    });
-
-  const handleSaveProviderInSheet = () =>
-    action.run(async () => {
-      const id = providerFormId.trim();
-      const baseUrl = providerFormBaseUrl.trim();
-      const modelIds = providerFormModelsText
-        .split('\n')
-        .map(line => line.trim())
-        .filter(Boolean);
-      if (!id || id.includes('/')) {
-        throw new Error(t('请填写有效的服务商 ID（不含斜杠）', 'Please enter a valid Provider ID (no slashes)'));
-      }
-      if (!baseUrl.startsWith('http://') && !baseUrl.startsWith('https://')) {
-        throw new Error(t('Base URL 必须以 http:// 或 https:// 开头', 'Base URL must start with http:// or https://'));
-      }
-      if (modelIds.length === 0) {
-        throw new Error(t('请至少填写一个模型 ID', 'Please enter at least one Model ID'));
-      }
-
-      const currentPayload = hindsightSettingsPayload ?? (await BotHost.settingsGet());
-      const prevProvider = (currentPayload.settings.runtime.providers ?? []).find(p => p.id === id);
-      const preset = MODEL_PROVIDER_PRESETS.find(p => p.id === id);
-      const apiKeyEnv =
-        prevProvider?.apiKeyEnv ||
-        preset?.apiKeyEnv ||
-        `${id.toUpperCase().replace(/[^A-Z0-9_]/g, '_')}_API_KEY`;
-
-      if (providerFormApiKey.trim()) {
-        const mergedAliases = {
-          ...readCredentialAliases(),
-          [apiKeyEnv]: providerFormApiKey.trim(),
-        };
-        writeCredentialAliases(mergedAliases);
-        await BotHost.saveCredentials({
-          aliases: mergedAliases,
-        });
-        try {
-          const snap = await BotHost.snapshot();
-          if (snap.phase === 'running') {
-            await BotHost.call({
-              method: 'discoverProviderModels',
-              params: {
-                input: {
-                  apiKeyEnv,
-                  apiKey: providerFormApiKey.trim(),
-                  syncEnvOnly: true,
-                },
-              },
-            });
-          }
-        } catch {
-          // Ignore if Host is not running
-        }
-      }
-
-      const prevModelsMap = new Map((prevProvider?.models ?? []).map(m => [m.id, m]));
-      const discoveredMap = new Map(discoveredModels.map(m => [m.id, m]));
-      const uniqueModelIds = Array.from(new Set(modelIds));
-      const nextModels = uniqueModelIds.map(mId => {
-        const disc = discoveredMap.get(mId);
-        const old = prevModelsMap.get(mId);
-        if (disc) {
-          return {
-            ...(old ?? {}),
-            id: mId,
-            ...(disc.name && disc.name !== mId ? { name: disc.name } : {}),
-            ...(disc.reasoning ? { reasoning: true } : {}),
-            ...(disc.contextWindow ? { contextWindow: disc.contextWindow } : {}),
-          };
-        }
-        return old ? { ...old, id: mId } : { id: mId };
-      });
-
-      const nextProvider: HostProviderConfig = {
-        id,
-        ...(providerFormName.trim() ? { name: providerFormName.trim() } : {}),
-        ...(providerFormApi ? { api: providerFormApi } : {}),
-        baseUrl,
-        apiKeyEnv,
-        models: nextModels,
-      };
-
-      const existingProviders = currentPayload.settings.runtime.providers ?? [];
-      const nextProviders = existingProviders.some(p => p.id === id)
-        ? existingProviders.map(p => (p.id === id ? nextProvider : p))
-        : [...existingProviders, nextProvider];
-
-      const firstModelRef = `${id}/${uniqueModelIds[0]}`;
-      const nextDefaultModel =
-        providerFormSetDefault || !currentPayload.settings.runtime.defaultModel
-          ? firstModelRef
-          : currentPayload.settings.runtime.defaultModel;
-
-      const nextSettings: HostSettings = {
-        ...currentPayload.settings,
-        runtime: {
-          ...currentPayload.settings.runtime,
-          providers: nextProviders,
-          defaultModel: nextDefaultModel,
-        },
-      };
-
-      const savedPayload = await BotHost.settingsSet({
-        input: {
-          expectedRevision: currentPayload.revision,
-          settings: nextSettings,
-        },
-      });
-      setHindsightSettingsPayload(savedPayload);
-      setProviderFormApiKey('');
-
-      // Auto-star first models if user hasn't starred any yet
-      if (starredModels.length === 0) {
-        const autoStar = uniqueModelIds.slice(0, 2).map(mId => `${id}/${mId}`);
-        setStarredModels(autoStar);
-        writeStarredModels(autoStar);
-      }
-
-      setModelSheetView('list');
-    });
-
-  const handleDeleteProviderInSheet = (providerId: string) =>
-    action.run(async () => {
-      const currentPayload = hindsightSettingsPayload ?? (await BotHost.settingsGet());
-      const nextProviders = (currentPayload.settings.runtime.providers ?? []).filter(p => p.id !== providerId);
-      const currentDefault = currentPayload.settings.runtime.defaultModel ?? null;
-      const nextDefault =
-        currentDefault && currentDefault.startsWith(`${providerId}/`)
-          ? nextProviders[0]?.models[0]
-            ? `${nextProviders[0].id}/${nextProviders[0].models[0].id}`
-            : null
-          : currentDefault;
-
-      const nextSettings: HostSettings = {
-        ...currentPayload.settings,
-        runtime: {
-          ...currentPayload.settings.runtime,
-          providers: nextProviders,
-          defaultModel: nextDefault,
-        },
-      };
-      const savedPayload = await BotHost.settingsSet({
-        input: {
-          expectedRevision: currentPayload.revision,
-          settings: nextSettings,
-        },
-      });
-      setHindsightSettingsPayload(savedPayload);
-      setModelSheetView('list');
-    });
+  useEffect(() => {
+    setModelTarget(null);
+  }, [activeBotKey, activeCenter, remoteIdentity?.generation, remoteConnected, screen, localHost?.deviceId]);
 
   // Save Bot Soul (CAS)
   const handleSaveSoul = () =>
@@ -3079,15 +2486,12 @@ export function HostPage({
                 type="button"
                 className="grok-card-row"
                 onClick={() => openModelPickerSheet('bot-profile')}
+                disabled={!getOrCreateRemoteClient || !remoteConnected || !remoteIdentity || activeBot.botId === '__jarvis__' || (activeBot.hostKind === 'local' && !localHost?.deviceId)}
               >
                 <Cpu size={20} className="grok-row-icon" />
                 <span className="grok-row-label">{t('模型', 'Model')}</span>
                 <span className="grok-row-value grok-row-value-path">
-                  {activeBot.modelRef
-                    ? activeBot.modelRef.split('/').pop() || activeBot.modelRef
-                    : globalDefaultModel
-                      ? globalDefaultModel.split('/').pop() || globalDefaultModel
-                      : t('默认', 'Default')}
+                  {getOrCreateRemoteClient ? t('设置', 'Settings') : t('请在独立助手中设置 Bot 模型', 'Set the bot model in the standalone assistant')}
                 </span>
                 <ChevronRight size={18} className="grok-row-chevron" />
               </button>
@@ -3336,63 +2740,14 @@ export function HostPage({
               </div>
             )}
 
-            {/* Per-Bot Model Section: Quick Starred Models + More Models Popup */}
             <div className="grok-field-section">
               <label className="grok-section-label">{t('模型', 'Model')}</label>
               <div className="grok-card-group">
-                <div className="grok-model-quick-chips">
-                  <button
-                    type="button"
-                    className={`grok-model-quick-chip${!editModel.trim() ? ' active' : ''}`}
-                    onClick={() => void openCenterManagement()}
-                  >
-                    <span>
-                      {globalDefaultModel
-                        ? `${t('默认 · ', 'Default · ')}${globalDefaultModel.split('/').pop()}`
-                        : t('跟随默认', 'Follow Default')}
-                    </span>
-                  </button>
-                  {quickModelsForBot.map(item => {
-                    const isSelected = editModel.trim() === item.modelRef;
-                    const isStarred = starredModels.includes(item.modelRef);
-                    return (
-                      <button
-                        key={item.modelRef}
-                        type="button"
-                        className={`grok-model-quick-chip${isSelected ? ' active' : ''}`}
-                        onClick={() => void openCenterManagement()}
-                      >
-                        {isStarred && <Star size={12} className="grok-chip-star" />}
-                        <span>{item.modelId}</span>
-                      </button>
-                    );
-                  })}
-                  {editModel.trim() &&
-                    !quickModelsForBot.some(x => x.modelRef === editModel.trim()) && (
-                      <button
-                        type="button"
-                        className="grok-model-quick-chip active"
-                        onClick={() => openModelPickerSheet('bot-edit')}
-                      >
-                        <span>{editModel.trim()}</span>
-                      </button>
-                    )}
-                </div>
-
-                <button
-                  type="button"
-                  className="grok-card-row"
-                  onClick={() => openModelPickerSheet('bot-edit')}
-                >
-                  <Cpu size={18} className="grok-row-icon" />
-                  <span className="grok-row-label">{t('更多模型与服务商…', 'More Models & Providers…')}</span>
-                  <span className="grok-row-value">
-                    {allConfiguredModels.length > 0
-                      ? t(`共 ${allConfiguredModels.length} 个`, `${allConfiguredModels.length} total`)
-                      : t('去配置', 'Configure')}
-                  </span>
-                  <ChevronRight size={18} className="grok-row-chevron" />
-                </button>
+                {editMode === 'create' ? <div className="grok-card-row no-active">{t('创建后在模型设置中选择，默认继承中心', 'Choose a model after creation; inherits from the center by default')}</div>
+                  : !getOrCreateRemoteClient ? <div className="grok-card-row no-active">{t('请在独立助手中设置 Bot 模型', 'Set the bot model in the standalone assistant')}</div>
+                  : <button type="button" className="grok-card-row" onClick={() => openModelPickerSheet('bot-edit')} disabled={!remoteConnected || !remoteIdentity || !activeBot || activeBot.botId === '__jarvis__' || (activeBot.hostKind === 'local' && !localHost?.deviceId)}>
+                    <Cpu size={18} className="grok-row-icon"/><span className="grok-row-label">{t('Bot 模型设置', 'Bot model settings')}</span><ChevronRight size={18} className="grok-row-chevron"/>
+                  </button>}
               </div>
             </div>
 
@@ -4245,488 +3600,16 @@ export function HostPage({
           onRemoteUpdated={() => {
             void syncRemoteBots();
           }}
-          onOpenModelSheet={() => openModelPickerSheet('bot-edit')}
+          onOpenModelSheet={() => void openCenterManagement()}
           onOpenSystemSettings={onOpenSystemSettings}
         />
       )}
 
-      {/* ==================== MODEL PICKER & CUSTOM PROVIDER BOTTOM SHEET ==================== */}
-      {modelSheetOpen && (
-        <div
-          className="grok-sheet-backdrop"
-          role="dialog"
-          aria-modal="true"
-          aria-label={t('选择模型与配置服务商', 'Select Model & Configure Providers')}
-          onClick={() => setModelSheetOpen(false)}
-        >
-          <section className="grok-model-sheet" onClick={e => e.stopPropagation()}>
-            {modelSheetView === 'list' ? (
-              <>
-                <header className="grok-model-sheet-header">
-                  <div className="grok-model-sheet-title-wrap">
-                    <h3>{t('选择模型', 'Select Model')}</h3>
-                    <span className="grok-model-sheet-sub">
-                      {t('点击 ★ 收藏常用模型，优先显示在创建/编辑页', 'Tap ★ to pin favorite models for quick access')}
-                    </span>
-                  </div>
-                  <div className="grok-model-sheet-actions">
-                    <button
-                      type="button"
-                      className="grok-done-pill-btn"
-                      onClick={() => openProviderFormInSheet()}
-                    >
-                      <Plus size={15} style={{ marginRight: 3 }} />
-                      {t('服务商', 'Provider')}
-                    </button>
-                    <button
-                      type="button"
-                      className="grok-floating-circle-btn"
-                      aria-label={t('关闭', 'Close')}
-                      onClick={() => setModelSheetOpen(false)}
-                    >
-                      <X size={18} />
-                    </button>
-                  </div>
-                </header>
-
-                {allConfiguredModels.length > 3 && (
-                  <div className="grok-model-sheet-search">
-                    <Search size={16} />
-                    <input
-                      type="search"
-                      value={modelSearchQuery}
-                      onChange={e => setModelSearchQuery(e.target.value)}
-                      placeholder={t('搜索模型或服务商…', 'Search models or providers…')}
-                    />
-                    {modelSearchQuery && (
-                      <button type="button" onClick={() => setModelSearchQuery('')} aria-label={t('清除', 'Clear')}>
-                        <X size={14} />
-                      </button>
-                    )}
-                  </div>
-                )}
-
-                <div className="grok-model-sheet-body">
-                  {(() => {
-                    const currentSelectedRef =
-                      modelSheetTarget === 'bot-profile'
-                        ? activeBot?.modelRef ?? ''
-                        : editModel.trim();
-                    const q = modelSearchQuery.trim().toLowerCase();
-                    const starredItems = allConfiguredModels.filter(
-                      m =>
-                        starredModels.includes(m.modelRef) &&
-                        (!q || m.modelRef.toLowerCase().includes(q) || m.name.toLowerCase().includes(q)),
-                    );
-
-                    return (
-                      <>
-                        {/* Follow Global Default Option */}
-                        {!q && (
-                          <div className="grok-field-section" style={{ marginBottom: 12 }}>
-                            <section className="grok-card-group">
-                              <button
-                                type="button"
-                                className="grok-card-row"
-                                onClick={() => void selectModelFromSheet('')}
-                              >
-                                <Cpu size={18} className="grok-row-icon" />
-                                <div className="grok-model-row-main">
-                                  <span className="grok-row-label">{t('跟随全局默认模型', 'Follow Global Default')}</span>
-                                  <small className="grok-model-row-sub">
-                                    {globalDefaultModel
-                                      ? `${t('当前默认：', 'Default: ')}${globalDefaultModel}`
-                                      : t('未指定专属模型时使用 Host 默认设置', 'Uses Host default model')}
-                                  </small>
-                                </div>
-                                {!currentSelectedRef && <Check size={18} className="grok-model-check" />}
-                              </button>
-                            </section>
-                          </div>
-                        )}
-
-                        {/* Starred Models Group */}
-                        {starredItems.length > 0 && (
-                          <div className="grok-field-section" style={{ marginBottom: 14 }}>
-                            <label className="grok-section-label">{t('★ 常用模型', '★ Starred Models')}</label>
-                            <section className="grok-card-group">
-                              {starredItems.map(item => {
-                                const selected = currentSelectedRef === item.modelRef;
-                                return (
-                                  <div key={`star-${item.modelRef}`} className="grok-card-row grok-model-item-row">
-                                    <button
-                                      type="button"
-                                      className="grok-model-item-select"
-                                      onClick={() => void selectModelFromSheet(item.modelRef)}
-                                    >
-                                      <div className="grok-model-row-main">
-                                        <span className="grok-row-label">{item.name}</span>
-                                        <small className="grok-model-row-sub">{item.modelRef}</small>
-                                      </div>
-                                    </button>
-                                    <div className="grok-model-item-right">
-                                      <button
-                                        type="button"
-                                        className="grok-model-star-btn starred"
-                                        aria-label={t('取消常用', 'Unstar')}
-                                        onClick={e => {
-                                          e.stopPropagation();
-                                          toggleStarModel(item.modelRef);
-                                        }}
-                                      >
-                                        <Star size={16} />
-                                      </button>
-                                      {selected && <Check size={18} className="grok-model-check" />}
-                                    </div>
-                                  </div>
-                                );
-                              })}
-                            </section>
-                          </div>
-                        )}
-
-                        {/* All Configured Models Grouped by Provider */}
-                        {configuredProviders.length === 0 ? (
-                          <section className="grok-card-group grok-schedule-empty" style={{ marginTop: 8 }}>
-                            <Cpu size={28} className="grok-row-icon" />
-                            <h4>{t('尚未配置模型服务商', 'No Model Providers Configured')}</h4>
-                            <p>
-                              {t(
-                                '支持一键添加 DeepSeek、OpenAI、Anthropic、Gemini 或任意 Custom Provider（兼容 pi-ai 多协议）。',
-                                'Add DeepSeek, OpenAI, Anthropic, Gemini, or any custom provider.',
-                              )}
-                            </p>
-                            <button
-                              type="button"
-                              className="grok-done-pill-btn"
-                              style={{ marginTop: 8 }}
-                              onClick={() => openProviderFormInSheet()}
-                            >
-                              <Plus size={15} style={{ marginRight: 4 }} />
-                              {t('添加服务商 / Custom Provider', 'Add Provider')}
-                            </button>
-                          </section>
-                        ) : (
-                          configuredProviders.map(provider => {
-                            const models = (provider.models ?? []).filter(
-                              m =>
-                                !q ||
-                                `${provider.id}/${m.id}`.toLowerCase().includes(q) ||
-                                (m.name || m.id).toLowerCase().includes(q) ||
-                                (provider.name || provider.id).toLowerCase().includes(q),
-                            );
-                            if (models.length === 0 && q) return null;
-                            return (
-                              <div key={provider.id} className="grok-field-section" style={{ marginBottom: 14 }}>
-                                <div className="grok-provider-group-head">
-                                  <label className="grok-section-label">
-                                    {`${provider.name || provider.id} (${provider.id})`}
-                                  </label>
-                                  <button
-                                    type="button"
-                                    className="grok-provider-edit-link"
-                                    onClick={() => openProviderFormInSheet(provider)}
-                                  >
-                                    {t('编辑服务商', 'Edit')}
-                                  </button>
-                                </div>
-                                <section className="grok-card-group">
-                                  {models.map(m => {
-                                    const ref = `${provider.id}/${m.id}`;
-                                    const selected = currentSelectedRef === ref;
-                                    const isStar = starredModels.includes(ref);
-                                    return (
-                                      <div key={ref} className="grok-card-row grok-model-item-row">
-                                        <button
-                                          type="button"
-                                          className="grok-model-item-select"
-                                          onClick={() => void selectModelFromSheet(ref)}
-                                        >
-                                          <div className="grok-model-row-main">
-                                            <span className="grok-row-label">{m.name || m.id}</span>
-                                            <small className="grok-model-row-sub">{ref}</small>
-                                          </div>
-                                        </button>
-                                        <div className="grok-model-item-right">
-                                          <button
-                                            type="button"
-                                            className={`grok-model-star-btn${isStar ? ' starred' : ''}`}
-                                            aria-label={isStar ? t('取消常用', 'Unstar') : t('设为常用', 'Star')}
-                                            onClick={e => {
-                                              e.stopPropagation();
-                                              toggleStarModel(ref);
-                                            }}
-                                          >
-                                            <Star size={16} />
-                                          </button>
-                                          {selected && <Check size={18} className="grok-model-check" />}
-                                        </div>
-                                      </div>
-                                    );
-                                  })}
-                                </section>
-                              </div>
-                            );
-                          })
-                        )}
-                      </>
-                    );
-                  })()}
-                  <ErrorNotice error={action.error} />
-                </div>
-              </>
-            ) : (
-              <>
-                <header className="grok-model-sheet-header">
-                  <button
-                    type="button"
-                    className="grok-floating-circle-btn"
-                    aria-label={t('返回模型列表', 'Back to model list')}
-                    onClick={() => setModelSheetView('list')}
-                  >
-                    <ArrowLeft size={18} />
-                  </button>
-                  <div className="grok-model-sheet-title-wrap">
-                    <h3>
-                      {providerEditId
-                        ? t(`编辑服务商 · ${providerEditId}`, `Edit Provider · ${providerEditId}`)
-                        : t('配置服务商 / Custom Provider', 'Configure Provider')}
-                    </h3>
-                  </div>
-                  <button
-                    type="button"
-                    className="grok-done-pill-btn"
-                    disabled={action.busy || !providerFormId.trim() || !providerFormBaseUrl.trim()}
-                    onClick={() => void handleSaveProviderInSheet()}
-                  >
-                    {action.busy ? t('保存中', 'Saving') : t('保存', 'Save')}
-                  </button>
-                </header>
-
-                <div className="grok-model-sheet-body">
-                  {!providerEditId && (
-                    <div className="grok-field-section" style={{ marginBottom: 12 }}>
-                      <label className="grok-section-label">{t('快速预设 (点击自动填入)', 'Quick Presets')}</label>
-                      <div className="grok-model-quick-chips">
-                        {MODEL_PROVIDER_PRESETS.map(preset => (
-                          <button
-                            key={preset.id}
-                            type="button"
-                            className={`grok-model-quick-chip${providerFormId === preset.id ? ' active' : ''}`}
-                            onClick={() => applyProviderPreset(preset.id)}
-                          >
-                            <span>{preset.label}</span>
-                          </button>
-                        ))}
-                        <button
-                          type="button"
-                          className={`grok-model-quick-chip${
-                            !MODEL_PROVIDER_PRESETS.some(p => p.id === providerFormId) ? ' active' : ''
-                          }`}
-                          onClick={() => applyProviderPreset('__custom__')}
-                        >
-                          <span>{t('Custom 自定义', 'Custom')}</span>
-                        </button>
-                      </div>
-                    </div>
-                  )}
-
-                  <div className="grok-field-section" style={{ marginBottom: 12 }}>
-                    <label className="grok-section-label">{t('服务商与协议 (pi-ai)', 'Provider & Protocol')}</label>
-                    <section className="grok-card-group">
-                      <label className="grok-card-row grok-input-row">
-                        <span className="grok-input-label">{t('服务商 ID', 'Provider ID')}</span>
-                        <input
-                          className="grok-inline-input"
-                          disabled={Boolean(providerEditId)}
-                          value={providerFormId}
-                          onChange={e => setProviderFormId(e.target.value)}
-                          placeholder={t('如 deepseek、openai、my-api', 'e.g. deepseek, openai, custom-api')}
-                        />
-                      </label>
-                      <label className="grok-card-row grok-input-row">
-                        <span className="grok-input-label">{t('显示名称', 'Display Name')}</span>
-                        <input
-                          className="grok-inline-input"
-                          value={providerFormName}
-                          onChange={e => setProviderFormName(e.target.value)}
-                          placeholder={t('选填，如 DeepSeek / 自建节点', 'Optional display name')}
-                        />
-                      </label>
-                      <div className="grok-card-row no-active">
-                        <span className="grok-row-label">{t('API 协议', 'API Protocol')}</span>
-                        <label className="grok-select-wrap">
-                          <select value={providerFormApi} onChange={e => setProviderFormApi(e.target.value)}>
-                            {PI_PROVIDER_PROTOCOLS.map(proto => (
-                              <option key={proto.id} value={proto.id}>
-                                {proto.id}
-                              </option>
-                            ))}
-                          </select>
-                          <ChevronsUpDown size={15} />
-                        </label>
-                      </div>
-                      <label className="grok-card-row grok-input-row">
-                        <span className="grok-input-label">Base URL</span>
-                        <input
-                          className="grok-inline-input"
-                          inputMode="url"
-                          value={providerFormBaseUrl}
-                          onChange={e => setProviderFormBaseUrl(e.target.value)}
-                          placeholder="https://api.example.com/v1"
-                        />
-                      </label>
-                      <label className="grok-card-row grok-input-row">
-                        <span className="grok-input-label">API Key</span>
-                        <input
-                          type="password"
-                          autoComplete="new-password"
-                          className="grok-inline-input"
-                          value={providerFormApiKey}
-                          onChange={e => setProviderFormApiKey(e.target.value)}
-                          placeholder={t('输入密钥（留空保持不变）', 'Enter API Key (blank to keep)')}
-                        />
-                      </label>
-                    </section>
-                  </div>
-
-                  <div className="grok-field-section" style={{ marginBottom: 12 }}>
-                    <div className="grok-provider-group-head">
-                      <label className="grok-section-label">
-                        {t('模型 ID 列表（每行一个）', 'Model IDs (one per line)')}
-                      </label>
-                      <button
-                        type="button"
-                        className="grok-discover-btn"
-                        disabled={action.busy || discoveringModels || !providerFormBaseUrl.trim()}
-                        onClick={() => void handleDiscoverProviderModels()}
-                      >
-                        <RefreshCw size={13} className={discoveringModels ? 'grok-spin' : ''} />
-                        <span>
-                          {discoveringModels
-                            ? t('正在拉取…', 'Fetching…')
-                            : t('自动拉取可用模型', 'Fetch Available Models')}
-                        </span>
-                      </button>
-                    </div>
-                    <section className="grok-card-group">
-                      {discoveredModels.length > 0 && (() => {
-                        const selectedSet = new Set(
-                          providerFormModelsText
-                            .split('\n')
-                            .map(s => s.trim())
-                            .filter(Boolean),
-                        );
-                        const dq = discoveredSearch.trim().toLowerCase();
-                        const filteredDiscovered = discoveredModels.filter(
-                          m => !dq || m.id.toLowerCase().includes(dq) || m.name.toLowerCase().includes(dq),
-                        );
-                        return (
-                          <div className="grok-discovered-box">
-                            <div className="grok-discovered-head">
-                              <span className="grok-discovered-hint">
-                                {discoverHint ||
-                                  t(
-                                    `已拉取 ${discoveredModels.length} 个模型（点击标签勾选）`,
-                                    `Fetched ${discoveredModels.length} models (tap to toggle)`,
-                                  )}
-                              </span>
-                              <div className="grok-discovered-actions">
-                                <button
-                                  type="button"
-                                  className="grok-provider-edit-link"
-                                  onClick={() => {
-                                    const merged = Array.from(
-                                      new Set([...selectedSet, ...filteredDiscovered.map(m => m.id)]),
-                                    );
-                                    setProviderFormModelsText(merged.join('\n'));
-                                  }}
-                                >
-                                  {t('全选', 'Select All')}
-                                </button>
-                                <button
-                                  type="button"
-                                  className="grok-provider-edit-link"
-                                  onClick={() => setProviderFormModelsText('')}
-                                >
-                                  {t('清空', 'Clear')}
-                                </button>
-                              </div>
-                            </div>
-                            {discoveredModels.length > 6 && (
-                              <div className="grok-discovered-search">
-                                <Search size={14} />
-                                <input
-                                  type="search"
-                                  value={discoveredSearch}
-                                  onChange={e => setDiscoveredSearch(e.target.value)}
-                                  placeholder={t('筛选拉取到的模型…', 'Filter fetched models…')}
-                                />
-                              </div>
-                            )}
-                            <div className="grok-discovered-chips">
-                              {filteredDiscovered.slice(0, 60).map(m => {
-                                const activeChip = selectedSet.has(m.id);
-                                return (
-                                  <button
-                                    key={m.id}
-                                    type="button"
-                                    className={`grok-model-quick-chip${activeChip ? ' active' : ''}`}
-                                    onClick={() => toggleDiscoveredModelInForm(m.id)}
-                                  >
-                                    {activeChip && <Check size={13} />}
-                                    <span>{m.id}</span>
-                                  </button>
-                                );
-                              })}
-                            </div>
-                          </div>
-                        );
-                      })()}
-                      <div className="grok-card-textarea-wrap">
-                        <textarea
-                          rows={4}
-                          value={providerFormModelsText}
-                          onChange={e => setProviderFormModelsText(e.target.value)}
-                          placeholder={'deepseek-chat\ndeepseek-reasoner'}
-                          spellCheck={false}
-                        />
-                      </div>
-                      <div className="grok-card-row no-active">
-                        <span className="grok-row-label">{t('将首个模型设为全局默认', 'Set first model as default')}</span>
-                        <button
-                          type="button"
-                          role="switch"
-                          aria-checked={providerFormSetDefault}
-                          className={`grok-toggle-switch${providerFormSetDefault ? ' checked' : ''}`}
-                          onClick={() => setProviderFormSetDefault(v => !v)}
-                        >
-                          <span className="grok-toggle-knob" />
-                        </button>
-                      </div>
-                    </section>
-                  </div>
-
-                  {providerEditId && (
-                    <section className="grok-card-group">
-                      <button
-                        type="button"
-                        className="grok-card-row danger-text"
-                        onClick={() => void handleDeleteProviderInSheet(providerEditId)}
-                      >
-                        <Trash2 size={18} />
-                        <span className="grok-row-label">{t('删除该服务商', 'Delete Provider')}</span>
-                      </button>
-                    </section>
-                  )}
-
-                  <ErrorNotice error={action.error} />
-                </div>
-              </>
-            )}
-          </section>
-        </div>
-      )}
+      {modelTarget && activeBot?.key === modelTarget.botKey && activeBot.botId === modelTarget.botId &&
+        activeCenter === modelTarget.center && remoteConnected && remoteIdentity?.generation === modelTarget.identity.generation &&
+        (activeBot.hostKind === 'local' ? localHost?.deviceId : activeBot.hostId) === modelTarget.identity.targetDeviceId &&
+        (screen === 'bot-profile' || (screen === 'bot-edit' && editMode === 'edit')) &&
+        <BotModelSheet key={`${modelTarget.center}|${modelTarget.botKey}|${modelTarget.identity.generation}`} api={modelTarget.api} identity={modelTarget.identity} botId={modelTarget.botId} onClose={() => setModelTarget(null)}/>}
 
       {/* ==================== LEFT HIDDEN SIDEBAR DRAWER (Persistent for smooth slide animation) ==================== */}
       <div

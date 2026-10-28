@@ -331,6 +331,34 @@ export function openDesktopClient(options) {
     if (previous) await previous.close();
     return centerStatus();
   }
+  async function ownerOperation(params, signal, kind) {
+    const allowed = kind === 'session' ? [] : kind === 'login' ? ['password'] : kind === 'get' ? ['deviceId', 'botId'] : ['deviceId', 'botId', 'expectedRevision', 'value'];
+    rejectUnknownFields(params, new Set(allowed), `center owner ${kind} params`);
+    if (kind === 'login' && (typeof params.password !== 'string' || params.password.length > 1024)) throw invalid('invalid administrator password');
+    if (kind === 'get' || kind === 'set') {
+      try { assertId(params.deviceId, 'deviceId'); assertId(params.botId, 'botId'); } catch (err) { throw invalid(err.message); }
+      if (['.', '..'].includes(params.deviceId) || ['.', '..'].includes(params.botId)) throw invalid('invalid model target');
+    }
+    if (kind === 'set') {
+      if (!Number.isSafeInteger(params.expectedRevision) || params.expectedRevision < 0) throw invalid('invalid expectedRevision');
+      if (!isPlainObject(params.value)) throw invalid('model selection must be an object');
+      rejectUnknownFields(params.value, new Set(['modelRef', 'thinkingLevel']), 'model selection');
+      for (const value of Object.values(params.value)) {
+        if (value !== null && (typeof value !== 'string' || !value.length)) throw invalid('invalid model selection');
+      }
+    }
+    const client = centerClient;
+    try {
+      if (kind === 'session') return await client.ownerSession(signal);
+      if (kind === 'login') return await client.ownerLogin(params.password, signal);
+      if (kind === 'get') return await client.botModelGet(params.deviceId, params.botId, signal);
+      return await client.botModelSet(params.deviceId, params.botId, { expectedRevision: params.expectedRevision, value: params.value }, signal);
+    } catch (err) {
+      const norm = normalizeDesktopError(err, 'unconfirmed');
+      throw brokerError(norm.code, norm.code === 'REQUEST_CONFLICT' || norm.code === 'CONTROL_UNAUTHORIZED' || norm.code === 'BAD_RESPONSE' ? 'responded' : norm.outcome, norm.message);
+    }
+  }
+
   function requireCenter() {
     if (centerState !== 'ready') throw brokerError('NOT_CONNECTED', 'not-sent', 'center is disconnected');
   }
@@ -1163,6 +1191,10 @@ export function openDesktopClient(options) {
     ['center_connect', opCenterConnect],
     ['center_status', opCenterStatus],
     ['center_disconnect', opCenterDisconnect],
+    ['center_owner_session', (params, signal) => ownerOperation(params, signal, 'session')],
+    ['center_owner_login', (params, signal) => ownerOperation(params, signal, 'login')],
+    ['center_bot_model_get', (params, signal) => ownerOperation(params, signal, 'get')],
+    ['center_bot_model_set', (params, signal) => ownerOperation(params, signal, 'set')],
     ['connect', opConnect],
     ['disconnect', opDisconnect],
     ['status', opStatus],

@@ -162,6 +162,9 @@ export interface DesktopCenterStatus {
   clientId: string;
 }
 
+export interface CenterModelSelection { modelRef?: string | null; thinkingLevel?: string | null }
+export interface CenterBotModelConfig { global: CenterModelSelection; overrides: CenterModelSelection; effective: CenterModelSelection; revision: number }
+
 export interface DesktopOperationMap {
   center_connect: {
     params: { url: string; deviceId: string; deviceToken: string; ca?: string };
@@ -175,6 +178,10 @@ export interface DesktopOperationMap {
     params: Record<string, never>;
     result: DesktopCenterStatus;
   };
+  center_owner_session: { params: Record<string, never>; result: { authenticated: boolean } };
+  center_owner_login: { params: { password: string }; result: { authenticated: boolean } };
+  center_bot_model_get: { params: { deviceId: string; botId: string }; result: CenterBotModelConfig };
+  center_bot_model_set: { params: { deviceId: string; botId: string; expectedRevision: number; value: CenterModelSelection }; result: CenterBotModelConfig };
   connect: {
     params: { connection: DesktopConnectionInput };
     result: DesktopClientStatus;
