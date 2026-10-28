@@ -38,6 +38,10 @@ final class BotHostClient {
 
     private final Context context;
     private final Object lock = new Object();
+    private final CenterClientCredentials credentials;
+    private long centerRevision;
+    private boolean centerPending;
+    private boolean centerBlocked;
     /** 串行化启动/关闭与帧派发；读响应不占用本线程。 */
     private final ThreadPoolExecutor control;
 
@@ -54,6 +58,7 @@ final class BotHostClient {
 
     private BotHostClient(Context context) {
         this.context = context.getApplicationContext();
+        this.credentials = new CenterClientCredentials(this.context);
         this.control = new ThreadPoolExecutor(1, 1, 0L, TimeUnit.MILLISECONDS,
                 new ArrayBlockingQueue<>(CONTROL_QUEUE_CAPACITY),
                 runnable -> {
@@ -87,14 +92,109 @@ final class BotHostClient {
         final JSONObject input = params == null ? new JSONObject() : params;
         return onControl(() -> {
             BotHostProcess process = acquire(ownerId, ownerOpen);
+            JSONObject forwarded = input;
+            long revision = 0;
+            if ("center_connect".equals(op)) {
+                synchronized (lock) {
+                    if (generation == null || generation.process != process || generation.closing || !ownerOpen.getAsBoolean())
+                        throw new BridgeException("CANCELLED", "not-sent", "界面会话已关闭");
+                    revision = ++centerRevision;
+                    centerPending = true;
+                    centerBlocked = false;
+                }
+                if ("".equals(input.opt("deviceToken"))) {
+                    JSONObject saved;
+                    try {
+                        synchronized (lock) { saved = credentials.read(); }
+                    } catch (Exception failure) {
+                        synchronized (lock) { centerPending = false; centerBlocked = true; }
+                        throw new BridgeException("CREDENTIALS", "not-sent", "已保存的中心凭据无法读取，请输入新令牌重新连接");
+                    }
+                    if (saved == null || !saved.getString("url").equals(input.opt("url"))
+                            || !saved.getString("deviceId").equals(input.opt("deviceId"))
+                            || !saved.getString("ca").equals(input.has("ca") ? input.opt("ca") : "")) {
+                        synchronized (lock) { centerPending = false; centerBlocked = true; }
+                        throw new BridgeException("CREDENTIALS", "not-sent", "中心地址、设备身份或 CA 不匹配，请输入令牌");
+                    }
+                    forwarded = new JSONObject(input.toString()).put("deviceToken", saved.getString("deviceToken"));
+                }
+            } else if ("center_disconnect".equals(op)) {
+                if (input.length() != 0) throw new BridgeException("INVALID_ARGUMENT", "not-sent", "断开请求参数无效");
+                synchronized (lock) {
+                    if (generation == null || generation.process != process || generation.closing || !ownerOpen.getAsBoolean())
+                        throw new BridgeException("CANCELLED", "not-sent", "界面会话已关闭");
+                    ++centerRevision;
+                    centerPending = false;
+                    centerBlocked = true;
+                    try { credentials.clear(); }
+                    catch (Exception failure) {
+                        throw new BridgeException("CREDENTIALS", "not-sent", "无法清除已保存的中心凭据，请重试");
+                    }
+                }
+            }
+            final JSONObject sent = forwarded;
+            final long attempt = revision;
             CompletableFuture<JSONObject> reply;
             try {
-                reply = process.request("call", new JSONObject().put("method", op).put("params", input));
+                reply = process.request("call", new JSONObject().put("method", op).put("params", sent));
             } catch (IOException | JSONException failure) {
+                if ("center_connect".equals(op)) synchronized (lock) { centerPending = false; centerBlocked = true; }
                 return failed(failure);
+            }
+            if ("center_connect".equals(op)) {
+                return reply.handle((value, failure) -> onControl(() -> {
+                    synchronized (lock) {
+                        if (attempt != centerRevision || generation == null || generation.process != process
+                                || generation.closing || !generation.owner.equals(ownerId) || !ownerOpen.getAsBoolean()) {
+                            throw new BridgeException("CANCELLED", "not-sent", "中心连接已被替换或会话已关闭");
+                        }
+                        centerPending = false;
+                        if (failure != null) {
+                            centerBlocked = true;
+                            return failed(failure);
+                        }
+                        centerBlocked = true;
+                        JSONObject envelope = valueEnvelope(value);
+                        try {
+                            JSONObject record = new JSONObject().put("url", sent.getString("url"))
+                                    .put("deviceId", sent.getString("deviceId"))
+                                    .put("deviceToken", sent.getString("deviceToken"))
+                                    .put("ca", sent.optString("ca", ""));
+                            credentials.save(record);
+                        } catch (Exception saveFailure) {
+                            centerBlocked = true;
+                            try { process.request("call", new JSONObject().put("method", "center_disconnect")
+                                    .put("params", new JSONObject())); } catch (Exception ignored) { }
+                            throw new BridgeException("CREDENTIALS", "responded", "连接成功但无法加密保存中心凭据，请重试");
+                        }
+                        centerBlocked = false;
+                        return CompletableFuture.completedFuture(centerMetadata(envelope));
+                    }
+                })).thenCompose(future -> future);
+            }
+            if ("center_status".equals(op) || "center_disconnect".equals(op)) {
+                return reply.thenCompose(value -> onControl(() -> {
+                    synchronized (lock) {
+                        JSONObject envelope = valueEnvelope(value);
+                        JSONObject status = envelope.getJSONObject("value");
+                        if (centerPending || centerBlocked) status.put("state", "disconnected");
+                        return CompletableFuture.completedFuture(centerMetadata(envelope));
+                    }
+                }));
             }
             return reply.thenApply(BotHostClient::valueEnvelope);
         });
+    }
+
+    private JSONObject centerMetadata(JSONObject envelope) throws JSONException {
+        JSONObject status = envelope.getJSONObject("value");
+        try {
+            JSONObject saved = credentials.read();
+            if (saved != null) status.put("savedConnection", CenterClientCredentials.metadata(saved));
+        } catch (Exception failure) {
+            status.put("savedConnectionError", "已保存的中心凭据无法读取，请输入新令牌重新连接");
+        }
+        return envelope;
     }
 
     /**
@@ -153,6 +253,9 @@ final class BotHostClient {
             if (current == null || !current.owner.equals(ownerId) || current.closing) return;
             current.closing = true;
             current.current = false;
+            ++centerRevision;
+            centerPending = false;
+            centerBlocked = false;
             // 启动中可能仍为 null：onStarting 登记后由 acquire 的放弃分支统一回收。
             process = current.process;
         }
