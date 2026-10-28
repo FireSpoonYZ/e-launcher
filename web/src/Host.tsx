@@ -671,6 +671,7 @@ export function HostPage({
   const [screen, setScreen] = useState<HubScreen>('hub');
   const [avatarReturnScreen, setAvatarReturnScreen] = useState<HubScreen>('bot-edit');
   const [subPageReturnScreen, setSubPageReturnScreen] = useState<HubScreen>('bot-profile');
+  const [computerReturnScreen, setComputerReturnScreen] = useState<'chat' | 'bot-profile'>('bot-profile');
 
   // Left drawer (always mounted in DOM for smooth slide-in & slide-out animation)
   const [leftDrawerOpen, setLeftDrawerOpen] = useState(false);
@@ -2513,7 +2514,8 @@ export function HostPage({
       showerIdentity &&
       remoteIdentity &&
       showerIdentity.profileId === remoteIdentity.profileId &&
-      showerIdentity.generation === remoteIdentity.generation,
+      showerIdentity.generation === remoteIdentity.generation &&
+      remoteDevices.some(device => device.deviceId === showerIdentity.targetDeviceId && device.online),
   );
   // 复用既有 remote 面板 call（与 Host 其它调用同源），绝不发给本机 BotHost；
   // 本机 Bot 不传 call，由 adapter 默认走 BotHost.call。
@@ -2531,7 +2533,7 @@ export function HostPage({
   const showerConnected =
     showerHostKind === 'local' ? localHost?.phase === 'running' : showerRemoteReady;
   // 换主机/档案/设备/代/Bot 就换 key：旧画面与旧会话随卸载丢弃，不跨设备复用帧。
-  const showerPreviewKey = `${showerHostKind ?? '-'}:${showerIdentity?.profileId ?? '-'}:${showerIdentity?.generation ?? '-'}:${showerIdentity?.targetDeviceId ?? '-'}:${showerBotId ?? '-'}`;
+  const showerPreviewKey = `${showerHostKind ?? '-'}:${showerIdentity?.profileId ?? '-'}:${showerIdentity?.generation ?? '-'}:${showerIdentity?.targetDeviceId ?? '-'}:${showerBotId ?? '-'}:${showerHostKind === 'remote' ? showerRemoteReady : 'local'}`;
 
   return (
     <div
@@ -2710,6 +2712,19 @@ export function HostPage({
 
             <button
               type="button"
+              className="grok-chat-computer-btn"
+              onClick={() => {
+                setChatTopMenuOpen(false);
+                setComputerReturnScreen('chat');
+                setScreen('bot-screen');
+              }}
+            >
+              <Monitor size={18} />
+              <span>{t('查看桌面', 'View desktop')}</span>
+            </button>
+
+            <button
+              type="button"
               className="grok-floating-circle-btn"
               aria-label={t('更多选项', 'More options')}
               aria-expanded={chatTopMenuOpen}
@@ -2718,7 +2733,7 @@ export function HostPage({
               <MoreHorizontal size={20} />
             </button>
 
-            {/* 15845.jpg Dropdown Menu Card (no right drawer item; computer entry is in Bot Profile) */}
+            {/* 15845.jpg Dropdown Menu Card */}
             {chatTopMenuOpen && (
               <>
                 <div className="grok-menu-backdrop" onClick={() => setChatTopMenuOpen(false)} />
@@ -3149,7 +3164,7 @@ export function HostPage({
               <button
                 type="button"
                 className="grok-card-row"
-                onClick={() => setScreen('bot-screen')}
+                onClick={() => { setComputerReturnScreen('bot-profile'); setScreen('bot-screen'); }}
               >
                 <Monitor size={20} className="grok-row-icon" />
                 <span className="grok-row-label">{t('电脑', 'Computer')}</span>
@@ -3195,19 +3210,18 @@ export function HostPage({
           key={showerPreviewKey}
           botId={activeBot.botId}
           botName={activeBot.role}
+          hostLabel={activeBot.hostKind === 'remote' ? `${t('远程', 'Remote')} · ${activeBot.hostLabel}` : activeBot.hostLabel}
           avatarPreset={resolveBotAvatarPreset(activeBot.key, activeBot.role, activeBot.isPrimary)}
           isPrimary={activeBot.isPrimary}
           hostKind={activeBot.hostKind}
           open={screen === 'bot-screen'}
-          onBack={() => setScreen('bot-profile')}
+          onBack={() => setScreen(computerReturnScreen)}
           showerTarget={showerTarget}
           showerCall={showerCall}
           showerConnected={showerConnected}
           onInterrupt={async () => {
             if (activeBot.hostKind === 'local' && activeBot.botId !== '__jarvis__') {
               await BotHost.call({ method: 'abort', params: { botId: activeBot.botId } });
-            } else if (activeBot.hostKind === 'remote' && activeBot.remoteIdentity && remoteClientRef.current) {
-              await remoteClientRef.current.api.call(activeBot.remoteIdentity, 'abort', { botId: activeBot.botId });
             }
           }}
         />

@@ -1,6 +1,6 @@
 // Bot 电脑全屏视图（Grok Bot 风格）：全屏深色展示该 Bot 的虚拟工作屏幕。
 // 顶部为返回按钮、Bot 头像与名称、右上角状态/帮助按钮；中央为全幅画面；右下角为「接管控制」胶囊按钮。
-// 接管 = 先 interrupt 当前对话，再让执行器停止在途动作并接受人工操作；之后 Bot 与用户可同时操作。
+// 原生接管先中断当前对话；RPC 接管由服务端处理中断与执行器停止。
 import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
 import { ChevronLeft, CircleHelp, Monitor, Play, RefreshCw, Trash2 } from 'lucide-react';
 import type { ShowerTarget } from '../../host-core/index.js';
@@ -26,13 +26,14 @@ interface RpcStatusSnapshot {
   width: number;
   height: number;
   sessionId: string;
-  phase: 'none' | 'connecting' | 'live' | 'ended' | 'unavailable' | 'error';
+  phase: 'none' | 'connecting' | 'authentication-required' | 'live' | 'ended' | 'unavailable' | 'error';
   message?: string;
 }
 
 export type BotScreenPanelProps = {
   botId: string;
   botName: string;
+  hostLabel: string;
   avatarPreset: GrokAvatarPreset;
   isPrimary?: boolean;
   hostKind: 'local' | 'remote';
@@ -49,6 +50,7 @@ export type BotScreenPanelProps = {
 export function BotScreenPanel({
   botId,
   botName,
+  hostLabel,
   avatarPreset,
   isPrimary,
   hostKind,
@@ -158,15 +160,17 @@ export function BotScreenPanel({
       const phase: RpcStatusSnapshot['phase'] =
         sessPhase === 'ready'
           ? 'live'
-          : sessPhase === 'starting' || sessPhase === 'authentication-required'
-            ? 'connecting'
-            : sessPhase === 'closed'
-              ? 'ended'
-              : sessPhase === 'error'
-                ? 'error'
-                : sessPhase === 'unavailable'
-                  ? 'unavailable'
-                  : 'none';
+          : sessPhase === 'authentication-required'
+            ? 'authentication-required'
+            : sessPhase === 'starting'
+              ? 'connecting'
+              : sessPhase === 'closed'
+                ? 'ended'
+                : sessPhase === 'error'
+                  ? 'error'
+                  : sessPhase === 'unavailable'
+                    ? 'unavailable'
+                    : 'none';
       const errObj = raw && typeof raw.error === 'object' && raw.error ? (raw.error as Record<string, unknown>) : null;
       const message = typeof errObj?.message === 'string' ? errObj.message : undefined;
       setRpcState({ live, userControl, width, height, sessionId, phase, message });
@@ -250,12 +254,12 @@ export function BotScreenPanel({
     setBusy(true);
     setError('');
     try {
-      try {
-        await onInterrupt();
-      } catch (failure) {
-        setError(t('中断对话失败：', 'Interrupt failed: ') + errorText(failure));
-      }
       if (isNativeClient) {
+        try {
+          await onInterrupt();
+        } catch (failure) {
+          setError(t('中断对话失败：', 'Interrupt failed: ') + errorText(failure));
+        }
         const viewer = viewerRef.current;
         if (!viewer) return;
         const next = await viewer.takeover();
@@ -417,10 +421,10 @@ export function BotScreenPanel({
 
   let statusText = '';
   if (!supported) {
-    if (resolution.kind === 'unsupported' && resolution.reason === 'not-created') {
+    if (hostKind === 'remote' && !showerConnected) {
+      statusText = t('远程设备离线或未连接', 'Remote device offline or disconnected');
+    } else if (resolution.kind === 'unsupported' && resolution.reason === 'not-created') {
       statusText = t('这个 Bot 还没有屏幕，用到屏幕时会自动创建', 'This Bot has no screen yet. It is created automatically when needed');
-    } else if (hostKind === 'remote' && !showerConnected) {
-      statusText = t('远程节点未连接，请先在设置中连接节点', 'Remote host disconnected');
     } else {
       statusText = t('当前环境暂无活跃屏幕', 'No active screen in this environment');
     }
@@ -428,6 +432,8 @@ export function BotScreenPanel({
     statusText = t('当前空闲，Bot 用到电脑屏幕时会自动开启', 'Idle. The screen starts automatically when the Bot needs it');
   } else if (phase === 'ended') {
     statusText = t('屏幕已关闭，Bot 下次用到时会自动重新开启', 'Screen closed. It will reopen automatically when needed');
+  } else if (phase === 'authentication-required') {
+    statusText = t('等待设备认证…', 'Waiting for device authentication…');
   } else if (phase === 'error' || phase === 'unavailable') {
     statusText = activeState?.message || t('画面连接失败，正在重试…', 'Connection failed, retrying…');
   } else if (!live) {
@@ -435,7 +441,15 @@ export function BotScreenPanel({
   }
 
   const metaText = !live
-    ? t('空闲', 'Idle')
+    ? hostKind === 'remote' && !showerConnected
+      ? t('离线', 'Offline')
+      : phase === 'authentication-required'
+        ? t('等待认证', 'Authentication required')
+        : phase === 'error' || phase === 'unavailable'
+          ? t('连接失败', 'Connection failed')
+          : phase === 'connecting'
+            ? t('连接中', 'Connecting')
+            : t('空闲', 'Idle')
     : userControl
       ? t('人工接管中 · 可直接触控屏幕', 'In control · Touch screen directly')
       : t(`实时 · ${activeState?.width ?? 0}×${activeState?.height ?? 0}`, `Live · ${activeState?.width ?? 0}×${activeState?.height ?? 0}`);
@@ -455,7 +469,10 @@ export function BotScreenPanel({
 
         <div className="grok-computer-bot-id">
           <GrokBotAvatar preset={avatarPreset} isPrimary={isPrimary} size={32} />
-          <span className="grok-computer-bot-name">{botName}</span>
+          <div className="grok-computer-bot-details">
+            <span className="grok-computer-bot-name">{botName}</span>
+            <span className="grok-computer-host-label">{hostLabel}</span>
+          </div>
         </div>
 
         <button
