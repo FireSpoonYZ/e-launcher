@@ -352,24 +352,28 @@ export function BotScreenPanel({
     }
   };
 
-  const mapPointerToDevice = (e: ReactPointerEvent<HTMLImageElement>): { x: number; y: number } | null => {
+  const mapPointerToDevice = (e: ReactPointerEvent<HTMLImageElement>, clamp: boolean): { x: number; y: number } | null => {
     const el = imgRef.current;
-    if (!el) return null;
+    if (!el || !el.complete || !el.naturalWidth || !el.naturalHeight) return null;
     const rect = el.getBoundingClientRect();
     if (rect.width <= 0 || rect.height <= 0) return null;
+    const scale = Math.min(rect.width / el.naturalWidth, rect.height / el.naturalHeight);
+    const width = el.naturalWidth * scale;
+    const height = el.naturalHeight * scale;
+    const x = e.clientX - rect.left - (rect.width - width) / 2;
+    const y = e.clientY - rect.top - (rect.height - height) / 2;
+    if (!clamp && (x < 0 || x > width || y < 0 || y > height)) return null;
     const w = rpcState?.width || DEFAULT_WIDTH;
     const h = rpcState?.height || DEFAULT_HEIGHT;
-    const relX = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
-    const relY = Math.min(1, Math.max(0, (e.clientY - rect.top) / rect.height));
     return {
-      x: Math.min(w - 1, Math.max(0, Math.round(relX * w))),
-      y: Math.min(h - 1, Math.max(0, Math.round(relY * h))),
+      x: Math.min(w - 1, Math.max(0, Math.round(x / width * w))),
+      y: Math.min(h - 1, Math.max(0, Math.round(y / height * h))),
     };
   };
 
   const onRpcPointerDown = (e: ReactPointerEvent<HTMLImageElement>) => {
     if (!rpcState?.live || !rpcState?.userControl || busy) return;
-    const pt = mapPointerToDevice(e);
+    const pt = mapPointerToDevice(e, false);
     if (!pt) return;
     e.currentTarget.setPointerCapture?.(e.pointerId);
     gestureStartRef.current = { ...pt, at: Date.now(), pointerId: e.pointerId };
@@ -377,11 +381,13 @@ export function BotScreenPanel({
 
   const onRpcPointerUp = (e: ReactPointerEvent<HTMLImageElement>) => {
     const start = gestureStartRef.current;
+    if (!start || start.pointerId !== e.pointerId) return;
     gestureStartRef.current = null;
-    if (!start || start.pointerId !== e.pointerId || !canUseRpcFallback || !rpcCall || !baseParams) return;
+    if (!canUseRpcFallback || !rpcCall || !baseParams) return;
     const sid = rpcState?.sessionId || lastSessionIdRef.current;
     if (!sid) return;
-    const end = mapPointerToDevice(e) ?? { x: start.x, y: start.y };
+    const end = mapPointerToDevice(e, true);
+    if (!end) return;
     const dist = Math.hypot(end.x - start.x, end.y - start.y);
     const durationMs = Math.min(MAX_SWIPE_DURATION_MS, Math.max(MIN_SWIPE_DURATION_MS, Date.now() - start.at));
     void (async () => {
@@ -552,6 +558,9 @@ export function BotScreenPanel({
             draggable={false}
             onPointerDown={onRpcPointerDown}
             onPointerUp={onRpcPointerUp}
+            onPointerCancel={e => {
+              if (gestureStartRef.current?.pointerId === e.pointerId) gestureStartRef.current = null;
+            }}
           />
         ) : null}
 
