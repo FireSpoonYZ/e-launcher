@@ -22,10 +22,17 @@ function finishDecision(state, outcome) {
   state.lastDecision = {
     requestId: pending.requestId,
     outcome,
-    throughLocalId: pending.prepared?.throughLocalId ?? null,
+    throughLocalId: pending.takeover?.throughLocalId ?? pending.prepared?.throughLocalId ?? null,
     completedAt: new Date().toISOString(),
   };
   state.pending = null;
+}
+
+function finishTakeover(state) {
+  const takeover = state.pending?.takeover;
+  if (!takeover || takeover.requestId !== state.pending.requestId) return;
+  state.handledLocalId = Math.max(state.handledLocalId, takeover.throughLocalId);
+  finishDecision(state, 'aborted');
 }
 
 function generationError(reason) {
@@ -140,8 +147,67 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
     // abort() marks cancellation and waits for ordinary work quiescence, never for a natural model answer.
     await conversation.abort(context);
     await getHarness().commit(async (tx) => {
-      finishDecision(await tx.doc(WorkDecisionState, binding.nativeId), 'aborted');
+      const state = await tx.doc(WorkDecisionState, binding.nativeId);
+      if (state.pending?.takeover) finishTakeover(state);
+      else finishDecision(state, 'aborted');
     }, context);
+  }
+
+  /** 接管与工作准入串行；仅给取消前确有在运行提交的决策记录本轮及水位。 */
+  function takeoverShower(botId, cancel, abortConversations) {
+    return admit(async () => {
+      const harness = getHarness();
+      const index = await harness.snapshot(WorkIndex, context);
+      const candidates = [];
+      for (const [key, binding] of Object.entries(index?.byKey ?? {})) {
+        const pair = JSON.parse(key);
+        if (!Array.isArray(pair) || pair.length !== 2 || pair[0] !== botId || typeof pair[1] !== 'string') continue;
+        const state = await harness.snapshot(WorkDecisionState, binding.nativeId, context);
+        const pending = state?.pending;
+        if (!pending || state.stopped || state.error) continue;
+        if (pending.takeover) {
+          candidates.push({ nativeId: binding.nativeId, requestId: pending.requestId, takeover: pending.takeover });
+          continue;
+        }
+        const record = await harness.commit((tx) => tx.submissionByRequest(binding.nativeId, pending.requestId), context);
+        if (record?.status !== 'queued' && record?.status !== 'placed') continue;
+        const meta = await harness.snapshot(WorkContextState, binding.nativeId, context);
+        candidates.push({
+          nativeId: binding.nativeId,
+          requestId: pending.requestId,
+          takeover: {
+            requestId: pending.requestId,
+            // 旧版尚无起始水位；Bot 准入阻止并发导入，此时已导入水位是安全的上界。
+            throughLocalId: Math.max(pending.startedThroughLocalId ?? meta.lastImportedLocalId, pending.prepared?.throughLocalId ?? 0),
+          },
+        });
+      }
+      // 同步重新校验屏幕并取消在途工具；此前只读，错误/过期 ID 不改变决策。
+      cancel();
+      // shortcut: 取消后原因落盘前崩溃仍按普通生成失败恢复，需用户显式恢复；需崩溃原子性时升级跨层协调。
+      await harness.commit(async (tx) => {
+        for (const candidate of candidates) {
+          const state = await tx.doc(WorkDecisionState, candidate.nativeId);
+          if (state.pending?.requestId !== candidate.requestId || state.stopped || state.error || state.pending.takeover) continue;
+          const record = await tx.submissionByRequest(candidate.nativeId, candidate.requestId);
+          if (record?.status === 'queued' || record?.status === 'placed' ||
+              (record?.status === 'unanswered' && record.reason === 'aborted')) {
+            state.pending.takeover = {
+              ...candidate.takeover,
+              throughLocalId: Math.max(candidate.takeover.throughLocalId, state.pending.prepared?.throughLocalId ?? 0),
+            };
+          }
+        }
+      }, context);
+      await abortConversations();
+      await harness.commit(async (tx) => {
+        for (const candidate of candidates) {
+          const state = await tx.doc(WorkDecisionState, candidate.nativeId);
+          if (state.pending?.requestId === candidate.requestId) finishTakeover(state);
+        }
+      }, context);
+      nudge();
+    }, undefined, new Set([...CONTROL_ERRORS, 'SHOWER_SESSION_NOT_FOUND', 'SHOWER_SESSION_MISMATCH']), botId);
   }
 
   async function stopWork(botId, scopeId) {
@@ -230,7 +296,7 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
     const input = await harness.commit(async (tx) => {
       const meta = await tx.doc(WorkContextState, binding.nativeId);
       const state = await tx.doc(WorkDecisionState, binding.nativeId);
-      if (closing || fatalError || state.stopped || state.error || !state.pending || state.pending.replan || !currentMember(meta)) return null;
+      if (closing || fatalError || state.stopped || state.error || !state.pending || state.pending.replan || state.pending.takeover || !currentMember(meta)) return null;
       if (!await selectModel(tx, binding.nativeId, meta, state, bot)) return null;
       return createWorkInput(toWorkContextRecord(meta), state.pending.requestId);
     }, context);
@@ -255,6 +321,10 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
     const snapshot = await harness.snapshot(WorkDecisionState, binding.nativeId, context);
     if (!snapshot?.pending) return;
     const requestId = snapshot.pending.requestId;
+    if (snapshot.pending.takeover) {
+      await abortPending(binding);
+      return;
+    }
     const meta = await harness.snapshot(WorkContextState, binding.nativeId, context);
     if (snapshot.stopped || !currentMember(meta)) {
       await abortPending(binding);
@@ -315,6 +385,7 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
         requestId: randomUUID(),
         submissionId: null,
         startedAt: new Date().toISOString(),
+        startedThroughLocalId: items[items.length - 1].localId,
         prepared: null,
         published: false,
         replan: false,
@@ -389,7 +460,7 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
     if (state.stopped) throw messageError('WORK_STOPPED', 'work context is stopped');
     if (!state.pending) throw messageError('WORK_CONTEXT_INACTIVE', 'work context has no pending decision');
     if (!matchesRequest) throw messageError('STALE_INPUT', 'work request does not match the pending decision');
-    if (state.pending.replan) throw messageError('STALE_INPUT', 'work decision needs newer input');
+    if (state.pending.replan || state.pending.takeover) throw messageError('STALE_INPUT', 'work decision needs newer input');
     if (meta.deviceId !== host.deviceId) throw messageError('WORK_CONTEXT_INACTIVE', 'work context is not local');
     if (!currentMember(meta)) {
       // Commit this fence before throwing, so a quick rejoin cannot turn revoked work into a model failure.
@@ -485,7 +556,7 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
         }
         if (state.stopped) throw messageError('WORK_STOPPED', 'work context is stopped');
         if (!state.pending?.prepared || state.error) throw messageError('WORK_CONTEXT_INACTIVE', 'work context has no prepared decision');
-        if (state.pending.replan) throw messageError('STALE_INPUT', 'work decision needs newer input');
+        if (state.pending.replan || state.pending.takeover) throw messageError('STALE_INPUT', 'work decision needs newer input');
         try {
           const stored = log.publish(publication, { scopeId: meta.scopeId, afterLocalId: state.pending.prepared.throughLocalId });
           state.pending.published = true;
@@ -516,5 +587,5 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
     return closePromise;
   }
 
-  return { resume, close, beforeRequest, checkBudget, publishWork, getWorkActivity, stopWork, resumeWork };
+  return { resume, close, beforeRequest, checkBudget, publishWork, getWorkActivity, stopWork, resumeWork, takeoverShower };
 }

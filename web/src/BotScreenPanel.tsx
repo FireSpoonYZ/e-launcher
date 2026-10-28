@@ -1,6 +1,6 @@
 // Bot 电脑全屏视图（Grok Bot 风格）：全屏深色展示该 Bot 的虚拟工作屏幕。
 // 顶部为返回按钮、Bot 头像与名称、右上角状态/帮助按钮；中央为全幅画面；右下角为「接管控制」胶囊按钮。
-// 接管 = 先 interrupt 当前对话，再让执行器停止在途动作并接受人工操作；之后 Bot 与用户可同时操作。
+// 原生接管先中断当前对话；RPC 接管由服务端处理中断与执行器停止。
 import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
 import { ChevronLeft, CircleHelp, Monitor, Play, RefreshCw, Trash2 } from 'lucide-react';
 import type { ShowerTarget } from '../../host-core/index.js';
@@ -26,13 +26,14 @@ interface RpcStatusSnapshot {
   width: number;
   height: number;
   sessionId: string;
-  phase: 'none' | 'connecting' | 'live' | 'ended' | 'unavailable' | 'error';
+  phase: 'none' | 'connecting' | 'authentication-required' | 'live' | 'ended' | 'unavailable' | 'error';
   message?: string;
 }
 
 export type BotScreenPanelProps = {
   botId: string;
   botName: string;
+  hostLabel: string;
   avatarPreset: GrokAvatarPreset;
   isPrimary?: boolean;
   hostKind: 'local' | 'remote';
@@ -49,6 +50,7 @@ export type BotScreenPanelProps = {
 export function BotScreenPanel({
   botId,
   botName,
+  hostLabel,
   avatarPreset,
   isPrimary,
   hostKind,
@@ -158,15 +160,17 @@ export function BotScreenPanel({
       const phase: RpcStatusSnapshot['phase'] =
         sessPhase === 'ready'
           ? 'live'
-          : sessPhase === 'starting' || sessPhase === 'authentication-required'
-            ? 'connecting'
-            : sessPhase === 'closed'
-              ? 'ended'
-              : sessPhase === 'error'
-                ? 'error'
-                : sessPhase === 'unavailable'
-                  ? 'unavailable'
-                  : 'none';
+          : sessPhase === 'authentication-required'
+            ? 'authentication-required'
+            : sessPhase === 'starting'
+              ? 'connecting'
+              : sessPhase === 'closed'
+                ? 'ended'
+                : sessPhase === 'error'
+                  ? 'error'
+                  : sessPhase === 'unavailable'
+                    ? 'unavailable'
+                    : 'none';
       const errObj = raw && typeof raw.error === 'object' && raw.error ? (raw.error as Record<string, unknown>) : null;
       const message = typeof errObj?.message === 'string' ? errObj.message : undefined;
       setRpcState({ live, userControl, width, height, sessionId, phase, message });
@@ -250,12 +254,12 @@ export function BotScreenPanel({
     setBusy(true);
     setError('');
     try {
-      try {
-        await onInterrupt();
-      } catch (failure) {
-        setError(t('中断对话失败：', 'Interrupt failed: ') + errorText(failure));
-      }
       if (isNativeClient) {
+        try {
+          await onInterrupt();
+        } catch (failure) {
+          setError(t('中断对话失败：', 'Interrupt failed: ') + errorText(failure));
+        }
         const viewer = viewerRef.current;
         if (!viewer) return;
         const next = await viewer.takeover();
@@ -348,24 +352,28 @@ export function BotScreenPanel({
     }
   };
 
-  const mapPointerToDevice = (e: ReactPointerEvent<HTMLImageElement>): { x: number; y: number } | null => {
+  const mapPointerToDevice = (e: ReactPointerEvent<HTMLImageElement>, clamp: boolean): { x: number; y: number } | null => {
     const el = imgRef.current;
-    if (!el) return null;
+    if (!el || !el.complete || !el.naturalWidth || !el.naturalHeight) return null;
     const rect = el.getBoundingClientRect();
     if (rect.width <= 0 || rect.height <= 0) return null;
+    const scale = Math.min(rect.width / el.naturalWidth, rect.height / el.naturalHeight);
+    const width = el.naturalWidth * scale;
+    const height = el.naturalHeight * scale;
+    const x = e.clientX - rect.left - (rect.width - width) / 2;
+    const y = e.clientY - rect.top - (rect.height - height) / 2;
+    if (!clamp && (x < 0 || x > width || y < 0 || y > height)) return null;
     const w = rpcState?.width || DEFAULT_WIDTH;
     const h = rpcState?.height || DEFAULT_HEIGHT;
-    const relX = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
-    const relY = Math.min(1, Math.max(0, (e.clientY - rect.top) / rect.height));
     return {
-      x: Math.min(w - 1, Math.max(0, Math.round(relX * w))),
-      y: Math.min(h - 1, Math.max(0, Math.round(relY * h))),
+      x: Math.min(w - 1, Math.max(0, Math.round(x / width * w))),
+      y: Math.min(h - 1, Math.max(0, Math.round(y / height * h))),
     };
   };
 
   const onRpcPointerDown = (e: ReactPointerEvent<HTMLImageElement>) => {
     if (!rpcState?.live || !rpcState?.userControl || busy) return;
-    const pt = mapPointerToDevice(e);
+    const pt = mapPointerToDevice(e, false);
     if (!pt) return;
     e.currentTarget.setPointerCapture?.(e.pointerId);
     gestureStartRef.current = { ...pt, at: Date.now(), pointerId: e.pointerId };
@@ -373,11 +381,13 @@ export function BotScreenPanel({
 
   const onRpcPointerUp = (e: ReactPointerEvent<HTMLImageElement>) => {
     const start = gestureStartRef.current;
+    if (!start || start.pointerId !== e.pointerId) return;
     gestureStartRef.current = null;
-    if (!start || start.pointerId !== e.pointerId || !canUseRpcFallback || !rpcCall || !baseParams) return;
+    if (!canUseRpcFallback || !rpcCall || !baseParams) return;
     const sid = rpcState?.sessionId || lastSessionIdRef.current;
     if (!sid) return;
-    const end = mapPointerToDevice(e) ?? { x: start.x, y: start.y };
+    const end = mapPointerToDevice(e, true);
+    if (!end) return;
     const dist = Math.hypot(end.x - start.x, end.y - start.y);
     const durationMs = Math.min(MAX_SWIPE_DURATION_MS, Math.max(MIN_SWIPE_DURATION_MS, Date.now() - start.at));
     void (async () => {
@@ -417,10 +427,10 @@ export function BotScreenPanel({
 
   let statusText = '';
   if (!supported) {
-    if (resolution.kind === 'unsupported' && resolution.reason === 'not-created') {
+    if (hostKind === 'remote' && !showerConnected) {
+      statusText = t('远程设备离线或未连接', 'Remote device offline or disconnected');
+    } else if (resolution.kind === 'unsupported' && resolution.reason === 'not-created') {
       statusText = t('这个 Bot 还没有屏幕，用到屏幕时会自动创建', 'This Bot has no screen yet. It is created automatically when needed');
-    } else if (hostKind === 'remote' && !showerConnected) {
-      statusText = t('远程节点未连接，请先在设置中连接节点', 'Remote host disconnected');
     } else {
       statusText = t('当前环境暂无活跃屏幕', 'No active screen in this environment');
     }
@@ -428,6 +438,8 @@ export function BotScreenPanel({
     statusText = t('当前空闲，Bot 用到电脑屏幕时会自动开启', 'Idle. The screen starts automatically when the Bot needs it');
   } else if (phase === 'ended') {
     statusText = t('屏幕已关闭，Bot 下次用到时会自动重新开启', 'Screen closed. It will reopen automatically when needed');
+  } else if (phase === 'authentication-required') {
+    statusText = t('等待设备认证…', 'Waiting for device authentication…');
   } else if (phase === 'error' || phase === 'unavailable') {
     statusText = activeState?.message || t('画面连接失败，正在重试…', 'Connection failed, retrying…');
   } else if (!live) {
@@ -435,7 +447,15 @@ export function BotScreenPanel({
   }
 
   const metaText = !live
-    ? t('空闲', 'Idle')
+    ? hostKind === 'remote' && !showerConnected
+      ? t('离线', 'Offline')
+      : phase === 'authentication-required'
+        ? t('等待认证', 'Authentication required')
+        : phase === 'error' || phase === 'unavailable'
+          ? t('连接失败', 'Connection failed')
+          : phase === 'connecting'
+            ? t('连接中', 'Connecting')
+            : t('空闲', 'Idle')
     : userControl
       ? t('人工接管中 · 可直接触控屏幕', 'In control · Touch screen directly')
       : t(`实时 · ${activeState?.width ?? 0}×${activeState?.height ?? 0}`, `Live · ${activeState?.width ?? 0}×${activeState?.height ?? 0}`);
@@ -455,7 +475,10 @@ export function BotScreenPanel({
 
         <div className="grok-computer-bot-id">
           <GrokBotAvatar preset={avatarPreset} isPrimary={isPrimary} size={32} />
-          <span className="grok-computer-bot-name">{botName}</span>
+          <div className="grok-computer-bot-details">
+            <span className="grok-computer-bot-name">{botName}</span>
+            <span className="grok-computer-host-label">{hostLabel}</span>
+          </div>
         </div>
 
         <button
@@ -535,6 +558,9 @@ export function BotScreenPanel({
             draggable={false}
             onPointerDown={onRpcPointerDown}
             onPointerUp={onRpcPointerUp}
+            onPointerCancel={e => {
+              if (gestureStartRef.current?.pointerId === e.pointerId) gestureStartRef.current = null;
+            }}
           />
         ) : null}
 

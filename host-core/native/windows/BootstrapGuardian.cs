@@ -127,8 +127,9 @@ namespace ELauncher.Shower
                 }
                 return state;
             }
-            catch (Exception)
+            catch (Exception error)
             {
+                BootstrapLog.Write(dir, "读取 owner 状态失败: " + error.GetType().Name);
                 return null;
             }
         }
@@ -285,17 +286,24 @@ namespace ELauncher.Shower
             return false;
         }
 
-        /// <summary>
-        /// 非提权宿主无法探测提权 guardian 的存活，因此这里只看“本宿主已生效”的持久记录；
-        /// 真正的 guardian 存活校验放在提权路径里做。
-        /// </summary>
+        /// <summary>复用授权须匹配宿主身份、已生效状态和提权 guardian。</summary>
         internal static bool IsReadyForHost(string dir, int hostPid, long hostStartTicks)
         {
             EnableState state = ReadState(dir);
-            return state != null
-                && state.HostPid == hostPid
-                && state.HostStartTicks == hostStartTicks
-                && state.Applied && state.GuardianElevated && GuardianAlive(state.GuardianPid);
+            string reason;
+            if (state == null) reason = "owner-missing-or-unreadable";
+            else if (state.HostPid != hostPid || state.HostStartTicks != hostStartTicks) reason = "owner-mismatch";
+            else if (!state.Applied) reason = "not-applied";
+            else if (!state.GuardianElevated) reason = "guardian-not-elevated";
+            else if (!GuardianAlive(state.GuardianPid)) reason = "guardian-not-alive";
+            else reason = "ready";
+            BootstrapLog.Write(dir, "授权复用检查 host=" + hostPid.ToString(CultureInfo.InvariantCulture)
+                + " start=" + hostStartTicks.ToString(CultureInfo.InvariantCulture)
+                + " owner=" + (state == null ? "none" : state.HostPid.ToString(CultureInfo.InvariantCulture))
+                + " ownerStart=" + (state == null ? "none" : state.HostStartTicks.ToString(CultureInfo.InvariantCulture))
+                + " guardian=" + (state == null ? "none" : state.GuardianPid.ToString(CultureInfo.InvariantCulture))
+                + " result=" + reason);
+            return reason == "ready";
         }
 
         internal static void DeleteState(string dir)

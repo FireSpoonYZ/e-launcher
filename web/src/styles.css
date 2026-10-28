@@ -431,6 +431,8 @@ small, .secondary { font-size: .85rem; color: var(--muted); }
 .grok-computer-circle-btn { width: 42px; height: 42px; border-radius: 50%; border: 1px solid rgb(255 255 255 / .12); background: #1c1c1e; color: #f5f5f7; display: inline-flex; align-items: center; justify-content: center; flex: none; transition: transform 150ms ease, background-color 150ms ease; }
 .grok-computer-circle-btn:active { transform: scale(.92); background: #2c2c2e; }
 .grok-computer-bot-id { flex: 1; min-width: 0; display: inline-flex; align-items: center; gap: 9px; }
+.grok-computer-bot-details { min-width: 0; display: flex; flex-direction: column; }
+.grok-computer-host-label { font-size: .75rem; color: #a1a1a6; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .grok-computer-bot-name { font-size: 1.04rem; font-weight: 650; color: #f5f5f7; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .grok-computer-popover-backdrop { position: fixed; inset: 0; z-index: 35; background: rgb(0 0 0 / .45); }
 .grok-computer-help-popover { position: absolute; top: calc(var(--top) + 56px); right: 14px; z-index: 40; width: min(280px, calc(100vw - 28px)); padding: 14px 16px; border-radius: 20px; background: #1c1c1e; border: 1px solid rgb(255 255 255 / .14); box-shadow: 0 14px 36px rgb(0 0 0 / .55); color: #f5f5f7; display: flex; flex-direction: column; gap: 10px; animation: grok-pop-in 180ms cubic-bezier(.22, 1, .36, 1) both; }
@@ -455,7 +457,19 @@ small, .secondary { font-size: .85rem; color: var(--muted); }
 .grok-computer-takeover-pill.active { background: #f5f5f7; color: #000; border-color: #f5f5f7; }
 .grok-chat-floating-header { flex: none; position: relative; z-index: 12; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: calc(var(--top) + 6px) 16px 8px; background: transparent; }
 .grok-chat-center-pill { display: inline-flex; align-items: center; gap: 9px; max-width: calc(100% - 112px); min-height: 44px; padding: 6px 16px 6px 10px; border-radius: 999px; background: color-mix(in srgb, var(--bg) 94%, #fff); border: 1px solid color-mix(in srgb, var(--line) 80%, transparent); box-shadow: 0 3px 14px rgb(0 0 0 / .06); transition: transform 160ms cubic-bezier(.22, 1, .36, 1); }
+.grok-chat-floating-header .grok-chat-center-pill { flex: 1; min-width: 0; }
+.grok-chat-floating-header .grok-floating-circle-btn { flex: none; }
+.grok-chat-floating-header .hub-bot-host-badge { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.grok-chat-computer-btn { flex: none; display: inline-flex; align-items: center; justify-content: center; gap: 5px; min-height: 44px; padding: 0 10px; border-radius: 999px; border: 1px solid color-mix(in srgb, var(--line) 80%, transparent); background: var(--surface); color: var(--text); font-size: .8rem; font-weight: 600; white-space: nowrap; }
 .grok-chat-pill-name { font-size: .96rem; font-weight: 650; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 480px) {
+  .grok-chat-floating-header { display: grid; grid-template-columns: 44px minmax(0, 1fr) 44px; grid-template-areas: "back bot more" ". desktop desktop"; }
+  .grok-chat-header-back { grid-area: back; }
+  .grok-chat-header-more { grid-area: more; }
+  .grok-chat-floating-header .grok-chat-center-pill { grid-area: bot; max-width: none; }
+  .grok-chat-floating-header .hub-bot-host-badge { max-width: 30%; }
+  .grok-chat-computer-btn { grid-area: desktop; justify-self: end; }
+}
 .grok-menu-backdrop { position: fixed; inset: 0; z-index: 18; background: transparent; }
 .grok-floating-menu { position: absolute; top: calc(100% + 4px); right: 16px; z-index: 25; min-width: 220px; padding: 8px; border-radius: 22px; background: color-mix(in srgb, var(--bg) 98%, #fff); border: 1px solid color-mix(in srgb, var(--line) 85%, transparent); box-shadow: 0 12px 36px rgb(0 0 0 / .14); display: flex; flex-direction: column; gap: 2px; transform-origin: top right; animation: grok-pop-in 200ms cubic-bezier(.22, 1, .36, 1) both; }
 .grok-floating-menu button { display: flex; align-items: center; gap: 12px; width: 100%; min-height: 46px; padding: 10px 14px; border-radius: 14px; font-size: .95rem; font-weight: 500; text-align: left; color: var(--text); transition: background-color 140ms ease; }

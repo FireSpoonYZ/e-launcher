@@ -485,11 +485,12 @@ export function createShowerManager({ dataRoot, nativeBridge, backend } = {}) {
   }
 
   /**
-   * 人类接管：只丢弃同一 owner 的排队操作并请求其在途停止（不释放环境），
+   * 人类接管：同步校验当前 session 后只取消同一 owner 的操作，不释放环境。
    * Windows 共享队列上也不会波及其他 bot。不排在操作之后执行。
    */
-  function cancel(actor) {
+  function cancel(actor, sessionId) {
     const bound = normalizeActor(actor);
+    resolveSession(bound, sessionId);
     cancelOwner(gates, queueKey(bound), ownerKey(bound));
   }
 
