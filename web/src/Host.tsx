@@ -1345,7 +1345,6 @@ export function HostPage({
       const generation = ++chatLoadGeneration.current;
       const current = () => generation === chatLoadGeneration.current;
       // 同一聊天前台恢复/重连时保留现有 live，直到新快照到达；旧消息只来自实时快照时不会被清空。
-      let historyError = '';
       const historyErrorText = t('历史记录暂时无法加载，正在重试…', 'History temporarily unavailable; retrying…');
 
       if (bot.hostKind === 'local') {
@@ -1362,10 +1361,10 @@ export function HostPage({
           if (lastTurn?.text) {
             updateBotMeta(bot.key, { lastText: lastTurn.text, unread: false });
           }
+          setChatHistoryError('');
         } catch {
-          if (current()) historyError = historyErrorText;
+          if (current()) setChatHistoryError(historyErrorText);
         }
-        if (current()) setChatHistoryError(historyError);
         if (!current()) return;
         try {
           const obsId = uuid();
@@ -1390,10 +1389,10 @@ export function HostPage({
           if (lastTurn?.text) {
             updateBotMeta(bot.key, { lastText: lastTurn.text, unread: false });
           }
+          setChatHistoryError('');
         } catch {
-          if (current()) historyError = historyErrorText;
+          if (current()) setChatHistoryError(historyErrorText);
         }
-        if (current()) setChatHistoryError(historyError);
         if (!current()) return;
         try {
           const handle = api.observe(identity, { kind: 'primary', botId: bot.botId }, ev => {
@@ -1451,13 +1450,15 @@ export function HostPage({
 
   useEffect(() => {
     if (chatHostKind !== 'remote' || (chatRemoteConnected && activeBot?.online !== false)) return;
+    // 断连/目标暂不可达时提示连接恢复，观察 ready 成功后自然清除。
+    setChatObservationError(t('连接中断，正在恢复…', 'Connection interrupted; recovering…'));
     const pending = chatPending;
-    if (!pending || pending.phase === 'recovering' || chatReceipt?.status === 'done' || chatReceipt?.status === 'unanswered') return;
+    if (!pending || chatReceipt?.status === 'done' || chatReceipt?.status === 'unanswered') return;
+    // pendingByBot entry 是 updatePending 的共享真源：只有匹配当前 request 且无回执的请求才降级。
     const entry = pendingByBot.current.get(pending.scopeKey);
-    // 已有回执说明请求已被受理，连接断开/目标离线只是恢复观察，不能降级成待确认；无回执的 sending 仍按原逻辑安全恢复。
-    if (entry?.receipt || entry?.pending.phase === 'accepted' || chatReceipt?.requestId === pending.requestId) return;
-    if (entry?.pending.requestId === pending.requestId) updatePending({ ...entry, pending: { ...pending, phase: 'recovering' } });
-  }, [chatHostKind, chatRemoteConnected, activeBot?.online, chatPending?.requestId, chatPending?.phase, chatReceipt?.status, chatReceipt?.requestId]);
+    if (!entry || entry.pending.requestId !== pending.requestId || entry.receipt || entry.pending.phase === 'recovering') return;
+    updatePending({ ...entry, pending: { ...entry.pending, phase: 'recovering' } });
+  }, [chatHostKind, chatRemoteConnected, activeBot?.online, chatPending?.requestId, chatPending?.scopeKey, chatReceipt?.status, t]);
 
   // 依赖实际目标与回执标识，不随 Bot 展示对象或历史数组重建而重复补读终态。
   useEffect(() => {
@@ -1564,8 +1565,12 @@ export function HostPage({
     chatSubmissionRef.current = saved ? { botKey: bot.key, requestId: saved.pending.requestId, afterEntryId: saved.pending.afterEntryId } : undefined;
     setActiveBotKey(bot.key);
     if (!sameScope) {
+      // 切目标立即 fence 旧加载/观察，防旧 callback 回填新聊天。
+      chatLoadGeneration.current += 1;
+      cancelActiveObservation();
       setChatHistory([]);
       setChatLive(undefined);
+      setChatObservationError('');
       setChatHistoryError('');
     }
     setChatPending(saved?.pending);
@@ -1708,6 +1713,8 @@ export function HostPage({
     setChatPending(undefined);
     setChatHistory([]);
     setChatLive(undefined);
+    setChatObservationError('');
+    setChatHistoryError('');
     setChatReceipt(undefined);
     setChatDraft('');
     if (currentChatScope.current) writeChatDraft(currentChatScope.current, '');
