@@ -25,7 +25,7 @@ export function openHostBridge({ dataRoot, store, linkUrl, ca, relay }) {
       registry,
       listDevices() {
         const online = new Set(relay.getStatus().onlineDeviceIds);
-        return registry.list().filter(d => d.deviceId !== deviceId && d.revokedAt === null).map(d => ({ deviceId: d.deviceId, name: d.deviceId, online: online.has(d.deviceId) }));
+        return registry.list().filter(d => d.deviceId !== deviceId && d.revokedAt === null).map(d => ({ deviceId: d.deviceId, name: d.displayName || d.deviceId, online: online.has(d.deviceId) }));
       },
       async call(target, method, params) {
         if (!relay.getStatus().onlineDeviceIds.includes(target)) throw Object.assign(new Error('Device offline'), { code: 'DEVICE_OFFLINE' });

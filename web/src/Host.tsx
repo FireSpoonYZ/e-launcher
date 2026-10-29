@@ -959,7 +959,7 @@ export function HostPage({
       const key = `remote:${activeProfileId}:${b.deviceId}:${b.botId}`;
       const matchedDevice = remoteDevices.find(device => device.deviceId === b.deviceId);
       const isOnline = Boolean(remoteConnected && matchedDevice?.online);
-      const shortHostName = b.deviceName || matchedDevice?.displayName || b.deviceId.slice(0, 10);
+      const shortHostName = matchedDevice?.displayName || b.deviceName || b.deviceId.slice(0, 10);
       return {
         key,
         botId: b.botId,
@@ -1007,9 +1007,8 @@ export function HostPage({
     const archived = [...allLocal.filter(b => Boolean(b.archivedAt)), ...allRemote.filter(b => Boolean(b.archivedAt))]
       .sort((a, b) => (Date.parse(b.archivedAt || '') || 0) - (Date.parse(a.archivedAt || '') || 0));
 
-    const combined = [...pinnedRemoteMainBots, ...regularBots];
-    const allItems = [...(primary ? [primary] : []), ...combined, ...archived];
-    return { primaryBot: primary, pinnedRemoteMainBots, listBotItems: combined, archivedBots: archived, allBotItems: allItems };
+    const allItems = [...(primary ? [primary] : []), ...pinnedRemoteMainBots, ...regularBots, ...archived];
+    return { primaryBot: primary, pinnedRemoteMainBots, listBotItems: regularBots, archivedBots: archived, allBotItems: allItems };
   }, [localBots, remoteBots, remoteDevices, remoteProfiles, remoteConnected, remoteIdentity, localHost?.deviceId, botMetaMap, avatarVersion, t]);
 
   const activeBot = useMemo<UnifiedBotItem | null>(() => {
@@ -2210,6 +2209,10 @@ export function HostPage({
   // Edge swipe gesture support for Left Hidden Sidebar
   const touchStartRef = useRef<{ x: number; y: number } | null>(null);
   const onTouchStart = (e: React.TouchEvent) => {
+    if (!leftDrawerOpen && e.target instanceof Element && e.target.closest('.hub-hero-section')) {
+      touchStartRef.current = null;
+      return;
+    }
     const touch = e.touches[0];
     if (touch) touchStartRef.current = { x: touch.clientX, y: touch.clientY };
   };
@@ -2263,6 +2266,11 @@ export function HostPage({
       }
     }
     if (state.pulling) {
+      if (dx > dy * 1.2) {
+        pullTouchRef.current = null;
+        setPullDistance(0);
+        return;
+      }
       if (scrollEl.scrollTop > 0 || dy <= 0) {
         setPullDistance(0);
         return;
@@ -2364,11 +2372,11 @@ export function HostPage({
               const progress = Math.min(1, pullDistance / PULL_THRESHOLD);
               return (
                 <div
-                  className={`hub-top-spinner-indicator${isVisible ? ' visible' : ''}${isSpinning ? ' spinning' : ''}${pullDistance >= PULL_THRESHOLD ? ' ready' : ''}`}
+                  className={`hub-top-spinner-indicator${isVisible ? ' visible' : ''}${isSpinning ? ' is-refreshing' : ''}${pullDistance >= PULL_THRESHOLD ? ' ready' : ''}`}
                   style={
                     !isSpinning && pullDistance > 0
                       ? {
-                          transform: `translateY(${Math.min(26, Math.round(pullDistance * 0.36))}px) scale(${0.75 + progress * 0.25})`,
+                          transform: `translateX(-50%) translateY(${Math.min(26, Math.round(pullDistance * 0.36))}px) scale(${0.75 + progress * 0.25})`,
                           opacity: Math.min(1, 0.25 + progress * 0.85),
                         }
                       : undefined
@@ -2414,16 +2422,16 @@ export function HostPage({
             onTouchStart={onHubScrollTouchStart}
             onTouchMove={onHubScrollTouchMove}
             onTouchEnd={onHubScrollTouchEnd}
-            onTouchCancel={onHubScrollTouchEnd}
+            onTouchCancel={() => { pullTouchRef.current = null; setPullDistance(0); }}
           >
             {/* Hero Spotlight: Local + Remote Primary Assistants */}
-            <section className="hub-hero-section" style={{ flexDirection: 'row', justifyContent: 'center', flexWrap: 'wrap', gap: 12 }}>
+            <section className="hub-hero-section">
               {primaryBot ? (
                 <button
                   type="button"
                   className="hub-hero-button"
                   onClick={() => openBotChat(primaryBot)}
-                  aria-label={`${primaryBot.role} - ${t('点击进入文字对话', 'Tap to chat')}`}
+                  aria-label={`${primaryBot.role} · ${primaryBot.hostLabel} - ${t('点击进入文字对话', 'Tap to chat')}`}
                 >
                   <GrokBotAvatar
                     preset={primaryPreset}
@@ -2432,7 +2440,11 @@ export function HostPage({
                     platformBadge={<PlatformLogoIcon platform={primaryBot.platform} size={11} />}
                     size={88}
                   />
-                  <span className="hub-hero-name">{primaryBot.role}</span>
+                  <span className="hub-hero-name" title={primaryBot.role}>{primaryBot.role}</span>
+                  <span className="hub-bot-host-badge local" title={primaryBot.hostLabel}>
+                    <PlatformLogoIcon platform={primaryBot.platform} size={12} />
+                    <span className="hub-bot-host-text">{primaryBot.hostLabel}</span>
+                  </span>
                 </button>
               ) : (
                 <button
@@ -2465,7 +2477,7 @@ export function HostPage({
                   type="button"
                   className="hub-hero-button"
                   onClick={() => openBotChat(remoteMain)}
-                  aria-label={`${remoteMain.role} - ${t('点击进入文字对话', 'Tap to chat')}`}
+                  aria-label={`${remoteMain.role} · ${remoteMain.hostLabel} - ${t('点击进入文字对话', 'Tap to chat')}`}
                 >
                   <GrokBotAvatar
                     preset={resolveBotAvatarPreset(remoteMain.key, remoteMain.role, true)}
@@ -2474,12 +2486,16 @@ export function HostPage({
                     platformBadge={<PlatformLogoIcon platform={remoteMain.platform} size={11} />}
                     size={88}
                   />
-                  <span className="hub-hero-name">{remoteMain.role}</span>
+                  <span className="hub-hero-name" title={remoteMain.role}>{remoteMain.role}</span>
+                  <span className={`hub-bot-host-badge remote${remoteMain.online === false ? ' is-offline' : ''}`} title={remoteMain.hostLabel}>
+                    <PlatformLogoIcon platform={remoteMain.platform} size={12} />
+                    <span className="hub-bot-host-text">{remoteMain.hostLabel}</span>
+                  </span>
                 </button>
               ))}
             </section>
 
-            {/* Unified Bot List (Pinned Remote Main Bots + Regular Bots) */}
+            {/* Regular and archived Bots */}
             <section className="hub-bot-list" aria-label={t('智能体列表', 'Bots')}>
               <ErrorNotice error={directoryError} />
               {filteredBotItems.length === 0 ? (

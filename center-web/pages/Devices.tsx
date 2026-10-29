@@ -126,6 +126,8 @@ export default function Devices() {
   const [options, setOptions] = useState<ModelOption[]>([]);
   const [selected, setSelected] = useState<{ device: Device; bot: BotRef; config: BotModelConfig }>();
   const [expandedCreate, setExpandedCreate] = useState<Record<string, boolean>>({});
+  const [editingDevice, setEditingDevice] = useState<{ deviceId: string; name: string }>();
+  const [confirmDeleteDevice, setConfirmDeleteDevice] = useState<string>();
   const [editingBot, setEditingBot] = useState<{ deviceId: string; botId: string; name: string; description: string }>();
   const [confirmDeleteKey, setConfirmDeleteKey] = useState<string>();
   const [error, setError] = useState('');
@@ -247,7 +249,23 @@ export default function Devices() {
           <section className="resource-row" key={device.deviceId}>
             <div className="action-row">
               <h2>{device.name || device.deviceId}</h2>
-              <span className="secondary">{device.deviceId} · {device.online ? '在线' : '离线（离线设备禁用远程管理）'}</span>
+              <span className="secondary">{device.deviceId} · {device.online ? '在线' : '离线（离线设备禁用 Bot 远程管理）'}</span>
+              <button className="quiet-button" disabled={busy} onClick={() => setEditingDevice({ deviceId: device.deviceId, name: device.name })}>重命名设备</button>
+              {confirmDeleteDevice !== device.deviceId ? (
+                <button className="quiet-button danger" disabled={busy} onClick={() => setConfirmDeleteDevice(device.deviceId)}>删除设备</button>
+              ) : (
+                <>
+                  <span className="secondary">从中心移除并撤销接入，不删除设备本机聊天数据。</span>
+                  <button className="quiet-button danger" disabled={busy} onClick={() => void run(async () => {
+                    await api.deleteDevice(device.deviceId);
+                    setConfirmDeleteDevice(undefined);
+                    if (selected?.device.deviceId === device.deviceId) setSelected(undefined);
+                    await syncBotsNow();
+                    setNotice(`已从中心移除 ${device.name}`);
+                  })}>确认删除设备</button>
+                  <button className="quiet-button" disabled={busy} onClick={() => setConfirmDeleteDevice(undefined)}>取消</button>
+                </>
+              )}
               <button
                 className="quiet-button"
                 disabled={busy || !device.online}
@@ -257,6 +275,25 @@ export default function Devices() {
                 {createOpen ? '收起新建 Bot' : '新建 Bot'}
               </button>
             </div>
+
+            {editingDevice?.deviceId === device.deviceId && (
+              <form className="form" onSubmit={e => {
+                e.preventDefault();
+                if (!editingDevice.name.trim()) return;
+                void run(async () => {
+                  await api.renameDevice(device.deviceId, editingDevice.name.trim());
+                  setEditingDevice(undefined);
+                  await syncBotsNow();
+                  setNotice('设备名称已更新');
+                });
+              }}>
+                <label>设备名称<input value={editingDevice.name} onChange={e => setEditingDevice({ ...editingDevice, name: e.target.value })} maxLength={120} required disabled={busy} /></label>
+                <div className="action-row">
+                  <button className="button" type="submit" disabled={busy || !editingDevice.name.trim()}>保存</button>
+                  <button className="quiet-button" type="button" disabled={busy} onClick={() => setEditingDevice(undefined)}>取消</button>
+                </div>
+              </form>
+            )}
 
             {!hasPrimary && (
               <div className="panel">

@@ -461,7 +461,7 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
                 const devInfo = deviceMap.get(parsed.deviceId);
                 return {
                   ...parsed,
-                  ...(parsed.deviceName ? {} : devInfo?.displayName ? { deviceName: devInfo.displayName } : {}),
+                  ...(devInfo ? { deviceName: devInfo.name || devInfo.displayName || parsed.deviceId } : {}),
                   ...(parsed.platform ? {} : devInfo?.platform ? { platform: devInfo.platform } : {}),
                   online: onlineMap.get(parsed.deviceId) ?? false,
                   seq: row.seq,
@@ -478,6 +478,7 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
               op: row.op,
               bot: row.json ? {
                 ...JSON.parse(row.json),
+                ...(deviceMap.has(row.device_id) ? { deviceName: deviceMap.get(row.device_id).name || deviceMap.get(row.device_id).displayName || row.device_id } : {}),
                 online: onlineMap.get(row.device_id) ?? false,
                 seq: row.seq,
               } : null,

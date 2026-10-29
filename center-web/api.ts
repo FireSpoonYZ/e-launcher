@@ -59,6 +59,8 @@ export const api = {
   getModelConfig: () => request<ModelConfig>('/api/model-config'),
   putModelConfig: (body: RevisionWrite<ModelSelection>) => request<ModelConfig>('/api/model-config', 'PUT', body),
   listDevices: () => request<Device[]>('/api/devices'),
+  renameDevice: (deviceId: string, name: string) => request<Device>(`/api/devices/${id(deviceId)}`, 'PATCH', { name }),
+  deleteDevice: (deviceId: string) => request<void>(`/api/devices/${id(deviceId)}`, 'DELETE'),
   getBotSync: (params?: { epoch?: string; sinceSeq?: number }) => {
     const query = new URLSearchParams();
     if (params?.epoch) query.set('epoch', params.epoch);

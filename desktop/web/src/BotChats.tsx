@@ -1506,7 +1506,7 @@ export function BotChats({ api, pageActive = true }: { api: DesktopPanelApi; pag
               ) : null}
             </span>
             <span className="entity-sub">
-              {b.deviceName || b.deviceId} · {b.deviceId} · {isBotOnline ? '在线' : '离线或不可读取'}
+              {devices.find((d) => d.deviceId === b.deviceId)?.displayName || b.deviceName || b.deviceId} · {b.deviceId} · {isBotOnline ? '在线' : '离线或不可读取'}
             </span>
             {b.lastPreview ? (
               <span className="entity-sub entity-preview">{truncate(b.lastPreview, 80)}</span>

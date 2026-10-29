@@ -68,6 +68,21 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
   route('GET', '/api/model-config', () => store.getModelConfig());
   route('PUT', '/api/model-config', req => { const body = object(req.body); return changed(store.putModelConfig(body.expectedRevision, validate(selectionSchema, body.value))); }, true);
   route('GET', '/api/devices', () => bridge.listDevices());
+  route('PATCH', '/api/devices/:deviceId', req => {
+    const { deviceId } = req.params;
+    if (deviceId === bridge.deviceId || !bridge.listDevices().some(device => device.deviceId === deviceId)) fail('NOT_FOUND', 'Device not found');
+    const device = bridge.registry.rename(deviceId, object(req.body).name);
+    store.replaceDeviceBots(deviceId, store.listDeviceBots(deviceId).map(bot => ({ ...bot, deviceName: device.displayName })), { bumpRevision: false });
+    return { deviceId, name: device.displayName, online: bridge.listDevices().find(item => item.deviceId === deviceId).online };
+  }, true);
+  route('DELETE', '/api/devices/:deviceId', (req, reply) => {
+    const { deviceId } = req.params;
+    if (deviceId === bridge.deviceId || !bridge.registry.get(deviceId)) fail('NOT_FOUND', 'Device not found');
+    bridge.registry.revoke(deviceId);
+    store.replaceDeviceBots(deviceId, []);
+    notify(deviceId);
+    return reply.code(204).send();
+  }, true);
   route('GET', '/api/bot-sync', req => store.getBotSync({
     epoch: typeof req.query?.epoch === 'string' ? req.query.epoch : undefined,
     sinceSeq: req.query?.sinceSeq !== undefined ? Number(req.query.sinceSeq) : undefined,
