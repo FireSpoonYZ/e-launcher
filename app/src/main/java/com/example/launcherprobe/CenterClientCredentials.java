@@ -55,11 +55,14 @@ final class CenterClientCredentials {
         record.getString("url");
         record.getString("deviceId");
         record.getString("deviceToken");
+        // Older connections omitted the optional CA field.
+        if (!record.has("ca")) record.put("ca", "");
         record.getString("ca");
         return record;
     }
 
     void save(JSONObject record) throws Exception {
+        if (!record.has("ca")) record.put("ca", "");
         Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
         cipher.init(Cipher.ENCRYPT_MODE, key(true));
         JSONObject encrypted = new JSONObject()

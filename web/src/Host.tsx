@@ -701,7 +701,21 @@ export function HostPage({
   const [chatSearchOpen, setChatSearchOpen] = useState(false);
   const [chatSearchQuery, setChatSearchQuery] = useState('');
   const [clearNotice, setClearNotice] = useState('');
+  const [offlineNotice, setOfflineNotice] = useState<{ botKey: string; text: string }>();
   const [voiceCapturing, setVoiceCapturing] = useState<{ botId: string; requestId: string }>();
+
+  useEffect(() => {
+    setOfflineNotice(undefined);
+    const dismiss = () => setOfflineNotice(undefined);
+    document.addEventListener('visibilitychange', dismiss);
+    return () => document.removeEventListener('visibilitychange', dismiss);
+  }, [screen, activeBotKey, active]);
+
+  useEffect(() => {
+    if (!offlineNotice) return;
+    const timer = window.setTimeout(() => setOfflineNotice(undefined), 3000);
+    return () => window.clearTimeout(timer);
+  }, [offlineNotice]);
 
 
   // Bot Edit / Create mode state (15847.jpg)
@@ -1691,7 +1705,10 @@ export function HostPage({
     action.run(async () => {
       const bot = activeBot;
       if (!bot) return;
-      if (bot.hostKind === 'remote') throw new Error(t('目标离线，草稿已保留。', 'Target offline; draft retained.'));
+      if (bot.hostKind === 'remote') {
+        setOfflineNotice({ botKey: bot.key, text: t('目标离线，草稿已保留。', 'Target offline; draft retained.') });
+        return;
+      }
       if (chatPending?.botKey === bot.key && chatPending.phase !== 'accepted') throw new Error(t('原请求尚未确认，请勿重复发送。', 'Original request is unconfirmed; do not resend.'));
       if (bot.archivedAt) throw new Error(t('该智能体已归档，请先恢复后再发送消息', 'This bot is archived. Unarchive it first.'));
       const draftSnapshot = chatDraft;
@@ -1699,7 +1716,8 @@ export function HostPage({
       if (!trimmed) return;
       if (trimmed === '/clear' || trimmed === '/new') { clearCurrentBotHistory(); return; }
       if (!centerConn.ready || centerConn.status?.state === 'disconnected') {
-        throw new Error(t('中心离线，草稿已保留。', 'Center offline; draft retained.'));
+        setOfflineNotice({ botKey: bot.key, text: t('中心离线，草稿已保留。', 'Center offline; draft retained.') });
+        return;
       }
       const scopeKey = scopeForBot(bot);
       if (!scopeKey) throw new Error(t('目标身份尚未就绪，草稿已保留。', 'Target identity unavailable; draft retained.'));
@@ -1737,7 +1755,7 @@ ${newer}` : draftSnapshot;
         const center = centerConnectionRef.current;
         if (!snap || snap.phase !== 'running' || !snap.deviceId || !center.ready || center.status?.state === 'disconnected' || chatStorageKey(center.saved?.url || center.url || '', snap.deviceId, bot.botId) !== scopeKey) {
           restore();
-          if (currentChatScope.current === scopeKey) throw new Error(t('目标离线，草稿已保留。', 'Target offline; draft retained.'));
+          if (currentChatScope.current === scopeKey) setOfflineNotice({ botKey: bot.key, text: t('目标离线，草稿已保留。', 'Target offline; draft retained.') });
           return;
         }
         updateBotMeta(bot.key, { lastText: trimmed, updatedAt: Date.now(), unread: false });
@@ -3192,6 +3210,9 @@ ${newer}` : draftSnapshot;
 
           {/* 15845.jpg / 15866.jpg Bottom Composer Bar */}
           <footer className="grok-chat-composer-area">
+            {offlineNotice?.botKey === activeBot.key && (
+              <div className="bot-chat-toast" role="status" aria-atomic="true">{offlineNotice.text}</div>
+            )}
             {activeBot.archivedAt ? (
               <div className="grok-card-group" style={{ padding: '10px 14px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
                 <span style={{ fontSize: '0.86rem', opacity: 0.85 }}>
@@ -3218,6 +3239,7 @@ ${newer}` : draftSnapshot;
                 botRole={activeBot.role}
                 isBotBusy={isBotBusy}
                 online={remoteConnected && activeBot.online !== false}
+                onOffline={() => setOfflineNotice({ botKey: activeBot.key, text: t('目标离线，草稿已保留。', 'Target offline; draft retained.') })}
                 composerMenuOpen={composerMenuOpen}
                 onToggleComposerMenu={() => setComposerMenuOpen(v => !v)}
                 onOpenProfile={() => {
@@ -4943,6 +4965,7 @@ function RemotePendingComposer({
   botRole,
   isBotBusy,
   online,
+  onOffline,
   composerMenuOpen,
   onToggleComposerMenu,
   onOpenProfile,
@@ -4965,6 +4988,7 @@ function RemotePendingComposer({
   botRole: string;
   isBotBusy: boolean;
   online: boolean;
+  onOffline(): void;
   composerMenuOpen: boolean;
   onToggleComposerMenu(): void;
   onOpenProfile(): void;
@@ -5179,7 +5203,7 @@ function RemotePendingComposer({
       return;
     }
     if (!online || !api.transportConnected) {
-      setNotice(t('目标离线，草稿已保留。', 'Target offline; draft retained.'));
+      onOffline();
       return;
     }
     const text =
@@ -5214,7 +5238,7 @@ function RemotePendingComposer({
         drafts.markNotSent(started.handle, '目标离线');
         drafts.releaseIfNotSent(started.handle);
         onNotSent(requestId);
-        setNotice(t('目标离线，草稿已保留。', 'Target offline; draft retained.'));
+        onOffline();
         return;
       }
       let pending;
