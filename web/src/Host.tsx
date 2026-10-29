@@ -77,7 +77,7 @@ import {
   saveBotAvatarConfig,
   type GrokAvatarPreset,
 } from './GrokBotAvatar';
-import { ErrorNotice, array, errorText, record, useAction, useText } from './ui';
+import { ErrorNotice, FloatingPillToast, array, errorText, record, useAction, useText } from './ui';
 
 const uuid = () =>
   typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
@@ -1218,6 +1218,9 @@ export function HostPage({
         if (!alive) return;
         if (ev.type === 'submitted' || ev.type === 'error') {
           setVoiceCapturing(current => current?.requestId === ev.requestId ? undefined : current);
+        }
+        if (ev.type === 'error' && ev.message) {
+          action.setError(ev.message);
         }
         if (ev.type === 'submitted' && ev.receipt && ev.requestId === chatSubmissionRef.current?.requestId) {
           setChatReceipt(ev.receipt as unknown as HostSubmission);
@@ -2746,7 +2749,12 @@ ${newer}` : draftSnapshot;
 
             {/* Regular and archived Bots */}
             <section className="hub-bot-list" aria-label={t('智能体列表', 'Bots')}>
-              <ErrorNotice error={directoryError || (!centerConn.ready && centerConn.status?.error ? centerConn.error : '')} />
+              <ErrorNotice
+                error={directoryError || (!centerConn.ready && centerConn.status?.error ? centerConn.error : '')}
+                actionLabel={!centerConn.ready && centerConn.status?.error ? t('去设置', 'Settings') : directoryError ? t('刷新', 'Refresh') : undefined}
+                onAction={!centerConn.ready && centerConn.status?.error ? () => setScreen('settings') : directoryError ? () => void triggerHubRefresh() : undefined}
+                onDismiss={directoryError ? () => setDirectoryError('') : undefined}
+              />
               {filteredBotItems.length === 0 ? (
                 <div className="hub-empty-list">
                   <p>
@@ -3164,9 +3172,12 @@ ${newer}` : draftSnapshot;
                   )}
                   {turn.text && <Markdown text={turn.text} />}
                   <ErrorNotice
+                    compact
                     error={turn.error === 'model_error'
                       ? t('模型生成失败，请重试或检查模型配置。', 'Model generation failed. Retry or check the model configuration.')
                       : turn.error}
+                    actionLabel={t('模型设置', 'Model Settings')}
+                    onAction={() => openBotProfile(activeBot)}
                   />
                 </article>
               ))
@@ -3194,7 +3205,11 @@ ${newer}` : draftSnapshot;
               hasError={Boolean(submissionFailure) || chatReceipt?.status === 'unanswered'}
               t={t}
             />
-            <ErrorNotice error={submissionFailure || (!centerConn.ready && centerConn.status?.error ? centerConn.error : '')} />
+            <ErrorNotice
+              error={submissionFailure || (!centerConn.ready && centerConn.status?.error ? centerConn.error : '')}
+              actionLabel={submissionFailure ? t('检查配置', 'Check Settings') : !centerConn.ready && centerConn.status?.error ? t('去连接', 'Connect') : undefined}
+              onAction={submissionFailure ? () => openBotProfile(activeBot) : !centerConn.ready && centerConn.status?.error ? () => setScreen('settings') : undefined}
+            />
             {((chatObservationError && !(centerConn.status?.state === 'disconnected' && centerConn.status.error)) || (chatPending?.botKey === activeBot.key && chatPending.phase === 'recovering')) && (
               <div className="bot-chat-system-notice" role="status">
                 {chatPending?.phase === 'recovering' ? t('发送结果待确认，保留原请求 ID；不会自动重发。', 'Send result unconfirmed; retaining the original request ID without resending.') : activeBot.online === false ? t('目标节点离线，上线后自动恢复。', 'Target offline; restoring when it returns.') : chatObservationError}
@@ -3211,7 +3226,11 @@ ${newer}` : draftSnapshot;
           {/* 15845.jpg / 15866.jpg Bottom Composer Bar */}
           <footer className="grok-chat-composer-area">
             {offlineNotice?.botKey === activeBot.key && (
-              <div className="bot-chat-toast" role="status" aria-atomic="true">{offlineNotice.text}</div>
+              <FloatingPillToast
+                message={offlineNotice.text}
+                tone="warning"
+                onDismiss={() => setOfflineNotice(undefined)}
+              />
             )}
             {activeBot.archivedAt ? (
               <div className="grok-card-group" style={{ padding: '10px 14px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
@@ -3289,7 +3308,7 @@ ${newer}` : draftSnapshot;
                 onNotSent={requestId => removePending(activeChatScope, requestId)}
               />
             ) : <>
-            <ErrorNotice error={action.error} />
+            <ErrorNotice error={action.error} compact onDismiss={() => action.setError('')} />
             {!activeChatScope && <div className="bot-chat-system-notice" role="status">{t('正在读取目标身份…', 'Loading target identity…')}</div>}
 
             {showSlashHints && (
@@ -3673,7 +3692,7 @@ ${newer}` : draftSnapshot;
                   </>
                 )}
               </section>
-              <ErrorNotice error={action.error} />
+              <ErrorNotice error={action.error} onDismiss={() => action.setError('')} />
             </div>
           </div>
         </main>
@@ -3974,7 +3993,7 @@ ${newer}` : draftSnapshot;
               </div>
             </div>
 
-            <ErrorNotice error={action.error} />
+            <ErrorNotice error={action.error} onDismiss={() => action.setError('')} />
           </div>
         </main>
       )}
@@ -4250,7 +4269,7 @@ ${newer}` : draftSnapshot;
               </section>
             )}
 
-            <ErrorNotice error={action.error} />
+            <ErrorNotice error={action.error} onDismiss={() => action.setError('')} />
           </div>
         </main>
       )}
@@ -4511,7 +4530,10 @@ ${newer}` : draftSnapshot;
                 );
               })()}
 
-              <ErrorNotice error={action.error || botScheduleState.schedulingError} />
+              <ErrorNotice
+                error={action.error || botScheduleState.schedulingError}
+                onDismiss={action.error ? () => action.setError('') : undefined}
+              />
             </div>
           ) : (
             <div className="grok-subpage-scroll">
@@ -4747,7 +4769,10 @@ ${newer}` : draftSnapshot;
                 </section>
               )}
 
-              <ErrorNotice error={action.error || botScheduleState.schedulingError} />
+              <ErrorNotice
+                error={action.error || botScheduleState.schedulingError}
+                onDismiss={action.error ? () => action.setError('') : undefined}
+              />
             </div>
           )}
         </main>
@@ -5295,7 +5320,11 @@ function RemotePendingComposer({
 
   return (
     <>
-      <ErrorNotice error={drafts.error || notice} />
+      <ErrorNotice
+        error={drafts.error || notice}
+        compact
+        onDismiss={notice && !drafts.error ? () => setNotice('') : undefined}
+      />
       {fallbackDraft && (
         <section className="grok-card-group" role="status">
           <p>{t('离线输入已保留：', 'Offline draft retained:')} {fallbackDraft}</p>
@@ -5824,7 +5853,7 @@ function HubSettingsView({
 
                 {centerConn.error && (
                   <div className="grok-card-row no-active">
-                    <ErrorNotice error={centerConn.error} />
+                    <ErrorNotice error={centerConn.error} compact onDismiss={() => centerConn.setError('')} />
                   </div>
                 )}
 
@@ -6248,7 +6277,7 @@ function HubSettingsView({
           )}
         </div>
 
-        <ErrorNotice error={action.error} />
+        <ErrorNotice error={action.error} onDismiss={() => action.setError('')} />
       </div>
     </main>
   );

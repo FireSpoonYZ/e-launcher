@@ -127,7 +127,7 @@ export function BotModelSheet({ api, identity, botId, onClose }: Props) {
           </select>
           <button type="button" className="grok-done-pill-btn" disabled={busy} onClick={() => void save()}>{t('保存', 'Save')}</button>
         </>}
-        <ErrorNotice error={error}/>{notice && <p role="status">{notice}</p>}
+        <ErrorNotice error={error} onDismiss={() => setError('')}/>{notice && <ErrorNotice error={notice} tone="success" compact onDismiss={() => setNotice('')}/>}
       </div>
     </section>
   </div>;

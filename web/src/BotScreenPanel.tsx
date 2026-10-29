@@ -8,7 +8,7 @@ import { GrokBotAvatar, type GrokAvatarPreset } from './GrokBotAvatar';
 import { BotHost } from './native';
 import { resolveScreenClient, type ScreenViewState, type ScreenViewer } from './screen';
 import type { ShowerCall } from './ShowerPreview';
-import { errorText, useText } from './ui';
+import { ErrorNotice, errorText, useText } from './ui';
 
 /** 页面转场动画结束后再贴原生画面，避免动画过程中原生 TextureView 位置跳动。 */
 const SETTLE_MS = 280;
@@ -586,9 +586,14 @@ export function BotScreenPanel({
       </div>
 
       {error && (
-        <p className="grok-computer-error" role="alert">
-          {error}
-        </p>
+        <div className="grok-computer-error">
+          <ErrorNotice
+            error={error}
+            darkGlass
+            compact
+            onDismiss={() => setError('')}
+          />
+        </div>
       )}
 
       {/* Bottom Bar with Right-Aligned Takeover Pill (15859.jpg) */}

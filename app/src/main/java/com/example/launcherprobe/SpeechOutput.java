@@ -180,7 +180,7 @@ final class SpeechOutput {
             String message = problem;
             main.post(() -> {
                 if (token != generation.get()) return;
-                if (message != null) Toast.makeText(context, "远程朗读失败：" + message, Toast.LENGTH_LONG).show();
+                if (message != null) Toast.makeText(context, UiText.get(context, "远程语音朗读失败，请检查语音设置"), Toast.LENGTH_SHORT).show();
                 // Do not switch speakers or replay the reply when a partially played stream fails.
                 done(token);
             });
@@ -208,7 +208,7 @@ final class SpeechOutput {
             String message = cause.getMessage() == null ? cause.getClass().getSimpleName() : cause.getMessage();
             main.post(() -> {
                 if (token != generation.get()) return;
-                Toast.makeText(context, UiText.get(context, "远程朗读失败，已改用系统朗读：") + message, Toast.LENGTH_LONG).show();
+                Toast.makeText(context, UiText.get(context, "远程语音暂不可用，已切换为系统朗读"), Toast.LENGTH_SHORT).show();
                 speakSystem(token, fullText);
             });
         } finally {

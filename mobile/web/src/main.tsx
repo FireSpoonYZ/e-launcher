@@ -167,7 +167,7 @@ function MobileShell() {
             onOpenSystemSettings={() => void mobileLocalRequest('openSystemSettings').catch(error => setNotice(errorText(error)))}
           /></CenterGate>
         </div>
-        <ErrorNotice error={notice} />
+        <ErrorNotice error={notice} compact onDismiss={() => setNotice('')} />
       </div>
     </LanguageOverride.Provider>
   );
