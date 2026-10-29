@@ -16,7 +16,6 @@ dependencyResolutionManagement {
 
 rootProject.name = 'LauncherProbe'
 include ':app', ':shower-server'
-apply from: 'capacitor.settings.gradle'
 
 // Tauri Android SDK project (pinned tauri 2.12.5). The include snippet is resolved
 // from the mobile Cargo graph by `node host-core/build-mobile.js --sdk-path`

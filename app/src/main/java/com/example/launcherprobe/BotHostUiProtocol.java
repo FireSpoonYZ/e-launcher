@@ -69,14 +69,13 @@ final class BotHostUiProtocol {
     }
 
     /**
-     * 与 BotHostPlugin 的 Host 数据操作一一对应；start/stop/openLegacy/reconnect/hide
+     * 固定 Host 数据操作；start/stop/openSystemSettings/reconnect/hide
      * 属 UI 本地动作，不经服务派发。拒绝任何泛化转发。
      * client* 为 M20 无参数化的客户端入口：内层 broker 操作另有 16 项白名单（Node 侧强制）。
      * UI 会话只释放自己的观察，客户端进程由应用级 broker 持有。
      */
     private static final Set<String> OPERATIONS = Collections.unmodifiableSet(new HashSet<>(Arrays.asList(
             "snapshot", "status", "centerSettings", "saveCenterSettings", "settingsGet", "settingsSet", "saveCredentials", "call",
-            "legacyList", "legacyPreview", "legacyStatus", "legacyImport", "legacyDraft", "legacyDiscard",
             "observe", "cancelObservation",
             "voiceSettings", "saveVoiceSettings", "startVoice", "finishVoice", "cancelVoice",
             "uiSettings", OP_PAUSE,
@@ -153,7 +152,7 @@ final class BotHostUiProtocol {
         return result;
     }
 
-    // ---------- 错误归一化（与旧 BotHostPlugin 的 reject/事件错误对象一致） ----------
+    // ---------- 错误归一化 ----------
 
     static JSONObject errorObject(Throwable failure) {
         Throwable t = unwrap(failure);

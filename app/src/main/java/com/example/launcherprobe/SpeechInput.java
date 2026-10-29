@@ -54,14 +54,9 @@ abstract class SpeechInput {
     /** Called on the main thread; drops every callback still queued. */
     protected final void silence() { finished = true; }
 
-    static android.content.ComponentName systemRecognizer(Context context) {
-        return systemRecognizer(context, "voice");
-    }
-
     /**
-     * The recognizer SystemInput should bind, or null for the system default. As the default assistant this app's
-     * LauncherRecognitionService becomes the default, which only forwards, so another recognizer is used directly.
-     * Host 可用独立 pref 命名空间记录自己的 previousRecognizer，不读写旧 voice。
+     * The recognizer SystemInput should bind, or null for the system default.
+     * Host 使用自己的偏好命名空间记录 previousRecognizer。
      */
     static android.content.ComponentName systemRecognizer(Context context, String prefsName) {
         String current = android.provider.Settings.Secure.getString(context.getContentResolver(), "voice_recognition_service");
@@ -74,20 +69,12 @@ abstract class SpeechInput {
     }
 
     /** Whether SystemInput can run at all. */
-    static boolean systemAvailable(Context context) {
-        return systemAvailable(context, "voice");
-    }
-
     static boolean systemAvailable(Context context, String prefsName) {
         return SpeechRecognizer.isRecognitionAvailable(context) && (systemRecognizer(context, prefsName) != null
                 || !ownsDefaultRecognizer(context));
     }
 
     /** Another app's recognition service: the one in use before this app became default, else any installed one. */
-    static android.content.ComponentName fallbackRecognizer(Context context) {
-        return fallbackRecognizer(context, "voice");
-    }
-
     static android.content.ComponentName fallbackRecognizer(Context context, String prefsName) {
         java.util.List<android.content.pm.ResolveInfo> services = context.getPackageManager().queryIntentServices(
                 new Intent(android.speech.RecognitionService.SERVICE_INTERFACE), 0);
@@ -122,8 +109,6 @@ abstract class SpeechInput {
         private final String prefsName;
         private SpeechRecognizer recognizer;
         private String partial = "";
-
-        SystemInput(Context context, String language) { this(context, language, "voice"); }
 
         /** Host 使用独立命名空间，记录自己的 previousRecognizer。 */
         SystemInput(Context context, String language, String prefsName) {

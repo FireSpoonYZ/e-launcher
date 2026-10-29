@@ -37,14 +37,15 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.BooleanSupplier;
 import java.util.regex.Pattern;
 
 /**
  * M18 私有 UI↔Host 桥服务：默认进程内 non-exported Binder，只把固定 Host 数据操作转给 BotHostManager。
- * 冷访问只读现有快照；绝不启动/停止 Host、不重放请求；saveCredentials 仅按旧插件语义把别名交给
+ * 桥不因绑定启动 Host、不重放请求；saveCredentials 仅按旧插件语义把别名交给
  * BotHostManager 受控转发（本层无 getter、不落盘、不打印）。
  * 每个 UI 进程一个 socket 会话：EOF/关闭只释放本会话登记过的观察与语音捕获。
- * client* 固定入口使用应用级独立客户端 broker，与本机 Host 生命周期隔离。
+ * client* 固定入口使用应用级独立客户端 broker；客户端退出时关闭所有 UI 会话。
  */
 public final class BotHostUiBridgeService extends Service {
     private static final int MAX_OBSERVATIONS = 8;
@@ -52,18 +53,31 @@ public final class BotHostUiBridgeService extends Service {
     private static final Pattern OBSERVATION_ID = Pattern.compile(
             "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}");
 
+    private static volatile BotHostUiBridgeService activeService;
     private final List<Session> sessions = new ArrayList<>();
     private final Handler main = new Handler(Looper.getMainLooper());
     private final Binder binder = new SessionBinder();
     private boolean destroyed;
 
-    @Override public IBinder onBind(Intent intent) {
-        client().resumeSavedService();
-        client().checkConnection(true);
-        return binder;
+    @Override public void onCreate() {
+        super.onCreate();
+        activeService = this;
+    }
+
+    @Override public IBinder onBind(Intent intent) { return binder; }
+
+    static void closeClientSessions() {
+        BotHostUiBridgeService service = activeService;
+        if (service == null) return;
+        List<Session> copy;
+        synchronized (service.sessions) { copy = new ArrayList<>(service.sessions); }
+        for (Session session : copy) {
+            session.close(new BridgeException("CANCELLED", "responded", "客户端已退出"));
+        }
     }
 
     @Override public void onDestroy() {
+        if (activeService == this) activeService = null;
         List<Session> copy;
         synchronized (sessions) {
             destroyed = true;
@@ -89,16 +103,21 @@ public final class BotHostUiBridgeService extends Service {
                 reply.writeException(new SecurityException("调用方不受信任"));
                 return true;
             }
+            BooleanSupplier clientLifecycle = BotClientService.ownerOpen();
+            if (!clientLifecycle.getAsBoolean()) {
+                reply.writeException(new IllegalStateException("客户端未运行"));
+                return true;
+            }
             Session session;
             try {
-                session = new Session();
+                session = new Session(clientLifecycle);
             } catch (IOException failure) {
                 reply.writeException(new IllegalStateException("无法建立私有通道"));
                 return true;
             }
             synchronized (sessions) {
-                if (destroyed) {
-                    session.close(new BridgeException("CANCELLED", "responded", "UI 桥已关闭"));
+                if (destroyed || !clientLifecycle.getAsBoolean()) {
+                    session.close(new BridgeException("CANCELLED", "responded", "UI 桥或客户端已关闭"));
                     reply.writeException(new IllegalStateException("UI 桥已关闭"));
                     return true;
                 }
@@ -137,6 +156,7 @@ public final class BotHostUiBridgeService extends Service {
         private final AtomicInteger inFlight = new AtomicInteger();
         private final Map<String, Observation> observations = new HashMap<>();
         private final AtomicBoolean closed = new AtomicBoolean();
+        private final BooleanSupplier clientLifecycle;
         /** 本 UI 会话在客户端子进程上的身份：单写者校验用，关闭/EOF 后不可再被复用。 */
         private final String clientOwner = UUID.randomUUID().toString();
         private final BotHostUiProtocol.LineReader lines =
@@ -146,7 +166,8 @@ public final class BotHostUiBridgeService extends Service {
         private String voiceBotId;
         private String voiceRequestId;
 
-        Session() throws IOException {
+        Session(BooleanSupplier clientLifecycle) throws IOException {
+            this.clientLifecycle = clientLifecycle;
             ParcelFileDescriptor[] pair = ParcelFileDescriptor.createSocketPair();
             server = pair[0];
             channel = pair[1];
@@ -280,6 +301,8 @@ public final class BotHostUiBridgeService extends Service {
             shutdownAndClose(server);
         }
 
+        private boolean clientSessionOpen() { return !closed.get() && clientLifecycle.getAsBoolean(); }
+
         // ---------- 请求派发（reader 线程顺序执行，非阻塞 manager 操作） ----------
 
         private void onFrame(JSONObject frame) throws IOException {
@@ -338,11 +361,11 @@ public final class BotHostUiBridgeService extends Service {
                 case "centerSettings":
                     return done(manager.centerSettings());
                 case "saveCenterSettings":
-                    return done(manager.saveCenterSettings(requiredObject(params, "input")));
+                    return BotClientService.saveHostCenterSettings(BotHostUiBridgeService.this, requiredObject(params, "input"));
                 case "settingsGet":
-                    return manager.settingsGet();
+                    return manager.settingsGet(this::clientSessionOpen);
                 case "settingsSet":
-                    return manager.settingsSet(requiredObject(params, "input"));
+                    return manager.settingsSet(requiredObject(params, "input"), this::clientSessionOpen);
                 case "saveCredentials":
                     return manager.saveCredentials(optionalObject(params, "aliases"))
                             .thenApply(ignored -> new JSONObject());
@@ -358,30 +381,6 @@ public final class BotHostUiBridgeService extends Service {
                                         localBotId, localRequestId, failure));
                     }
                     return manager.call(method, callParams);
-                case "legacyList":
-                    return legacyList(manager, params);
-                case "legacyPreview":
-                    return manager.legacyPreview(BotHostUiProtocol.object(
-                            "conversationId", required(params, "conversationId"),
-                            "role", required(params, "role"),
-                            "cwd", required(params, "cwd"),
-                            "modelRef", required(params, "modelRef")));
-                case "legacyStatus":
-                    return manager.legacyStatus(BotHostUiProtocol.object(
-                            "sourceKey", required(params, "sourceKey"),
-                            "requestId", BotHostUiProtocol.optionalString(params, "requestId")));
-                case "legacyImport":
-                    return manager.legacyImport(requiredObject(params, "input"));
-                case "legacyDraft":
-                    return manager.legacyDraft(BotHostUiProtocol.object(
-                            "sourceKey", required(params, "sourceKey"),
-                            "requestId", required(params, "requestId"),
-                            "textOffset", optionalNullable(params, "textOffset"),
-                            "attachmentOffset", optionalNullable(params, "attachmentOffset")));
-                case "legacyDiscard":
-                    return manager.legacyDiscard(BotHostUiProtocol.object(
-                            "sourceKey", required(params, "sourceKey"),
-                            "snapshotId", required(params, "snapshotId")));
                 case "observe":
                     return observe(manager, params);
                 case "cancelObservation":
@@ -435,7 +434,7 @@ public final class BotHostUiBridgeService extends Service {
             JSONObject input = params.has("params") && !params.isNull("params")
                     ? requiredObject(params, "params")
                     : new JSONObject();
-            CompletableFuture<JSONObject> result = client().request(clientOwner, () -> !closed.get(), op, input);
+            CompletableFuture<JSONObject> result = client().request(clientOwner, () -> !closed.get() && BotClientService.isActive(), op, input);
             if ("pending_send".equals(op)) result.whenComplete((value, failure) -> {
                 if (failure == null || "unconfirmed".equals(BotHostUiProtocol.errorOutcome(failure)))
                     BotClientService.requestPoll();
@@ -471,7 +470,8 @@ public final class BotHostUiBridgeService extends Service {
                 if (observations.containsKey(observationId)) throw new IllegalArgumentException("observationId 已存在");
                 observations.put(observationId, record);
             }
-            return client().observe(clientOwner, () -> !closed.get(), () -> observationActive(record),
+            return client().observe(clientOwner, () -> !closed.get() && BotClientService.isActive(),
+                            () -> BotClientService.isActive() && observationActive(record),
                             observationId,
                             BotHostUiProtocol.object("targetDeviceId", targetDeviceId, "target", target),
                             event -> onClientFrame(record, event),
@@ -510,7 +510,8 @@ public final class BotHostUiBridgeService extends Service {
         }
 
         private void ensureOpen() throws IOException {
-            if (closed.get()) throw new BridgeException("CLOSED", "not-sent", "UI 通道已关闭");
+            if (closed.get() || !BotClientService.isActive())
+                throw new BridgeException("CLOSED", "not-sent", "客户端或 UI 通道已关闭");
         }
 
         // ---------- 观察（本会话独占；断开/暂停只停自己） ----------
@@ -830,25 +831,6 @@ public final class BotHostUiBridgeService extends Service {
                     "message", message)));
         }
 
-        private CompletableFuture<JSONObject> legacyList(BotHostManager manager, JSONObject params) {
-            String cursor = null;
-            int limit = 0;
-            if (params != null && params.has("cursor") && !params.isNull("cursor")) {
-                Object value = params.opt("cursor");
-                if (!(value instanceof String)) throw new IllegalArgumentException("cursor 无效");
-                cursor = (String) value;
-            }
-            if (params != null && params.has("limit") && !params.isNull("limit")) {
-                Object value = params.opt("limit");
-                if (!(value instanceof Number)) throw new IllegalArgumentException("limit 无效");
-                double number = ((Number) value).doubleValue();
-                if (number != Math.floor(number) || number < 0 || number > 200) {
-                    throw new IllegalArgumentException("limit 超出范围");
-                }
-                limit = (int) number;
-            }
-            return manager.legacyList(cursor, limit);
-        }
     }
 
     // ---------- 共享工具 ----------
@@ -861,7 +843,7 @@ public final class BotHostUiBridgeService extends Service {
         return BotHostClient.get(this);
     }
 
-    /** 仅复用旧 DevicePlugin/AppAppearance 的 "ui" 偏好键：language 与外观(theme)；不读 Pi 配置/凭据。 */
+    /** 仅读取界面语言与主题，不读配置凭据。 */
     private JSONObject uiSettings() {
         SharedPreferences ui = getSharedPreferences("ui", MODE_PRIVATE);
         return BotHostUiProtocol.object(
@@ -890,12 +872,6 @@ public final class BotHostUiBridgeService extends Service {
     }
 
     /** 缺省省略该键；显式 null 传 JSON null（Manager 按无效参数拒绝）。 */
-    private static Object optionalNullable(JSONObject params, String name) {
-        if (params == null || !params.has(name)) return null;
-        Object value = params.opt(name);
-        return value == null ? JSONObject.NULL : value;
-    }
-
     private static CompletableFuture<JSONObject> failed(Throwable failure) {
         CompletableFuture<JSONObject> future = new CompletableFuture<>();
         future.completeExceptionally(failure);

@@ -12,7 +12,6 @@ const centerErrorMessage = (error: unknown) => typeof error === 'string' ? error
 export const ActiveCenter = createContext('');
 
 export interface CenterConnectionContextValue {
-  remoteClient: boolean;
   url: string;
   setUrl: (v: string) => void;
   deviceId: string;
@@ -40,7 +39,6 @@ export interface CenterConnectionContextValue {
 }
 
 const defaultCenterContext: CenterConnectionContextValue = {
-  remoteClient: false,
   url: '',
   setUrl: () => {},
   deviceId: '',
@@ -68,7 +66,7 @@ const defaultCenterContext: CenterConnectionContextValue = {
 export const CenterConnectionContext = createContext<CenterConnectionContextValue>(defaultCenterContext);
 export const useCenterConnection = () => useContext(CenterConnectionContext);
 
-export function CenterGate({ children, remoteClient = false, onDisconnected, onReady, recoveryEpoch = 0 }: { children: ReactNode; remoteClient?: boolean; onDisconnected?: () => void; onReady?: (centerUrl: string) => Promise<void>; recoveryEpoch?: number }) {
+export function CenterGate({ children, onDisconnected, onReady, recoveryEpoch = 0 }: { children: ReactNode; onDisconnected?: () => void; onReady?: (centerUrl: string) => Promise<void>; recoveryEpoch?: number }) {
   const [url, setUrl] = useState('');
   const [deviceId, setDeviceId] = useState(() => localStorage.getItem('center-client-device-id') ?? '');
   const [token, setToken] = useState('');
@@ -90,24 +88,6 @@ export function CenterGate({ children, remoteClient = false, onDisconnected, onR
   useEffect(() => {
     let live = true;
     let timer: ReturnType<typeof setTimeout>;
-    if (!remoteClient) {
-      setInitialized(true);
-      void BotHost.centerSettings().then(value => {
-        if (live) { setUrl(value.url); setCa(value.ca); }
-      }).catch(() => { if (live) setError('无法读取中心连接设置'); });
-      const pollHost = async () => {
-        const issued = epoch.current;
-        try {
-          const next = (await BotHost.status()).center;
-          if (live && issued === epoch.current) setStatus(next);
-        } catch {
-          if (live && issued === epoch.current) setStatus(undefined);
-        }
-        if (live) timer = setTimeout(pollHost, 1000);
-      };
-      void pollHost();
-      return () => { live = false; epoch.current += 1; clearTimeout(timer); };
-    }
     const updateStatus = (next: CenterStatus) => {
       setStatus(next);
       setSaved(next.savedConnection);
@@ -187,7 +167,7 @@ export function CenterGate({ children, remoteClient = false, onDisconnected, onR
     };
     void initialize();
     return () => { live = false; epoch.current += 1; clearTimeout(timer); };
-  }, [remoteClient]);
+  }, []);
 
   useEffect(() => {
     if (wasReady.current && status?.state !== 'ready') onDisconnected?.();
@@ -222,30 +202,22 @@ export function CenterGate({ children, remoteClient = false, onDisconnected, onR
     setStatus(undefined);
     onDisconnected?.();
     try {
-      if (!remoteClient || hostToken.trim()) {
-        const snapshot = await BotHost.snapshot();
-        if (snapshot.phase === 'running' || snapshot.phase === 'starting') {
-          throw new Error('Host 正在运行；如需修改连接，请先停止 Host。');
-        }
+      if (hostToken.trim()) {
         await BotHost.saveCenterSettings({ input: {
-          url: url.trim(), deviceToken: remoteClient ? hostToken.trim() : token.trim(), ca: ca.trim(),
+          url: url.trim(), deviceToken: hostToken.trim(), ca: ca.trim(),
         } });
       }
-      if (remoteClient) {
-        const next = await mobileClientRequest<CenterStatus>('center_connect', {
-          url: url.trim(), deviceId: deviceId.trim(), deviceToken: token.trim(),
-          ...(ca.trim() ? { ca: ca.trim() } : {}),
-        });
-        if (issued !== epoch.current) return;
-        localStorage.setItem('center-client-device-id', deviceId.trim());
-        localStorage.setItem('active-center-url', url.trim());
-        setSaved(next.savedConnection);
-        const broker = next.state === 'ready' ? await mobileClientRequest<{ phase: string; generation: number }>('status', {}) : undefined;
-        if (issued !== epoch.current) return;
-        setStatus(broker ? { ...next, state: broker.phase === 'connected' ? 'ready' : 'connecting', brokerGeneration: broker.generation } : next);
-      } else {
-        await BotHost.start();
-      }
+      const next = await mobileClientRequest<CenterStatus>('center_connect', {
+        url: url.trim(), deviceId: deviceId.trim(), deviceToken: token.trim(),
+        ...(ca.trim() ? { ca: ca.trim() } : {}),
+      });
+      if (issued !== epoch.current) return;
+      localStorage.setItem('center-client-device-id', deviceId.trim());
+      localStorage.setItem('active-center-url', url.trim());
+      setSaved(next.savedConnection);
+      const broker = next.state === 'ready' ? await mobileClientRequest<{ phase: string; generation: number }>('status', {}) : undefined;
+      if (issued !== epoch.current) return;
+      setStatus(broker ? { ...next, state: broker.phase === 'connected' ? 'ready' : 'connecting', brokerGeneration: broker.generation } : next);
     } catch (failure) {
       if (issued === epoch.current) setError(failure instanceof Error ? failure.message : '连接失败，请检查中心设置。');
     } finally {
@@ -262,7 +234,7 @@ export function CenterGate({ children, remoteClient = false, onDisconnected, onR
     const issued = ++epoch.current;
     setBusy(true);
     setError('');
-    const request = remoteClient ? mobileClientRequest<CenterStatus>('center_disconnect', {}) : BotHost.stop().then(() => undefined);
+    const request = mobileClientRequest<CenterStatus>('center_disconnect', {});
     void request.then(next => {
       if (issued !== epoch.current) return;
       setSaved(undefined);
@@ -279,7 +251,7 @@ export function CenterGate({ children, remoteClient = false, onDisconnected, onR
 
   const stopLocalHost = () => {
     void BotHost.stop().catch(failure => {
-      setError(failure instanceof Error ? failure.message : '停止本机 Host 失败');
+      setError(failure instanceof Error ? failure.message : '退出客户端失败');
     });
   };
 
@@ -288,7 +260,6 @@ export function CenterGate({ children, remoteClient = false, onDisconnected, onR
   const activeCenterUrl = ready && status ? status.centerUrl : '';
 
   const contextValue: CenterConnectionContextValue = {
-    remoteClient,
     url,
     setUrl,
     deviceId,

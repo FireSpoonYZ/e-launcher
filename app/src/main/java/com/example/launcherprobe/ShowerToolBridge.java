@@ -87,19 +87,8 @@ final class ShowerToolBridge {
         if (current != null) current.release();
     }
 
-    JSONObject execute(String conversationId, JSONObject arguments) throws Exception {
-        if (conversationId == null || conversationId.isBlank()) {
-            throw new IllegalArgumentException("Shower 操作必须属于一个聊天");
-        }
-        return run(conversationId, arguments, null);
-    }
-
-    /** Host 原生调用：归属键只来自可信 metadata，绝不接受模型参数里的归属。 */
     JSONObject executeOwner(String ownerKey, JSONObject arguments) throws Exception {
-        if (ownerKey == null || ownerKey.isEmpty()) {
-            throw new IllegalArgumentException("Shower 操作缺少归属键");
-        }
-        return run(ownerKey, arguments, null);
+        return executeOwner(ownerKey, arguments, null);
     }
 
     /** Host 原生调用（带任务取消标记）：取消后即使 Binder 忽略/清除中断也释放本次新建控制器。 */
@@ -291,14 +280,6 @@ final class ShowerToolBridge {
                 integer(arguments, "height", metrics.heightPixels),
                 integer(arguments, "dpi", metrics.densityDpi),
                 integer(arguments, "bitrateKbps", 500));
-    }
-
-    void forgetConversation(String conversationId) {
-        ShowerController controller = controllers.remove(conversationId);
-        if (controller != null) {
-            try { controller.release(); }
-            catch (Exception ignored) { } // The server also reclaims idle displays or dead client tokens.
-        }
     }
 
     void shutdown() {

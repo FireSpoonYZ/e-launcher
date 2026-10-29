@@ -84,8 +84,7 @@ final class BotHostProcess {
     private static final int QUEUE_CAPACITY = 4;
     private static final long QUEUE_BYTE_BUDGET = 24L * 1024 * 1024;
     private static final List<String> REQUEST_TYPES =
-            Arrays.asList("call", "status", "settings_get", "settings_set",
-                    "legacy_preview", "legacy_status", "legacy_import", "legacy_draft");
+            Arrays.asList("call", "status", "settings_get", "settings_set");
     /** 八个 Hindsight 记忆控制方法；其余方法沿用 REQUEST_TIMEOUT_MS。 */
     private static final List<String> MEMORY_METHODS =
             Arrays.asList("memoryStatus", "recallMemory", "reflectMemory", "retainMemory",
@@ -141,7 +140,7 @@ final class BotHostProcess {
 
     private void debugLog(String stage) {
         if ((context.getApplicationInfo().flags & android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0) {
-            Log.d("BotHostProcess", stage);
+            Log.d("BotHostProcess", "mode=" + initMode + " " + stage);
         }
     }
 

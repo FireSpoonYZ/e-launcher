@@ -1,10 +1,15 @@
 package com.example.launcherprobe;
 
 import android.graphics.Color;
+import android.content.BroadcastReceiver;
+import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Process;
+import android.util.Log;
+import android.widget.Toast;
 import android.view.View;
 import android.view.WindowManager;
 import android.webkit.WebView;
@@ -20,15 +25,17 @@ import org.json.JSONObject;
 
 /**
  * M18 Tauri 界面入口：独立 {@code :tauri_ui} 进程，SDK 退出只结束本进程，
- * 默认进程的 Host/FGS/旧能力不受影响。
+ * 默认进程的 Host/FGS 不受影响。
  */
 public class TauriMainActivity extends TauriActivity {
     static {
-        // :tauri_ui 必须在本进程首个 WebView 创建前设置独立数据目录，避免多进程 WebView 冲突；
-        // 旧 Capacitor 进程（MainActivity）不设置，保留原 WebView 目录与 localStorage。
+        // 必须在本进程首个 WebView 创建前设置独立数据目录，避免多进程 WebView 冲突。
         WebView.setDataDirectorySuffix("tauri-ui");
     }
 
+    private final BroadcastReceiver clientExit = new BroadcastReceiver() {
+        @Override public void onReceive(Context context, Intent intent) { finishAndRemoveTask(); }
+    };
     private volatile boolean resumed;
     private View insetsTarget;
     private WebView activeWebView;
@@ -46,6 +53,8 @@ public class TauriMainActivity extends TauriActivity {
         }
         captureLaunchTarget(getIntent());
         super.onCreate(savedInstanceState);
+        registerReceiver(clientExit, new IntentFilter(BotClientService.ACTION_CLOSE_UI), Context.RECEIVER_NOT_EXPORTED);
+        startClient();
         WindowCompat.setDecorFitsSystemWindows(getWindow(), false);
         if (Build.VERSION.SDK_INT >= 28) {
             WindowManager.LayoutParams lp = getWindow().getAttributes();
@@ -75,8 +84,18 @@ public class TauriMainActivity extends TauriActivity {
     @Override protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
         setIntent(intent);
+        startClient();
         if (captureLaunchTarget(intent) && activeWebView != null) {
             activeWebView.evaluateJavascript("window.dispatchEvent(new Event('assistant-open-chat'))", null);
+        }
+    }
+
+    private void startClient() {
+        try {
+            BotHostService.startClientFromActivity(this);
+        } catch (RuntimeException failure) {
+            Log.e("TauriMainActivity", "Client foreground service start failed", failure);
+            Toast.makeText(this, "客户端启动失败，请重新打开应用", Toast.LENGTH_LONG).show();
         }
     }
 
@@ -197,6 +216,7 @@ public class TauriMainActivity extends TauriActivity {
     @Override protected void onDestroy() {
         resumed = false;
         activeWebView = null;
+        unregisterReceiver(clientExit);
         super.onDestroy();
         // SDK 清理完成后只终止隔离 UI 进程，避免 C 全局析构与绘图线程冲突。
         if (!isChangingConfigurations()) {

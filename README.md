@@ -1,10 +1,10 @@
 # e-launcher 独立 AI 助手
 
-普通 Android AI 助手应用，安装后显示为 **AI Assistant**，保留 Pi SDK 聊天、后台与定时任务、通知、分享导入、语音会话、系统语音助手、唤醒和朗读，以及 Shower 虚拟屏与接管。可把标准 Android App Widget 添加到其他桌面，不再充当默认 HOME，不提供桌面布局、应用网格／全局桌面搜索、壁纸／图标包管理、小组件宿主、模拟导航手势或自定义应用切换页。
+普通 Android AI 助手应用，安装后显示为 **AI Assistant**，保留 Pi SDK 数据、后台与定时任务、通知、分享草稿、语音会话、系统语音助手、唤醒和朗读，以及 Shower 虚拟屏与接管。可把标准 Android App Widget 添加到其他桌面，不再充当默认 HOME，不提供桌面布局、应用网格／全局桌面搜索、壁纸／图标包管理、小组件宿主、模拟导航手势或自定义应用切换页。
 
 ## 界面与数据
 
-普通桌面图标与 Host 入口现在默认启动 `TauriMainActivity`（独立 `:tauri_ui` 进程，`exported=false`），由 Tauri 承载 `mobile/web/` 与既有 `web/src/` 的 HostPage；`MainActivity` 仍是导出的 singleTask Capacitor `BridgeActivity`，只服务旧会话/设置/Host 显式入口（含 `assistant_legacy_ui=true`）与带旧 extras 的 Intent。任务详情、语音会话和分享确认使用 Android Java Activity；Widget 使用 Java `AppWidgetProvider` + `RemoteViews`/XML。应用目录查询与显式启动仍服务于助手和 Shower，不是桌面功能。`LauncherVoiceInteractionService` 等三个原系统语音组件名有意保留，以保持系统助手身份。界面架构、命令与构建见 [Tauri Android 界面](mobile/README.md)。
+普通桌面图标、旧聊天 Intent 和 Host 入口启动 `TauriMainActivity`（独立 `:tauri_ui` 进程，`exported=false`），由 Tauri 承载 `mobile/web/` 与既有 `web/src/` 的 HostPage；`MainActivity` 仍是导出的 singleTask Capacitor `BridgeActivity`，保留旧设置、定时任务和显式旧 Host 待确认入口，不再打开旧聊天界面。任务详情、语音会话和分享确认使用 Android Java Activity；Widget 使用 Java `AppWidgetProvider` + `RemoteViews`/XML。应用目录查询与显式启动仍服务于助手和 Shower，不是桌面功能。`LauncherVoiceInteractionService` 等三个原系统语音组件名有意保留，以保持系统助手身份。界面架构、命令与构建见 [Tauri Android 界面](mobile/README.md)。
 
 覆盖安装保留 `applicationId=com.example.launcherprobe`、包名、原签名及数据路径：聊天仍在私有 `chat` SharedPreferences，附件在 `files/chat-attachments`，Pi 上下文在 `files/pi-contexts`，全局配置在 `files/node/.pi/agent`，会话工作区在 `files/pi-workspaces`。旧未发送草稿及附件保留；不要清除数据、卸载重装或换签名来完成迁移。
 
@@ -50,15 +50,15 @@ Pi Agent 是聊天的唯一执行路径。内置 `shower` 工具使用 Operit Sh
 
 `shower` 必须先 `create`，服务未运行时会自动启动，同一聊天可复用已有屏幕。每块屏幕独立计算空闲时间：5 分钟没有工具操作后自动销毁，执行中的操作不会被回收；最后一块屏幕关闭后服务空闲 15 秒退出。`release` 和删除聊天只释放对应屏幕，切换聊天、停止生成及回复结束不会立即释放。超时后的操作会提示重新 `create`，需要重新启动应用并截图定位。同一应用不能被不同聊天的虚拟屏同时占用；系统剪贴板仍共享，但一次 `text` 的写入与粘贴会串行完成，避免被另一聊天的输入插入。默认虚拟尺寸和密度采用手机主屏当前设置的完整逻辑分辨率与密度；坐标始终是 create 返回的虚拟屏坐标。截图通过 Binder 文件描述符传输，避免大 PNG 进入 Binder 事务，并可按 `maxWidth` / `maxHeight` 等比缩小；工具结果同时返回虚拟屏与图片尺寸，PNG 作为 image content 保存到聊天附件。先点击输入框，再用 `text` 全选并粘贴替换全部内容；空文本或 `clear` 清空输入框。`copy(text)` 写入系统剪贴板，`paste` 在光标处粘贴或替换选区；`key COPY/CUT` 操作选区，`key A` 配合 `CTRL` 全选。系统剪贴板与主屏应用共享，`text` / `copy` 会覆盖剪贴板；触摸和按键仍只发往虚拟屏。网页、虚拟屏和工具输出均是不可信数据，动作被系统接受后仍须再次截图验证。继续对话时，每次模型调用只带上最新一张 Shower 截图的图片；更早的截图图片会从这次上下文副本里去掉，并保留原有文字、调用编号和其他图片。已经保存的会话消息和附件不会被改写。
 
-聊天页提供独立保存的会话与草稿、历史分支、按标题及正文搜索的会话抽屉、归档与恢复。生成期间可切换会话，后台任务继续运行；同一会话一次运行一轮。附件、系统分享与语音入口不再经过桌面。分享导入必须确认，只保存草稿，不自动发送；语音与文字会话保持明确目标，不把缺失或已归档目标静默替换为当前会话。发送内容及工具结果会交给用户配置的模型服务；公开网页请求会直接访问相应站点。
+当前聊天使用 Tauri 客户端。旧聊天界面入口已停用，旧会话、草稿与附件仍保留原路径，不自动迁移到新客户端；旧 Host 待确认和显式导入入口仍可使用。系统分享需确认，仅保存到所选旧会话草稿、不自动发送或转入当前客户端，保存后可打开客户端。旧语音与任务详情中的客户端入口不再定位旧会话。发送内容及工具结果会交给用户配置的模型服务；公开网页请求会直接访问相应站点。
 
 ### 标准任务 Widget
 
-在系统桌面的小组件选择器中添加任务 Widget；可调整宽高，多个实例分别记住所选会话。卡片沿用原任务卡的圆角、配色、状态胶囊、任务计数和步骤条；上下箭头切换会话，文件夹打开已归档列表，点击正文进入该任务详情。底部为「归档／停止」与「查看对话」，操作绑定当前卡片的会话；停止中禁用左侧按钮。空态显示「开始对话」。删除 Widget 不删除任务或聊天。
+在系统桌面的小组件选择器中添加任务 Widget；可调整宽高，多个实例分别记住所选会话。卡片沿用原任务卡的圆角、配色、状态胶囊、任务计数和步骤条；上下箭头切换会话，点击正文进入该任务详情。底部为「归档／停止」与「打开客户端」；前者绑定当前卡片，后者打开 Tauri 而不定位旧会话。停止中禁用左侧按钮；空态也可打开客户端。旧归档列表入口不再显示，删除 Widget 不删除任务或聊天。
 
 卡片尺寸和外部间距由桌面宿主分配；步骤条保留原节点图形和文字，以静态图显示当前步骤附近的内容。标准 `RemoteViews` 未复刻旧桌面的实时壁纸模糊、节点旋转动画与条内横向滚动。
 
-`RemoteViews` **不能内嵌可编辑的聊天输入框**，也不展示虚拟屏或嵌入问卷作答。需要打字时打开聊天，出现问卷时打开详情回答；没有伪装成输入框的 `EditText`。虚拟屏预览与手动接管仍在详情页。
+`RemoteViews` **不能内嵌可编辑的聊天输入框**，也不展示虚拟屏或嵌入问卷作答。需要打字时打开客户端，出现问卷时打开详情回答；没有伪装成输入框的 `EditText`。虚拟屏预览与手动接管仍在详情页。
 
 更新来自任务事件：开始、问卷、停止、终态、归档和删除及时更新，普通状态与文字流采用至少 1000ms 的尾沿节流，不跟随 40ms 文字流刷新。系统定时刷新关闭（`updatePeriodMillis=0`）。私有 `task_widget` 偏好仅保存有界展示快照；系统恢复或进程不存在时仅读最后快照，保存时间与「上次状态」保留在无障碍描述中。卡片状态不作实时运行保证，刷新不会启动 Pi、Shizuku、Shower 或前台服务。
 
@@ -109,7 +109,7 @@ Shower 对存活的独立虚拟屏每约 4 秒报告显示活动，保留原有 
 
 待执行记录 `queued` 持久保存后可在进程恢复时继续安排；调用 Pi 前先保存 `starting`。仅确定尚未提交到 Pi 的同步启动失败允许有限重试：**总计最多 3 次尝试**，两次重试分别延迟 **60 秒、120 秒**，且不得超过原定执行时间后 15 分钟。执行记录展示等待／启动状态、尝试次数和下次重试时间。已被 Pi 接受的请求不重放；旧进程遗留的 `starting / running` 结果不明，恢复时记为 `interrupted`，不自动重试不确定的外部操作。
 
-每次执行创建独立会话，使用全局默认模型，不改变当前聊天或未发送草稿；执行记录可打开对应会话。历史保留最近 100 条，活动的 `queued / starting / running` 不因该上限被截断。暂停、删除或修改定义会取消尚未开始的旧待执行项，不停止已启动的会话，也不删除会话或历史；一次性任务到点自动停用不会取消自身待执行项。勾选「完成后删除」（`deleteAfterRun`）后，仅在 `completed` 终态删除对应且未被用户修改或重新启用的定义，失败或中断保留。`completed` 只表示 Pi 回合正常结束，不保证外部操作目标已达成。
+每次执行创建独立会话，使用全局默认模型，不改变当前聊天或未发送草稿；旧执行会话与记录保留，但不再提供旧聊天界面入口。历史保留最近 100 条，活动的 `queued / starting / running` 不因该上限被截断。暂停、删除或修改定义会取消尚未开始的旧待执行项，不停止已启动的会话，也不删除会话或历史；一次性任务到点自动停用不会取消自身待执行项。勾选「完成后删除」（`deleteAfterRun`）后，仅在 `completed` 终态删除对应且未被用户修改或重新启用的定义，失败或中断保留。`completed` 只表示 Pi 回合正常结束，不保证外部操作目标已达成。
 
 强行停止应用（force-stop）、撤销权限及系统后台限制仍可能阻止或中断执行；不保证关机或重启后首次解锁前运行。Node 启动故障可能持续到应用进程重启，有限重试不是 Node 自愈机制，也不新增独立 Node 进程。普通定时任务不需要 Shizuku，仅任务中的 Shower 手机操作需要对应授权与服务。
 
@@ -121,7 +121,7 @@ Shower 对存活的独立虚拟屏每约 4 秒报告显示活动，保留原有 
 
 Android 应用内集成 Host 核心：在受监督的独立 Node Mobile 子进程中运行 Pi Durable/chord/pi-ai **1.3.0** 与内嵌 acp-kernel **0.0.101**，旧 Capacitor 入口保持不变。Host 提供 Bot 登记、持久消息账本、工具（含 grep/find）、工作上下文与长期记忆；旧数据迁移已交付（父限定范围验收，见 host-core 模块 16）；M18 的 Tauri 只提供独立 `:tauri_ui` 界面外壳（见 [mobile/README.md](mobile/README.md)），Host 仍在默认进程的 Node Mobile 子进程运行。
 
-- **使用入口**：用户在设置中开启/停止 Host；Host 仅在用户显式开启 `specialUse` 前台服务时运行，无开机自启/空闲自动关闭/粘性重启。
+- **使用入口**：打开客户端时启动 `specialUse` 前台生命周期并尝试启动本机 Host；Host 所需中心配置尚未设置或启动失败时在状态/通知中显示错误，保存配置后重新启动。冷启动仍须中心完成初始化；网络恢复或客户端重新连接中心后会延迟重试失败的已配置 Host。客户端在后台、锁屏或中心断网时仍持有已运行的 Host；Host 子进程意外退出后按退出事件延迟重启。通知或设置中的「退出客户端」先撤销恢复并回收子进程，保留凭据和业务数据；断开中心只断开中心。没有新增开机自启、轮询或闹钟保活。
 - **旧聊天导入与新 Host 定时任务**：设置中的 Local Host / Legacy import 面板可列出旧会话，显式预览（单独选 role/cwd/model）后导入；导入的草稿仅手动追加到对应 Bot，不自动发送。新 Host 定时任务（schedule_task）只在 Host 运行时执行，离线错过不补发。详见 [host-core/README.md](host-core/README.md) 模块 16。
 - **配置与数据**：Host 运行数据位于独立 `files/bot-host`；模型凭据与语音偏好分别在 `bot_host_credentials`、`bot_host_voice`、`bot_host_voice_secrets` SharedPreferences（不在 files/bot-host 内），与旧聊天数据隔离；模型/语音由用户配置，系统语音入口仍走 Android 原生路径。
 - **构建与许可**：构建命令与前提（JDK/AGP/NDK/CMake/Node/Rust 目标及自动 prepare/bundle）见 [host-core/README.md](host-core/README.md) 模块 15，M18 界面见 [mobile/README.md](mobile/README.md)；依赖与 NDK 搜索工具（rg/fd）许可见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。

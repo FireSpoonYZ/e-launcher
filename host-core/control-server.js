@@ -255,11 +255,6 @@ export async function openControlServer(options) {
     applyCenterSnapshot: (snapshot) => runtime.applyCenterSnapshot(snapshot),
     setCenterOnline: (online) => runtime.setCenterOnline(online),
     withCapabilityActivation: (id, publish) => runtime.withCapabilityActivation(id, publish),
-    // Private legacy migration local methods only; no new HTTP/remote/relay routes.
-    previewLegacyImport: (input) => runtime.previewLegacyImport(input),
-    getLegacyImportStatus: (input) => runtime.getLegacyImportStatus(input),
-    importLegacySnapshot: (input) => runtime.importLegacySnapshot(input),
-    readLegacyDraft: (input) => runtime.readLegacyDraft(input),
   };
 }
 

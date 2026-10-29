@@ -1,4 +1,4 @@
-import { mkdirSync, rmSync } from 'node:fs';
+import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
@@ -6,22 +6,6 @@ import { DatabaseSync } from 'node:sqlite';
 const SCHEMA_VERSION = 5;
 const DB_FILE = 'host.sqlite';
 const PRIMARY_KIND = 'primary';
-
-const LEGACY_IMPORTS_DDL = `
-  CREATE TABLE legacy_imports (
-    source_key TEXT PRIMARY KEY,
-    request_id TEXT NOT NULL UNIQUE,
-    snapshot_id TEXT NOT NULL,
-    phase TEXT NOT NULL CHECK (phase IN ('prepared', 'completed')),
-    bot_id TEXT NOT NULL UNIQUE,
-    device_id TEXT NOT NULL,
-    role TEXT NOT NULL,
-    cwd TEXT NOT NULL,
-    model_ref TEXT,
-    primary_conversation_id TEXT NOT NULL UNIQUE,
-    created_at TEXT NOT NULL
-  );
-`;
 
 function errWithCode(message, code) {
   const err = new Error(message);
@@ -68,58 +52,18 @@ function toBotExtensionSettings(row) {
   };
 }
 
-function toLegacyImport(row, primaryBotId) {
-  if (!row) return null;
-  return {
-    sourceKey: row.source_key,
-    requestId: row.request_id,
-    snapshotId: row.snapshot_id,
-    phase: row.phase,
-    bot: toBot(row, primaryBotId),
-  };
-}
-
 // 先取写锁再读版本：并发首次 open 不会都读到 0 而重复插身份。
 function initSchema(db) {
   db.exec('BEGIN IMMEDIATE');
   let committed = false;
-  let rebuilt = false;
   try {
     const version = db.prepare('PRAGMA user_version').get().user_version;
-    // 仅接受已知版本；负数/未知版本一律拒绝，不迁移。
-    if (
-      version !== 0 &&
-      version !== 1 &&
-      version !== 2 &&
-      version !== 3 &&
-      version !== 4 &&
-      version !== SCHEMA_VERSION
-    ) {
+    // Existing older schemas are never rebuilt automatically: preserve all Host data.
+    if (version !== 0 && version !== SCHEMA_VERSION) {
       throw errWithCode('database schema version is not supported', 'UNSUPPORTED_SCHEMA');
     }
-    if (version < SCHEMA_VERSION) {
-      let existingDeviceId = null;
-      if (version > 0) {
-        rebuilt = true;
-        try {
-          const row = db.prepare('SELECT device_id FROM host_identity WHERE id = 1').get();
-          if (row && typeof row.device_id === 'string' && row.device_id.trim() !== '') {
-            existingDeviceId = row.device_id;
-          }
-        } catch {
-          existingDeviceId = null;
-        }
-        db.exec(`
-          DROP TABLE IF EXISTS bot_extension_settings;
-          DROP TABLE IF EXISTS legacy_imports;
-          DROP TABLE IF EXISTS bot_create_requests;
-          DROP TABLE IF EXISTS conversations;
-          DROP TABLE IF EXISTS host_profile;
-          DROP TABLE IF EXISTS bots;
-          DROP TABLE IF EXISTS host_identity;
-        `);
-      }
-      const deviceId = existingDeviceId ?? randomUUID();
+    if (version === 0) {
+      const deviceId = randomUUID();
       db.exec(`
         CREATE TABLE host_identity (
           id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -156,7 +100,6 @@ function initSchema(db) {
           cwd TEXT NOT NULL,
           model_ref TEXT
         );
-        ${LEGACY_IMPORTS_DDL}
         ${BOT_EXTENSION_SETTINGS_DDL}
       `);
       db.prepare('INSERT INTO host_identity (id, device_id) VALUES (1, ?)').run(deviceId);
@@ -179,7 +122,6 @@ function initSchema(db) {
     }
     db.exec('COMMIT');
     committed = true;
-    return { rebuilt };
   } finally {
     if (!committed) {
       try { db.exec('ROLLBACK'); } catch { /* rollback 失败不掩盖原错误 */ }
@@ -199,16 +141,7 @@ export function openStore(dataRoot) {
   try {
     db.exec('PRAGMA foreign_keys = ON;');
     db.exec('PRAGMA busy_timeout = 5000;');
-    const { rebuilt } = initSchema(db);
-    if (rebuilt) {
-      for (const entry of ['bots', 'durable.sqlite', 'durable.sqlite-wal', 'durable.sqlite-shm', 'hindsight.sqlite', 'scopes', 'messages.sqlite', 'messages.sqlite-wal', 'messages.sqlite-shm', 'messages.sqlite-journal']) {
-        try {
-          rmSync(join(dataRoot, entry), { recursive: true, force: true });
-        } catch {
-          /* ignore cleanup errors */
-        }
-      }
-    }
+    initSchema(db);
 
     const deviceId = db.prepare('SELECT device_id FROM host_identity WHERE id = 1').get().device_id;
 
@@ -228,17 +161,11 @@ export function openStore(dataRoot) {
     );
     const stmtArchiveBot = db.prepare('UPDATE bots SET archived_at = COALESCE(archived_at, ?) WHERE bot_id = ?');
     const stmtUnarchiveBot = db.prepare('UPDATE bots SET archived_at = NULL WHERE bot_id = ?');
-    const stmtDeleteLegacyImportByBot = db.prepare('DELETE FROM legacy_imports WHERE bot_id = ?');
     const stmtDeleteBot = db.prepare('DELETE FROM bots WHERE bot_id = ?');
     const stmtRecordBotActivity = db.prepare('UPDATE bots SET last_activity_at = ?, last_preview = ? WHERE bot_id = ?');
     const stmtListExpiredArchivedBots = db.prepare(
       'SELECT * FROM bots WHERE archived_at IS NOT NULL AND archived_at <= ? ORDER BY archived_at ASC, bot_id ASC'
     );
-    const stmtGetLegacyImport = db.prepare('SELECT * FROM legacy_imports WHERE source_key = ?');
-    const stmtInsertLegacyImport = db.prepare(
-      'INSERT INTO legacy_imports (source_key, request_id, snapshot_id, phase, bot_id, device_id, role, cwd, model_ref, primary_conversation_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
-    );
-    const stmtSetLegacyPhase = db.prepare('UPDATE legacy_imports SET phase = ? WHERE source_key = ?');
     const stmtGetBotExtensionSettings = db.prepare('SELECT * FROM bot_extension_settings WHERE bot_id = ?');
     const stmtInsertBotExtensionSettings = db.prepare(
       'INSERT INTO bot_extension_settings (bot_id, revision, extensions_json, retention_floor) VALUES (?, ?, ?, ?)'
@@ -385,7 +312,6 @@ export function openStore(dataRoot) {
         if (getPrimaryBotId() === botId) {
           throw errWithCode('primary bot cannot be deleted', 'PRIMARY_BOT_PROTECTED');
         }
-        stmtDeleteLegacyImportByBot.run(botId);
         stmtDeleteBot.run(botId);
         db.exec('COMMIT');
         committed = true;
@@ -413,8 +339,6 @@ export function openStore(dataRoot) {
         .filter((row) => row.bot_id !== primaryBotId)
         .map((row) => toBot(row, primaryBotId));
     };
-
-    const getLegacyImport = (sourceKey) => toLegacyImport(stmtGetLegacyImport.get(sourceKey), getPrimaryBotId());
 
     const getBotExtensionSettings = (botId) => toBotExtensionSettings(stmtGetBotExtensionSettings.get(botId));
 
@@ -444,83 +368,12 @@ export function openStore(dataRoot) {
       return result.changes === 1 ? getBotExtensionSettings(botId) : null;
     };
 
-    const reserveLegacyImport = (input) => {
-      const sourceKey = input.sourceKey;
-      const requestId = input.requestId;
-      const snapshotId = input.snapshotId;
-      const role = input.role;
-      const cwd = input.cwd;
-      const modelRef = input.modelRef == null ? null : input.modelRef;
-
-      db.exec('BEGIN IMMEDIATE');
-      let committed = false;
-      try {
-        // 同一 sourceKey 全定义一致返回既有行，任何字段不一致即冲突。
-        const existing = stmtGetLegacyImport.get(sourceKey);
-        if (existing) {
-          if (
-            existing.request_id === requestId &&
-            existing.snapshot_id === snapshotId &&
-            existing.role === role &&
-            existing.cwd === cwd &&
-            existing.model_ref === modelRef
-          ) {
-            return toLegacyImport(existing, getPrimaryBotId());
-          }
-          throw errWithCode('sourceKey already used with different request definition', 'REQUEST_CONFLICT');
-        }
-        // 只预留Bot；不写 bots/conversations，complete 前不可见。
-        const botId = randomUUID();
-        const conversationId = randomUUID();
-        const createdAt = new Date().toISOString();
-        stmtInsertLegacyImport.run(sourceKey, requestId, snapshotId, 'prepared', botId, deviceId, role, cwd, modelRef, conversationId, createdAt);
-        db.exec('COMMIT');
-        committed = true;
-        return getLegacyImport(sourceKey);
-      } finally {
-        if (!committed) {
-          try { db.exec('ROLLBACK'); } catch { /* rollback 失败不掩盖原错误 */ }
-        }
-      }
-    };
-
-    const completeLegacyImport = (sourceKey, requestId) => {
-      db.exec('BEGIN IMMEDIATE');
-      let committed = false;
-      try {
-        const row = stmtGetLegacyImport.get(sourceKey);
-        if (!row) {
-          throw errWithCode('legacy import not found', 'INVALID_ARGUMENT');
-        }
-        if (row.request_id !== requestId) {
-          throw errWithCode('requestId does not match reserved import', 'REQUEST_CONFLICT');
-        }
-        if (row.phase === 'completed') {
-          // 幂等：已完成且同 requestId，直接返回已完成行。
-          db.exec('COMMIT');
-          committed = true;
-          return toLegacyImport(row, getPrimaryBotId());
-        }
-        // 同一事务发布预留Bot并置 completed；不写 bot_create_requests。
-        stmtInsertBot.run(row.bot_id, row.device_id, row.role, row.cwd, row.model_ref, row.primary_conversation_id, row.created_at);
-        stmtInsertConversation.run(row.primary_conversation_id, row.bot_id, PRIMARY_KIND);
-        stmtSetLegacyPhase.run('completed', sourceKey);
-        db.exec('COMMIT');
-        committed = true;
-        return toLegacyImport(stmtGetLegacyImport.get(sourceKey), getPrimaryBotId());
-      } finally {
-        if (!committed) {
-          try { db.exec('ROLLBACK'); } catch { /* rollback 失败不掩盖原错误 */ }
-        }
-      }
-    };
-
     return {
       deviceId, getPrimaryBotId, getHostProfile,
       createBot, getBot, setBotModel, updateBotProfile, findByRequest, listBots,
       setPrimaryBot, archiveBot, unarchiveBot, deleteBot, recordBotActivity, listExpiredArchivedBots,
       ensureBotExtensionSettings, getBotExtensionSettings, updateBotExtensionSettings,
-      reserveLegacyImport, getLegacyImport, completeLegacyImport, close,
+      close,
     };
   } catch (err) {
     try { close(); } catch { /* close 失败不掩盖原错误 */ }

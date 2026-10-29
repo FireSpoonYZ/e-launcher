@@ -5,19 +5,18 @@
 // listen 结果必须为 {listening:true, streamId:'<uuid>:<generation>'}，deliveryId = streamId + ':' + sequence。
 // M20 远端页（其他设备）复用同一个 mobile_host_request，method 为 clientRequest/clientObserve/
 // clientUnobserve，事件为同一流上的 clientFrame（不是公开 listener 名）。
-// 只有 native/index.ts 在 __TAURI_INTERNALS__ 存在时装配本适配器，Capacitor 路径不变。
-// 本适配器不启动 Host/模型：start/stop 只是原生 UI-local 动作，cold 状态只读 snapshot。
+// native/index.ts 装配此 Tauri 适配器。
+// 本适配器只转发 start/stop 原生动作；客户端生命周期负责自动启动 Host，snapshot 仅读状态。
 import { Channel, invoke } from '@tauri-apps/api/core';
-import type { PluginListenerHandle } from '@capacitor/core';
 import type { DesktopObservationEvent } from '../../../host-core/desktop-client.js';
 import type { LiveTarget } from '../../../host-core/index.js';
 import type {
-  BotHostPlugin, CenterSettings, DeviceState, FrozenInput, HostCallResult, HostFrameEvent, HostSettings,
+  BotHostPlugin, CenterSettings, HostCallResult, HostFrameEvent, HostSettings,
   HostSettingsPayload, HostSnapshot, HostStatus, HostVoiceEvent, HostVoiceSaveInput,
-  HostVoiceSettings, LegacyDraftPage, LegacyListResult, LegacyPreview, LegacyStatus,
+  HostVoiceSettings, PluginListenerHandle,
 } from './index';
 
-// hostFrame/voiceEvent 是 Capacitor 公共 listener 名；clientFrame 只给手机远端页内部使用。
+// clientFrame 只给手机远端页内部使用。
 type HostEvent = 'hostFrame' | 'voiceEvent' | 'clientFrame';
 type EnvelopeEvent = HostEvent | 'streamError';
 type Envelope = { deliveryId: string; event: EnvelopeEvent; data: unknown };
@@ -150,7 +149,7 @@ class MobileBotHost implements BotHostPlugin {
   }
   /** UI-local：经 Service 入口请求启动，返回仅为“已请求”。 */
   start(): Promise<{ requested: boolean }> { return request('start'); }
-  /** UI-local：用户显式停止。 */
+  /** UI-local：用户显式退出客户端。 */
   stop(): Promise<{ requested: boolean }> { return request('stop'); }
   settingsGet(): Promise<HostSettingsPayload> { return request('settingsGet'); }
   settingsSet(options: { input: { expectedRevision: number; settings: HostSettings } }): Promise<HostSettingsPayload> {
@@ -207,25 +206,6 @@ class MobileBotHost implements BotHostPlugin {
     if (this.capture === owner) this.capture = undefined;
     return result;
   }
-  legacyList(options?: { cursor?: string | null; limit?: number }): Promise<LegacyListResult> {
-    return request('legacyList', options ?? {});
-  }
-  legacyPreview(options: { conversationId: string; role: string; cwd: string; modelRef: string }): Promise<LegacyPreview> {
-    return request('legacyPreview', options);
-  }
-  legacyImport(options: { input: FrozenInput }): Promise<LegacyStatus> { return request('legacyImport', options); }
-  legacyStatus(options: { sourceKey: string; requestId?: string | null }): Promise<LegacyStatus> {
-    return request('legacyStatus', options);
-  }
-  legacyDraft(options: {
-    sourceKey: string; requestId: string; textOffset?: number; attachmentOffset?: number;
-  }): Promise<LegacyDraftPage> {
-    return request('legacyDraft', options);
-  }
-  legacyDiscard(options: { sourceKey: string; snapshotId: string }): Promise<Record<string, never>> {
-    return request('legacyDiscard', options);
-  }
-
   addListener(event: 'hostFrame', listener: (event: HostFrameEvent) => void): Promise<PluginListenerHandle>;
   addListener(event: 'voiceEvent', listener: (event: HostVoiceEvent) => void): Promise<PluginListenerHandle>;
   /** 远端观察帧：与 hostFrame/voiceEvent 共用同一个原生事件流（内部，不扩公共插件接口）。 */
@@ -464,14 +444,14 @@ class MobileBotHost implements BotHostPlugin {
   }
 }
 
-/** 由 native/index.ts 在 Tauri 环境装配；legacy Capacitor 路径不调用。 */
+/** 由 native/index.ts 装配 Tauri Host 适配器。 */
 export function createTauriBotHost(): BotHostPlugin {
   active = new MobileBotHost();
   return active;
 }
 
 /** uiSettings 只有界面语言与外观：同一偏好键/类型，不含 Pi 配置或凭据。 */
-export type MobileUiSettings = { language: DeviceState['language']; appearance: DeviceState['theme'] };
+export type MobileUiSettings = { language: 'system'|'zh'|'en'; appearance: 'system'|'light'|'dark' };
 
 export function mobileUiSettings(): Promise<MobileUiSettings> {
   return request<MobileUiSettings>('uiSettings');
@@ -480,11 +460,6 @@ export function mobileUiSettings(): Promise<MobileUiSettings> {
 /** hide：只把本 UI 任务移到后台，不停止 Host。 */
 export function mobileHide(): Promise<unknown> {
   return request('hide');
-}
-
-/** 固定旧入口 chat/settings/host：旧 WebView 的 pending/localStorage 仍在原处。 */
-export function mobileOpenLegacy(action: 'chat' | 'settings' | 'host'): Promise<unknown> {
-  return request('openLegacy', { action });
 }
 
 /** 显式重建 IPC 会话并修复已保留监听器的事件传输；不重发观察或 mutation。 */

@@ -3,58 +3,14 @@ plugins {
     id 'org.jetbrains.kotlin.android'
 }
 
-apply from: 'capacitor.build.gradle'
-
 // Opt-in emulator ABI; ordinary builds remain arm64-v8a.
 def launcherAbis = (findProperty("launcherAbis") ?: "arm64-v8a").split(",").toList()
 
 def npmCommand = System.getProperty('os.name').toLowerCase().contains('windows') ? ['cmd', '/c', 'npm'] : ['npm']
-def webDependencies = rootProject.fileTree('node_modules') {
-    exclude '.cache/**', '.vite/**', '.vite-temp/**',
-            '@capacitor/android/capacitor/build/**', '@capacitor/app/android/build/**'
-}
 def sharedWebInputs = rootProject.files(
         rootProject.fileTree('desktop/web/src'),
         rootProject.fileTree('host-core') { include '*.js', '*.d.ts' })
-def webBuildInputs = rootProject.files(
-        sharedWebInputs,
-        rootProject.fileTree('web') { exclude 'dist/**', 'node_modules/**' },
-        rootProject.fileTree('.') { include 'package*.json', '*.config.*', 'tsconfig*.json', '.env*', '.npmrc' },
-        webDependencies)
-def buildWeb = tasks.register('buildWeb', Exec) {
-    workingDir rootProject.projectDir
-    // The runner avoids writing Vite's temporary config bundle into node_modules.
-    commandLine npmCommand + ['run', 'build', '--', '--configLoader', 'runner']
-    inputs.files webBuildInputs
-    inputs.file file('build.gradle')
-    inputs.property 'nodeEnv', System.getenv('NODE_ENV') ?: ''
-    inputs.property 'viteEnv', System.getenv().findAll { key, value -> key.startsWith('VITE_') }
-    outputs.dir rootProject.file('web/dist')
-}
-def cordovaManifest = rootProject.file('capacitor-cordova-android-plugins/src/main/AndroidManifest.xml')
-def copyWebAssets = tasks.register('copyWebAssets', Exec) {
-    dependsOn buildWeb
-    workingDir rootProject.projectDir
-    commandLine npmCommand + ['exec', '--', 'cap', 'copy', 'android']
-    inputs.dir rootProject.file('web/dist')
-    inputs.files webDependencies, rootProject.file('capacitor.config.ts'),
-            rootProject.file('package.json'), rootProject.file('package-lock.json')
-    inputs.file file('build.gradle')
-    outputs.dir file('src/main/assets/public')
-    outputs.files file('src/main/assets/capacitor.config.json'), file('src/main/res/xml/config.xml'), cordovaManifest
-    doFirst {
-        // Capacitor copy only rewrites this side product if it already exists.
-        cordovaManifest.parentFile.mkdirs()
-        if (!cordovaManifest.exists()) cordovaManifest.createNewFile()
-    }
-}
-def installPiDependencies = tasks.register('installPiDependencies', Exec) {
-    workingDir rootProject.file('pi-runtime')
-    commandLine npmCommand + ['ci']
-    inputs.files rootProject.file('pi-runtime/package.json'), rootProject.file('pi-runtime/package-lock.json'),
-            rootProject.fileTree('pi-runtime') { include '.npmrc' }, rootProject.fileTree('.') { include '.npmrc' }
-    outputs.dir rootProject.file('pi-runtime/node_modules')
-}
+
 def installHostDependencies = tasks.register('installHostDependencies', Exec) {
     workingDir rootProject.file('host-core')
     commandLine npmCommand + ['ci']
@@ -74,7 +30,7 @@ def prepareHostTools = tasks.register('prepareHostTools', Exec) {
     outputs.dir file("$buildDir/host-native-tools/licenses")
 }
 def buildHostRuntime = tasks.register('buildHostRuntime', Exec) {
-    dependsOn installHostDependencies, installPiDependencies, prepareHostTools
+    dependsOn installHostDependencies, prepareHostTools
     workingDir rootProject.file('host-core')
     commandLine 'node', 'build-android.js'
     inputs.files rootProject.fileTree('host-core') { exclude 'build/**', 'node_modules/**' },
@@ -86,16 +42,6 @@ def buildHostRuntime = tasks.register('buildHostRuntime', Exec) {
             file("$buildDir/host-native-tools/licenses")
     inputs.file file('build.gradle')
     outputs.dir file("$buildDir/generated/assets/botHost")
-}
-def buildPiRuntime = tasks.register('buildPiRuntime', Exec) {
-    dependsOn installPiDependencies
-    workingDir rootProject.file('pi-runtime')
-    commandLine npmCommand + ['run', 'build:android']
-    inputs.files rootProject.fileTree('pi-runtime') { exclude 'build/**', 'node_modules/.cache/**' }
-    inputs.file file('build.gradle')
-    outputs.files file('src/main/assets/pi-runtime.cjs'), file('src/main/assets/codemode-worker.js'),
-            file('src/main/assets/image-resize-worker.js'), file('src/main/assets/photon_rs_bg.wasm')
-    outputs.dirs file('src/main/assets/pi-sdk'), file('src/main/assets/npm')
 }
 // Tauri UI process (:tauri_ui): Rust cdylib, wry/tauri generated Kotlin and the
 // Android Rust third-party notices. The Rust library is release-built for both
@@ -131,7 +77,19 @@ tasks.matching { it.name in ['compileDebugKotlin', 'compileReleaseKotlin',
         || it.name.toLowerCase().contains('lint') }
         .configureEach { dependsOn buildMobileUi }
 
-tasks.named('preBuild') { dependsOn copyWebAssets, buildPiRuntime, buildHostRuntime, prepareHostTools, buildMobileUi }
+def syncHostNpm = tasks.register('syncHostNpm', Sync) {
+    dependsOn installHostDependencies
+    from rootProject.file('host-core/node_modules/npm')
+    into "$buildDir/generated/assets/hostNpm/npm/11.6.2"
+    doLast {
+        file("$buildDir/generated/assets/hostNpm/npm/11.6.2/payload-complete.txt").setText('11.6.2\n', 'UTF-8')
+    }
+}
+def syncAppAssets = tasks.register('syncAppAssets', Sync) {
+    from('src/main/assets') { include 'cn-holidays.json', 'cn-holidays-LICENSE.txt' }
+    into "$buildDir/generated/assets/app"
+}
+tasks.named('preBuild') { dependsOn syncAppAssets, syncHostNpm, buildHostRuntime, prepareHostTools, buildMobileUi }
 tasks.matching { it.name in ['mergeDebugAssets', 'mergeReleaseAssets']
         || it.name.toLowerCase().contains('lint') }
         .configureEach { dependsOn buildHostRuntime }
@@ -165,7 +123,6 @@ android {
         targetSdk 36
         versionCode 1
         versionName '1.0'
-        testInstrumentationRunner 'com.example.launcherprobe.ChatStoreChecks'
         ndk { abiFilters.addAll(launcherAbis) }
         externalNativeBuild {
             cmake {
@@ -223,9 +180,13 @@ android {
         ignoreAssetsPattern = '!.git:!.svn:!.DS_Store:!*~'
     }
 
-    sourceSets.main.assets.srcDir "$buildDir/generated/showerAssets"
-    sourceSets.main.assets.srcDir "$buildDir/generated/assets/botHost"
-    sourceSets.main.assets.srcDir "$buildDir/generated/assets/tauri"
+    sourceSets.main.assets.setSrcDirs([
+            "$buildDir/generated/assets/app",
+            "$buildDir/generated/assets/hostNpm",
+            "$buildDir/generated/showerAssets",
+            "$buildDir/generated/assets/botHost",
+            "$buildDir/generated/assets/tauri"
+    ])
     sourceSets.main.jniLibs.srcDir "$buildDir/generated/jniLibs/hostTools"
     sourceSets.main.jniLibs.srcDir "$buildDir/generated/jniLibs/tauri"
     sourceSets.main.java.srcDir "$buildDir/generated/source/tauri"
@@ -276,55 +237,7 @@ tasks.matching { it.name in ['mergeDebugAssets', 'mergeReleaseAssets']
         || it.name.toLowerCase().contains('lint') }
         .configureEach { dependsOn syncShowerServer }
 
-// sherpa-onnx wake word engine and model: downloaded once into the ignored root build/ cache and pinned by SHA-256.
-def sherpaVersion = '1.13.8'
-def sherpaCache = rootProject.file('build/downloads/sherpa-onnx')
-def sherpaAar = new File(sherpaCache, "sherpa-onnx-static-link-onnxruntime-${sherpaVersion}.aar")
-def kwsModelName = 'sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20'
-def kwsArchive = new File(sherpaCache, "${kwsModelName}.tar.bz2")
-def downloadPinned = { String url, File target, String sha256 ->
-    def digest = { File file ->
-        def md = java.security.MessageDigest.getInstance('SHA-256')
-        file.withInputStream { input -> byte[] buffer = new byte[1 << 16]; int n; while ((n = input.read(buffer)) > 0) md.update(buffer, 0, n) }
-        md.digest().encodeHex().toString()
-    }
-    if (target.isFile() && digest(target) == sha256) return
-    target.parentFile.mkdirs()
-    def partial = new File(target.path + '.part')
-    // Uses the systemProp.https.proxy* settings from the user-level gradle.properties.
-    new URL(url).withInputStream { input -> partial.withOutputStream { output -> output << input } }
-    def actual = digest(partial)
-    if (actual != sha256) { partial.delete(); throw new GradleException("Checksum mismatch for $url: $actual") }
-    target.delete(); if (!partial.renameTo(target)) throw new GradleException("Cannot move $partial")
-}
-def downloadSherpaOnnx = tasks.register('downloadSherpaOnnx') {
-    outputs.files sherpaAar, kwsArchive
-    doLast {
-        downloadPinned("https://github.com/k2-fsa/sherpa-onnx/releases/download/v${sherpaVersion}/${sherpaAar.name}",
-                sherpaAar, 'b22c3fc1b6a45666d28892bb2f7694beeb77a8362d7ebd77c1a5431ec9435471')
-        downloadPinned("https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/${kwsArchive.name}",
-                kwsArchive, '68447f4fbc67e70eee3a93961f36e81e98f47aef73ce7e7ca00885c6cd3616a6')
-    }
-}
-def syncKwsModel = tasks.register('syncKwsModel', Sync) {
-    dependsOn downloadSherpaOnnx
-    from({ tarTree(resources.bzip2(kwsArchive)) }) {
-        include "${kwsModelName}/encoder-epoch-13-avg-2-chunk-16-left-64.int8.onnx"
-        include "${kwsModelName}/decoder-epoch-13-avg-2-chunk-16-left-64.onnx"
-        include "${kwsModelName}/joiner-epoch-13-avg-2-chunk-16-left-64.int8.onnx"
-        include "${kwsModelName}/tokens.txt"
-        eachFile { it.path = "kws/${it.name}" }
-        includeEmptyDirs = false
-    }
-    into "$buildDir/generated/kwsAssets"
-}
-android.sourceSets.main.assets.srcDir "$buildDir/generated/kwsAssets"
-tasks.named('preBuild') { dependsOn syncKwsModel }
-tasks.matching { it.name.toLowerCase().contains('lint') }.configureEach { dependsOn syncKwsModel }
-
 dependencies {
-    implementation files(sherpaAar).builtBy(downloadSherpaOnnx)
-    implementation project(':capacitor-android')
     // Tauri Android SDK project (wry/tauri Kotlin, PluginManager) for TauriMainActivity.
     implementation project(':tauri-android')
     // Required by WryActivity's ProcessLifecycleOwner; version pinned by tauri-build.
@@ -338,19 +251,9 @@ dependencies {
     implementation 'com.fasterxml.jackson.core:jackson-databind:2.15.3'
     implementation 'androidx.appcompat:appcompat:1.7.1'
     implementation 'androidx.activity:activity:1.11.0'
-    implementation 'androidx.work:work-runtime:2.10.1'
-    implementation 'androidx.dynamicanimation:dynamicanimation:1.1.0'
-    implementation 'com.belerweb:pinyin4j:2.5.1'
     testImplementation 'junit:junit:4.13.2'
     testImplementation 'org.robolectric:robolectric:4.14.1'
     implementation 'dev.rikka.shizuku:api:13.1.5'
     implementation 'dev.rikka.shizuku:provider:13.1.5'
     implementation 'com.squareup.okhttp3:okhttp:3.14.9'
-    implementation 'org.jsoup:jsoup:1.21.2'
-    implementation 'io.noties.markwon:core:4.6.2'
-    implementation 'io.noties.markwon:ext-tables:4.6.2'
-    implementation 'io.noties.markwon:ext-strikethrough:4.6.2'
-    implementation 'io.noties.markwon:ext-tasklist:4.6.2'
-    implementation 'io.noties.markwon:inline-parser:4.6.2'
-    implementation 'io.noties.markwon:ext-latex:4.6.2'
 }

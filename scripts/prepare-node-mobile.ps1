@@ -1,5 +1,3 @@
-param([switch]$SkipRuntimeBuild)
-
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 $root = Split-Path $PSScriptRoot -Parent
@@ -16,6 +14,7 @@ $zip = [IO.Compression.ZipFile]::OpenRead($archive)
 try {
     $wanted = @{
         'bin/arm64-v8a/libnode.so' = 'app/src/main/jniLibs/arm64-v8a/libnode.so'
+        'bin/x86_64/libnode.so' = 'app/src/main/jniLibs/x86_64/libnode.so'
     }
     foreach ($entry in $zip.Entries) {
         $target = $wanted[$entry.FullName]
@@ -29,20 +28,3 @@ try {
         }
     }
 } finally { $zip.Dispose() }
-Push-Location (Join-Path $root 'pi-runtime')
-try {
-    $npmVersion = '11.6.2'
-    $npmIntegrity = 'sha512-7iKzNfy8lWYs3zq4oFPa8EXZz5xt9gQNKJZau3B1ErLBb6bF7sBJ00x09485DOvRT2l5Gerbl3VlZNT57MxJVA=='
-    $lockedNpm = node -p "JSON.stringify(require('./package-lock.json').packages['node_modules/npm']||{})" | ConvertFrom-Json
-    if ($lockedNpm.version -ne $npmVersion -or $lockedNpm.integrity -ne $npmIntegrity -or
-            $lockedNpm.resolved -ne "https://registry.npmjs.org/npm/-/npm-$npmVersion.tgz") {
-        throw 'Official npm package lock does not match the pinned payload'
-    }
-    npm ci
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    # CI can defer bundling/assets to the subsequent runtime tests or Gradle build.
-    if (-not $SkipRuntimeBuild) {
-        npm run build:android
-        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    }
-} finally { Pop-Location }

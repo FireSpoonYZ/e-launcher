@@ -6,7 +6,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.util.Log;
 
-/** M16 Host 定时任务闹钟接收器：与旧 ScheduledTaskReceiver 完全隔离。 */
+/** Host 定时任务闹钟接收器。 */
 public final class BotHostScheduleReceiver extends BroadcastReceiver {
     @Override public void onReceive(Context context, Intent intent) {
         // 只取已存在的 Schedules；不存在或无已绑定 Host 则不执行/不补发。

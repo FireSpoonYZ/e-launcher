@@ -36,7 +36,7 @@ jobs:
           cache: npm
           cache-dependency-path: |
             package-lock.json
-            pi-runtime/package-lock.json
+            host-core/package-lock.json
 
       - uses: actions/cache@v6
         with:
@@ -91,12 +91,9 @@ jobs:
       - name: Test web
         run: npm test
 
-      - name: Prepare Pi runtime
+      - name: Prepare Node Mobile
         shell: pwsh
-        run: ./scripts/prepare-pi-runtime.ps1 -SkipRuntimeBuild
-
-      - name: Test Pi runtime
-        run: npm --prefix pi-runtime test
+        run: ./scripts/prepare-node-mobile.ps1
 
       - name: Assemble APK
         run: ./gradlew --no-daemon --console=plain :app:testDebugUnitTest :app:lintDebug :shower-server:lintDebug :app:assembleDebug ${{ github.ref == 'refs/heads/main' && ':app:assembleRelease' || '' }}

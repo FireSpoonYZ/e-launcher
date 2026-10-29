@@ -12,6 +12,7 @@ import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
 import android.view.Gravity;
+import android.view.InputDevice;
 import android.view.MotionEvent;
 import android.view.Surface;
 import android.view.TextureView;
@@ -302,7 +303,7 @@ final class BotScreenOverlay implements TextureView.SurfaceTextureListener {
         if (action == MotionEvent.ACTION_DOWN && texture.getParent() != null) {
             texture.getParent().requestDisallowInterceptTouchEvent(true);
         }
-        MotionEvent mapped = ShowerDesktopView.mapTouch(event, texture.getWidth(), texture.getHeight(),
+        MotionEvent mapped = mapTouch(event, texture.getWidth(), texture.getHeight(),
                 displayWidth, displayHeight);
         if (lastTouch != null) lastTouch.recycle();
         lastTouch = MotionEvent.obtain(mapped);
@@ -314,6 +315,21 @@ final class BotScreenOverlay implements TextureView.SurfaceTextureListener {
             if (action == MotionEvent.ACTION_UP) texture.performClick();
         }
         return true;
+    }
+
+    private static MotionEvent mapTouch(MotionEvent event, int viewWidth, int viewHeight, int width, int height) {
+        int count = event.getPointerCount();
+        MotionEvent.PointerProperties[] properties = new MotionEvent.PointerProperties[count];
+        MotionEvent.PointerCoords[] coords = new MotionEvent.PointerCoords[count];
+        for (int i = 0; i < count; i++) {
+            properties[i] = new MotionEvent.PointerProperties(); event.getPointerProperties(i, properties[i]);
+            coords[i] = new MotionEvent.PointerCoords(); event.getPointerCoords(i, coords[i]);
+            coords[i].x = Math.max(0, Math.min(width - 1, coords[i].x * width / Math.max(1, viewWidth)));
+            coords[i].y = Math.max(0, Math.min(height - 1, coords[i].y * height / Math.max(1, viewHeight)));
+        }
+        return MotionEvent.obtain(event.getDownTime(), event.getEventTime(), event.getAction(), count,
+                properties, coords, event.getMetaState(), event.getButtonState(), 1, 1, 0,
+                event.getEdgeFlags(), InputDevice.SOURCE_TOUCHSCREEN, event.getFlags());
     }
 
     private void sendTouch(MotionEvent event) {

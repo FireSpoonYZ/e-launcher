@@ -214,17 +214,6 @@ export function openHost(options) {
       if (typeof input !== 'object' || input === null) throw invalidArgument('input must be an object');
       return setSoulText(root, bot.botId, input.expectedRevision, input.text);
     },
-    // M16 内部遗留迁移登记：只转发 store 三方法，不暴露于 HTTP/relay/plugin；
-    // 入参校验由 legacy-import.js 在可信调用前完成。
-    reserveLegacyImport(input) {
-      return store.reserveLegacyImport(input);
-    },
-    getLegacyImport(sourceKey) {
-      return store.getLegacyImport(sourceKey);
-    },
-    completeLegacyImport(sourceKey, requestId) {
-      return store.completeLegacyImport(sourceKey, requestId);
-    },
     close() {
       store.close();
     },

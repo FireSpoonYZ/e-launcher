@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 // host-core/build-android.js: product build entry for the Android Host runtime.
-// Bundles host-core/android-runtime.js (sibling lane entry) with the pi-runtime
-// esbuild dev dependency into app/build/generated/assets/botHost/bot-host/ and
+// Bundles host-core/android-runtime.js with the root Vite esbuild dependency into app/build/generated/assets/botHost/bot-host/ and
 // emits payload.json + third-party-licenses.txt for the APK.
 import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
@@ -16,7 +15,6 @@ const OUT_DIR = path.join(APP_BUILD, 'generated', 'assets', 'botHost', 'bot-host
 // esbuild build graph stays out of the APK assets: ignored build subdir only.
 const METAFILE_DIR = path.join(APP_BUILD, 'host-runtime');
 const TOOL_CACHE = path.join(APP_BUILD, 'host-native-tools');
-const PI_RUNTIME = path.join(ROOT, 'pi-runtime');
 // File-name prefixes considered license/notice texts (case-insensitive); files
 // only, so LICENSE-APACHE / LICENSE-MIT / COPYING variants are all captured.
 const LICENSE_PREFIXES = ['license', 'copying', 'notice'];
@@ -241,12 +239,12 @@ async function assertInstalledHostDependencies() {
 }
 
 async function main() {
-  const requirePi = createRequire(pathToFileURL(path.join(PI_RUNTIME, 'package.json')).href);
+  const requireRoot = createRequire(pathToFileURL(path.join(ROOT, 'package.json')).href);
   let esbuild;
   try {
-    esbuild = requirePi('esbuild');
+    esbuild = requireRoot('esbuild');
   } catch (err) {
-    throw new Error('esbuild not found in pi-runtime/node_modules; run installPiDependencies first: ' + err.message);
+    throw new Error('esbuild not found in root node_modules; run npm ci first: ' + err.message);
   }
   const entry = path.join(HERE, 'android-runtime.js');
   await access(entry); // sibling lane supplies this entry; missing is a hard error

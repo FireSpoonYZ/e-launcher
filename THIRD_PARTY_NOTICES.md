@@ -11,7 +11,7 @@ Earlier Launcher Probe versions incorporated modified source from **Ogesture**, 
 
 The standalone-assistant migration removes the derived `SwipeDetector.java` and `GestureService.java`, including the fixed navigation zones, accessibility overlays and touch replay. The former mappings were `gesture/SwipeDetector.kt` / `data/Models.kt` to `SwipeDetector.java`, and `service/EdgeOverlayService.kt` / `service/EdgeGestureAccessibilityService.kt` to `GestureService.java`. These are historical attributions, not a statement that the current APK includes that gesture implementation.
 
-The project-added `NavigationSession.java` and accessibility configuration are also removed. `LegacyNavigationRecovery` is project migration code: only a retained pending-restore marker permits writing and verifying the old stop value (`force_fsg_nav_bar=0`). It neither recreates navigation gestures nor enables accessibility services. The project license and historical attribution are retained; no license file is deleted by this migration.
+The project-added `NavigationSession.java` and accessibility configuration are also removed. `LegacySystemCleanup` is project migration code: only a retained pending-restore marker permits writing and verifying the old stop value (`force_fsg_nav_bar=0`). It neither recreates navigation gestures nor enables accessibility services. The project license and historical attribution are retained; no license file is deleted by this migration.
 
 ## Operit Shower
 
@@ -32,11 +32,9 @@ The required corresponding source is kept in this repository rather than represe
 | `tools/shower/app/src/main/java/com/ai/assistance/shower/` | `shower-server/src/main/` | Binder-only server with no Compose/video UI dependencies. Keeps Operit's virtual-display, capture, hidden-API workaround and display-scoped input implementation; enforces the host UID, forbids display 0, owns only one display, scales captures before PNG encoding, returns screenshot pipes, reports launch/input failures, sends swipe events at their actual timestamps, checks per-call Binder cancellation between gesture events, and exits only when no display is active. |
 | `showerclient/src/main/assets/shower-server.jar` | `shower-server/build.gradle`, `app/build.gradle` | The 1.08 MiB upstream prebuilt artifact is not copied. Gradle reproducibly builds the modified, source-present server APK and packages it under the expected `shower-server.jar` asset name. |
 
-`pi-runtime/shower.js` and the call-ID transport in `pi-runtime/android.js` are original host adapter code. Upstream's video renderer/surface UI, WebSocket/Python tools, Compose dependencies and coroutine client are not included. The task-detail preview is an original Java `TextureView` integration: the Binder contract now also accepts a viewer-owned `Surface` and display-scoped `MotionEvent` input. The server switches the existing virtual display to that local Surface and restores its original Surface on detach or viewer death; no upstream video UI or scrcpy code is bundled.
+The application uses the source-present Binder-only Shower server and a native `TextureView` overlay; no upstream video UI or scrcpy code is bundled.
 
 Network requests use [OkHttp 3.14.9](https://github.com/square/okhttp/tree/parent-3.14.9), Copyright 2019 Square, Inc., under the [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0).
-
-The pi.dev package catalog is parsed with [jsoup 1.21.2](https://jsoup.org/), Copyright Jonathan Hedley, under the [MIT License](https://jsoup.org/license).
 
 The selected upstream source files contain no individual copyright headers. Attribution for retained derived sources is kept here and at their Java file headers; historical removed-source mappings are documented above; the Free Software Foundation copyright in the license text refers to that document, not authorship of Ogesture's code. No upstream license notice has been removed.
 
@@ -55,58 +53,19 @@ placeholders are rejected. Unlisted dates use ordinary weekdays/weekends, while
 listed holiday and makeup-work dates override them. This is scheduling of all
 days off, not a wage-multiplier or statutory festival-day calculation.
 
-After verifying a new full annual notice, maintainers update the pinned snapshot
-with `node scripts/update-cn-holidays.mjs <commit> <year...> --verified` and ship an
-app update. The script checks format, dates, annual coverage, sources and conflicts;
-the explicit verification flag records the required human completeness check.
-The app additionally refreshes the current and next year in the background, at most
-once daily, from the same repository's GitHub HTTPS contents API. Valid annual data
-is atomically cached in private storage and takes precedence over the bundled year;
-the cache records the actual request URL, Git blob SHA (not a commit SHA), and fetch
-time. Empty placeholders and invalid responses never replace valid data. Opening or
-editing statutory schedules and statutory alarm delivery provide refresh opportunities.
-Alarm calculations never wait for HTTP; failed updates retain cached/bundled data,
-and unknown years remain explicitly downgraded to fixed weekdays/weekends.
+The Host reads the bundled verified snapshot and reports fallback for uncovered years.
 
-## Pi runtime
+## Bundled npm
 
-The Android Pi runtime bundles `@earendil-works/pi-coding-agent`, `pi-agent-core` and `pi-ai` at version **1.1.0**, together with their transitive dependencies. The Pi packages identify their license as **MIT** and their author as Mario Zechner; source is available at https://github.com/earendil-works/pi. Exact npm dependency versions and source locations are recorded in `pi-runtime/package-lock.json`. The build retains bundled legal comments and copies SDK resources from the pinned npm package. Generated SDK assets and the JavaScript bundle are reproduced by `pi-runtime/build.js`, not maintained as separate source copies. The runtime includes `@silvia-odwyer/photon-node` **0.3.4** (Rust/WASM image processing, **Apache-2.0**, https://github.com/silvia-odwyer/photon); its `photon_rs_bg.wasm` is packaged beside the runtime/resize worker and its license is copied to `assets/pi-sdk/PHOTON_LICENSE.md`. QuickJS WASM and the separate codemode worker are also packaged; exact dependency versions/licenses remain in the lockfile.
-
-The APK also includes the complete official **npm 11.6.2** distribution and its bundled dependencies, fetched from `https://registry.npmjs.org/npm/-/npm-11.6.2.tgz` with the exact SHA-512 integrity recorded in `pi-runtime/package-lock.json` and checked by `scripts/prepare-pi-runtime.ps1`. npm identifies its license as **Artistic License 2.0**; its `LICENSE` file and bundled dependency notices are retained inside the versioned npm payload. Source is available at https://github.com/npm/cli/tree/v11.6.2.
-
-## Bundled todo extension
-
-The app's [todo extension](pi-runtime/extensions/todo/index.js) is adapted from
-**@juicesharp/rpiv-todo 2.13.5**, Copyright (c) 2026 juicesharp, MIT License.
-Upstream: https://github.com/juicesharp/rpiv-mono/tree/main/packages/rpiv-todo.
-The original license is retained in [LICENSE](pi-runtime/extensions/todo/LICENSE)
-and copied into the APK as `assets/pi-sdk/RPIV_TODO_LICENSE.txt`.
-The fork retains the tool actions, task fields, transitions, dependency checks and
-`rpiv-todo-state` custom entries. It removes terminal-only UI/configuration and
-still replays this fork's older `e-launcher-todo` entries.
-It is bundled for e-launcher and is not published as a separate package.
-
-## Codex Horizon reference material
-
-The voice appearance reference in `app/src/main/res/raw/voice_horizon.glsl` and
-`voice_watercolor.webp` comes from the installed OpenAI Codex desktop distribution
-26.908.9136.0, assets `app-initial-bcc2ff475eb6.js` (Horizon material) and
-`watercolor-7f01d7071d0b.webp`. Attribution: OpenAI. The desktop distribution is not
-the Apache-licensed Codex CLI repository. No open-source license or redistribution
-grant for these desktop assets was established during the visual-reference work.
-The Android adapter replaces the WebGL uniform block with individual GLES uniforms
-and composites the material through this application's lowercase e mask.
+The APK includes the official npm 11.6.2 distribution, installed from the pinned
+`host-core/package-lock.json` and copied into the Host assets. npm uses the
+Artistic License 2.0; its license and bundled dependency notices accompany the
+distribution. Source: https://github.com/npm/cli/tree/v11.6.2.
 
 ## Distribution
 
 When conveying this APK, satisfy AGPLv3's corresponding-source requirements, including these modifications and the material needed to build them. A link to the unmodified upstream repository alone is not corresponding source for this APK. Preserve this notice and the complete license; consult `LICENSE` for the applicable source-delivery options and the network-interaction provisions if functionality later changes. This project makes no warranty of compatibility with a particular ROM.
 
-## Orca remote-terminal components
-
-Source: https://github.com/stablyai/orca, commit `de8bffe24045b396212f4f63de8960ec8380ea07`.
-MIT License, Copyright (c) 2026 Lovecast Inc. Adapted terminal input, key encoding, IME composition, gestures, Unicode width handling, shortcut mutations and native request tracking. Exact paths and changes: [ATTRIBUTION.md](web/src/RemoteTerminal/ATTRIBUTION.md) and [native adaptation](docs/remote-terminal-android.md). Full license: [LICENSE.orca](web/src/RemoteTerminal/LICENSE.orca).
-
-The extracted xterm.js Kitty keyboard encoder uses the pinned `@xterm/xterm@6.1.0-beta.303` source and retains its [MIT license](web/src/RemoteTerminal/xterm/LICENSE).
 ## acp-kernel
 
 The managed Billion Context Host plugin uses **acp-kernel 0.0.101**, by ranxianglei,
@@ -161,8 +120,7 @@ together with the transitive dependencies actually included
 in the bundle. Each included package's name, version and license text are emitted
 at build time into the shipped `bot-host/third-party-licenses.txt` by
 `host-core/build-android.js`; exact versions are pinned in
-`host-core/package-lock.json`. Building the bundle uses the esbuild dev dependency
-from `pi-runtime`; esbuild itself is not shipped. The host runtime is built from
+`host-core/package-lock.json`. Building the bundle uses the root Vite installation's esbuild; esbuild itself is not shipped. The host runtime is built from
 the repository's own `host-core` sources, not from a third-party binary kit.
 
 The published npm archives of `@earendil-works/chord`, `@earendil-works/pi-ai`

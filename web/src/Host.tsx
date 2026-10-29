@@ -610,7 +610,7 @@ export interface HostPageProps {
   active?: boolean;
   /** Optional remote client factory injected by Tauri mobile shell. */
   getOrCreateRemoteClient?(): { api: DesktopPanelApi; invalidate(): void; dispose(): void };
-  /** Optional callback to open system/legacy settings page when requested. */
+  /** Optional callback to open Android system settings. */
   onOpenSystemSettings?(): void;
 }
 
@@ -819,9 +819,7 @@ export function HostPage({
           await syncLocalBots(snap);
           return snap;
         }
-        if (snap.phase === 'stopped' || snap.phase === 'failed') {
-          await BotHost.start();
-        }
+        if (snap.phase !== 'starting') return snap;
         const deadline = Date.now() + 25000;
         while (Date.now() < deadline) {
           await new Promise(r => setTimeout(r, 600));
@@ -1700,7 +1698,7 @@ export function HostPage({
       const trimmed = draftSnapshot.trim();
       if (!trimmed) return;
       if (trimmed === '/clear' || trimmed === '/new') { clearCurrentBotHistory(); return; }
-      if (centerConn.remoteClient && !centerConn.ready || centerConn.status?.state === 'disconnected') {
+      if (!centerConn.ready || centerConn.status?.state === 'disconnected') {
         throw new Error(t('中心离线，草稿已保留。', 'Center offline; draft retained.'));
       }
       const scopeKey = scopeForBot(bot);
@@ -1737,7 +1735,7 @@ ${newer}` : draftSnapshot;
         if (readChatDraft(scopeKey) === draftSnapshot) writeChatDraft(scopeKey, '');
         const snap = await ensureLocalHostRunning();
         const center = centerConnectionRef.current;
-        if (!snap || snap.phase !== 'running' || !snap.deviceId || (center.remoteClient && !center.ready) || center.status?.state === 'disconnected' || chatStorageKey(center.saved?.url || center.url || '', snap.deviceId, bot.botId) !== scopeKey) {
+        if (!snap || snap.phase !== 'running' || !snap.deviceId || !center.ready || center.status?.state === 'disconnected' || chatStorageKey(center.saved?.url || center.url || '', snap.deviceId, bot.botId) !== scopeKey) {
           restore();
           if (currentChatScope.current === scopeKey) throw new Error(t('目标离线，草稿已保留。', 'Target offline; draft retained.'));
           return;
@@ -5786,7 +5784,7 @@ function HubSettingsView({
                     className="grok-inline-input"
                     value={centerConn.hostToken}
                     onChange={e => centerConn.setHostToken(e.target.value)}
-                    placeholder={t('选填，留空复用客户端令牌', 'Optional, defaults to client token')}
+                    placeholder={t('选填，留空不更改本机节点连接', 'Optional; leave blank to keep local Host settings')}
                   />
                 </label>
 
@@ -5823,7 +5821,7 @@ function HubSettingsView({
                     disabled={centerConn.busy}
                     onClick={() => void centerConn.stopLocalHost()}
                   >
-                    {t('停止本机节点', 'Stop Local Host')}
+                    {t('退出客户端', 'Exit Client')}
                   </button>
                   {centerConn.matchesSaved && !centerConn.token.trim() && (
                     <button
@@ -6158,7 +6156,7 @@ function HubSettingsView({
             {onOpenSystemSettings && (
               <button type="button" className="grok-card-row" onClick={onOpenSystemSettings}>
                 <Settings size={20} className="grok-row-icon" />
-                <span className="grok-row-label">{t('系统权限与旧版归档', 'System & Legacy Archive')}</span>
+                <span className="grok-row-label">{t('系统权限与设置', 'System permissions & settings')}</span>
                 <span className="grok-row-value">{t('Shizuku、唤醒词、外观', 'Permissions & Theme')}</span>
                 <ChevronRight size={18} className="grok-row-chevron" />
               </button>

@@ -46,7 +46,6 @@ const BROKER_ENTRY = path.join(HERE, 'desktop-client-cli.js');
 const BROKER_OUTFILE = path.join(DESKTOP_BUILD, 'desktop-client.mjs');
 const NOTICES_OUTFILE = path.join(DESKTOP_BUILD, 'THIRD_PARTY_NOTICES.txt');
 const CARGO_TOML = path.join(DESKTOP_DIR, 'src-tauri', 'Cargo.toml');
-const PI_RUNTIME = path.join(ROOT, 'pi-runtime');
 
 const NODE_VERSION = '22.19.0';
 const TAURI_API_VERSION = '2.12.4';
@@ -537,7 +536,6 @@ function loadEsbuild() {
   const candidates = [
     path.join(HERE, 'package.json'),
     path.join(ROOT, 'package.json'),
-    path.join(PI_RUNTIME, 'package.json'),
   ];
   for (const candidate of candidates) {
     if (!isRegularFile(candidate)) continue;

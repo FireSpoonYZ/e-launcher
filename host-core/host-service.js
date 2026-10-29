@@ -300,9 +300,5 @@ export async function openHostService(options) {
         if (errors.length) throw new AggregateError(errors, 'host service close failed');
       })();
     },
-    previewLegacyImport: (input) => control.previewLegacyImport(input),
-    getLegacyImportStatus: (input) => control.getLegacyImportStatus(input),
-    importLegacySnapshot: (input) => control.importLegacySnapshot(input),
-    readLegacyDraft: (input) => control.readLegacyDraft(input),
   };
 }

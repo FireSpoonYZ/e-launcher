@@ -43,8 +43,8 @@ internal class AckArgs {
 
 /**
  * M18 Tauri 界面的 Host 桥插件（运行在 :tauri_ui 进程）。
- * 只转发既有 Host 数据操作；UI 本地动作限于 start/stop/openLegacy/reconnect/hide，
- * 不自动启动 Host/模型，不重放 mutation，事件按单 ACK 窗口有界投递。
+ * 只转发既有 Host 数据操作；UI 本地动作限于 start/stop/openSystemSettings/reconnect/hide，
+ * 界面启动时由客户端前台生命周期管理 Host；不重放 mutation，事件按单 ACK 窗口有界投递。
  *
  * 四个 JS 命令与内部 eventsFailed 一律 resolve NativeReply：{ok:true,result} 或
  * {ok:false,error:{code,message,outcome}}，让 Rust 侧还原精确的 native 结果/outcome
@@ -200,7 +200,7 @@ class BotHostTauriPlugin(private val hostActivity: Activity) : Plugin(hostActivi
             "start" -> startHost(invoke)
             "stop" -> stopHost(invoke)
             "hide" -> hide(invoke)
-            "openLegacy" -> openLegacy(invoke, params)
+            "openSystemSettings" -> openSystemSettings(invoke)
             "openCenter" -> openCenter(invoke, params)
             "reconnect" -> reconnect(invoke)
             "clientLaunchTarget" -> {
@@ -305,23 +305,9 @@ class BotHostTauriPlugin(private val hostActivity: Activity) : Plugin(hostActivi
         }
     }
 
-    private fun openLegacy(invoke: Invoke, params: JSONObject) {
-        val action = params.optString("action")
-        if (action != "chat" && action != "settings" && action != "host") {
-            replyInvalid(invoke, "INVALID_ARGS", "action 无效")
-            return
-        }
-        val intent = Intent(hostActivity, MainActivity::class.java)
-            .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
-            .putExtra(MainActivity.EXTRA_LEGACY_UI, true)
-        when (action) {
-            "host" -> intent.putExtra(MainActivity.EXTRA_OPEN_HOST, true)
-            "settings" -> intent.putExtra(MainActivity.EXTRA_OPEN_SETTINGS, true)
-            // chat 恢复旧界面自己的活动会话。
-            else -> Unit
-        }
+    private fun openSystemSettings(invoke: Invoke) {
         try {
-            hostActivity.startActivity(intent)
+            hostActivity.startActivity(Intent(android.provider.Settings.ACTION_SETTINGS))
             replyOk(invoke, JSObject())
         } catch (t: Throwable) {
             replyFailure(invoke, t)
@@ -832,7 +818,6 @@ class BotHostTauriPlugin(private val hostActivity: Activity) : Plugin(hostActivi
         /** 固定白名单：只有既有 Host 数据操作可转发；eventsFailed 是内部流控 helper，不在其中。 */
         val SERVICE_METHODS = setOf(
             "snapshot", "status", "centerSettings", "saveCenterSettings", "settingsGet", "settingsSet", "saveCredentials", "call",
-            "legacyList", "legacyPreview", "legacyStatus", "legacyImport", "legacyDraft", "legacyDiscard",
             "observe", "cancelObservation", "voiceSettings", "saveVoiceSettings",
             "startVoice", "finishVoice", "cancelVoice", "uiSettings", "pause",
             // M20 客户端（远端 Host）固定入口；内层 broker 操作另有 16 项白名单。

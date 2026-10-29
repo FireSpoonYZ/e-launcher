@@ -1135,8 +1135,7 @@ final class BotHostSchedules {
         if (clockNext != Long.MAX_VALUE) {
             try {
                 PendingIntent show = PendingIntent.getActivity(context, REQ_SHOW,
-                        new Intent(context, MainActivity.class)
-                                .putExtra(MainActivity.EXTRA_OPEN_HOST, true)
+                        new Intent(context, TauriMainActivity.class)
                                 .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP),
                         PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
                 alarms.setAlarmClock(new AlarmManager.AlarmClockInfo(clockNext, show), clockOp);
@@ -1555,14 +1554,7 @@ final class BotHostSchedules {
     }
 
     private ScheduleCalendar calendar() {
-        if (calendarCached != null) return calendarCached;
-        try (java.io.InputStream input = context.getAssets().open("cn-holidays.json")) {
-            calendarCached = ScheduleCalendar.parse(new JSONObject(
-                    new String(input.readAllBytes(), StandardCharsets.UTF_8)));
-        } catch (Exception failure) {
-            // 仅读取签名 APK assets；失败用 EMPTY，describe 输出明确 fallback。
-            calendarCached = ScheduleCalendar.EMPTY;
-        }
+        if (calendarCached == null) calendarCached = ScheduleCalendar.load(context);
         return calendarCached;
     }
 

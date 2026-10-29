@@ -15,19 +15,25 @@ import android.net.Network;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
+import android.util.Log;
 
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Iterator;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.BooleanSupplier;
+import java.util.function.Consumer;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
-/** 用户连接中心后的独立客户端前台生命周期，不启动本机 Host。 */
+/** 客户端前台生命周期：持有本机 Host 退出监听，中心连接独立恢复。 */
 public final class BotClientService extends Service {
+    static final String ACTION_EXIT = "com.example.launcherprobe.action.CLIENT_EXIT";
+    static final String ACTION_CLOSE_UI = "com.example.launcherprobe.action.CLIENT_CLOSE_UI";
     private static final String CHANNEL = "bot-client-connection";
     private static final int NOTIFICATION_ID = 3160;
     private static volatile BotClientService activeService;
@@ -50,6 +56,9 @@ public final class BotClientService extends Service {
     private ConnectivityManager connectivity;
     private volatile boolean alive;
     private final AtomicInteger lifecycle = new AtomicInteger();
+    private CompletableFuture<Void> exitCleanup;
+    private volatile Consumer<Long> hostExitListener;
+    private Runnable hostRetry;
     private boolean polling;
     private boolean scanHasPending;
     private boolean previousPending;
@@ -57,13 +66,22 @@ public final class BotClientService extends Service {
     private final ConnectivityManager.NetworkCallback network = new ConnectivityManager.NetworkCallback() {
         @Override public void onAvailable(Network network) {
             if (!alive) return;
+            int epoch = lifecycle.get();
+            Consumer<Long> listener = hostExitListener;
             BotHostClient.get(BotClientService.this).checkConnection(true);
+            main.post(() -> {
+                if (lifecycle.get() == epoch) retryHostOnConnection(listener);
+            });
         }
     };
     private final Runnable check = new Runnable() {
         @Override public void run() {
             if (!alive) return;
             BotHostClient.get(BotClientService.this).checkConnection();
+            if (!getSharedPreferences("bot_client_connection", MODE_PRIVATE).getBoolean("enabled", true)) {
+                main.postDelayed(this, 15000);
+                return;
+            }
             if (!polling) {
                 polling = true;
                 previousPending = scanHasPending;
@@ -73,19 +91,150 @@ public final class BotClientService extends Service {
         }
     };
 
-    static void start(Context context) {
-        try { context.startForegroundService(new Intent(context, BotClientService.class)); }
-        catch (RuntimeException ignored) { /* 系统禁止后台启动时，等待用户再次打开应用。 */ }
+    static void exit(Context context) {
+        context.startService(new Intent(context, BotClientService.class).setAction(ACTION_EXIT));
     }
 
-    static void stop(Context context) {
+    static boolean isActive() {
         BotClientService service = activeService;
-        if (service != null) {
-            service.alive = false;
-            service.lifecycle.incrementAndGet();
-            service.main.removeCallbacks(service.check);
+        return service != null && service.alive;
+    }
+
+    static Context activeContext() { return activeService; }
+
+    static BooleanSupplier ownerOpen() {
+        BotClientService service = activeService;
+        int epoch = service == null ? -1 : service.lifecycle.get();
+        return () -> service != null && activeService == service && service.alive && service.lifecycle.get() == epoch;
+    }
+
+    static Consumer<Long> hostListener() {
+        BotClientService service = activeService;
+        return service != null && service.alive ? service.hostExitListener : null;
+    }
+
+    static boolean ownsHostListener(Consumer<Long> listener) {
+        return listener != null && hostListener() == listener;
+    }
+
+    static void hostServiceFailed() {
+        BotClientService service = activeService;
+        if (service == null) return;
+        int epoch = service.lifecycle.get();
+        service.main.post(() -> {
+            if (activeService == service && service.alive && service.lifecycle.get() == epoch)
+                service.updateNotification("本机 Host 前台服务启动失败");
+        });
+    }
+
+    private void attachHostListener() {
+        Consumer<Long> listener = new Consumer<Long>() {
+            @Override public void accept(Long generation) {
+                main.post(() -> {
+                    if (!ownsHostListener(this) || !BotHostManager.get(BotClientService.this).isCurrentExit(generation)) return;
+                    Log.i("BotClientService", "Host child exited generation=" + generation + "; retry scheduled");
+                    scheduleHostRetry(this, null, generation, true);
+                });
+            }
+        };
+        hostExitListener = listener;
+        BotHostManager.get(this).setExitListener(listener);
+    }
+
+    private void detachHostListener() {
+        Consumer<Long> listener = hostExitListener;
+        hostExitListener = null;
+        if (listener != null) BotHostManager.get(this).clearExitListener(listener);
+        if (hostRetry != null) main.removeCallbacks(hostRetry);
+        hostRetry = null;
+        BotHostService.cancelPendingStart();
+    }
+
+    static void retryHost(Consumer<Long> listener, Object attempt) {
+        BotClientService service = activeService;
+        if (service != null) service.scheduleHostRetry(listener, attempt, null, true);
+    }
+
+    static void centerReady() {
+        BotClientService service = activeService;
+        if (service == null) return;
+        int epoch = service.lifecycle.get();
+        Consumer<Long> listener = service.hostExitListener;
+        service.main.post(() -> {
+            if (service.lifecycle.get() == epoch) service.retryHostOnConnection(listener);
+        });
+    }
+
+    private void retryHostOnConnection(Consumer<Long> listener) {
+        if (!ownsHostListener(listener)) return;
+        Long generation = BotHostManager.get(this).configuredFailureGeneration();
+        if (generation != null) scheduleHostRetry(listener, null, generation, false);
+        else BotHostService.retryWhenStartFails(listener);
+    }
+
+    static void retryAfterConnection(Consumer<Long> listener) {
+        BotClientService service = activeService;
+        if (service != null) service.retryHostOnConnection(listener);
+    }
+
+    private void scheduleHostRetry(Consumer<Long> listener, Object attempt, Long failedGeneration, boolean recovering) {
+        if (!ownsHostListener(listener)) return;
+        if (!recovering && hostRetry != null) return;
+        if (hostRetry != null) main.removeCallbacks(hostRetry);
+        hostRetry = () -> {
+            hostRetry = null;
+            if (!ownsHostListener(listener)) return;
+            if (attempt != null && !BotHostService.ownsAttempt(attempt)) return;
+            if (failedGeneration != null && !BotHostManager.get(this).isCurrentFailure(failedGeneration)) return;
+            Log.i("BotClientService", recovering ? "Retrying Host after child exit" : "Retrying Host after connection recovery");
+            BotHostService.recover(listener, recovering);
+        };
+        main.postDelayed(hostRetry, 5000);
+    }
+
+    static CompletableFuture<JSONObject> saveHostCenterSettings(Context context, JSONObject input) {
+        CompletableFuture<JSONObject> result = new CompletableFuture<>();
+        BotClientService service = activeService;
+        if (service == null) {
+            try { result.complete(BotHostManager.get(context).saveCenterSettings(input)); }
+            catch (Exception failure) { result.completeExceptionally(failure); }
+            return result;
         }
-        context.stopService(new Intent(context, BotClientService.class));
+        int epoch = service.lifecycle.get();
+        service.main.post(() -> service.saveHostCenterSettings(input, result, epoch));
+        return result;
+    }
+
+    private void saveHostCenterSettings(JSONObject input, CompletableFuture<JSONObject> result, int epoch) {
+        if (!alive || lifecycle.get() != epoch || activeService != this || hostExitListener == null) {
+            result.completeExceptionally(new IllegalStateException("客户端已关闭或配置正在更新"));
+            return;
+        }
+        BotHostManager manager = BotHostManager.get(this);
+        String phase = manager.snapshot().optString("phase");
+        boolean wasRunning = "running".equals(phase) || "starting".equals(phase);
+        detachHostListener();
+        manager.stop().whenComplete((ignored, stopError) -> main.post(() -> {
+            if (!alive || lifecycle.get() != epoch || activeService != this) {
+                result.completeExceptionally(new IllegalStateException("客户端已关闭"));
+                return;
+            }
+            if (stopError != null) {
+                attachHostListener();
+                result.completeExceptionally(stopError);
+                return;
+            }
+            try {
+                JSONObject saved = manager.saveCenterSettings(input);
+                attachHostListener();
+                BotHostService.startForClient(this);
+                result.complete(saved);
+            } catch (Exception failure) {
+                attachHostListener();
+                if (wasRunning && manager.centerSettingsConfirmed()) BotHostService.startForClient(this);
+                result.completeExceptionally(failure);
+            }
+        }));
     }
 
     static void requestPoll() {
@@ -101,7 +250,6 @@ public final class BotClientService extends Service {
 
     @Override public void onCreate() {
         super.onCreate();
-        alive = true;
         activeService = this;
         NotificationManager notifications = getSystemService(NotificationManager.class);
         NotificationChannel connectionChannel = new NotificationChannel(CHANNEL, "中心连接", NotificationManager.IMPORTANCE_LOW);
@@ -109,23 +257,22 @@ public final class BotClientService extends Service {
         connectionChannel.enableVibration(false);
         notifications.createNotificationChannel(connectionChannel);
         notifications.createNotificationChannel(new NotificationChannel("bot-client-tasks", "任务完成", NotificationManager.IMPORTANCE_DEFAULT));
-        PendingIntent open = PendingIntent.getActivity(this, 0, new Intent(this, TauriMainActivity.class),
-                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
-        startForeground(NOTIFICATION_ID, new Notification.Builder(this, CHANNEL)
-                .setSmallIcon(android.R.drawable.stat_notify_sync)
-                .setContentTitle("中心连接")
-                .setContentText("后台保持连接")
-                .setContentIntent(open).setOngoing(true).setOnlyAlertOnce(true)
-                .setCategory(Notification.CATEGORY_SERVICE).build());
+        startForeground(NOTIFICATION_ID, notification("客户端运行中"));
+        Thread cleanup = new Thread(() -> LegacySystemCleanup.run(this), "obsolete-system-cleanup");
+        cleanup.setDaemon(true);
+        cleanup.start();
         connectivity = getSystemService(ConnectivityManager.class);
         connectivity.registerDefaultNetworkCallback(network);
-        main.post(check);
     }
 
     @Override public int onStartCommand(Intent intent, int flags, int startId) {
-        if (!getSharedPreferences("bot_client_connection", MODE_PRIVATE).getBoolean("enabled", true)) {
-            alive = false;
-            stopSelf(startId);
+        if (intent != null && ACTION_EXIT.equals(intent.getAction())) {
+            if (exitCleanup == null || exitCleanup.isDone()) beginExit();
+            else sendBroadcast(new Intent(ACTION_CLOSE_UI).setPackage(getPackageName()));
+            return START_NOT_STICKY;
+        }
+        if (exitCleanup != null) {
+            sendBroadcast(new Intent(ACTION_CLOSE_UI).setPackage(getPackageName()));
             return START_NOT_STICKY;
         }
         if (!alive) {
@@ -133,15 +280,67 @@ public final class BotClientService extends Service {
             scanHasPending = false;
             rescanRequested = false;
             alive = true;
+            lifecycle.incrementAndGet();
+            Log.i("BotClientService", "Client lifecycle started");
             activeService = this;
+            attachHostListener();
             main.post(check);
         }
+        if (hostExitListener != null) BotHostService.startForClient(this);
         return START_STICKY;
+    }
+
+    private void beginExit() {
+        alive = false;
+        int epoch = lifecycle.incrementAndGet();
+        Log.i("BotClientService", "Client exit requested");
+        detachHostListener();
+        main.removeCallbacks(check);
+        CompletableFuture<Void> clientClosed = BotHostClient.get(this).shutdown();
+        BotHostUiBridgeService.closeClientSessions();
+        sendBroadcast(new Intent(ACTION_CLOSE_UI).setPackage(getPackageName()));
+        updateNotification("正在退出客户端");
+        CompletableFuture<Void> hostClosed = BotHostManager.get(this).stop();
+        CompletableFuture<Void> cleanup = CompletableFuture.allOf(hostClosed, clientClosed);
+        exitCleanup = cleanup;
+        cleanup.whenComplete((ignored, error) -> main.post(() -> {
+            if (activeService != this || exitCleanup != cleanup || alive || lifecycle.get() != epoch) return;
+            if (error != null) {
+                Log.e("BotClientService", "Client exit cleanup failed", error);
+                updateNotification("退出失败，请再次点击退出客户端");
+                return;
+            }
+            Log.i("BotClientService", "Client exit complete");
+            stopService(new Intent(this, BotHostService.class));
+            stopForeground(STOP_FOREGROUND_REMOVE);
+            exitCleanup = null;
+            stopSelf();
+        }));
+    }
+
+    private Notification notification(String text) {
+        PendingIntent open = PendingIntent.getActivity(this, 0, new Intent(this, TauriMainActivity.class),
+                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+        PendingIntent exit = PendingIntent.getService(this, 0, new Intent(this, BotClientService.class).setAction(ACTION_EXIT),
+                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+        return new Notification.Builder(this, CHANNEL)
+                .setSmallIcon(android.R.drawable.stat_notify_sync)
+                .setContentTitle("AI 客户端")
+                .setContentText(text)
+                .setContentIntent(open).setOngoing(true).setOnlyAlertOnce(true)
+                .addAction(new Notification.Action.Builder(android.R.drawable.ic_menu_close_clear_cancel,
+                        "退出客户端", exit).build())
+                .setCategory(Notification.CATEGORY_SERVICE).build();
+    }
+
+    private void updateNotification(String text) {
+        getSystemService(NotificationManager.class).notify(NOTIFICATION_ID, notification(text));
     }
 
     @Override public void onDestroy() {
         alive = false;
         lifecycle.incrementAndGet();
+        detachHostListener();
         if (activeService == this) activeService = null;
         main.removeCallbacks(check);
         connectivity.unregisterNetworkCallback(network);
@@ -152,7 +351,7 @@ public final class BotClientService extends Service {
         if (!alive || lifecycle.get() != epoch) return;
         JSONObject options = BotHostUiProtocol.object("limit", 200);
         try { if (cursor != null) options.put("cursor", cursor); } catch (Exception ignored) { }
-        BotHostClient.get(this).request("background", () -> alive, "pending_list",
+        BotHostClient.get(this).request("background", () -> alive && lifecycle.get() == epoch, "pending_list",
                 BotHostUiProtocol.object("options", options)).whenComplete((envelope, error) -> main.post(() -> {
             if (!alive || lifecycle.get() != epoch) return;
             JSONObject page = envelope == null ? null : envelope.optJSONObject("value");
@@ -199,7 +398,7 @@ public final class BotClientService extends Service {
         scanHasPending = true;
         JSONObject call = BotHostUiProtocol.object("targetDeviceId", deviceId, "method", "getSubmission",
                 "params", BotHostUiProtocol.object("botId", botId, "requestId", requestId));
-        BotHostClient.get(this).request("background", () -> alive, "call", call).whenComplete((envelope, error) -> main.post(() -> {
+        BotHostClient.get(this).request("background", () -> alive && lifecycle.get() == epoch, "call", call).whenComplete((envelope, error) -> main.post(() -> {
             if (!alive || lifecycle.get() != epoch) return;
             JSONObject submission = envelope == null ? null : envelope.optJSONObject("value");
             String result = submission == null ? "" : submission.optString("status");

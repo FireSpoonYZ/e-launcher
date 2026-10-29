@@ -16,7 +16,6 @@ import { openHostService } from './host-service.js';
 import { openHost } from './host.js';
 import { openHostSettings } from './host-settings.js';
 import { openDesktopClient } from './desktop-client.js';
-import { previewLegacyImport, getLegacyImportStatus, readLegacyDraft } from './legacy-import.js';
 import {
   BRIDGE_MAX_FRAME_BYTES,
   BRIDGE_MAX_CONTROL_BYTES,
@@ -237,7 +236,7 @@ export function createAndroidBridge(options = {}) {
   let terminated = false;
   let service = null;
   let settingsStore = null;
-  let settingsHost = null; // offline settings-mode registry handle for legacy preview/status/draft
+  let settingsHost = null; // offline settings-mode host identity
   let broker = null; // client-mode desktop broker (never opens a Host/Runtime/model)
   let deviceId = null;
   let controlUrl = null;
@@ -1040,58 +1039,6 @@ export function createAndroidBridge(options = {}) {
     rec.op.catch(() => {});
   }
 
-  // Private legacy migration commands run under the same bounded request
-  // tracking as calls so shutdown joins them and cancel can abort their
-  // controller. Offline import is refused; preview/status/draft use the
-  // settings-mode registry handle with pure core functions (no Runtime/model).
-  function offlineLegacyImportError() {
-    return errorWithOutcome(messageError('NOT_CONNECTED', 'legacy import requires a running host'), 'not-sent');
-  }
-
-  const legacyHandlers = {
-    preview: (input) => {
-      if (mode === 'host' && service) return service.previewLegacyImport(input);
-      if (mode === 'settings' && settingsHost) return previewLegacyImport(settingsHost, input);
-      throw messageError('NOT_CONNECTED', 'host is not ready');
-    },
-    status: (input) => {
-      if (mode === 'host' && service) return service.getLegacyImportStatus(input);
-      if (mode === 'settings' && settingsHost) return getLegacyImportStatus(settingsHost, input);
-      throw messageError('NOT_CONNECTED', 'host is not ready');
-    },
-    import: (input) => {
-      if (mode === 'host' && service) return service.importLegacySnapshot(input);
-      throw offlineLegacyImportError();
-    },
-    draft: (input) => {
-      if (mode === 'host' && service) return service.readLegacyDraft(input);
-      if (mode === 'settings' && settingsHost) return readLegacyDraft(settingsHost, input);
-      throw messageError('NOT_CONNECTED', 'host is not ready');
-    },
-  };
-
-  function runLegacy(cmd, handler) {
-    assertFreshId(cmd.id);
-    if (calls.size >= BRIDGE_MAX_CONTROL_CALLS) {
-      void busyError(cmd.id);
-      return;
-    }
-    const controller = new AbortController();
-    const rec = { controller, op: null };
-    calls.set(cmd.id, rec);
-    rec.op = (async () => {
-      try {
-        const result = await handler(cmd.input);
-        await sendResultChecked(cmd.id, result);
-      } catch (err) {
-        await sendError(cmd.id, err);
-      } finally {
-        calls.delete(cmd.id);
-      }
-    })();
-    rec.op.catch(() => {});
-  }
-
   function runShutdown(cmd) {
     assertFreshId(cmd.id);
     const rec = { controller: new AbortController(), op: null };
@@ -1136,18 +1083,6 @@ export function createAndroidBridge(options = {}) {
         break;
       case 'settings_set':
         runSettingsSet(cmd);
-        break;
-      case 'legacy_preview':
-        runLegacy(cmd, legacyHandlers.preview);
-        break;
-      case 'legacy_status':
-        runLegacy(cmd, legacyHandlers.status);
-        break;
-      case 'legacy_import':
-        runLegacy(cmd, legacyHandlers.import);
-        break;
-      case 'legacy_draft':
-        runLegacy(cmd, legacyHandlers.draft);
         break;
       case 'shutdown':
         await runShutdown(cmd);
@@ -1279,8 +1214,7 @@ export function createAndroidBridge(options = {}) {
       phase = 'ready';
       return;
     }
-    // settings mode: offline settings store + registry handle only; never opens
-    // Runtime/FGS/model. The registry handle serves legacy preview/status/draft.
+    // settings mode: offline settings store and host identity only; no Runtime/FGS/model.
     try {
       settingsHost = openHost({ dataRoot: init.dataRoot });
       deviceId = settingsHost.deviceId;

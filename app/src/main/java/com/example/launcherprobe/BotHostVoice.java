@@ -14,7 +14,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * 新 Host 专属语音门面：显式用户听写和朗读，与旧 VoiceManager 完全隔离。
+ * Host 语音门面：显式用户听写和朗读。
  * 所有公开入口 marshal 到主线程；唯一共享状态是当前捕获。speak 只保证已交给 SpeechOutput，不保证播放完成。
  */
 final class BotHostVoice {

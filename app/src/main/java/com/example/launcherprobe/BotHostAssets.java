@@ -101,6 +101,52 @@ final class BotHostAssets {
         return new BotHostAssets(root, state, home, bin, workspace, entry);
     }
 
+    /** Install the bundled npm distribution without touching the user's Node home. */
+    static synchronized void prepareNpm(Context context, File home) throws IOException {
+        String version = "11.6.2";
+        File root = new File(home, "npm"), target = new File(root, version);
+        if (!new File(target, "payload-complete.txt").isFile() || !new File(target, "bin/npm-cli.js").isFile()) {
+            File temporary = new File(root, "." + version + "-installing");
+            deleteTree(temporary);
+            try {
+                copyAssets(context, "npm/" + version, temporary);
+                if (!new File(temporary, "payload-complete.txt").isFile() || !new File(temporary, "bin/npm-cli.js").isFile())
+                    throw new IOException("内置 npm 资源不完整");
+                deleteTree(target);
+                if (!temporary.renameTo(target)) throw new IOException("无法启用内置 npm");
+            } catch (IOException failure) {
+                deleteTree(temporary);
+                throw failure;
+            }
+        }
+        File bin = new File(home, "bin");
+        if (!bin.isDirectory() && !bin.mkdirs()) throw new IOException("无法创建 Node 命令目录");
+        File launcher = new File(context.getApplicationInfo().nativeLibraryDir, "libnode_launcher.so");
+        if (!launcher.isFile()) throw new IOException("内置 Node 启动器缺失");
+        File node = new File(bin, "node");
+        if (Files.exists(node.toPath(), LinkOption.NOFOLLOW_LINKS)
+                && !node.getCanonicalFile().equals(launcher.getCanonicalFile())) Files.delete(node.toPath());
+        try {
+            if (!node.exists()) android.system.Os.symlink(launcher.getAbsolutePath(), node.getAbsolutePath());
+        } catch (android.system.ErrnoException failure) {
+            throw new IOException("无法修复 Node 链接", failure);
+        }
+    }
+
+    private static void copyAssets(Context context, String source, File target) throws IOException {
+        String[] entries = context.getAssets().list(source);
+        if (entries != null && entries.length > 0) {
+            if (!target.isDirectory() && !target.mkdirs()) throw new IOException("无法创建 npm 资源目录");
+            for (String entry : entries) copyAssets(context, source + "/" + entry, new File(target, entry));
+        } else {
+            try (InputStream input = context.getAssets().open(source);
+                 FileOutputStream output = new FileOutputStream(target)) {
+                byte[] buffer = new byte[16_384];
+                for (int count; (count = input.read(buffer)) >= 0;) output.write(buffer, 0, count);
+            }
+        }
+    }
+
     private static JSONObject readManifest(Context context) throws IOException {
         String text;
         try (InputStream in = context.getAssets().open(MANIFEST_ASSET)) {

@@ -8,7 +8,7 @@ import { CenterGate } from '../../../web/src/native/CenterGate';
 import { ErrorNotice, LanguageOverride, errorText } from '../../../web/src/ui';
 import {
   mobileHide,
-  mobileOpenLegacy,
+  mobileLocalRequest,
   mobileUiSettings,
   mobileClientRequest,
   mobileReconnect,
@@ -158,13 +158,13 @@ function MobileShell() {
     <LanguageOverride.Provider value={ui.language}>
       <div className="mobile-shell">
         <div className="mobile-body">
-          <CenterGate remoteClient onDisconnected={centerDisconnected} onReady={centerReady} recoveryEpoch={connectionEpoch + adoptEpoch}><HostPage
+          <CenterGate onDisconnected={centerDisconnected} onReady={centerReady} recoveryEpoch={connectionEpoch + adoptEpoch}><HostPage
             onBack={() => void mobileHide()}
             persistentPending
             connectionEpoch={connectionEpoch}
             active
             getOrCreateRemoteClient={getOrCreateRemoteClient}
-            onOpenSystemSettings={() => void mobileOpenLegacy('settings')}
+            onOpenSystemSettings={() => void mobileLocalRequest('openSystemSettings').catch(error => setNotice(errorText(error)))}
           /></CenterGate>
         </div>
         <ErrorNotice error={notice} />
