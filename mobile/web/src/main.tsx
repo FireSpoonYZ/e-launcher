@@ -4,7 +4,7 @@ import { createRoot } from 'react-dom/client';
 import type { DesktopClientStatus } from '../../../host-core/desktop-client';
 import { HashRouter } from 'react-router-dom';
 import { HostPage } from '../../../web/src/Host';
-import { CenterGate } from '../../../web/src/native/CenterGate';
+import { CenterGate, isTransientCenterError, type CenterStatus } from '../../../web/src/native/CenterGate';
 import { ErrorNotice, LanguageOverride, errorText } from '../../../web/src/ui';
 import {
   mobileHide,
@@ -29,12 +29,21 @@ function MobileShell() {
   const [notice, setNotice] = useState('');
   const [connectionEpoch, setConnectionEpoch] = useState(0);
   const [adoptEpoch, setAdoptEpoch] = useState(0);
-  const adopting = useRef(false);
+  const adopting = useRef<Promise<void> | null>(null);
+  const adoptedGeneration = useRef<number | undefined>(undefined);
+  const repairIpc = useRef<(() => Promise<void>) | null>(null);
+  const connectionRevision = useRef(0);
+  const recoverConnection = useRef<() => Promise<void>>(async () => {});
+  const checkConnection = useCallback(() => recoverConnection.current(), []);
   const scheduleAdopt = useRef<() => void>(() => {});
   const unsubscribeRemote = useRef<(() => void) | undefined>(undefined);
   const remoteRef = useRef<MobileRemoteClient | undefined>(undefined);
 
-  const centerDisconnected = useCallback(() => { remoteRef.current?.invalidate(); }, []);
+  const centerDisconnected = useCallback(() => {
+    connectionRevision.current += 1;
+    adoptedGeneration.current = undefined;
+    remoteRef.current?.invalidate();
+  }, []);
 
   const getOrCreateRemoteClient = useCallback(() => {
     if (!remoteRef.current) {
@@ -45,19 +54,19 @@ function MobileShell() {
     return remoteRef.current;
   }, []);
 
-  const centerReady = useCallback(async (centerUrl: string) => {
-    if (adopting.current) throw Object.assign(new Error('正在恢复设备连接。'), { code: 'RPC_BUSY' });
-    adopting.current = true;
-    let adopted = false;
-    try {
+  const centerReady = useCallback((centerUrl: string): Promise<void> => {
+    if (adopting.current) return adopting.current;
+    const revision = connectionRevision.current;
+    const run = (async () => {
       const client = getOrCreateRemoteClient();
-      client.invalidate();
       const status = await mobileClientRequest<DesktopClientStatus>('status', {});
       const connection = status.connection;
       if (status.phase !== 'connected' || connection?.kind !== 'relay') {
         throw Object.assign(new Error('中心已认证，但设备中继正在恢复。'), { code: 'NOT_CONNECTED' });
       }
       const api = client.api;
+      if (api.transportConnected && adoptedGeneration.current === status.generation) return;
+      client.invalidate();
       let snapshot = await api.init();
       let profile = snapshot.state.profiles.find(p => p.kind === 'relay' &&
         p.url === connection.url && p.deviceId === connection.deviceId);
@@ -68,17 +77,21 @@ function MobileShell() {
         profile = snapshot.state.profiles.find(p => p.id === next.id)!;
       }
       const latest = await mobileClientRequest<DesktopClientStatus>('status', {});
-      if (latest.generation !== status.generation || latest.phase !== 'connected') {
+      if (revision !== connectionRevision.current || latest.generation !== status.generation || latest.phase !== 'connected') {
         throw Object.assign(new Error('设备连接已变化，正在恢复。'), { code: 'NOT_CONNECTED' });
       }
       api.setIdentity({ profileId: profile.id, targetDeviceId: '', kind: 'relay' });
       api.setTransportConnected(true);
-      adopted = true;
+      adoptedGeneration.current = status.generation;
       setNotice('');
-    } finally {
-      adopting.current = false;
-      if (adopted && remoteRef.current && !remoteRef.current.api.transportConnected) scheduleAdopt.current();
-    }
+    })();
+    adopting.current = run;
+    const settled = () => { if (adopting.current === run) adopting.current = null; };
+    void run.then(() => {
+      settled();
+      if (remoteRef.current && !remoteRef.current.api.transportConnected) scheduleAdopt.current();
+    }, settled);
+    return run;
   }, [getOrCreateRemoteClient]);
 
   useEffect(() => {
@@ -100,58 +113,114 @@ function MobileShell() {
 
   useEffect(() => {
     let live = true;
-    let recovering = false;
+    let flight: Promise<void> | null = null;
     let failedAgain = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const recover = () => {
-      if (!live) return;
-      if (recovering) { failedAgain = true; return; }
-      recovering = true;
-      setNotice('正在重连…');
-      let delay = 500;
-      const attempt = async () => {
+    let delay = 500;
+    const attempt = (): Promise<void> => {
+      if (timer) { clearTimeout(timer); timer = undefined; }
+      if (flight) return flight;
+      const run = (async () => {
         try {
           failedAgain = false;
           const result = await mobileReconnect();
-          if (!result.connected || failedAgain) throw new Error('IPC unavailable');
+          if (!result.connected || failedAgain) throw Object.assign(new Error('IPC unavailable'), { code: 'NOT_CONNECTED' });
           if (!live) return;
-          recovering = false;
+          repairIpc.current = null;
+          delay = 500;
           setConnectionEpoch(value => value + 1);
-        } catch {
+        } catch (error) {
           if (!live) return;
-          timer = setTimeout(attempt, delay);
+          timer = setTimeout(() => { void attempt().catch(() => {}); }, delay);
           delay = Math.min(delay * 2, 10000);
+          throw error;
         }
-      };
-      void attempt();
+      })();
+      flight = run;
+      const settled = () => { flight = null; };
+      void run.then(settled, settled);
+      return run;
+    };
+    const recover = () => {
+      if (!live) return;
+      if (repairIpc.current) { failedAgain = true; return; }
+      centerDisconnected();
+      setNotice('正在重连…');
+      repairIpc.current = attempt;
+      void attempt().catch(() => {});
     };
     const stop = onMobileStreamFailure(recover);
-    return () => { live = false; stop(); if (timer) clearTimeout(timer); };
-  }, []);
+    return () => { live = false; repairIpc.current = null; stop(); if (timer) clearTimeout(timer); };
+  }, [centerDisconnected]);
   useEffect(() => {
     let live = true;
-    let scheduled = false;
+    let flight: Promise<void> | null = null;
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const check = () => {
-      if (!live || scheduled || adopting.current || !remoteRef.current || remoteRef.current.api.transportConnected) return;
-      scheduled = true;
-      timer = setTimeout(async () => {
-        try {
-          const center = await mobileClientRequest<{ state: string }>('center_status', {});
-          const broker = await mobileClientRequest<DesktopClientStatus>('status', {});
-          if (live && !adopting.current && !remoteRef.current?.api.transportConnected && center.state === 'ready' && broker.phase === 'connected') {
-            setAdoptEpoch(value => value + 1);
-          }
-        } catch { /* IPC reconnect has its own retry loop */ }
-        finally { scheduled = false; }
-      }, 2000);
+    let delay = 1000;
+    const schedule = () => {
+      if (!live || document.hidden || timer) return;
+      timer = setTimeout(() => { timer = undefined; void check().catch(() => {}); }, delay);
+      delay = Math.min(delay * 2, 10000);
     };
-    scheduleAdopt.current = check;
-    const foreground = () => { if (!document.hidden) check(); };
+    const check = (): Promise<void> => {
+      if (timer) { clearTimeout(timer); timer = undefined; }
+      if (flight) return flight;
+      const revision = connectionRevision.current;
+      const previousGeneration = adoptedGeneration.current;
+      const wasConnected = remoteRef.current?.api.transportConnected;
+      let retry = false;
+      const run = (async () => {
+        try {
+          await repairIpc.current?.();
+          if (!live || revision !== connectionRevision.current) return;
+          const center = await mobileClientRequest<CenterStatus>('center_status', { probe: true });
+          if (!live || revision !== connectionRevision.current) return;
+          if (center.state === 'ready') {
+            await centerReady(center.centerUrl);
+            if (!live || revision !== connectionRevision.current) return;
+            if (!wasConnected || previousGeneration !== adoptedGeneration.current) setAdoptEpoch(value => value + 1);
+            setNotice('');
+            delay = 1000;
+          } else {
+            if (remoteRef.current?.api.transportConnected) centerDisconnected();
+            retry = center.state === 'connecting';
+            setNotice(retry ? '正在重连…' : center.savedConnectionError || (center.error ? errorText(center.error) : ''));
+          }
+        } catch (error) {
+          if (!live || revision !== connectionRevision.current) return;
+          retry = isTransientCenterError(error);
+          setNotice(retry ? '正在重连…' : errorText(error));
+          throw error;
+        }
+      })();
+      flight = run;
+      const settled = () => {
+        flight = null;
+        if (retry) schedule();
+      };
+      void run.then(settled, settled);
+      return run;
+    };
+    // 用户操作跳过退避；已经在执行的检查由前台恢复与下拉刷新共用。
+    recoverConnection.current = () => { delay = 1000; return check(); };
+    scheduleAdopt.current = schedule;
+    const foreground = () => {
+      if (document.hidden) {
+        if (timer) { clearTimeout(timer); timer = undefined; }
+      } else {
+        void recoverConnection.current().catch(() => {});
+      }
+    };
     document.addEventListener('visibilitychange', foreground);
-    check();
-    return () => { live = false; scheduleAdopt.current = () => {}; document.removeEventListener('visibilitychange', foreground); if (timer) clearTimeout(timer); };
-  }, []);
+    return () => {
+      live = false;
+      connectionRevision.current += 1;
+      recoverConnection.current = async () => {};
+      scheduleAdopt.current = () => {};
+      document.removeEventListener('visibilitychange', foreground);
+      if (timer) clearTimeout(timer);
+    };
+  }, [centerReady, centerDisconnected]);
   useEffect(() => () => { unsubscribeRemote.current?.(); remoteRef.current?.dispose(); }, []);
 
   return (
@@ -164,6 +233,7 @@ function MobileShell() {
             connectionEpoch={connectionEpoch}
             active
             getOrCreateRemoteClient={getOrCreateRemoteClient}
+            onRefreshConnection={checkConnection}
             onOpenSystemSettings={() => void mobileLocalRequest('openSystemSettings').catch(error => setNotice(errorText(error)))}
           /></CenterGate>
         </div>

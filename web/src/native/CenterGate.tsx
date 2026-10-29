@@ -5,8 +5,9 @@ import { mobileClientRequest } from './tauri-host';
 export type SavedConnection = { url: string; deviceId: string; ca: string };
 export type CenterStatus = { state: 'disconnected' | 'connecting' | 'ready'; centerUrl: string; clientId?: string; savedConnection?: SavedConnection; savedConnectionError?: string; brokerGeneration?: number; error?: { code?: string; message?: string } | string | null };
 const permanentCenterErrors = new Set(['UNAUTHENTICATED', 'UNAUTHORIZED', 'CONTROL_UNAUTHORIZED', 'INVALID_ARGUMENT', 'INVALID_CREDENTIALS', 'CREDENTIALS_NOT_FOUND', 'INVALID_TOKEN', 'REVOKED', 'CREDENTIALS', 'CERTIFICATE_ERROR', 'CERTIFICATE_INVALID', 'CERT_HAS_EXPIRED', 'UNABLE_TO_VERIFY_LEAF_SIGNATURE', 'SELF_SIGNED_CERT_IN_CHAIN']);
-const transientCenterErrors = new Set(['NOT_CONNECTED', 'DISCONNECTED', 'EVENT_STREAM_CLOSED', 'RPC_BUSY', 'TIMEOUT', 'TRANSPORT_RESET', 'CENTER_OFFLINE', 'CENTER_REQUEST_FAILED']);
+const transientCenterErrors = new Set(['NOT_CONNECTED', 'DISCONNECTED', 'EVENT_STREAM_CLOSED', 'RPC_BUSY', 'BUSY', 'TIMEOUT', 'TRANSPORT_RESET', 'CENTER_OFFLINE', 'CENTER_REQUEST_FAILED']);
 const centerErrorCode = (error: unknown) => typeof error === 'object' && error !== null && 'code' in error ? String(error.code) : '';
+export const isTransientCenterError = (error: unknown) => transientCenterErrors.has(centerErrorCode(error));
 const centerErrorMessage = (error: unknown) => typeof error === 'string' ? error : error instanceof Error ? error.message : typeof error === 'object' && error !== null && 'message' in error ? String(error.message) : '';
 
 export const ActiveCenter = createContext('');
@@ -185,7 +186,7 @@ export function CenterGate({ children, onDisconnected, onReady, recoveryEpoch = 
       if (live) { setPreparedCenter(preparedKey); setError(''); }
     }, failure => {
       if (live) {
-        const permanent = !transientCenterErrors.has(centerErrorCode(failure));
+        const permanent = !isTransientCenterError(failure);
         setError(permanent ? centerErrorMessage(failure) || centerErrorCode(failure) : '正在重连…');
         if (!permanent) retry = setTimeout(() => setPrepareRetry(value => value + 1), 2000);
       }

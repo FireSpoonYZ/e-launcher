@@ -610,6 +610,8 @@ export interface HostPageProps {
   active?: boolean;
   /** Optional remote client factory injected by Tauri mobile shell. */
   getOrCreateRemoteClient?(): { api: DesktopPanelApi; invalidate(): void; dispose(): void };
+  /** Check/recover the existing connection before a user-requested directory refresh. */
+  onRefreshConnection?(): Promise<void>;
   /** Optional callback to open Android system settings. */
   onOpenSystemSettings?(): void;
 }
@@ -618,6 +620,7 @@ export function HostPage({
   connectionEpoch = 0,
   active = true,
   getOrCreateRemoteClient,
+  onRefreshConnection,
   onOpenSystemSettings,
 }: HostPageProps = {}) {
   const t = useText();
@@ -2360,25 +2363,32 @@ ${newer}` : draftSnapshot;
   }, [screen, visibleTurns.length, liveGeneratingText, isBotBusy, activeLiveToolName, submissionFailure]);
 
   const [hubRefreshing, setHubRefreshing] = useState(false);
+  const hubRefreshRunning = useRef(false);
   const [pullDistance, setPullDistance] = useState(0);
   const hubScrollRef = useRef<HTMLDivElement | null>(null);
   const pullTouchRef = useRef<{ startY: number; startX: number; pulling: boolean } | null>(null);
   const PULL_THRESHOLD = 62;
 
   const triggerHubRefresh = useCallback(async () => {
-    if (hubRefreshing) return;
+    if (hubRefreshRunning.current) return;
+    hubRefreshRunning.current = true;
     setHubRefreshing(true);
     try {
-      await Promise.allSettled([
+      const results = await Promise.allSettled([
         syncLocalBots(),
-        syncRemoteBots(),
+        (async () => {
+          await onRefreshConnection?.();
+          await ensureRemoteApi();
+          await syncRemoteBots();
+        })(),
       ]);
-      await new Promise(r => setTimeout(r, 420));
+      if (results[1].status === 'rejected') setDirectoryError(errorText(results[1].reason));
     } finally {
+      hubRefreshRunning.current = false;
       setHubRefreshing(false);
       setPullDistance(0);
     }
-  }, [hubRefreshing, syncLocalBots, syncRemoteBots]);
+  }, [onRefreshConnection, ensureRemoteApi, syncLocalBots, syncRemoteBots]);
 
   // Step-by-step Back Navigation for Android full-screen back gesture & hardware Back button
   const handleStepBack = useCallback((): boolean => {
@@ -2771,11 +2781,18 @@ ${newer}` : draftSnapshot;
             {/* Regular and archived Bots */}
             <section className="hub-bot-list" aria-label={t('智能体列表', 'Bots')}>
               <ErrorNotice
-                error={directoryError || (!centerConn.ready && centerConn.status?.error ? centerConn.error : '')}
+                error={directoryError || (!centerConn.ready ? centerConn.error : '')}
                 actionLabel={!centerConn.ready && centerConn.status?.error ? t('去设置', 'Settings') : directoryError ? t('刷新', 'Refresh') : undefined}
                 onAction={!centerConn.ready && centerConn.status?.error ? () => setScreen('settings') : directoryError ? () => void triggerHubRefresh() : undefined}
                 onDismiss={directoryError ? () => setDirectoryError('') : undefined}
               />
+              {remoteBots.length > 0 && !remoteConnected && (
+                <p className="hub-empty-list" role="status">
+                  {centerConn.connecting
+                    ? t('正在恢复连接，远端设备状态待确认…', 'Reconnecting; remote device status is unknown…')
+                    : t('与中心未连接，远端设备状态待确认。下拉可尝试恢复。', 'Disconnected from center. Pull down to check and reconnect.')}
+                </p>
+              )}
               {filteredBotItems.length === 0 ? (
                 <div className="hub-empty-list">
                   <p>
@@ -2823,7 +2840,7 @@ ${newer}` : draftSnapshot;
                           {hasRemoteConfigured && (
                             <span
                               className={`hub-bot-host-badge ${item.hostKind}${item.online === false ? ' is-offline' : ''}`}
-                              title={`${item.hostLabel}${item.platform ? ` (${item.platform})` : ''}${item.online === false ? ` · ${t('离线', 'Offline')}` : ''}`}
+                              title={`${item.hostLabel}${item.platform ? ` (${item.platform})` : ''}${item.online === false ? ` · ${remoteConnected ? t('离线', 'Offline') : t('状态待确认', 'Status unknown')}` : ''}`}
                             >
                               <PlatformLogoIcon platform={item.platform} size={12} />
                               <span className="hub-bot-host-text">{item.hostLabel}</span>
@@ -3233,7 +3250,7 @@ ${newer}` : draftSnapshot;
             />
             {((chatLoadError && !(centerConn.status?.state === 'disconnected' && centerConn.status.error)) || (chatPending?.botKey === activeBot.key && chatPending.phase === 'recovering')) && (
               <div className="bot-chat-system-notice" role="status">
-                {chatPending?.phase === 'recovering' ? t('发送结果待确认，保留原请求 ID；不会自动重发。', 'Send result unconfirmed; retaining the original request ID without resending.') : activeBot.online === false ? t('目标节点离线，上线后自动恢复。', 'Target offline; restoring when it returns.') : chatLoadError}
+                {chatPending?.phase === 'recovering' ? t('发送结果待确认，保留原请求 ID；不会自动重发。', 'Send result unconfirmed; retaining the original request ID without resending.') : activeBot.online === false ? remoteConnected ? t('目标节点离线，上线后自动恢复。', 'Target offline; restoring when it returns.') : t('连接已中断，远端设备状态待确认。', 'Connection interrupted; remote device status is unknown.') : chatLoadError}
                 {chatPending?.phase === 'recovering' && activeBot.hostKind === 'local' && <button type="button" className="hub-outline-btn" onClick={() => setChatResumeEpoch(value => value + 1)}>{t('按原 ID 对账', 'Reconcile ID')}</button>}
               </div>
             )}

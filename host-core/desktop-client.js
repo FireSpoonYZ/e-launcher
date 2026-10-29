@@ -595,7 +595,9 @@ export function openDesktopClient(options) {
     if (params.probe !== undefined && typeof params.probe !== 'boolean') throw invalid('probe must be a boolean');
     if (params.probe && centerState === 'ready') {
       await probeReadyCenter();
-    } else if (params.probe && centerState === 'connecting' && centerCredentials) {
+    }
+    // A failed foreground/manual probe must also bypass the retry backoff.
+    if (params.probe && centerState === 'connecting' && centerCredentials) {
       if (centerRetryTimer) clearTimeout(centerRetryTimer);
       centerRetryTimer = null;
       void startCenterAttempt(centerGeneration).catch(() => {});
