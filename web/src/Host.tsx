@@ -693,6 +693,9 @@ export function HostPage({
   const selectedChatTarget = useRef<{ hostKind: 'local' | 'remote'; hostId: string; botId: string } | undefined>(undefined);
   const localInFlight = useRef(new Set<string>());
   const [chatObservationError, setChatObservationError] = useState('');
+  // 历史读取失败单独记录：观察恢复成功只清连接问题，不清掉这次历史错误，交给现有 2s 重试。
+  const [chatHistoryError, setChatHistoryError] = useState('');
+  const chatLoadError = chatObservationError || chatHistoryError;
   const [chatResumeEpoch, setChatResumeEpoch] = useState(0);
   const chatSubmissionRef = useRef<{ botKey: string; requestId: string; afterEntryId: number } | undefined>(undefined);
   const [chatDraft, setChatDraft] = useState('');
@@ -1341,7 +1344,9 @@ export function HostPage({
       cancelActiveObservation();
       const generation = ++chatLoadGeneration.current;
       const current = () => generation === chatLoadGeneration.current;
-      setChatLive(undefined);
+      // 同一聊天前台恢复/重连时保留现有 live，直到新快照到达；旧消息只来自实时快照时不会被清空。
+      let historyError = '';
+      const historyErrorText = t('历史记录暂时无法加载，正在重试…', 'History temporarily unavailable; retrying…');
 
       if (bot.hostKind === 'local') {
         const snap = await ensureLocalHostRunning();
@@ -1358,8 +1363,9 @@ export function HostPage({
             updateBotMeta(bot.key, { lastText: lastTurn.text, unread: false });
           }
         } catch {
-          // Ignore
+          if (current()) historyError = historyErrorText;
         }
+        if (current()) setChatHistoryError(historyError);
         if (!current()) return;
         try {
           const obsId = uuid();
@@ -1385,8 +1391,9 @@ export function HostPage({
             updateBotMeta(bot.key, { lastText: lastTurn.text, unread: false });
           }
         } catch {
-          // Ignore
+          if (current()) historyError = historyErrorText;
         }
+        if (current()) setChatHistoryError(historyError);
         if (!current()) return;
         try {
           const handle = api.observe(identity, { kind: 'primary', botId: bot.botId }, ev => {
@@ -1425,10 +1432,10 @@ export function HostPage({
   }, [screen, active, activeBot?.key, activeBot?.remoteIdentity?.generation, activeBot?.online, remoteConnected, chatResumeEpoch, connectionEpoch]);
 
   useEffect(() => {
-    if (!chatObservationError || screen !== 'chat' || !active || document.hidden || (activeBot?.hostKind === 'remote' && (!remoteConnected || activeBot.online === false))) return;
+    if (!chatLoadError || screen !== 'chat' || !active || document.hidden || (activeBot?.hostKind === 'remote' && (!remoteConnected || activeBot.online === false))) return;
     const timer = window.setTimeout(() => setChatResumeEpoch(value => value + 1), 2000);
     return () => window.clearTimeout(timer);
-  }, [chatObservationError, screen, active, activeBot?.hostKind, activeBot?.online, remoteConnected, chatResumeEpoch]);
+  }, [chatLoadError, screen, active, activeBot?.hostKind, activeBot?.online, remoteConnected, chatResumeEpoch]);
 
   const chatBotKey = activeBot?.key;
   const chatBotId = activeBot?.botId;
@@ -1447,8 +1454,10 @@ export function HostPage({
     const pending = chatPending;
     if (!pending || pending.phase === 'recovering' || chatReceipt?.status === 'done' || chatReceipt?.status === 'unanswered') return;
     const entry = pendingByBot.current.get(pending.scopeKey);
+    // 已有回执说明请求已被受理，连接断开/目标离线只是恢复观察，不能降级成待确认；无回执的 sending 仍按原逻辑安全恢复。
+    if (entry?.receipt || entry?.pending.phase === 'accepted' || chatReceipt?.requestId === pending.requestId) return;
     if (entry?.pending.requestId === pending.requestId) updatePending({ ...entry, pending: { ...pending, phase: 'recovering' } });
-  }, [chatHostKind, chatRemoteConnected, activeBot?.online, chatPending?.requestId, chatPending?.phase, chatReceipt?.status]);
+  }, [chatHostKind, chatRemoteConnected, activeBot?.online, chatPending?.requestId, chatPending?.phase, chatReceipt?.status, chatReceipt?.requestId]);
 
   // 依赖实际目标与回执标识，不随 Bot 展示对象或历史数组重建而重复补读终态。
   useEffect(() => {
@@ -1545,6 +1554,8 @@ export function HostPage({
     profileLoadGeneration.current += 1;
     scheduleLoadGeneration.current += 1;
     const scopeKey = scopeForBot(bot);
+    // 同一非空 scope 重进（前台恢复/回主页再进入）保留已加载历史与实时投影；不同 scope 才清空，防跨 Bot/跨 center 串消息。
+    const sameScope = Boolean(scopeKey) && currentChatScope.current === scopeKey;
     currentChatScope.current = scopeKey;
     selectedChatTarget.current = { hostKind: bot.hostKind, hostId: bot.hostId, botId: bot.botId };
     const stored = scopeKey ? pendingByBot.current.get(scopeKey) || readChatPending(scopeKey) : undefined;
@@ -1552,8 +1563,11 @@ export function HostPage({
     if (saved) pendingByBot.current.set(scopeKey, saved);
     chatSubmissionRef.current = saved ? { botKey: bot.key, requestId: saved.pending.requestId, afterEntryId: saved.pending.afterEntryId } : undefined;
     setActiveBotKey(bot.key);
-    setChatHistory([]);
-    setChatLive(undefined);
+    if (!sameScope) {
+      setChatHistory([]);
+      setChatLive(undefined);
+      setChatHistoryError('');
+    }
     setChatPending(saved?.pending);
     setChatReceipt(saved?.receipt);
     setChatDraft(scopeKey ? readChatDraft(scopeKey) : '');
@@ -3210,9 +3224,9 @@ ${newer}` : draftSnapshot;
               actionLabel={submissionFailure ? t('检查配置', 'Check Settings') : !centerConn.ready && centerConn.status?.error ? t('去连接', 'Connect') : undefined}
               onAction={submissionFailure ? () => openBotProfile(activeBot) : !centerConn.ready && centerConn.status?.error ? () => setScreen('settings') : undefined}
             />
-            {((chatObservationError && !(centerConn.status?.state === 'disconnected' && centerConn.status.error)) || (chatPending?.botKey === activeBot.key && chatPending.phase === 'recovering')) && (
+            {((chatLoadError && !(centerConn.status?.state === 'disconnected' && centerConn.status.error)) || (chatPending?.botKey === activeBot.key && chatPending.phase === 'recovering')) && (
               <div className="bot-chat-system-notice" role="status">
-                {chatPending?.phase === 'recovering' ? t('发送结果待确认，保留原请求 ID；不会自动重发。', 'Send result unconfirmed; retaining the original request ID without resending.') : activeBot.online === false ? t('目标节点离线，上线后自动恢复。', 'Target offline; restoring when it returns.') : chatObservationError}
+                {chatPending?.phase === 'recovering' ? t('发送结果待确认，保留原请求 ID；不会自动重发。', 'Send result unconfirmed; retaining the original request ID without resending.') : activeBot.online === false ? t('目标节点离线，上线后自动恢复。', 'Target offline; restoring when it returns.') : chatLoadError}
                 {chatPending?.phase === 'recovering' && activeBot.hostKind === 'local' && <button type="button" className="hub-outline-btn" onClick={() => setChatResumeEpoch(value => value + 1)}>{t('按原 ID 对账', 'Reconcile ID')}</button>}
               </div>
             )}
