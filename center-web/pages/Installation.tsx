@@ -3,7 +3,7 @@ import { Link, useParams } from 'react-router-dom';
 import Form from '@rjsf/core';
 import { customizeValidator } from '@rjsf/validator-ajv8';
 import type { RJSFSchema } from '@rjsf/utils';
-import { ArrowLeft, ExternalLink, Play, Power, RefreshCw, RotateCcw, Trash2 } from 'lucide-react';
+import { ArrowLeft, ExternalLink, Pencil, Play, Power, RefreshCw, RotateCcw, Trash2 } from 'lucide-react';
 import type {
   BotRef,
   CapabilityTool,
@@ -16,8 +16,10 @@ import type {
   PackageVersion,
 } from '@e-launcher/center-contract';
 import { api } from '../api';
+import { ActivationBadge, ActivationSummary, activationUsable } from '../components/ActivationStatus';
 import ConfigForm from '../components/ConfigForm';
 import { ConfigOperation, errorMessage } from '../components/ConfigOperation';
+import { SheetModal } from '../components/SheetModal';
 import '../components/Config.css';
 
 type ActionDescriptor = {
@@ -53,6 +55,7 @@ export default function Installation() {
   const [botId, setBotId] = useState('');
   const [action, setAction] = useState('');
   const [result, setResult] = useState<JsonValue>();
+  const [renameDraft, setRenameDraft] = useState<string>();
 
   const load = async () => {
     try {
@@ -118,10 +121,10 @@ export default function Installation() {
     }
   };
 
-  const request = async (kind: 'update' | 'rollback' | 'disable' | 'enable' | 'uninstall') => {
+  const request = async (kind: 'update' | 'rollback' | 'disable' | 'uninstall') => {
     if (
       (kind === 'uninstall' || kind === 'disable') &&
-      !window.confirm(kind === 'uninstall' ? '卸载此实例？默认保留数据。' : '禁用此实例？')
+      !window.confirm(kind === 'uninstall' ? '卸载此实例？默认保留数据。' : '停用全局启用？保留各 Bot 绑定偏好，但立即停止执行。')
     ) {
       return;
     }
@@ -144,11 +147,30 @@ export default function Installation() {
             ? await api.rollbackInstallation(installationId, body)
             : kind === 'disable'
               ? await api.disableInstallation(installationId, body)
-              : kind === 'enable'
-                ? await api.enableInstallation(installationId, body)
-                : await api.uninstallInstallation(installationId, body);
+              : await api.uninstallInstallation(installationId, body);
       setOperation(accepted.operationId);
     });
+  };
+
+  // OAuth MCPs are validated with an existing Bot as identity; that Bot does not need an enabled binding.
+  const needsValidationBot = item?.kind === 'mcp' && item.target === 'center' && config?.globalConfig.oauth === true;
+  const globalUsable = item ? activationUsable(item) : false;
+
+  const submitEnable = async () => {
+    const accepted = await api.enableInstallation(installationId, {
+      requestId: crypto.randomUUID(),
+      ...(needsValidationBot ? { validationBot: { deviceId, botId } } : {}),
+    });
+    setOperation(accepted.operationId);
+    setMessage('已受理全局启用；校验通过前保持「启用中」');
+  };
+
+  const enableGlobal = async () => {
+    if (needsValidationBot && (!deviceId || !botId)) {
+      setError('OAuth MCP 需要一个已有 Bot 作为校验身份：请在上方选择设备与 Bot');
+      return;
+    }
+    await run(submitEnable);
   };
 
   const toggleBotCapability = async (bot: BotRef & { enabled: boolean }, nextEnabled: boolean) => {
@@ -210,11 +232,24 @@ export default function Installation() {
                 {item.kind}
               </span>
               <span className={`badge ${item.enabled ? 'badge-online' : 'badge-offline'}`}>
-                {item.enabled ? '已启用' : '已禁用'}
+                {item.enabled ? '全局意图：启用' : '全局意图：停用'}
               </span>
+              <ActivationBadge status={item.activation.status} />
+              {item.enabled && !activationUsable(item) && (
+                <span className="badge badge-warn">当前不生效</span>
+              )}
               <span className="badge badge-neutral">目标：{item.target}</span>
               <span className="badge badge-neutral">版本：{item.targetVersion}</span>
               <span className="badge badge-neutral">包：{item.packageId}</span>
+              <button
+                type="button"
+                className="quiet-button"
+                disabled={busy}
+                onClick={() => setRenameDraft(item.displayName)}
+              >
+                <Pencil size={15} aria-hidden="true" />
+                重命名
+              </button>
             </div>
           )}
         </div>
@@ -261,6 +296,12 @@ export default function Installation() {
                     ? item.source.url
                     : item.source.artifactRef}
               </p>
+              {item.kind === 'mcp' && (
+                <p>
+                  MCP 运行位置：{item.target === 'center' ? '中心' : '目标 Host'} · MCP URL 由
+                  {item.target === 'center' ? '中心' : '该目标 Host'} 进程访问，需在该运行位置可达
+                </p>
+              )}
             </div>
             <div className="form form-grid">
               <label>
@@ -306,6 +347,85 @@ export default function Installation() {
                 检查连接
               </button>
             </div>
+          </section>
+
+          <section className="card-group">
+            <div className="card-header">
+              <h2>全局启用</h2>
+              <div className="action-row">
+                {item.enabled ? (
+                  <>
+                    <button
+                      type="button"
+                      className="button secondary-button"
+                      disabled={busy}
+                      onClick={() => void request('disable')}
+                    >
+                      <Power size={15} aria-hidden="true" />
+                      停用全局
+                    </button>
+                    {!activationUsable(item) && (
+                      <button type="button" className="button" disabled={busy} onClick={() => void enableGlobal()}>
+                        <RefreshCw size={15} aria-hidden="true" />
+                        {item.activation.status === 'enabling' ? '重新校验' : '重试全局启用'}
+                      </button>
+                    )}
+                  </>
+                ) : (
+                  <button type="button" className="button" disabled={busy} onClick={() => void enableGlobal()}>
+                    <Power size={15} aria-hidden="true" />
+                    全局启用
+                  </button>
+                )}
+              </div>
+            </div>
+            <ActivationSummary installation={item} />
+            <p className="secondary">
+              全局启用成功前，Bot 端不能新开启该能力；全局停用立即停止执行，但保留各 Bot 的绑定偏好，已有绑定仍可关闭。
+            </p>
+            {needsValidationBot && (
+              <>
+                <p className="secondary">
+                  OAuth MCP 需要一个已有 Bot 作为校验身份（该 Bot 无需已绑定此能力，令牌仍按 Bot 隔离）；先授权再重试全局启用。
+                </p>
+                <div className="action-row">
+                  <button
+                    type="button"
+                    className="button secondary-button button-sm"
+                    disabled={busy || !deviceId || !botId}
+                    onClick={() =>
+                      void run(async () => {
+                        setFlow(await api.startMcpOAuth(installationId, { deviceId, botId }));
+                        setFlowStatus('pending');
+                      })
+                    }
+                  >
+                    授权校验身份
+                  </button>
+                  {flow && (
+                    <a href={flow.authorizationUrl} target="_blank" rel="noreferrer">
+                      打开授权页面 <ExternalLink size={14} aria-hidden="true" />
+                    </a>
+                  )}
+                  {flow && (
+                    <button
+                      type="button"
+                      className="quiet-button"
+                      disabled={busy}
+                      onClick={() =>
+                        void run(async () => {
+                          const status = await api.getMcpOAuthFlow(flow.flowId);
+                          setFlowStatus(status.error ? `${status.status}：${status.error}` : status.status);
+                          if (status.status === 'complete') await submitEnable();
+                        })
+                      }
+                    >
+                      检查授权并重试启用（{flowStatus}）
+                    </button>
+                  )}
+                </div>
+              </>
+            )}
           </section>
 
           {item.kind === 'mcp' && (
@@ -488,11 +608,16 @@ export default function Installation() {
                       <input
                         type="checkbox"
                         checked={bot.enabled}
-                        disabled={busy}
+                        disabled={busy || (!bot.enabled && !globalUsable)}
                         onChange={event => void toggleBotCapability(bot, event.target.checked)}
                       />
                       为此 Bot 启用
                     </label>
+                    {!globalUsable && (
+                      <span className="secondary">
+                        {bot.enabled ? '全局未启用成功，当前不生效；仍可关闭' : '全局启用成功后才能开启'}
+                      </span>
+                    )}
                     <Link
                       className="quiet-button"
                       to={`/devices/${encodeURIComponent(bot.deviceId)}/bots/${encodeURIComponent(bot.botId)}/capabilities`}
@@ -746,7 +871,7 @@ export default function Installation() {
             <div className="card-header">
               <h3>实例生命周期</h3>
             </div>
-            <p className="secondary">可全局禁用或恢复此能力实例，或卸载实例（默认保留持久化数据）。</p>
+            <p className="secondary">可停用或重新全局启用此能力实例，或卸载实例（默认保留持久化数据）。</p>
             <div className="action-row">
               {item?.enabled ? (
                 <button
@@ -756,17 +881,17 @@ export default function Installation() {
                   onClick={() => void request('disable')}
                 >
                   <Power size={15} aria-hidden="true" />
-                  禁用
+                  停用全局
                 </button>
               ) : (
                 <button
                   type="button"
                   className="button"
                   disabled={busy || !item}
-                  onClick={() => void request('enable')}
+                  onClick={() => void enableGlobal()}
                 >
                   <Power size={15} aria-hidden="true" />
-                  恢复全局启用
+                  全局启用
                 </button>
               )}
               <button
@@ -782,6 +907,60 @@ export default function Installation() {
           </section>
         </>
       )}
+
+      <SheetModal
+        open={renameDraft !== undefined}
+        onOpenChange={open => {
+          if (!open) setRenameDraft(undefined);
+        }}
+        title="重命名能力实例"
+        description="只修改显示名称；安装标识、包 ID、工具名和执行内容不变，也不会触发重新部署。"
+      >
+        {renameDraft !== undefined && item && (
+          <form
+            className="form"
+            onSubmit={event => {
+              event.preventDefault();
+              const next = renameDraft.trim();
+              if (!next) return;
+              void run(async () => {
+                setItem(
+                  await api.renameInstallation(installationId, {
+                    expectedRevision: item.revision,
+                    displayName: next,
+                  }),
+                );
+                setRenameDraft(undefined);
+                setMessage('显示名称已更新');
+              });
+            }}
+          >
+            <label>
+              显示名称
+              <input
+                required
+                maxLength={120}
+                disabled={busy}
+                value={renameDraft}
+                onChange={event => setRenameDraft(event.target.value)}
+              />
+            </label>
+            <div className="action-row">
+              <button type="submit" className="button" disabled={busy || !renameDraft.trim()}>
+                保存
+              </button>
+              <button
+                type="button"
+                className="quiet-button"
+                disabled={busy}
+                onClick={() => setRenameDraft(undefined)}
+              >
+                取消
+              </button>
+            </div>
+          </form>
+        )}
+      </SheetModal>
     </main>
   );
 }

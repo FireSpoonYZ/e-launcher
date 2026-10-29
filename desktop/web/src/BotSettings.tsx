@@ -7,7 +7,8 @@ import type { CenterBotModelConfig, CenterModelSelection } from '../../../host-c
 import type { BotSoul, ModelCatalog } from '../../../host-core/index.js';
 import { request, toError } from './api';
 import { openCenterManagement } from './CenterGate';
-import type { DesktopIdentity, DesktopViewApi } from './types';
+import { BotCapabilities } from './BotCapabilities';
+import type { DesktopIdentity, DesktopPanelApi } from './types';
 
 /** 与 Host 的公开上限一致（UTF-8 字节）。 */
 const SOUL_MAX_BYTES = 64 * 1024;
@@ -57,7 +58,7 @@ export function BotSettings({
   open,
   onOpenChange,
 }: {
-  api: DesktopViewApi;
+  api: DesktopPanelApi;
   botId: string;
   open?: boolean;
   onOpenChange?: (next: boolean) => void;
@@ -74,7 +75,9 @@ export function BotSettings({
   const [saving, setSaving] = useState<'soul' | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const [studioTab, setStudioTab] = useState<'all' | 'soul' | 'extensions'>('all');
+  const [studioTab, setStudioTab] = useState<'all' | 'soul' | 'extensions' | 'capabilities'>('all');
+  // 能力面板只在展开时挂载：收起/后台不轮询中心。
+  const [detailsOpen, setDetailsOpen] = useState(Boolean(open));
 
   const [modelConfig, setModelConfig] = useState<CenterBotModelConfig | null>(null);
   const [modelDraft, setModelDraft] = useState<CenterModelSelection>({});
@@ -95,6 +98,10 @@ export function BotSettings({
     mountedRef.current = true;
     return () => { mountedRef.current = false; };
   }, []);
+
+  useEffect(() => {
+    setDetailsOpen(Boolean(open));
+  }, [open]);
 
   /** 选择是否已变（profile/target/bot）或已卸载：迟到结果一律丢弃。 */
   const stale = useCallback((sel: string): boolean => {
@@ -309,6 +316,7 @@ export function BotSettings({
 
   const showSoulPanel = studioTab === 'all' || studioTab === 'soul';
   const showModelPanel = studioTab === 'all' || studioTab === 'extensions';
+  const showCapabilityPanel = detailsOpen && studioTab === 'capabilities';
   const q = modelQuery.trim().toLowerCase();
 
   return (
@@ -316,6 +324,7 @@ export function BotSettings({
       className="raw-history soul-studio-details"
       open={open}
       onToggle={(e) => {
+        setDetailsOpen(e.currentTarget.open);
         if (onOpenChange) onOpenChange((e.currentTarget as HTMLDetailsElement).open);
       }}
     >
@@ -360,6 +369,13 @@ export function BotSettings({
               onClick={() => setStudioTab('extensions')}
             >
               🤖 模型与思考 (CPA)
+            </button>
+            <button
+              type="button"
+              className={studioTab === 'capabilities' ? 'active' : undefined}
+              onClick={() => setStudioTab('capabilities')}
+            >
+              🔌 能力（插件 / MCP / 技能）
             </button>
             <button type="button" onClick={() => void openCenterManagement()}>插件与中心管理</button>
           </div>
@@ -574,6 +590,15 @@ export function BotSettings({
               ) : (
                 <div className="metadata">{loading ? '读取模型配置中…' : '尚未加载模型配置'}</div>
               )}
+            </div>
+          ) : null}
+
+          {showCapabilityPanel && identity ? (
+            <div className="field studio-card">
+              <div className="studio-card-header">
+                <label>🔌 Bot 能力（插件 / MCP / 技能）</label>
+              </div>
+              <BotCapabilities key={`${identity.targetDeviceId}\u0000${botId}`} api={api} identity={identity} deviceId={identity.targetDeviceId} botId={botId} />
             </div>
           ) : null}
         </div>

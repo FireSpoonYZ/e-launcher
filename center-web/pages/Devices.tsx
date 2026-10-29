@@ -17,11 +17,13 @@ import type {
   BotRef,
   BotSyncResponse,
   Device,
+  DeviceRuntimeStatus,
   ModelConfig,
   ModelSelection,
   Provider,
 } from '@e-launcher/center-contract';
 import { api } from '../api';
+import { RuntimeStatusSummary } from '../components/RuntimeStatus';
 import { SheetModal } from '../components/SheetModal';
 
 const levels = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
@@ -222,6 +224,7 @@ function CreateBotForm({
 export default function Devices() {
   const [devices, setDevices] = useState<Device[]>([]);
   const [bots, setBots] = useState<Record<string, BotRef[]>>({});
+  const [runtime, setRuntime] = useState<Record<string, DeviceRuntimeStatus>>({});
   const [global, setGlobal] = useState<ModelConfig>();
   const [globalModalOpen, setGlobalModalOpen] = useState(false);
   const [options, setOptions] = useState<ModelOption[]>([]);
@@ -300,6 +303,17 @@ export default function Devices() {
     }
   };
 
+  const refreshRuntime = async (deviceIds: string[]) => {
+    const results = await Promise.all(
+      deviceIds.map(deviceId => api.getDeviceRuntimeStatus(deviceId).catch(() => null)),
+    );
+    setRuntime(current => {
+      const next = { ...current };
+      for (const item of results) if (item) next[item.deviceId] = item;
+      return next;
+    });
+  };
+
   const load = async () => {
     const [sync, g, providers] = await Promise.all([
       api.getBotSync({ epoch: syncCursorRef.current.epoch, sinceSeq: syncCursorRef.current.seq }),
@@ -308,6 +322,7 @@ export default function Devices() {
     ]);
     const modelLists = await Promise.all(providers.map((p: Provider) => api.listModels(p.id)));
     applyBotSync(sync);
+    await refreshRuntime(sync.devices.map(device => device.deviceId));
     setGlobal(g);
     setOptions(
       modelLists.flatMap((models, i) =>
@@ -323,16 +338,25 @@ export default function Devices() {
   }, []);
 
   useEffect(() => {
-    const timer = setInterval(() => {
+    const tick = () => {
+      if (document.hidden) return;
       void api
         .getBotSync({
           epoch: syncCursorRef.current.epoch,
           sinceSeq: syncCursorRef.current.seq,
         })
-        .then(applyBotSync)
+        .then(sync => {
+          applyBotSync(sync);
+          return refreshRuntime(sync.devices.map(device => device.deviceId));
+        })
         .catch(() => {});
-    }, 2000);
-    return () => clearInterval(timer);
+    };
+    const timer = setInterval(tick, 2500);
+    document.addEventListener('visibilitychange', tick);
+    return () => {
+      clearInterval(timer);
+      document.removeEventListener('visibilitychange', tick);
+    };
   }, []);
 
   const visibleDevices =
@@ -505,6 +529,8 @@ export default function Devices() {
                 )}
               </div>
             </div>
+
+            {runtime[device.deviceId] && <RuntimeStatusSummary status={runtime[device.deviceId]} />}
 
             {!hasPrimary && (
               <div className="warning-banner">

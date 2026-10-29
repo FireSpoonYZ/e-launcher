@@ -5,3 +5,5 @@ export const DEPLOYMENT_PHASES = Object.freeze([
   'queued', 'downloading', 'preparing', 'waiting-idle', 'activating', 'applied', 'failed', 'removed',
 ]);
 export const HEALTH_STATES = Object.freeze(['ready', 'disconnected', 'needs-auth', 'unsupported', 'disabled']);
+export const RUNTIME_APPLY_STATUSES = Object.freeze(['pending', 'applying', 'waiting-idle', 'applied', 'failed']);
+export const ACTIVATION_STATUSES = Object.freeze(['disabled', 'enabling', 'enabled', 'failed']);

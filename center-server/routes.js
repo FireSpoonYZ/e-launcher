@@ -23,6 +23,19 @@ const modelSchema = {
 };
 const selectionSchema = { type: 'object', properties: { modelRef: { anyOf: [string, { type: 'null' }] }, thinkingLevel: { anyOf: [string, { type: 'null' }] } }, additionalProperties: false };
 function validate(schema, value) { if (!ajv.validate(schema, value)) fail('VALIDATION_FAILED', 'Invalid input'); return value; }
+/** Hosts report these; 'pending' is derived by the center and never accepted. */
+const runtimeStatuses = ['applying', 'waiting-idle', 'applied', 'failed'];
+const runtimeError = value => value == null ? null : { code: typeof value.code === 'string' ? value.code : 'INTERNAL_ERROR', message: typeof value.message === 'string' ? value.message : '' };
+function runtimeBotReceipt(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) fail('INVALID_ARGUMENT', 'Invalid runtime receipt');
+  if (!Number.isSafeInteger(value.desiredRevision) || value.desiredRevision < 0 || !runtimeStatuses.includes(value.status)) fail('INVALID_ARGUMENT', 'Invalid runtime receipt');
+  if (value.appliedRevision != null && (!Number.isSafeInteger(value.appliedRevision) || value.appliedRevision < 0)) fail('INVALID_ARGUMENT', 'Invalid runtime receipt');
+  return { botId: text(value.botId, 'botId'), desiredRevision: value.desiredRevision, appliedRevision: value.appliedRevision ?? null, status: value.status, error: runtimeError(value.error) };
+}
+function runtimeCapabilityError(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || value.error == null) fail('INVALID_ARGUMENT', 'Invalid runtime receipt');
+  return { botId: text(value.botId, 'botId'), installationId: text(value.installationId, 'installationId'), error: runtimeError(value.error) };
+}
 
 function assertConfigCredentials(schema, value) {
   if (!schema || typeof schema !== 'object' || value == null) return;
@@ -89,6 +102,11 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
     devices: bridge.listDevices(),
   }));
   route('GET', '/api/devices/:deviceId/bots', req => store.listDeviceBots(req.params.deviceId));
+  route('GET', '/api/devices/:deviceId/runtime-status', req => {
+    const device = bridge.listDevices().find(item => item.deviceId === req.params.deviceId);
+    if (!device) fail('NOT_FOUND', 'Device not found');
+    return store.getDeviceRuntimeStatus(device.deviceId, device.online);
+  });
   route('POST', '/api/devices/:deviceId/bots', async (req, reply) => {
     const { deviceId } = req.params;
     const created = await bridge.call(deviceId, 'createBot', {
@@ -180,8 +198,22 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
   route('GET', '/api/capabilities', () => store.listInstallations());
   route('POST', '/api/installations', async (req, reply) => { const body = object(req.body); if (body.target === 'center' && (body.kind === 'plugin' || body.kind === 'skill')) fail('UNSUPPORTED_TARGET', 'Native plugins and skills run on Hosts'); return reply.code(202).send(await packages.install(body)); }, true);
   route('GET', '/api/installations/:id', req => required(store.getInstallation(req.params.id), 'Installation'));
+  route('PATCH', '/api/installations/:id', req => store.renameInstallation(req.params.id, object(req.body)), true);
   route('GET', '/api/installations/:id/config', req => store.getInstallationConfig(req.params.id));
-  route('PUT', '/api/installations/:id/config', req => { const body = object(req.body); assertConfigCredentials(store.getInstallationConfig(req.params.id).configSchema, body.globalConfig); const result = store.putInstallationConfig(req.params.id, body); notifyInstallation(req.params.id); return result; }, true);
+  route('PUT', '/api/installations/:id/config', req => {
+    const body = object(req.body);
+    assertConfigCredentials(store.getInstallationConfig(req.params.id).configSchema, body.globalConfig);
+    const result = store.putInstallationConfig(req.params.id, body);
+    notifyInstallation(req.params.id);
+    // A global config change can invalidate a previous successful enable.
+    if (store.getInstallation(req.params.id).enabled) packages.revalidate(req.params.id);
+    return result;
+  }, true);
+  route('GET', '/api/devices/:deviceId/bots/:botId/capabilities', req => {
+    const { deviceId, botId } = req.params;
+    if (!store.listDeviceBots(deviceId).some(bot => bot.botId === botId)) fail('NOT_FOUND', 'Bot not found');
+    return store.listBotCapabilities(deviceId, botId);
+  });
   route('GET', '/api/devices/:deviceId/bots/:botId/capabilities/:id', req => store.getBotCapability(req.params.deviceId, req.params.botId, req.params.id));
   route('PUT', '/api/devices/:deviceId/bots/:botId/capabilities/:id', async req => { const { deviceId, botId, id } = req.params; const body = object(req.body); assertConfigCredentials(store.getInstallationConfig(id).configSchema, body.overrides); const result = store.putBotCapability(deviceId, botId, id, body); try { await packages.reconcileDevice(deviceId); } finally { notify(deviceId); } return result; }, true);
   function actions(id) {
@@ -194,7 +226,7 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
     const declared = actions(id).find(item => item.id === name);
     if (!declared) fail('NOT_FOUND', 'Action not declared');
     object(input); text(input.deviceId, 'deviceId'); text(input.botId, 'botId'); text(input.requestId, 'requestId');
-    if (!store.getInstallation(id).enabled || !store.getBotCapability(input.deviceId, input.botId, id).enabled) fail('FORBIDDEN', 'Capability unavailable');
+    if (!store.isActive(store.getInstallation(id)) || !store.getBotCapability(input.deviceId, input.botId, id).enabled) fail('FORBIDDEN', 'Capability unavailable');
     if (!ajv.validate(declared.inputSchema, input.input)) fail('VALIDATION_FAILED', 'Invalid action input');
     const result = await bridge.call(input.deviceId, 'callCapabilityAction', { installationId: id, action: name, request: input });
     if (declared.outputSchema !== undefined && !ajv.validate(declared.outputSchema, result.result)) fail('INVALID_STATE', 'Invalid action output');
@@ -204,7 +236,7 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
   route('POST', '/api/installations/:id/tools/list', async req => {
     const body = object(req.body); const deviceId = text(body.deviceId, 'deviceId'); const botId = text(body.botId, 'botId');
     const installation = required(store.getInstallation(req.params.id), 'Installation');
-    if (installation.kind !== 'mcp' || !installation.enabled || !store.listDeviceBots(deviceId).some(bot => bot.botId === botId) || !store.getBotCapability(deviceId, botId, req.params.id).enabled) fail('FORBIDDEN', 'Capability unavailable');
+    if (installation.kind !== 'mcp' || !store.isActive(installation) || !store.listDeviceBots(deviceId).some(bot => bot.botId === botId) || !store.getBotCapability(deviceId, botId, req.params.id).enabled) fail('FORBIDDEN', 'Capability unavailable');
     if (installation.target === 'center') return execution.listTools(deviceId, req.params.id, { botId });
     if (installation.target !== 'host') fail('UNSUPPORTED_TARGET', 'Unsupported MCP target');
     const result = await action(req.params.id, 'listTools', { requestId: randomUUID(), deviceId, botId, input: {} });
@@ -217,7 +249,19 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
     return result.result;
   }, true);
   route('POST', '/api/installations/:id/updates/check', req => packages.checkUpdates(req.params.id), true);
-  for (const [method, path, fn] of [['POST','update','update'],['POST','rollback','rollback'],['POST','disable','disable'],['POST','enable','enable'],['DELETE','','uninstall']]) {
+  route('POST', '/api/installations/:id/enable', async (req, reply) => {
+    const body = object(req.body);
+    const request = { requestId: text(body.requestId, 'requestId') };
+    if (body.validationBot !== undefined) {
+      const validationBot = object(body.validationBot);
+      const deviceId = text(validationBot.deviceId, 'deviceId');
+      const botId = text(validationBot.botId, 'botId');
+      if (!store.listDeviceBots(deviceId).some(bot => bot.botId === botId)) fail('NOT_FOUND', 'Bot not found');
+      request.validationBot = { deviceId, botId };
+    }
+    return reply.code(202).send(await packages.enable(req.params.id, request));
+  }, true);
+  for (const [method, path, fn] of [['POST','update','update'],['POST','rollback','rollback'],['POST','disable','disable'],['DELETE','','uninstall']]) {
     route(method, `/api/installations/:id${path ? `/${path}` : ''}`, async (req, reply) => reply.code(202).send(await packages[fn](req.params.id, object(req.body))), true);
   }
   route('GET', '/api/installations/:id/deployments', req => store.listDeploymentReceipts(req.params.id));
@@ -288,8 +332,16 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
   host('POST', '/api/host/receipt', (req, reply) => {
     const body = object(req.body);
     if (body.deviceId !== req.centerDevice.deviceId) fail('FORBIDDEN', 'Device mismatch');
-    if (!Number.isSafeInteger(body.revision) || body.revision < 0 || !['applied', 'failed'].includes(body.status)) fail('INVALID_ARGUMENT', 'Invalid runtime receipt');
-    store.putRuntimeReceipt({ ...body, error: body.error ? { code: 'INTERNAL_ERROR', message: 'Runtime application failed' } : null });
+    if (!Number.isSafeInteger(body.revision) || body.revision < 0 || !runtimeStatuses.includes(body.status)) fail('INVALID_ARGUMENT', 'Invalid runtime receipt');
+    if (body.appliedRevision != null && (!Number.isSafeInteger(body.appliedRevision) || body.appliedRevision < 0 || body.appliedRevision > body.revision)) fail('INVALID_ARGUMENT', 'Invalid runtime receipt');
+    if (body.bots !== undefined && (!Array.isArray(body.bots) || body.bots.length > 500)) fail('INVALID_ARGUMENT', 'Invalid runtime receipt');
+    if (body.capabilityErrors !== undefined && (!Array.isArray(body.capabilityErrors) || body.capabilityErrors.length > 500)) fail('INVALID_ARGUMENT', 'Invalid runtime receipt');
+    store.putRuntimeReceipt({
+      deviceId: body.deviceId, revision: body.revision, status: body.status, error: runtimeError(body.error),
+      appliedRevision: body.appliedRevision ?? null,
+      bots: (body.bots ?? []).map(runtimeBotReceipt),
+      capabilityErrors: (body.capabilityErrors ?? []).map(runtimeCapabilityError),
+    });
     return reply.code(204).send();
   });
   host('GET', '/api/host/deployments', req => packages.listDeploymentPlans(req.centerDevice.deviceId));
@@ -309,7 +361,7 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
         return current && receipts.find(r => r.deviceId === id && r.operationId === operation.operationId && r.planId === current.planId && r.desiredRevision === current.desiredRevision);
       });
       if (matched.some(receipt => receipt?.phase === 'failed')) store.updateOperation(operation.operationId, { phase: 'failed', error: { code: 'INTERNAL_ERROR', message: 'Deployment failed' } });
-      else if (matched.every(receipt => receipt && ['applied', 'removed'].includes(receipt.phase))) store.updateOperation(operation.operationId, { phase: operation.action === 'uninstall' ? 'removed' : 'applied', error: null });
+      else if (matched.every(receipt => receipt && ['applied', 'removed'].includes(receipt.phase))) packages.setOperationPhase(operation.operationId, operation.action === 'uninstall' ? 'removed' : 'applied', null);
     }
     return reply.code(204).send();
   });

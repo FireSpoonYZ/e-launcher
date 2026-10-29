@@ -117,8 +117,12 @@ export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, sign
       catch { throw centerError('BAD_RESPONSE', 'invalid center response'); }
       if (closed || signal?.aborted) throw centerError('CENTER_OFFLINE', 'center is disconnected');
       if (path === '/api/session') {
-        if (typeof result?.authenticated !== 'boolean' || typeof result.csrfToken !== 'string' || !result.csrfToken) throw centerError('BAD_RESPONSE', 'invalid center session');
-        ownerCsrf = result.csrfToken;
+        // SessionInfo.csrfToken 在未认证时为 null：保留旧 CSRF 为空串，只要求已认证时拿到令牌。
+        if (typeof result?.authenticated !== 'boolean' ||
+            (result.authenticated && (typeof result.csrfToken !== 'string' || !result.csrfToken))) {
+          throw centerError('BAD_RESPONSE', 'invalid center session');
+        }
+        if (typeof result.csrfToken === 'string' && result.csrfToken) ownerCsrf = result.csrfToken;
       }
       return result;
     });
@@ -129,9 +133,10 @@ export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, sign
     const session = await ownerRequest('/api/session', { signal });
     return { authenticated: session.authenticated };
   };
+  // 真实中心会话探测：不伪造已认证，同时让后续写请求拿到 CSRF 令牌。
   const ownerSession = async (signal) => {
     if (closed || signal?.aborted) throw centerError('CENTER_OFFLINE', 'center is disconnected');
-    return { authenticated: true };
+    return fetchOwnerSession(signal);
   };
   const botModelPath = (targetDeviceId, botId) => '/api/devices/' + encodeURIComponent(targetDeviceId) + '/bots/' + encodeURIComponent(botId) + '/model-config';
   const hostBotModelPath = (targetDeviceId, botId) => '/api/host/devices/' + encodeURIComponent(targetDeviceId) + '/bots/' + encodeURIComponent(botId) + '/model-config';
@@ -177,8 +182,13 @@ export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, sign
   }
   return {
     ownerSession,
+    // Fixed-path owner management requests (capabilities/runtime status). The caller
+    // owns path construction and argument validation; no arbitrary owner HTTP surface.
+    ownerRequest,
     async ownerLogin(password, signal) {
-      await fetchOwnerSession(signal);
+      // 未认证时 GET /api/session 可能 401：探测仅用于取 CSRF，失败不阻断登录本身。
+      try { await fetchOwnerSession(signal); } catch { /* 登录 POST 会给出真实结果 */ }
+      if (closed || signal?.aborted) throw centerError('CENTER_OFFLINE', 'center is disconnected');
       const session = await ownerRequest('/api/session', { method: 'POST', body: { password }, signal });
       return { authenticated: session.authenticated };
     },

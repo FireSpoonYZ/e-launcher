@@ -556,7 +556,7 @@ function PrimaryChatPane({
   onLiveActivity,
   pageActive = true,
 }: {
-  api: DesktopViewApi;
+  api: DesktopPanelApi;
   bot: BotRecord;
   onProfileSaved: (bot: BotRecord) => void;
   onBotUpdated: (patch: Partial<BotRecord> & { botId: string }) => void;

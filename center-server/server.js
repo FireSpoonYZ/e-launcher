@@ -37,7 +37,7 @@ export async function openCenterServer({ dataRoot, encryptionKey, sessionKey, ow
     bridge = openHostBridge({ dataRoot, store, relay, linkUrl: relayOptions.linkUrl, ca: [relayOptions.tls.cert, ...rootCertificates].join('\n') });
     oauth = openMcpOAuth({ store, publicUrl });
     execution = openCenterExecution({ store, packages: { getInstalled: id => packages.getInstalled(id) }, oauth });
-    packages = await openPackageManager({ dataRoot, store, npmPath: npmPath || join(dirname(require.resolve('npm/package.json')), 'bin', 'npm-cli.js'), onChange: id => routes?.notifyInstallation(id), withActivation: (id, publish) => execution.withActivation(id, publish) });
+    packages = await openPackageManager({ dataRoot, store, npmPath: npmPath || join(dirname(require.resolve('npm/package.json')), 'bin', 'npm-cli.js'), onChange: id => routes?.notifyInstallation(id), withActivation: (id, publish) => execution.withActivation(id, publish), probeCenterMcp: (installation, config, identity) => execution.probeGlobal(installation, config, identity) });
     app = Fastify({ https, logger: false, bodyLimit: 1024 * 1024 });
     app.addHook('onRequest', (req, reply, done) => {
       if (req.url.startsWith('/api/')) reply.header('Cache-Control', 'no-store');
