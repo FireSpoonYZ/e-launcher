@@ -61,21 +61,38 @@ export async function openHostService(options) {
   let phase = 'starting';
   let closed = false;
   let state = { state: 'connecting', centerUrl: center.url, appliedRevision: null, error: null };
-  let activeRevision, lastRevision, frozen, timer, deploymentTimer;
+  let activeRevision, lastRevision, frozen, timer, retryTimer, reconcileTimer;
   let generation = 0;
-  let activationRevision = 0;
-  let pendingChange = false;
+  let configDirty = false;
+  let bootstrapPending = false;
+  let refreshQueued = null;
   let serial = Promise.resolve();
+  const RECONCILE_INTERVAL_MS = 30000;
+  const RETRY_INTERVAL_MS = 1000;
   const enqueue = (fn) => {
     const next = serial.then(fn);
     serial = next.catch(() => {});
     return next;
   };
+  const isOffline = (err) => err?.code === 'CENTER_OFFLINE' || err?.code === 'UNAUTHORIZED' || err?.code === 'CONTROL_UNAUTHORIZED';
+  let lastReported = null;
+  /** 相同回执不重复上报（30 秒核对握手时保持安静），内容变化才发。 */
+  async function reportRuntime(current, receipt) {
+    const body = { deviceId, ...receipt };
+    const key = JSON.stringify(body);
+    if (key === lastReported) return;
+    await current.reportRuntime(body);
+    lastReported = key;
+  }
   function disconnect() {
+    // 只有真实断线才递增 generation、关闭准入并重建连接。
     generation++;
     const previous = client;
     client = null;
     if (previous) void previous.close();
+    clearTimeout(retryTimer);
+    retryTimer = null;
+    lastReported = null;
     state = { ...state, state: 'disconnected', appliedRevision: null, error: { code: 'CENTER_OFFLINE', message: 'center disconnected' } };
     if (control) void control.setCenterOnline(false).catch(() => {});
     if (!closed) scheduleReconnect();
@@ -103,32 +120,38 @@ export async function openHostService(options) {
   }
   async function applyPlans(current) {
     let waiting = false;
+    const planned = [];
+    const failed = [];
     for (const plan of await current.getDeployments()) {
       if (current !== client) throw offlineError();
+      planned.push(plan.installationId);
+      // 失败已由 installer 按计划回报中心；单个部署失败不再令整个 Host 断线。
       const receipt = await installer.apply(plan);
       if (receipt.phase === 'waiting-idle') waiting = true;
-      if (receipt.phase === 'failed') throw Object.assign(new Error('deployment failed'), { code: 'DEPLOYMENT_FAILED' });
+      if (receipt.phase === 'failed') failed.push(plan.installationId);
     }
-    clearTimeout(deploymentTimer);
-    if (waiting) {
-      deploymentTimer = setTimeout(() => {
-        deploymentTimer = null;
-        void enqueue(async () => {
-          if (!client || closed) return;
-          try {
-            const before = activationRevision;
-            await applyPlans(client);
-            if (activationRevision !== before) await refresh(false, true);
-          } catch { disconnect(); }
-        });
-      }, 1000);
-      deploymentTimer.unref?.();
-    }
-    return waiting;
+    return { waiting, planned, failed };
   }
-  async function apply(snapshot, current, gen, { plansApplied = false, resume = false } = {}) {
+  /** 合并在线激活阶段的能力失败：只有真的全部应用才算 applied，不伪报。 */
+  function mergeActivation(result, activation) {
+    const errors = activation?.capabilityErrors ?? [];
+    if (errors.length === 0) return result;
+    const affected = new Set(errors.map((item) => item.botId));
+    const bots = result.bots.map((bot) => (affected.has(bot.botId) && bot.status === 'applied'
+      ? { ...bot, appliedRevision: null, status: 'failed',
+        error: { code: 'CAPABILITY_ACTIVATE_FAILED', message: 'one or more capabilities could not be activated' } }
+      : bot));
+    const failed = bots.some((bot) => bot.status === 'failed');
+    return { ...result, bots, status: failed ? 'failed' : result.status,
+      appliedRevision: failed ? null : result.appliedRevision,
+      error: failed ? { code: 'RUNTIME_APPLY_FAILED', message: 'runtime configuration was only partially applied' } : result.error,
+      capabilityErrors: [...result.capabilityErrors, ...errors] };
+  }
+  async function apply(snapshot, current, gen, { plansApplied = false, resume = false, planning = null } = {}) {
     if (snapshot.deviceId !== deviceId || snapshot.protocol !== 1) throw invalidArgument('invalid center snapshot');
-    if (!plansApplied) await applyPlans(current);
+    // 新快照已校验：在此同步撤销该撤销的授权（同步删 policy，先于部署/空闲检查）。
+    void control.revokeCenterCapabilities(snapshot);
+    const plans = plansApplied ? (planning ?? { waiting: false, planned: [], failed: [] }) : await applyPlans(current);
     if (gen !== generation || current !== client) throw offlineError();
     if (snapshot.linkUrl !== linkUrl || link.getStatus().phase !== 'online') {
       parseRelayUrl(snapshot.linkUrl);
@@ -136,44 +159,95 @@ export async function openHostService(options) {
       link = await connectLink(snapshot.linkUrl);
       linkUrl = snapshot.linkUrl;
     }
-    await control.applyCenterSnapshot(snapshot);
     if (gen !== generation || current !== client) throw offlineError();
-    await control.setCenterOnline(true);
-    if (gen !== generation || current !== client) { await control.setCenterOnline(false); throw offlineError(); }
+    const previousRevision = state.appliedRevision;
+    if (previousRevision !== snapshot.revision) {
+      // 进度心跳；中心可忽略，失败不影响应用。
+      await reportRuntime(current, { revision: snapshot.revision, status: 'applying',
+        appliedRevision: previousRevision, error: null, bots: [], capabilityErrors: [] }).catch(() => {});
+    }
+    const applied = await control.applyCenterSnapshot(snapshot,
+      { deployment: { planned: plans.planned, failed: plans.failed } });
+    if (gen !== generation || current !== client) throw offlineError();
+    const activation = await control.setCenterOnline(true);
+    if (gen !== generation || current !== client) throw offlineError();
     if (resume) control.resume();
-    await current.reportRuntime({ deviceId, revision: snapshot.revision, status: 'applied', error: null });
-    if (gen !== generation || current !== client) { await control.setCenterOnline(false); throw offlineError(); }
-    state = { state: 'ready', centerUrl: center.url, appliedRevision: snapshot.revision, error: null };
+    const receipt = mergeActivation(applied, activation);
+    await reportRuntime(current, { revision: snapshot.revision, status: receipt.status,
+      appliedRevision: receipt.appliedRevision, error: receipt.error,
+      bots: receipt.bots, capabilityErrors: receipt.capabilityErrors });
+    if (gen !== generation || current !== client) throw offlineError();
+    state = { state: 'ready', centerUrl: center.url, appliedRevision: receipt.appliedRevision, error: receipt.error ?? null };
+    scheduleRetry(plans.waiting || receipt.bots.some((bot) => bot.status === 'waiting-idle'));
+    return receipt;
   }
-  async function refresh(bootstrap = false, plansApplied = false) {
+  async function refresh(bootstrap = false) {
     const current = client;
     const gen = generation;
     if (!current) throw offlineError();
-    state = { ...state, state: 'connecting', appliedRevision: null };
-    await control.setCenterOnline(false);
     const snapshot = bootstrap ? (await current.bootstrap(readBots())).snapshot : await current.getSnapshot();
-    try { await apply(snapshot, current, gen, { plansApplied }); }
-    catch (err) {
-      if (current === client) {
-        await control.setCenterOnline(false);
-        state = { ...state, state: 'disconnected', error: { code: 'CENTER_APPLY_FAILED', message: 'center configuration could not be applied' } };
-        await current.reportRuntime({ deviceId, revision: snapshot.revision, status: 'failed', error: state.error }).catch(() => {});
-      }
-      throw err;
+    try {
+      return await apply(snapshot, current, gen);
+    } catch (err) {
+      if (current !== client || closed) throw err;
+      // 应用失败不改写已在线状态：旧执行内容仍在服务，交给核对/重试恢复。
+      const error = { code: 'CENTER_APPLY_FAILED', message: 'center configuration could not be applied' };
+      state = { ...state, error };
+      scheduleRetry(true);
+      await reportRuntime(current, { revision: snapshot?.revision ?? state.appliedRevision ?? 0,
+        status: 'failed', appliedRevision: state.appliedRevision, error, bots: [], capabilityErrors: [] }).catch(() => {});
+      throw Object.assign(new Error('center configuration could not be applied'), { code: 'CENTER_APPLY_FAILED', cause: err });
     }
   }
-  function changed() {
-    generation++;
-    pendingChange = true;
-    if (control) {
-      state = { ...state, state: 'connecting', appliedRevision: null };
-      void control.setCenterOnline(false).catch(() => {});
-      void enqueue(async () => {
-        if (!pendingChange || !client || closed) return;
-        pendingChange = false;
-        try { await refresh(); } catch { disconnect(); }
-      });
+  /** 串行合并刷新：刷新期间的新事件只置脏，本轮结束后补拉最新一次。 */
+  function requestRefresh({ bootstrap = false } = {}) {
+    if (bootstrap) bootstrapPending = true;
+    if (closed || !client) return Promise.resolve(null);
+    if (refreshQueued) return refreshQueued;
+    refreshQueued = enqueue(async () => {
+      let result = null;
+      try {
+        do {
+          configDirty = false;
+          const useBootstrap = bootstrapPending;
+          bootstrapPending = false;
+          result = await refresh(useBootstrap);
+        } while ((configDirty || bootstrapPending) && client && !closed);
+        return result;
+      } finally { refreshQueued = null; }
+    });
+    return refreshQueued;
+  }
+  let retryCount = 0;
+  function scheduleRetry(needed) {
+    if (!needed) {
+      clearTimeout(retryTimer);
+      retryTimer = null;
+      retryCount = 0;
+      return;
     }
+    if (retryTimer || closed || !client) return;
+    // 快重试有界：连续约 30 次后交给 30 秒核对，避免永久 1s 轮询。
+    if (retryCount >= RECONCILE_INTERVAL_MS / RETRY_INTERVAL_MS) {
+      retryCount = 0;
+      return;
+    }
+    retryCount++;
+    retryTimer = setTimeout(() => {
+      retryTimer = null;
+      void requestRefresh().catch(() => { if (!closed) scheduleRetry(true); });
+    }, RETRY_INTERVAL_MS);
+    retryTimer.unref?.();
+  }
+  function startReconcile() {
+    if (reconcileTimer || closed) return;
+    // 30 秒低频核对：SSE 静默时也收敛；轮询不会中止运行中的任务。
+    reconcileTimer = setInterval(() => { if (!closed) void requestRefresh().catch(() => {}); }, RECONCILE_INTERVAL_MS);
+    reconcileTimer.unref?.();
+  }
+  function changed() {
+    configDirty = true;
+    void requestRefresh().catch(() => {});
   }
   async function connect() {
     const gen = ++generation;
@@ -191,10 +265,16 @@ export async function openHostService(options) {
       const connectedGeneration = generation;
       const snapshot = (await current.bootstrap(readBots())).snapshot;
       await apply(snapshot, current, connectedGeneration);
-      if (pendingChange) changed();
     } catch (err) {
-      if (current) await current.close();
-      disconnect();
+      if (!current || isOffline(err)) {
+        if (current) await current.close().catch(() => {});
+        disconnect();
+        throw err;
+      }
+      // 已连上但配置应用失败：保留连接，交给核对/重试恢复，不制造新的断线。
+      bootstrapPending = true;
+      state = { ...state, state: 'disconnected', error: { code: 'CENTER_APPLY_FAILED', message: 'center configuration could not be applied' } };
+      scheduleRetry(true);
       throw err;
     }
   }
@@ -218,17 +298,19 @@ export async function openHostService(options) {
       fetchArtifact: (ref) => { if (!client) throw offlineError(); return client.fetchArtifact(ref); },
       report: (receipt) => { if (!client) throw offlineError(); return client.reportDeployment(receipt); },
       withActivation: async (id, publish) => {
-        if (control) return control.withCapabilityActivation(id, async () => {
+        if (!control) {
+          await publish();
+          return true;
+        }
+        // 激活失败/成功都由本次刷新随后的快照应用重建普通服务（需重建的版本差异会报 waiting-idle 等重试）。
+        return control.withCapabilityActivation(id, async () => {
           state = { ...state, state: 'connecting', appliedRevision: null };
           // withCapabilityActivation 已关闭准入；重入其生命周期队列会死锁。
           await publish();
-          activationRevision++;
         });
-        await publish();
-        return true;
       },
     });
-    await applyPlans(current);
+    const bootPlans = await applyPlans(current);
     const { models } = applyCenterModels(snapshot);
     const execution = parseExecutionOptions(settings.settings.runtime);
     control = await openControlServer({
@@ -244,10 +326,8 @@ export async function openHostService(options) {
             try { await client.syncBots(readBots()); } catch { /* ignore transient sync error */ }
           });
         }
-        generation++;
-        state = { ...state, state: 'connecting', appliedRevision: null };
-        void control.setCenterOnline(false).catch(() => {});
-        return enqueue(async () => { try { await refresh(true); } catch (err) { disconnect(); throw err; } });
+        // 新 Bot 需要中心登记；普通配置刷新走同一串行合并路径，不制造假断线。
+        return requestRefresh({ bootstrap: true }).catch(() => null);
       },
       onBotsSync: () => enqueue(async () => {
         if (!client || closed) return;
@@ -257,13 +337,14 @@ export async function openHostService(options) {
     if (current !== client) throw offlineError();
     linkUrl = snapshot.linkUrl;
     link = await connectLink(linkUrl);
-    await apply(snapshot, current, initialGeneration, { plansApplied: true, resume: true });
+    await apply(snapshot, current, initialGeneration, { plansApplied: true, resume: true, planning: bootPlans });
     phase = 'running';
-    if (pendingChange) changed();
+    startReconcile();
   } catch (err) {
     closed = true;
     clearTimeout(timer);
-    clearTimeout(deploymentTimer);
+    clearTimeout(retryTimer);
+    if (reconcileTimer) clearInterval(reconcileTimer);
     if (client) await client.close().catch(() => {});
     if (link) await link.close().catch(() => {});
     if (control) await control.close().catch(() => {});
@@ -285,7 +366,8 @@ export async function openHostService(options) {
         closed = true;
         phase = 'closing';
         clearTimeout(timer);
-        clearTimeout(deploymentTimer);
+        clearTimeout(retryTimer);
+        if (reconcileTimer) clearInterval(reconcileTimer);
         generation++;
         state = { ...state, state: 'disconnected' };
         const errors = [];

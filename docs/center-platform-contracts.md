@@ -43,6 +43,8 @@ interface CenterStore {
   getPackageVersion(packageId: string, version: string): PackageVersion | null;
   putPackageVersion(version: PackageVersion): void;
   putInstallation(installation: Installation, expectedRevision: number | null): Installation;
+  putInstallationActivation(id: string, activation: InstallationActivation): Installation;
+  isActive(installation: Installation): boolean;
   getOperation(id: string): Operation | null;
   findOperationByRequestId(requestId: string): Operation | null;
   putOperation(operation: Operation, requestFingerprint: string): Operation;
@@ -52,6 +54,9 @@ interface CenterStore {
   listDeploymentPlans(deviceId: string | null): DeploymentPlan[];
   putRuntimeReceipt(receipt: RuntimeReceipt): void;
   getRuntimeReceipt(deviceId: string): RuntimeReceipt | null;
+  getDeviceRuntimeStatus(deviceId: string, online: boolean): DeviceRuntimeStatus;
+  listBotCapabilities(deviceId: string, botId: string): BotCapabilityEntry[];
+  renameInstallation(id: string, input: PutInstallationDisplayName): Installation;
   listDeploymentReceipts(installationId: string): DeploymentReceipt[];
   putDeploymentReceipt(receipt: DeploymentReceipt): void;
   getDeviceSnapshot(deviceId: string, linkUrl: string): DeviceRuntimeSnapshot;
@@ -59,7 +64,7 @@ interface CenterStore {
 }
 ```
 
-创建 Provider/Model/Installation 时 expectedRevision 为 null，服务生成 ID 和 revision；写入已有项时以 CAS 为准。credential value 为明文写入入口，持久层加密；仅可信服务内部可调用 resolveCredential。putOperation 只负责创建及 requestId/请求摘要的原子幂等，后续阶段更新使用 updateOperation。先 putPackageVersion，再 putInstallation；新安装 global 可以尚未完整配置，此时不得启用或启动。DeploymentPlan 的 planId 和 desiredRevision 按设备与安装实例标识当前计划，语义变化时才生成新 planId 并递增 desiredRevision；回执须匹配当前 planId，operation.deviceIds 不是永久授权依据。replaceDeviceBots 在事务内全量替换该设备登记的 Bot 引用（不得删除持久 Binding/业务数据）；listBotBindings 两个过滤字段同时提供时取交集。快照在一次一致性读取中生成，不能包含其他设备的 Bot/秘密；每个已登记 Bot 即使没有模型覆盖或 Binding 也必须出现，模型使用 global，能力默认禁用并使用 global 配置。模型字段沿用现有 `host-core/runtime-models.js`，迁移时需要兼容其模型和凭证解析，不把明文写到本地 settings。
+创建 Provider/Model/Installation 时 expectedRevision 为 null，服务生成 ID 和 revision；写入已有项时以 CAS 为准。Installation 始终带 `activation:{status,error,updatedAt}`；旧行按既有 `enabled` 归一为 `enabled`/`disabled`。`enabled` 是全局意图，有效授权必须同时满足 `activation.status==='enabled'`（`store.isActive`），不满足时快照、中心执行、动作与 Bot 新开启全部无效；`putInstallationActivation` 只改 activation 且在不改变有效授权时不推进配置修订号。credential value 为明文写入入口，持久层加密；仅可信服务内部可调用 resolveCredential。putOperation 只负责创建及 requestId/请求摘要的原子幂等，后续阶段更新使用 updateOperation。先 putPackageVersion，再 putInstallation；新安装 global 可以尚未完整配置，此时不得启用或启动。DeploymentPlan 的 planId 和 desiredRevision 按设备与安装实例标识当前计划，语义变化时才生成新 planId 并递增 desiredRevision；回执须匹配当前 planId，operation.deviceIds 不是永久授权依据。replaceDeviceBots 在事务内全量替换该设备登记的 Bot 引用（不得删除持久 Binding/业务数据）；listBotBindings 两个过滤字段同时提供时取交集。快照在一次一致性读取中生成，不能包含其他设备的 Bot/秘密；每个已登记 Bot 即使没有模型覆盖或 Binding 也必须出现，模型使用 global，能力默认禁用并使用 global 配置。模型字段沿用现有 `host-core/runtime-models.js`，迁移时需要兼容其模型和凭证解析，不把明文写到本地 settings。
 
 ## 服务组合（center-api）
 
@@ -91,6 +96,7 @@ interface CenterStore {
 | PUT /api/model-config | RevisionWrite<ModelSelection> → ModelConfig |
 | GET /api/devices | → Device[]（取原 relay 在线状态） |
 | GET /api/devices/:deviceId/bots | → BotRef[]（中心登记目录；设备离线时标识设备离线，不触发 Runtime 启动） |
+| GET /api/devices/:deviceId/runtime-status | → DeviceRuntimeStatus；期望版本与最新回执对比，无回执或回执落后为 pending，离线只体现在 online=false |
 | GET /api/devices/:deviceId/bots/:botId/model-config | → BotModelConfig |
 | PUT /api/devices/:deviceId/bots/:botId/model-config | RevisionWrite<ModelSelection>（value 为 overrides）→ BotModelConfig |
 | GET /api/credentials/:id | → CredentialInfo |
@@ -102,6 +108,8 @@ interface CenterStore {
 | GET /api/installations/:id | → Installation |
 | GET /api/installations/:id/config | → InstallationConfig |
 | PUT /api/installations/:id/config | PutInstallationConfig → InstallationConfig |
+| PATCH /api/installations/:id | PutInstallationDisplayName → Installation；只改显示名称，不改进安装标识/包 ID/工具名，不触发重新部署，非执行配置变更；不递增配置修订号 |
+| GET /api/devices/:deviceId/bots/:botId/capabilities | → BotCapabilityEntry[]；聚合实例、该 Bot 的绑定/有效配置与 uiSchema |
 | GET /api/devices/:deviceId/bots/:botId/capabilities/:id | → BotCapabilityConfig |
 | PUT /api/devices/:deviceId/bots/:botId/capabilities/:id | PutBotCapability → BotCapabilityConfig |
 | POST /api/installations/:id/validate | InstallationCheckRequest（deviceId、botId）→ ProviderCheckResult；未声明 validate 动作时明确不支持 |
@@ -114,7 +122,7 @@ interface CenterStore {
 | POST /api/installations/:id/update | UpdateRequest → Accepted，202；可选 source 为新上传 artifact |
 | POST /api/installations/:id/rollback | OperationRequest → Accepted，202 |
 | POST /api/installations/:id/disable | OperationRequest → Accepted，202 |
-| POST /api/installations/:id/enable | OperationRequest → Accepted，202；只恢复实例，不修改各 Bot 选择 |
+| POST /api/installations/:id/enable | EnableRequest → Accepted，202；全局意图置启用并进入 `enabling`，只有中心侧准备/校验成功才转 `enabled`；OAuth 中心 MCP 可带 validationBot；不修改各 Bot 选择 |
 | DELETE /api/installations/:id | OperationRequest → Accepted，202；默认保留数据 |
 | POST /api/installations/:id/actions/:action | ActionRequest → ActionResult；已声明 action，限输入输出及超时 |
 | GET /api/installations/:id/deployments | → DeploymentReceipt[] |
@@ -202,7 +210,7 @@ BC 保留 `compress`、`decompress`、`search_context`、`acp_status` 原名，�
 
 ## 管理前端（admin-shell、plugin-ui）
 
-`center-web/api.ts` 导出 `api` 对象，方法命名与 HTTP 操作一致：`session, login, logout, listProviders, createProvider, getProvider, putProvider, validateProvider, discoverModels, listModels, createModel, putModel, getModelConfig, putModelConfig, listDevices, listBots, getBotModelConfig, putBotModelConfig, getCredential, putCredential, deleteCredential, uploadArtifact, listCapabilities, install, getInstallation, getInstallationConfig, putInstallationConfig, getBotCapability, putBotCapability, validateInstallation, checkUpdates, updateInstallation, rollbackInstallation, disableInstallation, enableInstallation, uninstallInstallation, listActions, runAction, startOAuth, getOAuthFlow, logoutOAuth, listDeployments, getOperation`。参数按上表顺序（路径 ID 在前，body 在后），返回 Promise<对应响应 DTO>；统一 same-origin、session 和 CSRF，并将 ApiError 转为可展示错误。列表/详情查询无密钥。
+`center-web/api.ts` 导出 `api` 对象，方法命名与 HTTP 操作一致：`session, login, logout, listProviders, createProvider, getProvider, putProvider, validateProvider, discoverModels, listModels, createModel, putModel, getModelConfig, putModelConfig, listDevices, getDeviceRuntimeStatus, listBots, getBotModelConfig, putBotModelConfig, getCredential, putCredential, deleteCredential, uploadArtifact, listCapabilities, install, getInstallation, renameInstallation, getInstallationConfig, putInstallationConfig, listBotCapabilities, getBotCapability, putBotCapability, validateInstallation, checkUpdates, updateInstallation, rollbackInstallation, disableInstallation, enableInstallation, uninstallInstallation, listActions, runAction, startOAuth, getOAuthFlow, logoutOAuth, listDeployments, getOperation`。参数按上表顺序（路径 ID 在前，body 在后），返回 Promise<对应响应 DTO>；统一 same-origin、session 和 CSRF，并将 ApiError 转为可展示错误。列表/详情查询无密钥。
 
 `center-web/App.tsx` 默认导出 App；`center-web/pages/Login.tsx`、`Providers.tsx`、`Models.tsx`、`Devices.tsx`、`Capabilities.tsx`、`Installation.tsx`、`BotCapabilities.tsx` 分别默认导出无必需 props 的路由组件。路由参数使用 React Router：`/login`、`/providers`、`/providers/:providerId/models`、`/devices`、`/capabilities`、`/capabilities/:installationId`、`/devices/:deviceId/bots/:botId/capabilities`。admin-shell 挂载这些 export；plugin-ui 使用同一 api，不创建另一份业务状态。共享配置表单由 `center-web/components/ConfigForm.tsx` 默认导出，props 为 `{schema: JsonSchema, uiSchema?: JsonObject, globalConfig: JsonObject, overrides?: JsonObject, onSave(value: JsonObject): void}`；有 overrides 时 onSave 仅提交覆盖项，否则提交 global。凭证字段只显示引用及配置状态，不回填秘密。
 

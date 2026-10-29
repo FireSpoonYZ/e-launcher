@@ -5,10 +5,16 @@ export type JsonSchema = boolean | JsonObject;
 export type CapabilityKind = 'plugin' | 'mcp' | 'skill';
 export type DeploymentPhase = 'queued' | 'downloading' | 'preparing' | 'waiting-idle' | 'activating' | 'applied' | 'failed' | 'removed';
 export type HealthState = 'ready' | 'disconnected' | 'needs-auth' | 'unsupported' | 'disabled';
+/** Hosts report applying/waiting-idle/applied/failed; the center derives pending itself. */
+export type RuntimeApplyStatus = 'pending' | 'applying' | 'waiting-idle' | 'applied' | 'failed';
+/** 'enabling' means the center is still preparing or validating a global enable request. */
+export type ActivationStatus = 'disabled' | 'enabling' | 'enabled' | 'failed';
 export const CAPABILITY_PROTOCOL: 1;
 export const CAPABILITY_KINDS: readonly CapabilityKind[];
 export const DEPLOYMENT_PHASES: readonly DeploymentPhase[];
 export const HEALTH_STATES: readonly HealthState[];
+export const RUNTIME_APPLY_STATUSES: readonly RuntimeApplyStatus[];
+export const ACTIVATION_STATUSES: readonly ActivationStatus[];
 
 /** Error messages and details must never contain credentials. */
 export interface ApiError { error: { code: string; message: string; details?: JsonValue } }
@@ -85,8 +91,16 @@ export interface Installation {
   source: InstallSource;
   target: 'center' | 'host';
   targetVersion: string;
+  /** Global intent; effective authorization also needs `activation.status === 'enabled'`. */
   enabled: boolean;
   revision: number;
+  activation: InstallationActivation;
+}
+/** Center-owned global readiness of an installation: only 'enabled' authorizes Bots. */
+export interface InstallationActivation {
+  status: ActivationStatus;
+  error: ApiError['error'] | null;
+  updatedAt: string | null;
 }
 export interface InstallationConfig {
   globalConfig: JsonObject;
@@ -185,6 +199,10 @@ export type InstallSource =
   | { type: 'http'; url: string };
 export interface InstallRequest { requestId: string; displayName: string; kind: CapabilityKind; source: InstallSource; target: 'center' | 'host' }
 export interface OperationRequest { requestId: string }
+/** Global enable may name an existing Bot as the OAuth validation identity for center MCP. */
+export interface EnableRequest extends OperationRequest {
+  validationBot?: { deviceId: string; botId: string };
+}
 export interface UpdateRequest extends OperationRequest {
   targetVersion: string;
   source?: { type: 'artifact'; artifactRef: string };
@@ -236,12 +254,50 @@ export interface DeviceRuntimeSnapshot {
   bots: RuntimeBot[];
   credentials: Record<string, string>;
 }
+/** Per-Bot outcome inside a runtime receipt. */
+export interface RuntimeBotReceipt {
+  botId: string;
+  desiredRevision: number;
+  appliedRevision: number | null;
+  status: RuntimeApplyStatus;
+  error: ApiError['error'] | null;
+}
+export interface RuntimeCapabilityError {
+  botId: string;
+  installationId: string;
+  error: ApiError['error'];
+}
+/** `revision` is the desired snapshot revision the target is reporting on. */
 export interface RuntimeReceipt {
   deviceId: string;
   revision: number;
-  status: 'applied' | 'failed';
+  status: 'applying' | 'waiting-idle' | 'applied' | 'failed';
   error: ApiError['error'] | null;
+  appliedRevision?: number | null;
+  bots?: RuntimeBotReceipt[];
+  capabilityErrors?: RuntimeCapabilityError[];
 }
+/** Center-side aggregate of desired configuration and the latest accepted receipt. */
+export interface DeviceRuntimeStatus {
+  deviceId: string;
+  online: boolean;
+  desiredRevision: number;
+  appliedRevision: number | null;
+  status: RuntimeApplyStatus;
+  /** Server time when the current desired configuration took effect. */
+  updatedAt: string | null;
+  /** Server time when the target reported the current desired revision as applied. */
+  appliedAt: string | null;
+  error: ApiError['error'] | null;
+  bots: RuntimeBotReceipt[];
+  capabilityErrors: RuntimeCapabilityError[];
+}
+export interface BotCapabilityEntry {
+  installation: Installation;
+  config: BotCapabilityConfig;
+  uiSchema?: JsonObject;
+}
+export interface PutInstallationDisplayName { expectedRevision: number; displayName: string }
 export interface BootstrapRequest { deviceId: string; capabilityProtocol: 1; bots: BotRef[] }
 export interface BootstrapResponse { snapshot: DeviceRuntimeSnapshot }
 export interface CapabilityToolsListRequest { botId: string }

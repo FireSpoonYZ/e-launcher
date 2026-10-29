@@ -3,6 +3,7 @@ import { Check, Cpu, X } from 'lucide-react';
 import type { CenterBotModelConfig, CenterModelSelection } from '../../host-core/desktop-client.js';
 import type { ModelCatalog } from '../../host-core/index.js';
 import type { DesktopIdentity, DesktopPanelApi } from '../../desktop/web/src/types';
+import { BotCapabilities } from '../../desktop/web/src/BotCapabilities';
 import { openCenterManagement } from './native';
 import { ErrorNotice, errorText, useText } from './ui';
 
@@ -21,6 +22,7 @@ export function BotModelSheet({ api, identity, botId, onClose }: Props) {
   const [password, setPassword] = useState('');
   const [query, setQuery] = useState('');
   const [busy, setBusy] = useState(true);
+  const [tab, setTab] = useState<'model' | 'capabilities'>('model');
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
 
@@ -39,7 +41,8 @@ export function BotModelSheet({ api, identity, botId, onClose }: Props) {
         if (!alive.current) return;
         setCatalog(models);
         setAuthenticated(session.authenticated);
-        if (session.authenticated) await loadConfig();
+        // 模型配置读取走 host 设备令牌路径，未登录也照常显示；写入缺少 owner CSRF 时再提示登录。
+        await loadConfig();
       } catch (failure) {
         if (alive.current) setError(errorText(failure));
       } finally {
@@ -99,6 +102,12 @@ export function BotModelSheet({ api, identity, botId, onClose }: Props) {
         </div>
       </header>
       <div className="grok-model-sheet-body">
+        <div className="grok-segmented-tabs" role="tablist" aria-label={t('Bot 设置视图', 'Bot settings views')}>
+          <button type="button" role="tab" aria-selected={tab === 'model'} className={tab === 'model' ? 'active' : undefined} onClick={() => setTab('model')}>{t('模型', 'Model')}</button>
+          <button type="button" role="tab" aria-selected={tab === 'capabilities'} className={tab === 'capabilities' ? 'active' : undefined} onClick={() => setTab('capabilities')}>{t('能力', 'Capabilities')}</button>
+        </div>
+        {tab === 'capabilities' && <BotCapabilities api={api} identity={identity} deviceId={identity.targetDeviceId} botId={botId} t={t}/>}
+        {tab === 'model' && <>
         {busy && <p role="status">{t('正在处理…', 'Working…')}</p>}
         {!busy && !authenticated && catalog && <form onSubmit={e => { e.preventDefault(); void login(); }}>
           <label className="grok-section-label" htmlFor="center-owner-password">{t('中心管理员密码', 'Center administrator password')}</label>
@@ -128,6 +137,7 @@ export function BotModelSheet({ api, identity, botId, onClose }: Props) {
           <button type="button" className="grok-done-pill-btn" disabled={busy} onClick={() => void save()}>{t('保存', 'Save')}</button>
         </>}
         <ErrorNotice error={error} onDismiss={() => setError('')}/>{notice && <ErrorNotice error={notice} tone="success" compact onDismiss={() => setNotice('')}/>}
+        </>}
       </div>
     </section>
   </div>;

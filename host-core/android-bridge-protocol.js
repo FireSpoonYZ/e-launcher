@@ -79,7 +79,7 @@ export const BRIDGE_ERROR_CODES = new Set([
   ...BRIDGE_CLIENT_CODES,
 ]);
 
-// Client mode is a fixed broker surface: the 16 ordinary desktop-client
+// Client mode is a fixed broker surface: the ordinary desktop-client
 // operations. observe/unobserve stay separate (observe frame + cancel), so no
 // arbitrary method, JS or HTTP ever crosses this IPC.
 export const BRIDGE_CLIENT_OPERATIONS = new Set([
@@ -90,6 +90,9 @@ export const BRIDGE_CLIENT_OPERATIONS = new Set([
   'center_owner_login',
   'center_bot_model_get',
   'center_bot_model_set',
+  'center_bot_capabilities_get',
+  'center_bot_capability_set',
+  'center_runtime_status',
   'connect',
   'disconnect',
   'status',

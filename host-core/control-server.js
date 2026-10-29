@@ -256,7 +256,9 @@ export async function openControlServer(options) {
     url,
     close,
     resume: () => runtime.resume(),
-    applyCenterSnapshot: (snapshot) => runtime.applyCenterSnapshot(snapshot),
+    applyCenterSnapshot: (snapshot, options) => runtime.applyCenterSnapshot(snapshot, options),
+    // 内部即时撤销；不注册 HTTP 路由，不对外暴露。
+    revokeCenterCapabilities: (snapshot) => runtime.revokeCenterCapabilities(snapshot),
     setCenterOnline: (online) => runtime.setCenterOnline(online),
     withCapabilityActivation: (id, publish) => runtime.withCapabilityActivation(id, publish),
   };

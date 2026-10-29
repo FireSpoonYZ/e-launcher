@@ -1,6 +1,6 @@
 import { mkdirSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
-import { randomBytes, randomUUID, createCipheriv, createDecipheriv } from 'node:crypto';
+import { randomBytes, randomUUID, createCipheriv, createDecipheriv, createHash } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { isDeepStrictEqual } from 'node:util';
 import Ajv from 'ajv';
@@ -23,6 +23,20 @@ const safeError = (value) => value == null ? null : value.code === 'INTERRUPTED'
   ? { code: 'INTERRUPTED', message: 'Operation interrupted; retry explicitly' }
   : { code: 'INTERNAL_ERROR', message: 'Operation failed' };
 const safeReceipt = (receipt) => ({ ...receipt, error: safeError(receipt.error) });
+const SAFE_CODE = /^[A-Z][A-Z0-9_]{0,63}$/;
+/** Target-supplied messages can embed paths or secrets, so only an allowlisted code and a fixed message cross the boundary. */
+const safeRuntimeError = (value) => value == null ? null : { code: SAFE_CODE.test(String(value.code)) ? value.code : 'INTERNAL_ERROR', message: 'Runtime application failed' };
+const ACTIVATION_STATUSES = ['disabled', 'enabling', 'enabled', 'failed'];
+/** Activation errors are center-authored: keep the code and a bounded message, drop anything else. */
+const safeActivationError = (value, status) => status !== 'failed' || value == null ? null : {
+  code: SAFE_CODE.test(String(value.code)) ? value.code : 'INTERNAL_ERROR',
+  message: typeof value.message === 'string' ? value.message.slice(0, 300) : 'Global enable failed',
+};
+const legacyActivation = (enabled) => ({ status: enabled ? 'enabled' : 'disabled', error: null, updatedAt: null });
+/** Old rows have no activation; the historical `enabled` value is the last known good state. */
+const withActivation = (installation) => installation === null ? null : { ...installation, activation: installation.activation ?? legacyActivation(installation.enabled) };
+/** Effective authorization: global intent plus a successful center-side global enable. */
+const activeInstallation = (installation) => Boolean(installation?.enabled && installation.activation?.status === 'enabled');
 
 function assertId(value) {
   if (typeof value !== 'string' || !value.trim()) throw error('INVALID_ARGUMENT', 'An identifier is required');
@@ -91,6 +105,8 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
   const key = Buffer.from(encryptionKey);
   mkdirSync(dataRoot, { recursive: true });
   const db = new DatabaseSync(join(dataRoot, 'center.sqlite'));
+  // Declared here because the snapshot helpers below run before the store object literal is built.
+  let store;
   const ajv = new Ajv({ allErrors: true, strict: false });
   const defaultsAjv = new Ajv({ allErrors: true, strict: false, useDefaults: true });
   ajv.addFormat('credential-ref', { type: 'string', validate: (value) => value.length > 0 });
@@ -107,8 +123,9 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
       throw err;
     }
   }
+  /** Advances the execution-configuration revision used by device snapshots; status-only writes must not call it. */
   function bump() {
-    db.prepare('UPDATE metadata SET revision = revision + 1 WHERE id = 1').run();
+    db.prepare('UPDATE metadata SET config_revision = config_revision + 1 WHERE id = 1').run();
   }
   function validate(schema, value, allowMissing = false, defaults = false) {
     let validator;
@@ -157,7 +174,7 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
     return parse(row);
   }
   function requireInstallation(id) {
-    const installation = get('installations', id);
+    const installation = withActivation(get('installations', id));
     if (!installation) throw error('NOT_FOUND', 'Installation not found');
     return installation;
   }
@@ -202,15 +219,72 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
       throw error('INTERNAL_ERROR', 'Credential decryption failed');
     }
   }
+  /** Execution-relevant snapshot content for one device: no display names, activity fields or other devices. */
+  function executionContent(deviceId) {
+    const providers = store.listProviders();
+    for (const provider of providers) assertPublicCredentialId(provider.credentialRef);
+    const models = Object.fromEntries(providers.map((provider) => [provider.id, store.listModels(provider.id)]));
+    const installations = store.listInstallations();
+    const refs = new Set();
+    const bots = store.listDeviceBots(deviceId).map((bot) => {
+      const model = store.getBotModelConfig(deviceId, bot.botId).effective;
+      if (typeof model.modelRef === 'string') {
+        const slash = model.modelRef.indexOf('/');
+        const provider = providers.find((item) => item.id === model.modelRef.slice(0, slash) && item.enabled);
+        const selected = provider && models[provider.id].find((item) => item.id === model.modelRef.slice(slash + 1) && item.enabled);
+        if (slash > 0 && selected && provider.credentialRef) refs.add(provider.credentialRef);
+      }
+      const capabilities = installations.map((installation) => {
+        const config = capabilityFor(deviceId, bot.botId, installation.installationId);
+        const enabled = activeInstallation(installation) && config.enabled;
+        const capabilityRefs = new Set();
+        collectCredentialRefs(config.configSchema, config.effectiveConfig, capabilityRefs);
+        if (enabled) {
+          validate(config.configSchema, config.effectiveConfig);
+          if (installation.target === 'host') for (const ref of capabilityRefs) refs.add(ref);
+        }
+        return {
+          installationId: installation.installationId, kind: installation.kind, target: installation.target,
+          targetVersion: installation.targetVersion, enabled, revision: config.revision, effectiveConfig: config.effectiveConfig,
+          credentialRefs: [...capabilityRefs],
+        };
+      });
+      return { botId: bot.botId, model, capabilities };
+    });
+    return { providers, models, bots, refs };
+  }
+  // Display-only fields are excluded so renaming never invalidates a device; only execution content is compared.
+  const providerFields = ['id', 'api', 'baseUrl', 'credentialRef', 'enabled'];
+  const modelFields = ['id', 'contextWindow', 'maxTokens', 'input', 'reasoning', 'thinkingLevelMap', 'cost', 'compat', 'inputLimits', 'enabled'];
+  const capabilityFields = ['installationId', 'kind', 'target', 'targetVersion', 'enabled', 'effectiveConfig', 'credentialRefs'];
+  /** Fingerprints secret-free execution content; CAS revisions, Bot ordering and disabled capabilities are ignored. */
+  function deviceDesired(deviceId, content) {
+    const fingerprint = createHash('sha256').update(json({
+      providers: content.providers.map((provider) => pick(provider, providerFields)),
+      models: Object.entries(content.models).map(([id, list]) => [id, list.map((model) => pick(model, modelFields))]),
+      bots: [...content.bots].sort((a, b) => a.botId < b.botId ? -1 : a.botId > b.botId ? 1 : 0).map((bot) => ({
+        botId: bot.botId, model: bot.model,
+        capabilities: bot.capabilities.filter((capability) => capability.enabled).map((capability) => pick(capability, capabilityFields)),
+      })),
+      credentials: [...content.refs].sort().map((id) => [id, credential(id)?.revision ?? null]),
+    })).digest('hex');
+    const row = parse(db.prepare('SELECT json FROM device_configs WHERE device_id = ?').get(deviceId));
+    if (row && row.fingerprint === fingerprint) return row;
+    const configRevision = db.prepare('SELECT config_revision FROM metadata WHERE id = 1').get().config_revision;
+    const value = { deviceId, fingerprint, revision: Math.max(configRevision, row ? row.revision + 1 : 0), updatedAt: new Date().toISOString() };
+    db.prepare('INSERT INTO device_configs VALUES (?, ?) ON CONFLICT(device_id) DO UPDATE SET json = excluded.json').run(deviceId, json(value));
+    return value;
+  }
+  function desiredFor(deviceId) { return deviceDesired(deviceId, executionContent(deviceId)); }
   try {
     db.exec('PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON;');
     transaction(() => {
-      const version = db.prepare('PRAGMA user_version').get().user_version;
-      if (version !== 0 && version !== 1 && version !== 2) throw error('UNSUPPORTED_SCHEMA', 'Unsupported center database schema');
+      let version = db.prepare('PRAGMA user_version').get().user_version;
+      if (![0, 1, 2, 3].includes(version)) throw error('UNSUPPORTED_SCHEMA', 'Unsupported center database schema');
       if (version === 0) {
         db.exec(`
-          CREATE TABLE metadata (id INTEGER PRIMARY KEY CHECK(id = 1), revision INTEGER NOT NULL);
-          INSERT INTO metadata VALUES (1, 0);
+          CREATE TABLE metadata (id INTEGER PRIMARY KEY CHECK(id = 1), revision INTEGER NOT NULL, config_revision INTEGER NOT NULL);
+          INSERT INTO metadata VALUES (1, 0, 0);
           CREATE TABLE providers (id TEXT PRIMARY KEY, json TEXT NOT NULL);
           CREATE TABLE models (provider_id TEXT NOT NULL, id TEXT NOT NULL, json TEXT NOT NULL, PRIMARY KEY(provider_id, id));
           CREATE TABLE model_config (id INTEGER PRIMARY KEY CHECK(id = 1), json TEXT NOT NULL, revision INTEGER NOT NULL);
@@ -228,9 +302,11 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
           CREATE TABLE deployment_receipts (device_id TEXT NOT NULL, installation_id TEXT NOT NULL, operation_id TEXT NOT NULL, json TEXT NOT NULL, PRIMARY KEY(device_id, installation_id, operation_id));
           CREATE TABLE deployment_plans (device_id TEXT NOT NULL, installation_id TEXT NOT NULL, json TEXT NOT NULL, PRIMARY KEY(device_id, installation_id));
           CREATE TABLE runtime_receipts (device_id TEXT PRIMARY KEY, json TEXT NOT NULL);
-          PRAGMA user_version = 2;
+          CREATE TABLE device_configs (device_id TEXT PRIMARY KEY, json TEXT NOT NULL);
+          PRAGMA user_version = 3;
         `);
         db.prepare('INSERT INTO sync_meta VALUES (1, ?, 0)').run(randomUUID());
+        version = 3;
       } else if (version === 1) {
         db.exec(`
           DROP TABLE IF EXISTS device_bots;
@@ -244,10 +320,20 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
           PRAGMA user_version = 2;
         `);
         db.prepare('INSERT INTO sync_meta VALUES (1, ?, 0)').run(randomUUID());
+        version = 2;
+      }
+      if (version === 2) {
+        // config_revision starts at the legacy revision so existing Hosts never see a lower snapshot revision.
+        db.exec(`
+          ALTER TABLE metadata ADD COLUMN config_revision INTEGER NOT NULL DEFAULT 0;
+          UPDATE metadata SET config_revision = revision WHERE id = 1;
+          CREATE TABLE device_configs (device_id TEXT PRIMARY KEY, json TEXT NOT NULL);
+          PRAGMA user_version = 3;
+        `);
       }
     });
 
-    const store = {
+    store = {
       listProviders: () => rows('providers'),
       getProvider: (id) => get('providers', id),
       putProvider(provider, expectedRevision) {
@@ -354,7 +440,7 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
               db.prepare('DELETE FROM bot_events WHERE seq <= ?').run(seq - 5000);
             }
           }
-          if (bumpRevision) bump();
+          if (bumpRevision && seq !== meta.seq) bump();
           return { epoch: meta.epoch, seq };
         });
       },
@@ -403,7 +489,8 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
             if (seq > 5000) {
               db.prepare('DELETE FROM bot_events WHERE seq <= ?').run(seq - 5000);
             }
-            bump();
+            // Only a real Bot addition changes execution content; profile edits stay display-only.
+            if (!existingRow) bump();
           }
           return { ...merged, seq: targetSeq };
         });
@@ -490,8 +577,22 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
       listBotBindings(filter = {}) {
         return db.prepare('SELECT json FROM bindings WHERE (? IS NULL OR device_id = ?) AND (? IS NULL OR installation_id = ?) ORDER BY device_id, bot_id, installation_id').all(filter.deviceId ?? null, filter.deviceId ?? null, filter.installationId ?? null, filter.installationId ?? null).map(parse);
       },
-      listInstallations: () => rows('installations'),
-      getInstallation: (id) => get('installations', id),
+      listInstallations: () => rows('installations').map(withActivation),
+      getInstallation: (id) => withActivation(get('installations', id)),
+      /** Effective authorization used by snapshots, execution and deployment planning. */
+      isActive: activeInstallation,
+      /** Activation-only patch: keeps the CAS revision so a late preparation cannot clobber a newer intent. */
+      putInstallationActivation(id, activation) {
+        assertObject(activation);
+        if (!ACTIVATION_STATUSES.includes(activation.status)) throw error('INVALID_ARGUMENT', 'Invalid activation status');
+        return transaction(() => {
+          const current = requireInstallation(id);
+          const result = { ...current, activation: { status: activation.status, error: safeActivationError(activation.error, activation.status), updatedAt: new Date().toISOString() } };
+          if (activeInstallation(current) !== activeInstallation(result)) bump();
+          save('installations', id, result);
+          return result;
+        });
+      },
       getInstallationConfig: configFor,
       putInstallationConfig(id, input) {
         assertObject(input); assertObject(input.globalConfig);
@@ -506,6 +607,14 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
         });
       },
       getBotCapability: capabilityFor,
+      listBotCapabilities(deviceId, botId) {
+        assertId(deviceId); assertId(botId);
+        return transaction(() => store.listInstallations().map((installation) => {
+          const config = capabilityFor(deviceId, botId, installation.installationId);
+          const { uiSchema } = configFor(installation.installationId);
+          return { installation, config, ...(uiSchema === undefined ? {} : { uiSchema }) };
+        }), 'DEFERRED');
+      },
       putBotCapability(deviceId, botId, id, input) {
         assertId(deviceId); assertId(botId); assertObject(input); assertObject(input.overrides);
         if (typeof input.enabled !== 'boolean') throw error('INVALID_ARGUMENT', 'enabled must be boolean');
@@ -513,6 +622,10 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
           const config = configFor(id);
           const current = bindingFor(deviceId, botId, id);
           assertRevision(input.expectedRevision, current.revision);
+          // A new Bot enable requires a successfully enabled global installation; turning one off stays allowed.
+          if (input.enabled && !current.enabled && !activeInstallation(requireInstallation(id))) {
+            throw error('FORBIDDEN', 'Capability is not globally enabled');
+          }
           validate(config.configSchema, merge(config.globalConfig, input.overrides), !input.enabled);
           const binding = { deviceId, botId, installationId: id, enabled: input.enabled, overrides: input.overrides, revision: current.revision + 1 };
           db.prepare('INSERT INTO bindings VALUES (?, ?, ?, ?) ON CONFLICT(device_id, bot_id, installation_id) DO UPDATE SET json = excluded.json').run(deviceId, botId, id, json(binding));
@@ -559,7 +672,6 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
           if (previous && json(previous) !== json(version)) throw error('REQUEST_CONFLICT', 'Package version already exists');
           if (!previous) {
             db.prepare('INSERT INTO package_versions VALUES (?, ?, ?)').run(version.packageId, version.version, json(version));
-            bump();
           }
         });
       },
@@ -569,7 +681,10 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
           const pkg = packageFor(installation);
           if (pkg.kind !== installation.kind) throw error('INVALID_ARGUMENT', 'Package kind does not match installation');
           const current = installation.installationId ? get('installations', installation.installationId) : null;
-          const result = createOrUpdate('installations', pick(installation, ['installationId', 'packageId', 'displayName', 'kind', 'source', 'target', 'targetVersion', 'enabled']), 'installationId', expectedRevision);
+          const activation = installation.activation ?? legacyActivation(installation.enabled);
+          if (!ACTIVATION_STATUSES.includes(activation.status)) throw error('INVALID_ARGUMENT', 'Invalid activation status');
+          const input = { ...installation, activation: { status: activation.status, error: safeActivationError(activation.error, activation.status), updatedAt: activation.updatedAt ?? null } };
+          const result = createOrUpdate('installations', pick(input, ['installationId', 'packageId', 'displayName', 'kind', 'source', 'target', 'targetVersion', 'enabled', 'activation']), 'installationId', expectedRevision);
           if (!current) {
             const globalConfig = {};
             validate(pkg.configSchema, globalConfig, true, true);
@@ -580,6 +695,19 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
             checkEnabledBindings(result.installationId, config, result);
           }
           bump(); return result;
+        });
+      },
+      /** Display-name only: keeps installationId/packageId and never changes the deployment plan. */
+      renameInstallation(id, input) {
+        assertObject(input);
+        const displayName = typeof input.displayName === 'string' ? input.displayName.trim() : '';
+        if (!displayName || displayName.length > 120) throw error('INVALID_ARGUMENT', 'Invalid display name');
+        return transaction(() => {
+          const current = requireInstallation(id);
+          assertRevision(input.expectedRevision, current.revision);
+          const result = { ...current, displayName, revision: current.revision + 1 };
+          save('installations', id, result);
+          return result;
         });
       },
       getOperation(id) {
@@ -606,7 +734,7 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
           }
           const value = safeReceipt(pick(operation, ['operationId', 'requestId', 'action', 'installationId', 'deviceIds', 'target', 'phase', 'error']));
           db.prepare('INSERT INTO operations VALUES (?, ?, ?, ?)').run(value.operationId, value.requestId, requestFingerprint, json(value));
-          bump(); return value;
+          return value;
         });
       },
       updateOperation(id, update) {
@@ -616,7 +744,7 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
           if (!current) throw error('NOT_FOUND', 'Operation not found');
           const result = { ...current, phase: update.phase, error: safeError(update.error) };
           db.prepare('UPDATE operations SET json = ? WHERE id = ?').run(json(result), id);
-          bump(); return result;
+          return result;
         });
       },
       listDeploymentReceipts(installationId) {
@@ -637,7 +765,6 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
           }
           const value = safeReceipt(pick(receipt, ['deviceId', 'installationId', 'operationId', 'planId', 'desiredRevision', 'appliedRevision', 'actualVersion', 'phase', 'health', 'error']));
           db.prepare('INSERT INTO deployment_receipts VALUES (?, ?, ?, ?) ON CONFLICT(device_id, installation_id, operation_id) DO UPDATE SET json = excluded.json').run(value.deviceId ?? '', value.installationId, value.operationId, json(value));
-          bump();
         });
       },
       putDeploymentPlan(plan) {
@@ -657,7 +784,6 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
             if (value.desiredRevision <= current.desiredRevision || value.planId === current.planId) throw error('REVISION_CONFLICT', 'Deployment revision must advance');
           }
           db.prepare('INSERT INTO deployment_plans VALUES (?, ?, ?) ON CONFLICT(device_id, installation_id) DO UPDATE SET json = excluded.json').run(value.deviceId ?? '', value.installationId, json(value));
-          bump();
         });
       },
       listDeploymentPlans(deviceId) {
@@ -666,49 +792,51 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
       putRuntimeReceipt(receipt) {
         assertObject(receipt); assertId(receipt.deviceId);
         return transaction(() => {
-          const value = { deviceId: receipt.deviceId, revision: receipt.revision, status: receipt.status, error: safeError(receipt.error) };
+          const desired = desiredFor(receipt.deviceId);
+          if (receipt.revision > desired.revision) throw error('REVISION_CONFLICT', 'Runtime receipt is ahead of the desired configuration');
+          const previous = store.getRuntimeReceipt(receipt.deviceId);
+          if (previous && receipt.revision < previous.revision) return null;
+          const now = new Date().toISOString();
+          const applied = receipt.status === 'applied';
+          const value = {
+            deviceId: receipt.deviceId, revision: receipt.revision, status: receipt.status,
+            appliedRevision: receipt.appliedRevision ?? (applied ? receipt.revision : null),
+            error: safeRuntimeError(receipt.error), updatedAt: now,
+            appliedAt: applied ? (previous && previous.revision === receipt.revision && previous.appliedAt ? previous.appliedAt : now) : null,
+            bots: (receipt.bots ?? []).map((bot) => ({ botId: bot.botId, desiredRevision: bot.desiredRevision, appliedRevision: bot.appliedRevision ?? null, status: bot.status, error: safeRuntimeError(bot.error) })),
+            capabilityErrors: (receipt.capabilityErrors ?? []).map((entry) => ({ botId: entry.botId, installationId: entry.installationId, error: safeRuntimeError(entry.error) })),
+          };
           db.prepare('INSERT INTO runtime_receipts VALUES (?, ?) ON CONFLICT(device_id) DO UPDATE SET json = excluded.json').run(receipt.deviceId, json(value));
+          return null;
         });
       },
       getRuntimeReceipt(deviceId) {
         return parse(db.prepare('SELECT json FROM runtime_receipts WHERE device_id = ?').get(deviceId));
       },
+      /** Center-saved desired revision versus the target's actual receipt; a stale receipt reads as pending. */
+      getDeviceRuntimeStatus(deviceId, online) {
+        assertId(deviceId);
+        return transaction(() => {
+          const desired = desiredFor(deviceId);
+          const receipt = store.getRuntimeReceipt(deviceId);
+          const current = receipt && receipt.revision === desired.revision ? receipt : null;
+          // Receipts stored before the split carry no appliedRevision; an applied status implies its revision.
+          const appliedRevision = current ? current.appliedRevision ?? (current.status === 'applied' ? current.revision : null) : null;
+          return {
+            deviceId, online: Boolean(online), desiredRevision: desired.revision,
+            appliedRevision, status: current?.status ?? 'pending',
+            updatedAt: desired.updatedAt ?? null, appliedAt: current?.appliedAt ?? null,
+            error: current?.error ?? null, bots: current?.bots ?? [], capabilityErrors: current?.capabilityErrors ?? [],
+          };
+        }, 'DEFERRED');
+      },
       getDeviceSnapshot(deviceId, linkUrl) {
         assertId(deviceId);
         return transaction(() => {
-          const providers = store.listProviders();
-          for (const provider of providers) assertPublicCredentialId(provider.credentialRef);
-          const models = Object.fromEntries(providers.map((provider) => [provider.id, store.listModels(provider.id)]));
-          const installations = store.listInstallations();
-          const refs = new Set();
-          const bots = store.listDeviceBots(deviceId).map((bot) => {
-            const model = store.getBotModelConfig(deviceId, bot.botId).effective;
-            if (typeof model.modelRef === 'string') {
-              const slash = model.modelRef.indexOf('/');
-              const provider = providers.find((item) => item.id === model.modelRef.slice(0, slash) && item.enabled);
-              const selected = provider && models[provider.id].find((item) => item.id === model.modelRef.slice(slash + 1) && item.enabled);
-              if (slash > 0 && selected && provider.credentialRef) refs.add(provider.credentialRef);
-            }
-            const capabilities = installations.map((installation) => {
-              const config = capabilityFor(deviceId, bot.botId, installation.installationId);
-              const enabled = installation.enabled && config.enabled;
-              const capabilityRefs = new Set();
-              collectCredentialRefs(config.configSchema, config.effectiveConfig, capabilityRefs);
-              if (enabled) {
-                validate(config.configSchema, config.effectiveConfig);
-                if (installation.target === 'host') for (const ref of capabilityRefs) refs.add(ref);
-              }
-              return {
-                installationId: installation.installationId, kind: installation.kind, target: installation.target,
-                targetVersion: installation.targetVersion, enabled, revision: config.revision, effectiveConfig: config.effectiveConfig,
-                credentialRefs: [...capabilityRefs],
-              };
-            });
-            return { botId: bot.botId, model, capabilities };
-          });
-          const credentials = Object.fromEntries([...refs].map((id) => [id, resolveCredential(assertPublicCredentialId(id))]));
-          const revision = db.prepare('SELECT revision FROM metadata WHERE id = 1').get().revision;
-          return { protocol: 1, deviceId, revision, linkUrl, providers, models, bots, credentials };
+          const content = executionContent(deviceId);
+          const desired = deviceDesired(deviceId, content);
+          const credentials = Object.fromEntries([...content.refs].map((id) => [id, resolveCredential(assertPublicCredentialId(id))]));
+          return { protocol: 1, deviceId, revision: desired.revision, linkUrl, providers: content.providers, models: content.models, bots: content.bots, credentials };
         }, 'DEFERRED');
       },
       close() { db.close(); },

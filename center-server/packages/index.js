@@ -37,7 +37,7 @@ async function atomicJson(file, value) {
   await rename(tmp, file);
 }
 
-export function openPackageManager({ dataRoot, store, npmPath, withActivation, onChange = () => {} }) {
+export function openPackageManager({ dataRoot, store, npmPath, withActivation, onChange = () => {}, probeCenterMcp }) {
   const root = path.join(dataRoot, 'packages');
   const artifacts = path.join(root, 'artifacts');
   const metadata = path.join(root, 'metadata');
@@ -53,18 +53,39 @@ export function openPackageManager({ dataRoot, store, npmPath, withActivation, o
   const monitoring = new Map();
   const changing = new Set();
   const reconciling = new Map();
+  // Operations whose global probe has not finished: they must never publish a terminal phase yet.
+  const holding = new Set();
   let retryQueued = false;
+  const activation = (status, error = null) => ({ status, error, updatedAt: new Date().toISOString() });
+  // Activation errors are center-authored codes with fixed copy so no Host or npm text reaches the API.
+  const ACTIVATION_MESSAGES = {
+    NEEDS_AUTH: '需要先在选定的校验 Bot 完成 OAuth 授权，然后重试全局启用',
+    MCP_UNREACHABLE: '中心无法连接该 MCP（connect/listTools 未通过）',
+    PACKAGE_NOT_READY: '包校验或中心分发准备未完成',
+    INVALID_ARGUMENT: '配置不满足全局启用条件（含校验 Bot 与全局 URL 不一致）',
+    VALIDATION_FAILED: '配置或包校验未通过',
+    INTERNAL_ERROR: '全局启用失败，请检查中心日志',
+  };
+  const ACTIVATION_CODES = Object.keys(ACTIVATION_MESSAGES);
+  const activationError = (code) => ({ code, message: ACTIVATION_MESSAGES[code] });
+  const activationCode = (err) => ACTIVATION_CODES.includes(err?.code) ? err.code : 'INTERNAL_ERROR';
+  // Only these actions run the global validation after deployment; disable/uninstall must keep their terminal phase.
+  const VALIDATING_ACTIONS = ['enable', 'update', 'rollback'];
+  const needsValidation = (operationId) => VALIDATING_ACTIONS.includes(store.getOperation(operationId)?.action);
   const retryTimer = setInterval(() => {
     if ((!waiting.size && !monitoring.size) || closed || retryQueued) return;
     retryQueued = true;
     enqueue(async () => {
       try {
         for (const [id, pending] of waiting) {
+          const validating = needsValidation(pending.operationId);
+          if (validating) holding.add(pending.operationId);
           const receipt = await installer.apply(pending.plan);
-          store.updateOperation(pending.operationId, { phase: receipt.phase, error: receipt.error });
+          setOperationPhase(pending.operationId, receipt.phase, receipt.error);
           if (receipt.phase !== 'waiting-idle') {
             waiting.delete(id);
             if (receipt.phase === 'applied' || receipt.phase === 'removed') onChange(id);
+            if (validating) await settleActivation(id, pending.operationId).catch(() => {});
           }
         }
         for (const operationId of monitoring.keys()) updateMonitoredOperation(operationId);
@@ -241,7 +262,7 @@ export function openPackageManager({ dataRoot, store, npmPath, withActivation, o
     withActivation,
     report: async (receipt) => {
       store.putDeploymentReceipt(receipt);
-      store.updateOperation(receipt.operationId, { phase: receipt.phase, error: receipt.error });
+      setOperationPhase(receipt.operationId, receipt.phase, receipt.error);
     },
   });
 
@@ -310,7 +331,7 @@ export function openPackageManager({ dataRoot, store, npmPath, withActivation, o
       store.updateOperation(operationId, { phase: 'failed', error: { code: 'INSTALL_FAILED', message: 'Deployment failed or was superseded' } });
       monitoring.delete(operationId);
     } else if (matched.every((receipt) => receipt && ['applied', 'removed'].includes(receipt.phase))) {
-      store.updateOperation(operationId, { phase: operation.action === 'uninstall' ? 'removed' : 'applied', error: null });
+      setOperationPhase(operationId, operation.action === 'uninstall' ? 'removed' : 'applied', null);
       monitoring.delete(operationId);
     }
   }
@@ -318,6 +339,108 @@ export function openPackageManager({ dataRoot, store, npmPath, withActivation, o
   function monitorOperation(op, plans) {
     monitoring.set(op.operationId, { plans });
     updateMonitoredOperation(op.operationId);
+  }
+
+  /** Center-side distribution/preparation facts that must hold before a global enable may succeed. */
+  async function prepareGlobal(id, validationBot) {
+    const installation = existing(id);
+    const version = store.getPackageVersion(installation.packageId, installation.targetVersion);
+    if (!version || !version.manifest) throw error('PACKAGE_NOT_READY', 'Package version is not prepared');
+    if (version.artifactRef) {
+      try { await readArtifact(version.artifactRef); }
+      catch { throw error('PACKAGE_NOT_READY', 'Package artifact is missing'); }
+    }
+    if (installation.target !== 'center') return;
+    const installed = await installer.getInstalled(id);
+    if (!installed || installed.version !== installation.targetVersion) throw error('PACKAGE_NOT_READY', 'Center package is not installed');
+    if (installation.kind !== 'mcp') return;
+    const global = store.getInstallationConfig(id).globalConfig;
+    if (global.oauth === true) {
+      // OAuth tokens stay per Bot; a chosen existing Bot is only the validation identity.
+      if (!validationBot) throw error('NEEDS_AUTH', 'OAuth validation bot is required');
+      const botConfig = store.getBotCapability(validationBot.deviceId, validationBot.botId, id).effectiveConfig;
+      if (botConfig.oauth !== true || botConfig.url !== global.url) throw error('INVALID_ARGUMENT', 'Validation bot does not match the global MCP configuration');
+    }
+    try {
+      await probeCenterMcp(installation, global, validationBot);
+    } catch (err) {
+      if (err?.code === 'NEEDS_AUTH') throw err;
+      if (err?.code === 'INVALID_ARGUMENT' || err?.code === 'INVALID_STATE') throw err;
+      const authLike = /auth|token|401|403/i.test(String(err?.message ?? ''));
+      throw error(authLike ? 'NEEDS_AUTH' : 'MCP_UNREACHABLE', 'Center MCP validation failed');
+    }
+  }
+
+  /** Writes an activation only while the change that produced it still owns the installation metadata. */
+  async function applyActivation(id, value, meta) {
+    const current = await getMeta(id).catch(() => null);
+    if (!current || current.operationId !== meta.operationId) return false;
+    store.putInstallationActivation(id, value);
+    onChange(id);
+    return true;
+  }
+
+  /** The enable request's operation must not report success when the global validation failed. */
+  function failOperation(operationId) {
+    const operation = store.getOperation(operationId);
+    if (!operation || ['failed', 'removed'].includes(operation.phase)) return;
+    store.updateOperation(operationId, { phase: 'failed', error: { code: 'INTERNAL_ERROR', message: 'Global enable failed' } });
+  }
+
+  /** A held operation must not publish its terminal phase before the probe finishes; progress phases pass through. */
+  function setOperationPhase(operationId, phase, error) {
+    const terminal = phase === 'applied' || phase === 'removed';
+    if (terminal && holding.has(operationId)) {
+      store.updateOperation(operationId, { phase: 'activating', error: null });
+      return;
+    }
+    store.updateOperation(operationId, { phase, error });
+  }
+
+  /** Publishes the terminal phase only after the probe succeeded. */
+  function releaseOperation(operationId) {
+    const operation = store.getOperation(operationId);
+    if (operation?.phase === 'activating') store.updateOperation(operationId, { phase: 'applied', error: null });
+  }
+
+  /** Settles 'enabling' into 'enabled'/'failed' from the current operation and real preparation results. */
+  async function settleActivation(id, operationId) {
+    if (operationId) holding.add(operationId);
+    try {
+      const installation = store.getInstallation(id);
+      if (!installation || !installation.enabled) return false;
+      const meta = await getMeta(id).catch(() => null);
+      if (!meta) return false;
+      const op = store.getOperation(meta.operationId);
+      if (op?.phase === 'failed') return applyActivation(id, activation('failed', activationError('INTERNAL_ERROR')), meta);
+      // A center deployment that has not landed yet keeps the installation in 'enabling'.
+      const installed = installation.target === 'center' ? await installer.getInstalled(id).catch(() => null) : null;
+      if (installation.target === 'center' && (!installed || installed.version !== installation.targetVersion)) return false;
+      try {
+        await prepareGlobal(id, meta.validationBot);
+        const settled = await applyActivation(id, activation('enabled'), meta);
+        if (settled && operationId) releaseOperation(operationId);
+        return settled;
+      } catch (err) {
+        const settled = await applyActivation(id, activation('failed', activationError(activationCode(err))), meta);
+        // Only the change operation that this settle belongs to is touched; config revalidation passes no id.
+        if (settled && operationId) failOperation(operationId);
+        return settled;
+      }
+    } finally {
+      if (operationId) holding.delete(operationId);
+    }
+  }
+
+  /** Global config changed after a successful enable: stop claiming success until preparation passes again. */
+  function revalidate(id) {
+    if (closed) return;
+    enqueue(async () => {
+      const installation = store.getInstallation(id);
+      if (!installation || !installation.enabled) return;
+      if (installation.activation?.status !== 'enabling') store.putInstallationActivation(id, activation('enabling'));
+      await settleActivation(id).catch(() => {});
+    });
   }
 
   async function dispatch(installation, meta, op) {
@@ -332,10 +455,11 @@ export function openPackageManager({ dataRoot, store, npmPath, withActivation, o
       const pending = waiting.get(installation.installationId);
       if (pending) {
         waiting.delete(installation.installationId);
+        holding.delete(pending.operationId);
         store.updateOperation(pending.operationId, { phase: 'failed', error: { code: 'INTERRUPTED', message: 'Operation superseded' } });
       }
       const receipt = await installer.apply(plan);
-      store.updateOperation(op.operationId, { phase: receipt.phase, error: receipt.error });
+      setOperationPhase(op.operationId, receipt.phase, receipt.error);
       if (receipt.phase === 'waiting-idle') waiting.set(installation.installationId, { plan, operationId: op.operationId });
       if (receipt.phase === 'applied' || receipt.phase === 'removed') onChange(installation.installationId);
       return;
@@ -359,7 +483,7 @@ export function openPackageManager({ dataRoot, store, npmPath, withActivation, o
       await atomicJson(metaFile(id), meta);
       const installation = store.putInstallation({ installationId: id, packageId: v.packageVersion.packageId,
         displayName: request.displayName, kind: request.kind, source: request.source, target: request.target,
-        targetVersion: v.packageVersion.version, enabled: true, revision: 0 }, null);
+        targetVersion: v.packageVersion.version, enabled: false, activation: activation('disabled'), revision: 0 }, null);
       onChange(id);
       await dispatch(installation, meta, op);
     });
@@ -404,20 +528,32 @@ export function openPackageManager({ dataRoot, store, npmPath, withActivation, o
       if (targetVersion !== current.targetVersion) meta.history.push(targetVersion);
       meta.operationId = op.operationId;
       meta.action = action;
+      if (action === 'enable') meta.validationBot = request.validationBot ? { deviceId: request.validationBot.deviceId, botId: request.validationBot.botId } : null;
+      const intent = action === 'enable' ? true : action === 'disable' || action === 'uninstall' ? false : current.enabled;
       changing.add(id);
       let next;
       try {
         await atomicJson(metaFile(id), meta);
         try {
-          next = store.putInstallation({ ...current, source, targetVersion,
-            enabled: action === 'enable' ? true : action === 'disable' || action === 'uninstall' ? false : current.enabled }, current.revision);
+          next = store.putInstallation({ ...current, source, targetVersion, enabled: intent,
+            activation: intent ? activation('enabling') : activation('disabled') }, current.revision);
         } catch (err) {
           await atomicJson(metaFile(id), oldMeta);
           throw err;
         }
       } finally { changing.delete(id); }
       onChange(id);
-      await dispatch(next, meta, op);
+      // The global validation runs after dispatch, so the operation must not publish a terminal phase meanwhile.
+      if (intent) holding.add(op.operationId);
+      try {
+        await dispatch(next, meta, op);
+      } catch (err) {
+        holding.delete(op.operationId);
+        if (intent) await applyActivation(id, activation('failed', activationError('INTERNAL_ERROR')), meta);
+        throw err;
+      }
+      if (intent) await settleActivation(id, op.operationId);
+      else holding.delete(op.operationId);
     });
   }
 
@@ -462,6 +598,16 @@ export function openPackageManager({ dataRoot, store, npmPath, withActivation, o
     return semver.gt(v.packageVersion.version, installation.targetVersion) ? [v.packageVersion] : [];
   }
 
+  // Restore the hold before recovery: an interrupted validating operation must not publish 'applied'.
+  const enabling = new Set(store.listInstallations()
+    .filter((installation) => installation.enabled && installation.activation?.status === 'enabling')
+    .map((installation) => installation.installationId));
+  const resuming = new Map();
+  for (const op of store.listOperations()) {
+    if (!enabling.has(op.installationId) || !VALIDATING_ACTIONS.includes(op.action) || ['applied', 'removed', 'failed'].includes(op.phase)) continue;
+    holding.add(op.operationId);
+    resuming.set(op.installationId, op.operationId);
+  }
   for (const op of store.listOperations()) {
     if (['applied', 'removed', 'failed'].includes(op.phase)) continue;
     const devices = op.target === 'center' ? [null] : op.deviceIds;
@@ -474,9 +620,16 @@ export function openPackageManager({ dataRoot, store, npmPath, withActivation, o
     }
     store.updateOperation(op.operationId, { phase: 'failed', error: { code: 'INTERRUPTED', message: 'Operation interrupted; retry explicitly' } });
   }
+  // Finish an interrupted enable/update/rollback together with its validation; other 'enabling' settles without one.
+  for (const [installationId, operationId] of resuming) {
+    enqueue(async () => { await settleActivation(installationId, operationId).catch(() => {}); });
+  }
+  for (const installationId of enabling) {
+    if (!resuming.has(installationId)) revalidate(installationId);
+  }
 
   return {
-    uploadArtifact, readArtifact, listDeploymentPlans, reconcileDevice, install,
+    uploadArtifact, readArtifact, listDeploymentPlans, reconcileDevice, install, revalidate, setOperationPhase,
     update: (id, request) => change(id, request, 'update'),
     enable: (id, request) => change(id, request, 'enable'),
     disable: (id, request) => change(id, request, 'disable'),

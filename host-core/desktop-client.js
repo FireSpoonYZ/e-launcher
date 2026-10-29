@@ -652,6 +652,75 @@ export function openDesktopClient(options) {
   function requireCenter() {
     if (centerState !== 'ready') throw brokerError('NOT_CONNECTED', 'not-sent', 'center is disconnected');
   }
+
+  // Owner-authenticated center reads/writes on fixed paths built from validated ids.
+  async function ownerCenterRequest(path, options) {
+    const client = centerClient;
+    try {
+      return await client.ownerRequest(path, options);
+    } catch (err) {
+      const norm = normalizeDesktopError(err, 'unconfirmed');
+      throw brokerError(
+        norm.code,
+        norm.code === 'REQUEST_CONFLICT' || norm.code === 'CONTROL_UNAUTHORIZED' || norm.code === 'BAD_RESPONSE' ? 'responded' : norm.outcome,
+        norm.message,
+      );
+    }
+  }
+
+  function pathId(value, name) {
+    try {
+      assertId(value, name);
+    } catch (err) {
+      throw invalid(err.message);
+    }
+    if (value === '.' || value === '..') throw invalid(`invalid ${name}`);
+    return value;
+  }
+
+  const capabilityPath = (targetDeviceId, botId) =>
+    '/api/devices/' + encodeURIComponent(targetDeviceId) + '/bots/' + encodeURIComponent(botId) + '/capabilities';
+
+  async function opCenterBotCapabilitiesGet(params, reqSignal) {
+    rejectUnknownFields(params, new Set(['deviceId', 'botId']), 'center_bot_capabilities_get params');
+    const deviceId = pathId(params.deviceId, 'deviceId');
+    const botId = pathId(params.botId, 'botId');
+    return ownerCenterRequest(capabilityPath(deviceId, botId), { signal: reqSignal });
+  }
+
+  async function opCenterBotCapabilitySet(params, reqSignal) {
+    rejectUnknownFields(
+      params,
+      new Set(['deviceId', 'botId', 'installationId', 'expectedRevision', 'enabled', 'overrides']),
+      'center_bot_capability_set params',
+    );
+    const deviceId = pathId(params.deviceId, 'deviceId');
+    const botId = pathId(params.botId, 'botId');
+    const installationId = pathId(params.installationId, 'installationId');
+    if (!Number.isSafeInteger(params.expectedRevision) || params.expectedRevision < 0) {
+      throw invalid('expectedRevision must be a non-negative safe integer');
+    }
+    if (typeof params.enabled !== 'boolean') throw invalid('enabled must be a boolean');
+    if (!isPlainObject(params.overrides)) throw invalid('overrides must be a plain object');
+    let text;
+    const payload = { expectedRevision: params.expectedRevision, enabled: params.enabled, overrides: params.overrides };
+    try {
+      text = JSON.stringify(payload);
+    } catch {
+      throw invalid('overrides must be serializable JSON');
+    }
+    if (Buffer.byteLength(text, 'utf8') > 64 * 1024) throw invalid('capability write must be at most 64 KiB');
+    return ownerCenterRequest(capabilityPath(deviceId, botId) + '/' + encodeURIComponent(installationId), {
+      method: 'PUT', body: payload, signal: reqSignal,
+    });
+  }
+
+  async function opCenterRuntimeStatus(params, reqSignal) {
+    rejectUnknownFields(params, new Set(['deviceId']), 'center_runtime_status params');
+    const deviceId = pathId(params.deviceId, 'deviceId');
+    return ownerCenterRequest('/api/devices/' + encodeURIComponent(deviceId) + '/runtime-status', { signal: reqSignal });
+  }
+
   function dropTransportForCenter() {
     cancelCenterProbe();
     centerRelayConnection = null;
@@ -1537,6 +1606,9 @@ export function openDesktopClient(options) {
     ['center_owner_login', (params, signal) => ownerOperation(params, signal, 'login')],
     ['center_bot_model_get', (params, signal) => ownerOperation(params, signal, 'get')],
     ['center_bot_model_set', (params, signal) => ownerOperation(params, signal, 'set')],
+    ['center_bot_capabilities_get', opCenterBotCapabilitiesGet],
+    ['center_bot_capability_set', opCenterBotCapabilitySet],
+    ['center_runtime_status', opCenterRuntimeStatus],
     ['connect', opConnect],
     ['disconnect', opDisconnect],
     ['status', opStatus],

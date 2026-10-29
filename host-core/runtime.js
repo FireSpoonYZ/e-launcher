@@ -11,7 +11,7 @@ import { createAndroidTools } from './android-tools.js';
 import { createHostExecutionEnv } from './host-environment.js';
 import { openHost } from './host.js';
 import { acquireRuntimeOwner } from './runtime-owner.js';
-import { parseExecutionOptions, parseModelRef, describeModelCatalog, discoverProviderModels, applyCenterModels } from './runtime-models.js';
+import { parseExecutionOptions, parseModelRef, normalizeThinkingLevel, describeModelCatalog, discoverProviderModels, applyCenterModels } from './runtime-models.js';
 import { createGrepTool } from './grep-tool.js';
 import { createFindTool } from './find-tool.js';
 import { createLsTool } from './ls-tool.js';
@@ -51,9 +51,19 @@ function assertNonBlank(value, name) {
   }
 }
 
+// 生命周期回执的线格式：错误码与短消息，绝不含配置或凭证。
+function toRuntimeError(err) {
+  const code = typeof err?.code === 'string' && err.code ? err.code : 'RUNTIME_APPLY_FAILED';
+  const message = typeof err?.message === 'string' && err.message
+    ? err.message.slice(0, 200) : 'runtime configuration could not be applied';
+  return { code, message };
+}
+
 /**
  * 每 Bot FIFO 准入：同一 Bot 的发送、设置与工作操作串行，不同 Bot 互不阻塞。
  * 关闭时立即拒绝新准入，并排空已接纳操作（调用方仍各自收到自己的失败）。
+ * 配置应用用 tryExclusive：同一条 lane 串行，但从不等待已有任务（忙即返回 false），
+ * 因此不会与 send/设置或生命周期队列互相等死锁；准入暂停（启动/断线）时仍可应用配置。
  */
 function createBotAdmission() {
   const lanes = new Map();
@@ -61,17 +71,8 @@ function createBotAdmission() {
   let closed = false;
   let suspended = false;
 
-  function admit(botId, operation) {
-    if (typeof botId !== 'string' || botId === '') {
-      return Promise.reject(errWithCode('botId must be a non-empty string', 'INVALID_ARGUMENT'));
-    }
-    if (closed || suspended) return Promise.reject(errWithCode('host is not connected', 'NOT_CONNECTED'));
-    const previous = lanes.get(botId);
-    const start = () => {
-      if (closed || suspended) throw errWithCode('host is not connected', 'NOT_CONNECTED');
-      return operation();
-    };
-    const task = previous ? previous.then(start, start) : Promise.resolve().then(start);
+  function track(botId, start) {
+    const task = Promise.resolve().then(start);
     lanes.set(botId, task);
     accepted.add(task);
     const release = () => {
@@ -82,12 +83,46 @@ function createBotAdmission() {
     return task;
   }
 
+  function admit(botId, operation) {
+    if (typeof botId !== 'string' || botId === '') {
+      return Promise.reject(errWithCode('botId must be a non-empty string', 'INVALID_ARGUMENT'));
+    }
+    if (closed || suspended) return Promise.reject(errWithCode('host is not connected', 'NOT_CONNECTED'));
+    const start = () => {
+      if (closed || suspended) throw errWithCode('host is not connected', 'NOT_CONNECTED');
+      return operation();
+    };
+    const previous = lanes.get(botId);
+    if (!previous) return track(botId, start);
+    const task = previous.then(start, start);
+    lanes.set(botId, task);
+    accepted.add(task);
+    const release = () => {
+      accepted.delete(task);
+      if (lanes.get(botId) === task) lanes.delete(botId);
+    };
+    task.then(release, release);
+    return task;
+  }
+
+  /** 占用同一 lane 但不等已有任务：该 Bot 当前有排队/在操作时返回 false（调用方报 waiting-idle）。 */
+  function tryExclusive(botId, operation) {
+    if (typeof botId !== 'string' || botId === '') {
+      return Promise.reject(errWithCode('botId must be a non-empty string', 'INVALID_ARGUMENT'));
+    }
+    if (closed || lanes.has(botId)) return Promise.resolve(false);
+    return track(botId, () => {
+      if (closed) throw errWithCode('host is not connected', 'NOT_CONNECTED');
+      return operation();
+    }).then(() => true);
+  }
+
   async function close() {
     closed = true;
     while (accepted.size > 0) await Promise.allSettled([...accepted]);
   }
 
-  return { admit, close, suspend() { suspended = true; }, resume() { suspended = false; },
+  return { admit, tryExclusive, close, suspend() { suspended = true; }, resume() { suspended = false; },
     async drain() { while (accepted.size) await Promise.allSettled([...accepted]); } };
 }
 
@@ -414,6 +449,11 @@ function createRuntime({ host, harness, models, defaultModel, releaseOwner, clea
   let centerOnline = false;
   let appliedRevision = null;
   let highestRevision = -1;
+  let centerConfigured = false;
+  let registryKey = null;
+  // 每 Bot 已应用的执行内容摘要与版本：只用于判断“无需重建”，不参与授权。
+  const botFingerprints = new Map();
+  const botAppliedRevision = new Map();
   let lifecycle = Promise.resolve();
   let epoch = 0;
   const serial = (operation) => {
@@ -704,6 +744,78 @@ function createRuntime({ host, harness, models, defaultModel, releaseOwner, clea
     return conversation;
   }
 
+  /**
+   * 配置应用前的安全边界：该 Bot 不受其他 Bot 影响。
+   * 任何未结束任务（含 blocked，不把未知状态当空闲）、排队提交、挂起决策、能力执行都算忙；
+   * 检查失败也按忙处理，交给后续刷新重试。失效任务的显式清理在 reapStaleTasks。
+   */
+  async function botIsIdle(bot) {
+    try {
+      if (plugins.hasActiveExecutions(bot.botId)) return false;
+      const nativeIds = await botConversations(bot);
+      if (nativeIds.length === 0) return true;
+      const known = new Set(nativeIds);
+      const inspection = await harness.inspect(CTX);
+      if (inspection.tasks.some((task) => known.has(task.record.conversationId))) return false;
+      if (inspection.submissions.some((submission) => known.has(submission.conversationId))) return false;
+      for (const nativeId of nativeIds) {
+        const state = await harness.snapshot(WorkDecisionState, nativeId, CTX);
+        if (state?.pending) return false;
+      }
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * 只结束本 Bot 会话内明确属于本次被撤销能力的任务（按 durable 任务类型匹配）。
+   * 不认识的 blocked 任务一律不动：保持忙、由状态对外可见，绝不静默清理别人的遗留任务。
+   */
+  async function reapStaleTasks(bot, staleKinds) {
+    if (!staleKinds || staleKinds.size === 0) return;
+    const nativeIds = await botConversations(bot);
+    if (nativeIds.length === 0) return;
+    const known = new Set(nativeIds);
+    const inspection = await harness.inspect(CTX);
+    const stale = inspection.tasks.filter((task) => known.has(task.record.conversationId) &&
+      staleKinds.has(task.record.kind));
+    for (const task of stale) {
+      try { await harness.abortTask(task.record.id, CTX); }
+      catch { /* 已被其他路径结束 */ }
+    }
+  }
+
+  /** Bot 执行内容摘要：模型选择 + 启用的能力（含配置与凭证值），不含展示名称与 revision。 */
+  function botExecutionFingerprint(selection, capabilities, credentials) {
+    const entries = (capabilities ?? []).filter((capability) => capability.enabled).map((capability) => [
+      capability.installationId, capability.kind, capability.target, capability.targetVersion,
+      capability.effectiveConfig ?? null,
+      (capability.target === 'host' ? capability.credentialRefs ?? [] : []).map((ref) => [ref, credentials?.[ref] ?? null]),
+    ]);
+    entries.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+    return createHash('sha256').update(JSON.stringify([selection ?? null, entries])).digest('hex');
+  }
+
+  /**
+   * 模型注册表指纹：只含影响注册/执行的字段（启用、api、baseUrl、引用的凭证值、模型参数）。
+   * revision 与展示名称变化不重建 provider，所以单纯改名不会动运行中的模型对象。
+   */
+  function centerRegistryKey(snapshot) {
+    const providers = (snapshot.providers ?? []).map((provider) => ({
+      id: provider.id, enabled: provider.enabled, api: provider.api, baseUrl: provider.baseUrl,
+      credential: provider.credentialRef == null ? null
+        : [provider.credentialRef, snapshot.credentials?.[provider.credentialRef] ?? null],
+      models: (snapshot.models?.[provider.id] ?? []).filter((model) => model.enabled).map((model) => ({
+        id: model.id, contextWindow: model.contextWindow, maxTokens: model.maxTokens, input: model.input,
+        reasoning: model.reasoning, cost: model.cost, compat: model.compat ?? null,
+        thinkingLevelMap: model.thinkingLevelMap ?? null, inputLimits: model.inputLimits ?? null,
+      })),
+    }));
+    providers.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+    return createHash('sha256').update(JSON.stringify(providers)).digest('hex');
+  }
+
   async function purgeOneExpiredBot(botId) {
     const bot = host.getBot(botId);
     if (!bot || bot.isPrimary || !bot.archivedAt) return false;
@@ -772,9 +884,12 @@ function createRuntime({ host, harness, models, defaultModel, releaseOwner, clea
 
   function setCenterOnline(value) {
     if (!value) {
+      // 仅真实断线走这里：关闭准入、中止执行、卸载能力。
       ++epoch;
       centerOnline = false;
       appliedRevision = null;
+      botFingerprints.clear();
+      botAppliedRevision.clear();
       setOnline(false);
       botAdmissions.suspend();
       plugins.suspend();
@@ -783,14 +898,22 @@ function createRuntime({ host, harness, models, defaultModel, releaseOwner, clea
     }
     const generation = epoch;
     return serial(async () => {
-      if (closing || appliedRevision === null || !centerRuntime.getClient() || generation !== epoch) throw errWithCode('center is offline', 'CENTER_OFFLINE');
+      if (closing || !centerConfigured || !centerRuntime.getClient() || generation !== epoch) throw errWithCode('center is offline', 'CENTER_OFFLINE');
       setOnline(true);
       try {
-        await plugins.activate();
+        // 单个能力激活失败只撤销该能力，其他 Bot 与基础聊天保持在线。
+        const activation = await plugins.activate();
+        // 激活失败的能力已被 manager 释放：同步清掉这些 Bot 的已应用指纹，
+        // 否则下一轮核对会因指纹相等而跳过重试并伪报 applied。
+        for (const item of activation?.capabilityErrors ?? []) {
+          botFingerprints.delete(item.botId);
+          botAppliedRevision.delete(item.botId);
+        }
         if (generation !== epoch || !centerRuntime.getClient()) throw errWithCode('center is offline', 'CENTER_OFFLINE');
         plugins.resumeAdmissions();
         centerOnline = true;
         botAdmissions.resume();
+        return activation;
       } catch (err) {
         centerOnline = false;
         setOnline(false);
@@ -803,29 +926,180 @@ function createRuntime({ host, harness, models, defaultModel, releaseOwner, clea
     });
   }
 
-  function applyCenterSnapshot(snapshot) {
-    centerOnline = false;
-    appliedRevision = null;
-    setOnline(false);
-    botAdmissions.suspend();
-    plugins.suspend();
-    plugins.abortActions();
-    const generation = ++epoch;
+  /**
+   * 新快照校验后的即时撤销入口（内部，只由 HostService 生命周期调用，不对外暴露）：
+   * 先**同步**删授权（先于任何 await / 部署 / 忙闲检查），再在生命周期队列里按 Bot 安全顺序
+   * 通知 onPolicyChanged 并只结束属于被撤销能力的任务。应用阶段再次撤销幂等。
+   */
+  function revokeCenterCapabilities(snapshot) {
+    const pending = [];
+    if (!closing) {
+      try {
+        const valid = snapshot?.protocol === 1 && snapshot.deviceId === host.deviceId &&
+          Number.isSafeInteger(snapshot.revision) && snapshot.revision >= highestRevision;
+        if (valid) {
+          const credentials = snapshot.credentials ?? {};
+          const desired = new Map((snapshot.bots ?? []).map((bot) => [bot.botId, bot]));
+          for (const record of host.listBots()) {
+            const capabilities = desired.get(record.botId)?.capabilities ?? [];
+            const stale = plugins.staleGrants(record.botId, capabilities, credentials);
+            if (!stale.length) continue;
+            // 先把任务类型名取下来，再做删除；之后的实例释放不会让这里丢信息。
+            const kinds = plugins.capabilityTaskNames(stale);
+            const dropped = plugins.dropGrants(record.botId, stale);
+            if (!dropped.length) continue;
+            pending.push({ botId: record.botId, ids: dropped, capabilities, kinds });
+          }
+        }
+      } catch { /* 关闭中读不到 Bot 列表时，应用阶段仍会重做撤销 */ }
+    }
     return serial(async () => {
-      if (snapshot.protocol !== 1 || snapshot.deviceId !== host.deviceId || !Number.isSafeInteger(snapshot.revision) || snapshot.revision < highestRevision) {
+      for (const item of pending) {
+        try {
+          await plugins.notifyGrants(item.botId, item.ids, item.capabilities);
+          const record = host.getBot(item.botId);
+          if (record) await reapStaleTasks(record, item.kinds);
+        } catch { /* 撤销已完成；后续通知/清理失败不阻止其他 Bot */ }
+      }
+    });
+  }
+
+  /**
+   * 单个 Bot 的配置应用（已在它的 admission lane 内，与 send/设置严格串行）：
+   * 先收紧发生变化能力的授权（幂等），再只结束该能力的失效任务，最后在空闲边界切换模型/能力/profile。
+   */
+  async function applyBotConfiguration(record, selection, capabilities, deployment, credentials) {
+    const botId = record.botId;
+    try {
+      // 1. 授权先收紧（幂等；新快照到达时 HostService 已先做过一次）。
+      const stale = plugins.staleGrants(botId, capabilities, credentials);
+      if (stale.length) await plugins.revoke(botId, stale, capabilities);
+      // 2. 只结束受影响会话内明确属于被撤销能力的任务；其他未结束任务一律不碰。
+      await reapStaleTasks(record, plugins.capabilityTaskNames(stale));
+    } catch (err) {
+      return { status: 'failed', error: toRuntimeError(err), capabilityErrors: [] };
+    }
+    // 3. 仍有未结束任务/提交/挂起决策 => 在当前版本继续服务，本次报 waiting-idle。
+    if (!(await botIsIdle(record))) return { status: 'waiting-idle', error: null, capabilityErrors: [] };
+    try {
+      if (selection?.modelRef != null) {
+        const ref = parseModelRef(selection.modelRef);
+        if (!models.getModel(ref.provider, ref.modelId)) throw errWithCode('center selected model is unavailable', 'MODEL_NOT_FOUND');
+      }
+      normalizeThinkingLevel(selection?.thinkingLevel);
+      const nextModels = { ...getBotModels() };
+      if (selection && (selection.modelRef != null || selection.thinkingLevel != null)) nextModels[botId] = selection;
+      else delete nextModels[botId];
+      setBotModels(nextModels);
+      const applied = await plugins.applyBot(record, capabilities, { deviceId: host.deviceId, credentials });
+      await refreshBotProfiles(record);
+      if (applied.capabilityErrors.length === 0) return { status: 'applied', error: null, capabilityErrors: [] };
+      // 只有“目标版本未装且部署仍在进行中”才算等待；无计划或部署已失败一律报 failed，不得永久 waiting-idle。
+      const pendingDeployment = applied.capabilityErrors.every((item) => item.error.code === 'CAPABILITY_NOT_INSTALLED' &&
+        deployment.planned.has(item.installationId) && !deployment.failed.has(item.installationId));
+      if (pendingDeployment) return { status: 'waiting-idle', error: null, capabilityErrors: applied.capabilityErrors };
+      const deploymentFailed = applied.capabilityErrors.some((item) => deployment.failed.has(item.installationId));
+      return {
+        status: 'failed',
+        error: deploymentFailed
+          ? { code: 'DEPLOYMENT_FAILED', message: 'capability deployment failed' }
+          : { code: 'CAPABILITY_APPLY_FAILED', message: 'one or more capabilities could not be applied' },
+        capabilityErrors: applied.capabilityErrors,
+      };
+    } catch (err) {
+      return { status: 'failed', error: toRuntimeError(err), capabilityErrors: [] };
+    }
+  }
+
+  /**
+   * 应用中心快照：不再全局断线。执行内容未变的 Bot 只确认版本；变化的 Bot
+   * 在各自 admission lane 的空闲边界应用（模型/思考档位按请求边界、能力按 Bot），
+   * 失败隔离到 Bot/能力并回报；failed 优先于 waiting-idle，两者同时存在时每 Bot 状态准确。
+   */
+  function applyCenterSnapshot(snapshot, options = {}) {
+    const deployment = {
+      planned: new Set(options?.deployment?.planned ?? []),
+      failed: new Set(options?.deployment?.failed ?? []),
+    };
+    return serial(async () => {
+      if (closing) throw errWithCode('host is closing', 'NOT_CONNECTED');
+      if (snapshot?.protocol !== 1 || snapshot.deviceId !== host.deviceId ||
+          !Number.isSafeInteger(snapshot.revision) || snapshot.revision < highestRevision) {
         throw errWithCode('invalid or stale center snapshot', 'INVALID_ARGUMENT');
       }
       highestRevision = snapshot.revision;
-      appliedRevision = null;
-      await abortConversations();
-      await botAdmissions.drain();
-      await plugins.quiesce();
-      const { botModels } = applyCenterModels(snapshot, models);
-      await plugins.apply(snapshot);
-      setBotModels(botModels);
-      for (const bot of host.listBots()) await refreshBotProfiles(bot);
-      if (generation !== epoch || !centerRuntime.getClient()) throw errWithCode('center is offline', 'CENTER_OFFLINE');
-      appliedRevision = snapshot.revision;
+      // 模型注册表只在执行字段变化时重建；Bot 选择不在此处发布。
+      const nextRegistryKey = centerRegistryKey(snapshot);
+      if (nextRegistryKey !== registryKey) {
+        applyCenterModels(snapshot, models);
+        registryKey = nextRegistryKey;
+      }
+      centerConfigured = true;
+      const credentials = snapshot.credentials ?? {};
+      const desired = new Map((snapshot.bots ?? []).map((bot) => [bot.botId, bot]));
+      const bots = [];
+      const capabilityErrors = [];
+      let waiting = false;
+      for (const record of host.listBots()) {
+        const botId = record.botId;
+        const target = desired.get(botId) ?? null;
+        const selection = target?.model ?? null;
+        const capabilities = target?.capabilities ?? [];
+        const receipt = { botId, desiredRevision: snapshot.revision,
+          appliedRevision: botAppliedRevision.get(botId) ?? null, status: 'pending', error: null };
+        const fingerprint = botExecutionFingerprint(selection, capabilities, credentials);
+        if (plugins.isActive() && botFingerprints.get(botId) === fingerprint) {
+          botAppliedRevision.set(botId, snapshot.revision);
+          bots.push({ ...receipt, appliedRevision: snapshot.revision, status: 'applied' });
+          continue;
+        }
+        let outcome = null;
+        let ran = false;
+        try {
+          ran = await botAdmissions.tryExclusive(botId, async () => {
+            outcome = await applyBotConfiguration(record, selection, capabilities, deployment, credentials);
+          });
+        } catch (err) {
+          if (closing) throw errWithCode('host is closing', 'NOT_CONNECTED');
+          outcome = { status: 'waiting-idle', error: null, capabilityErrors: [], cause: err };
+          ran = true;
+        }
+        if (!ran) {
+          waiting = true;
+          bots.push({ ...receipt, status: 'waiting-idle' });
+          continue;
+        }
+        capabilityErrors.push(...outcome.capabilityErrors);
+        if (outcome.status === 'applied') {
+          botFingerprints.set(botId, fingerprint);
+          botAppliedRevision.set(botId, snapshot.revision);
+          bots.push({ ...receipt, appliedRevision: snapshot.revision, status: 'applied' });
+        } else if (outcome.status === 'waiting-idle') {
+          waiting = true;
+          bots.push({ ...receipt, status: 'waiting-idle' });
+        } else {
+          botAppliedRevision.delete(botId);
+          bots.push({ ...receipt, appliedRevision: null, status: 'failed', error: outcome.error });
+        }
+      }
+      // 本机已删除的 Bot：主循环不覆盖，这里只清记录并释放其能力绑定。
+      for (const botId of [...botFingerprints.keys()]) {
+        if (desired.has(botId) || host.getBot(botId)) continue;
+        botFingerprints.delete(botId);
+        botAppliedRevision.delete(botId);
+        try {
+          await plugins.revoke(botId, plugins.staleGrants(botId, [], credentials), []);
+          await plugins.applyBot({ botId }, [], { deviceId: host.deviceId, credentials: {} });
+        } catch { /* 已无能力可撤销时忽略 */ }
+      }
+      const failed = bots.some((bot) => bot.status === 'failed');
+      const status = failed ? 'failed' : waiting ? 'waiting-idle' : 'applied';
+      appliedRevision = status === 'applied' ? snapshot.revision : null;
+      return {
+        deviceId: host.deviceId, revision: snapshot.revision, appliedRevision, status,
+        error: failed ? { code: 'RUNTIME_APPLY_FAILED', message: 'runtime configuration was only partially applied' } : null,
+        bots, capabilityErrors,
+      };
     });
   }
 
@@ -848,13 +1122,15 @@ function createRuntime({ host, harness, models, defaultModel, releaseOwner, clea
       setOnline(false);
       await plugins.quiesce();
       appliedRevision = null;
+      botFingerprints.clear();
+      botAppliedRevision.clear();
       await publish();
       return true;
     });
   }
 
   const runtime = {
-    applyCenterSnapshot, setCenterOnline, withCapabilityActivation,
+    applyCenterSnapshot, setCenterOnline, withCapabilityActivation, revokeCenterCapabilities,
     callCapabilityAction: (id, action, request) => plugins.action(id, action, request),
     getCurrentDevice: collaboration.getCurrentDevice,
     createBot: createRuntimeBot,
@@ -1185,7 +1461,7 @@ function createRuntime({ host, harness, models, defaultModel, releaseOwner, clea
 
     close,
   };
-  const lifecycleMethods = new Set(['initializeBots', 'applyCenterSnapshot', 'setCenterOnline', 'withCapabilityActivation', 'close']);
+  const lifecycleMethods = new Set(['initializeBots', 'applyCenterSnapshot', 'setCenterOnline', 'withCapabilityActivation', 'revokeCenterCapabilities', 'close']);
   return new Proxy(runtime, {
     get(target, key) {
       const value = target[key];

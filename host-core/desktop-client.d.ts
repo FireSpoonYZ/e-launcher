@@ -17,6 +17,10 @@ import type {
   PendingListPage,
   LiveTarget,
 } from './index.js';
+import type { BotCapabilityConfig, Installation, JsonObject } from '../center-contract/index.js';
+
+/** Re-exported contract shapes so UI files only need this module. */
+export type { BotCapabilityConfig, Installation, JsonObject, JsonSchema, JsonValue } from '../center-contract/index.js';
 
 export const DESKTOP_MAX_IN_FLIGHT_REQUESTS: 8;
 export const DESKTOP_MAX_OBSERVATIONS: 8;
@@ -170,6 +174,48 @@ export interface DesktopCenterStatus {
 export interface CenterModelSelection { modelRef?: string | null; thinkingLevel?: string | null }
 export interface CenterBotModelConfig { global: CenterModelSelection; overrides: CenterModelSelection; effective: CenterModelSelection; revision: number }
 
+/** Center-reported apply status; `pending` is synthesized by the center and never sent by a Host. */
+export type CenterRuntimeApplyStatus = 'pending' | 'applying' | 'waiting-idle' | 'applied' | 'failed';
+export interface CenterRuntimeError { code: string; message: string }
+export interface CenterRuntimeBotReceipt {
+  botId: string;
+  desiredRevision: number;
+  appliedRevision: number | null;
+  status: CenterRuntimeApplyStatus;
+  error: CenterRuntimeError | null;
+}
+export interface CenterRuntimeCapabilityError {
+  botId: string;
+  installationId: string;
+  error: CenterRuntimeError;
+}
+/** GET /api/devices/:deviceId/runtime-status: center-time fields, offline expressed by `online` alone. */
+export interface CenterDeviceRuntimeStatus {
+  deviceId: string;
+  online: boolean;
+  desiredRevision: number | null;
+  appliedRevision: number | null;
+  status: CenterRuntimeApplyStatus;
+  updatedAt: string | null;
+  appliedAt: string | null;
+  error: CenterRuntimeError | null;
+  bots: CenterRuntimeBotReceipt[];
+  capabilityErrors: CenterRuntimeCapabilityError[];
+}
+/** One installed capability with this Bot's binding and effective config. */
+export type CenterCapabilityActivationStatus = 'disabled' | 'enabling' | 'enabled' | 'failed';
+/** Global activation of an installation; a Bot may only be switched on when this is `enabled`. */
+export interface CenterCapabilityActivation {
+  status: CenterCapabilityActivationStatus;
+  error: CenterRuntimeError | null;
+  updatedAt: string | null;
+}
+export interface CenterBotCapabilityEntry {
+  installation: Installation & { activation: CenterCapabilityActivation };
+  config: BotCapabilityConfig;
+  uiSchema?: JsonObject;
+}
+
 export interface DesktopOperationMap {
   center_connect: {
     params: { url: string; deviceId: string; deviceToken: string; ca?: string };
@@ -188,6 +234,19 @@ export interface DesktopOperationMap {
   center_owner_login: { params: { password: string }; result: { authenticated: boolean } };
   center_bot_model_get: { params: { deviceId: string; botId: string }; result: CenterBotModelConfig };
   center_bot_model_set: { params: { deviceId: string; botId: string; expectedRevision: number; value: CenterModelSelection }; result: CenterBotModelConfig };
+  center_bot_capabilities_get: { params: { deviceId: string; botId: string }; result: CenterBotCapabilityEntry[] };
+  center_bot_capability_set: {
+    params: {
+      deviceId: string;
+      botId: string;
+      installationId: string;
+      expectedRevision: number;
+      enabled: boolean;
+      overrides: JsonObject;
+    };
+    result: BotCapabilityConfig;
+  };
+  center_runtime_status: { params: { deviceId: string }; result: CenterDeviceRuntimeStatus };
   connect: {
     params: { connection: DesktopConnectionInput };
     result: DesktopClientStatus;

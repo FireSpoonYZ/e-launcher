@@ -1,9 +1,10 @@
 import type {
   Accepted, ActionRequest, ActionResult, ApiError, ArtifactUploadReceipt, BotCapabilityConfig, CapabilityToolsListResponse,
-  BotModelConfig, BotRef, BotSyncResponse, CenterCreateBotRequest, CenterUpdateBotRequest, CredentialInfo, CredentialWrite, DeploymentReceipt, Device, DiscoveryResult,
+  BotCapabilityEntry, BotModelConfig, BotRef, BotSyncResponse, CenterCreateBotRequest, CenterUpdateBotRequest, CredentialInfo, CredentialWrite, DeploymentReceipt, Device, DeviceRuntimeStatus, DiscoveryResult,
+  EnableRequest,
   InstallRequest, Installation, InstallationConfig, LoginRequest, Model, ModelConfig, ModelSelection,
   Operation, OperationRequest, PackageVersion, Provider, ProviderCheckRequest, ProviderCheckResult, JsonSchema,
-  PutBotCapability, PutInstallationConfig, RevisionWrite, SessionInfo, UpdateRequest,
+  PutBotCapability, PutInstallationConfig, PutInstallationDisplayName, RevisionWrite, SessionInfo, UpdateRequest,
 } from '@e-launcher/center-contract';
 
 export interface InstallationCheckRequest { deviceId: string; botId: string }
@@ -59,6 +60,7 @@ export const api = {
   getModelConfig: () => request<ModelConfig>('/api/model-config'),
   putModelConfig: (body: RevisionWrite<ModelSelection>) => request<ModelConfig>('/api/model-config', 'PUT', body),
   listDevices: () => request<Device[]>('/api/devices'),
+  getDeviceRuntimeStatus: (deviceId: string) => request<DeviceRuntimeStatus>(`/api/devices/${id(deviceId)}/runtime-status`),
   renameDevice: (deviceId: string, name: string) => request<Device>(`/api/devices/${id(deviceId)}`, 'PATCH', { name }),
   deleteDevice: (deviceId: string) => request<void>(`/api/devices/${id(deviceId)}`, 'DELETE'),
   getBotSync: (params?: { epoch?: string; sinceSeq?: number }) => {
@@ -84,8 +86,10 @@ export const api = {
   listCapabilities: () => request<Installation[]>('/api/capabilities'),
   install: (body: InstallRequest) => request<Accepted>('/api/installations', 'POST', body),
   getInstallation: (installationId: string) => request<Installation>(installationPath(installationId)),
+  renameInstallation: (installationId: string, body: PutInstallationDisplayName) => request<Installation>(installationPath(installationId), 'PATCH', body),
   getInstallationConfig: (installationId: string) => request<InstallationConfig>(`${installationPath(installationId)}/config`),
   putInstallationConfig: (installationId: string, body: PutInstallationConfig) => request<InstallationConfig>(`${installationPath(installationId)}/config`, 'PUT', body),
+  listBotCapabilities: (deviceId: string, botId: string) => request<BotCapabilityEntry[]>(`${botPath(deviceId, botId)}/capabilities`),
   getBotCapability: (deviceId: string, botId: string, installationId: string) => request<BotCapabilityConfig>(`${botPath(deviceId, botId)}/capabilities/${id(installationId)}`),
   putBotCapability: (deviceId: string, botId: string, installationId: string, body: PutBotCapability) => request<BotCapabilityConfig>(`${botPath(deviceId, botId)}/capabilities/${id(installationId)}`, 'PUT', body),
   validateInstallation: (installationId: string, body: InstallationCheckRequest) => request<ProviderCheckResult>(`${installationPath(installationId)}/validate`, 'POST', body),
@@ -98,7 +102,7 @@ export const api = {
   updateInstallation: (installationId: string, body: UpdateRequest) => request<Accepted>(`${installationPath(installationId)}/update`, 'POST', body),
   rollbackInstallation: (installationId: string, body: OperationRequest) => request<Accepted>(`${installationPath(installationId)}/rollback`, 'POST', body),
   disableInstallation: (installationId: string, body: OperationRequest) => request<Accepted>(`${installationPath(installationId)}/disable`, 'POST', body),
-  enableInstallation: (installationId: string, body: OperationRequest) => request<Accepted>(`${installationPath(installationId)}/enable`, 'POST', body),
+  enableInstallation: (installationId: string, body: EnableRequest) => request<Accepted>(`${installationPath(installationId)}/enable`, 'POST', body),
   uninstallInstallation: (installationId: string, body: OperationRequest) => request<Accepted>(installationPath(installationId), 'DELETE', body),
   runAction: (installationId: string, action: string, body: ActionRequest) => request<ActionResult>(`${installationPath(installationId)}/actions/${id(action)}`, 'POST', body),
   listDeployments: (installationId: string) => request<DeploymentReceipt[]>(`${installationPath(installationId)}/deployments`),
