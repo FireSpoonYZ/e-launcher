@@ -1,12 +1,29 @@
-.config-page { max-width: 70rem; margin: 0 auto; padding: 1.5rem; }
-.config-page section, .config-form fieldset, .config-operation { margin: 1rem 0; padding: 1rem; border: 1px solid #9996; border-radius: .5rem; }
-.config-page label, .config-form label { display: block; margin: .6rem 0; }
-.config-page input:not([type=checkbox]), .config-page select, .config-page textarea, .config-form input:not([type=checkbox]), .config-form select, .config-form textarea { max-width: 100%; padding: .4rem; }
-.config-page button, .config-form button { margin: .3rem; padding: .4rem .7rem; cursor: pointer; }
-.config-page button:disabled, .config-form button:disabled { cursor: default; opacity: .6; }
-.config-override { display: inline-flex !important; gap: .4rem; margin-right: 1rem !important; }
-.config-form small { display: block; }
-.config-tabs { display: flex; flex-wrap: wrap; gap: .3rem; }
-.config-error { color: #b3261e; white-space: pre-wrap; }
-.config-list { padding: 0; list-style: none; }
-.config-list li { padding: .7rem 0; border-bottom: 1px solid #9996; }
+/* Shared configuration & RJSF form refinements (variables defined in styles.css) */
+.config-form .form-group,
+.config-form .field {
+  margin-block: 10px;
+}
+
+.config-form .field-description,
+.config-form .help-block {
+  margin: 2px 0 6px;
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+
+.config-form .error-detail,
+.config-form .text-danger {
+  color: var(--danger);
+  font-size: 0.84rem;
+  list-style: none;
+  padding-left: 0;
+  margin: 4px 0;
+}
+
+.config-form .array-item {
+  padding: 12px;
+  margin-block: 8px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: var(--card);
+}
