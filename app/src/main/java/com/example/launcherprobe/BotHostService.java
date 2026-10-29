@@ -31,8 +31,26 @@ public final class BotHostService extends Service {
     private static final int NOTIFICATION_ID = 3150;
     private static final int ERROR_NOTIFICATION_ID = 3151;
     private static final int REQUEST_NOTIFICATIONS = 3109;
+    private static volatile BotHostService activeService;
 
     private final Handler main = new Handler(Looper.getMainLooper());
+    private final Runnable checkLocal = new Runnable() {
+        @Override public void run() {
+            BotClientService.pollLocal(BotHostService.this);
+            boolean pending = !getSharedPreferences("bot_local_submissions", MODE_PRIVATE).getAll().isEmpty();
+            main.postDelayed(this, pending ? 2000 : 15000);
+        }
+    };
+
+    static void wakeLocalPolling() {
+        BotHostService service = activeService;
+        if (service == null) return;
+        service.main.post(() -> {
+            if (activeService != service) return;
+            service.main.removeCallbacks(service.checkLocal);
+            service.main.post(service.checkLocal);
+        });
+    }
 
     /** 显式可见用户入口：通知权限经前台 Activity 流程请求；FGS 启动失败向调用方传播。 */
     public static void startFromActivity(Activity activity) {
@@ -56,9 +74,13 @@ public final class BotHostService extends Service {
 
     @Override public void onCreate() {
         super.onCreate();
+        activeService = this;
         getSystemService(NotificationManager.class).createNotificationChannel(
                 new NotificationChannel(CHANNEL, "AI Host", NotificationManager.IMPORTANCE_LOW));
+        getSystemService(NotificationManager.class).createNotificationChannel(
+                new NotificationChannel("bot-client-tasks", "任务完成", NotificationManager.IMPORTANCE_DEFAULT));
         BotHostManager.get(this).attachService(this);
+        main.post(checkLocal);
     }
 
     @Override public int onStartCommand(Intent intent, int flags, int startId) {
@@ -163,6 +185,8 @@ public final class BotHostService extends Service {
     }
 
     @Override public void onDestroy() {
+        if (activeService == this) activeService = null;
+        main.removeCallbacks(checkLocal);
         BotHostManager manager = BotHostManager.get(this);
         manager.onServiceDestroyed(this);
         manager.detachService(this);

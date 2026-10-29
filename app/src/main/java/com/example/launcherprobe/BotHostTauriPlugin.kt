@@ -203,6 +203,13 @@ class BotHostTauriPlugin(private val hostActivity: Activity) : Plugin(hostActivi
             "openLegacy" -> openLegacy(invoke, params)
             "openCenter" -> openCenter(invoke, params)
             "reconnect" -> reconnect(invoke)
+            "clientLaunchTarget" -> {
+                val target = (hostActivity as? TauriMainActivity)?.takeClientLaunchTarget()
+                val reply = JSObject()
+                reply.put("ok", true)
+                reply.put("result", target ?: JSONObject.NULL)
+                send(invoke, reply)
+            }
             "screenOpen" -> screenOpen(invoke, params)
             "screenLayout" -> screenLayout(invoke, params)
             "screenStatus" -> {
@@ -234,9 +241,17 @@ class BotHostTauriPlugin(private val hostActivity: Activity) : Plugin(hostActivi
             replyInvalid(invoke, "NOT_READY", "界面未就绪")
             return
         }
+        if (method == "clientRequest" && params.optString("op") == "center_connect" && foregroundUi()
+            && android.os.Build.VERSION.SDK_INT >= 33
+            && hostActivity.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+            hostActivity.requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 3110)
+        }
         if ("startVoice" == method) {
             startVoice(invoke, params)
             return
+        }
+        if (method == "clientChatVisibility" && params.optBoolean("visible") && !foregroundUi()) {
+            params.put("visible", false)
         }
         if ("cancelVoice" == method) invalidatePendingVoice()
         forward(invoke, method, params)
@@ -336,6 +351,7 @@ class BotHostTauriPlugin(private val hostActivity: Activity) : Plugin(hostActivi
                     streamFailure = null
                     failedDeliveryId = null
                     discardFrames()
+                    probeClientConnection()
                 }
                 replyOk(invoke, result)
             }
@@ -446,8 +462,25 @@ class BotHostTauriPlugin(private val hostActivity: Activity) : Plugin(hostActivi
         if (destroyed || streamFailure != null) return
         // session 关闭：统一用私有 EVENT_STREAM_CLOSED latch 告知前端（不再透传 CLOSED/BUSY 等
         // session outcome，前端只在该 code 上收敛）；发生前已发出的 RPC 仍由各自回执保留精确 outcome。
-        // 这里不调用 client：session 已结束，绝不触发任何重绑（cause 不落日志）。
+        // 旧请求保留各自 outcome；重建只建立新会话，不重放请求。
         latchStream()
+        scheduleBridgeRecovery(++reconnectEpoch)
+    }
+
+    private fun scheduleBridgeRecovery(epoch: Int) {
+        main.postDelayed({
+            if (destroyed || epoch != reconnectEpoch || streamFailure == null) return@postDelayed
+            bridge().reconnect().whenComplete { _, error ->
+                main.post {
+                    if (destroyed || epoch != reconnectEpoch) return@post
+                    if (error == null) {
+                        streamFailure = null
+                        failedDeliveryId = null
+                        probeClientConnection()
+                    } else scheduleBridgeRecovery(epoch)
+                }
+            }
+        }, 1000)
     }
 
     private fun deliver(event: String, data: JSONObject) {
@@ -471,7 +504,7 @@ class BotHostTauriPlugin(private val hostActivity: Activity) : Plugin(hostActivi
         drain(channel)
     }
 
-    /** 单一 ACK 窗口：同时只有一个在途帧；shortcut: 无 ACK 超时，卡死页面只在下一次 unlisten/onDestroy 释放。 */
+    /** 单一 ACK 窗口：同时只有一个在途帧；页面暂停时失效旧流。 */
     private fun drain(channel: Channel) {
         while (inFlight == null && queue.isNotEmpty()) {
             val frame = queue.poll() ?: return
@@ -492,19 +525,19 @@ class BotHostTauriPlugin(private val hostActivity: Activity) : Plugin(hostActivi
         if (streamFailure != null) return
         latchStream()
         client?.pause()
+        scheduleBridgeRecovery(++reconnectEpoch)
     }
 
     /**
      * UI 事件 latch：对外固定私有 code EVENT_STREAM_CLOSED + not-sent（前端只在此 code 上收敛）；
      * 在途 request/reconnect 的精确分项 outcome 由各自完成回执原样返回，这里不重写。
      *
-     * 空闲流（有订阅但无在途帧）无法靠 ACK 报错，所以在旧 channel 上补发恰好一个私有
-     * streamError 终帧；已有在途帧时沿用原 ACK 报错路径，不额外增加帧。
+     * 旧 channel 上发私有 streamError 终帧，通知前端作废旧代。
      */
     private fun latchStream() {
         // terminal 必须用旧 streamId 前缀 + 下一个 sequence，前端按代际准入后可忽略旧代终帧。
         val channel = events
-        val terminal = if (channel != null && streamId.isNotEmpty() && inFlight == null) terminalFrame() else null
+        val terminal = if (channel != null && streamId.isNotEmpty()) terminalFrame() else null
         streamFailure = StreamFailure(STREAM_CLOSED_CODE, "not-sent", STREAM_CLOSED_MESSAGE)
         failureEpoch = reconnectEpoch
         failedDeliveryId = inFlight?.deliveryId ?: terminal?.deliveryId
@@ -643,18 +676,30 @@ class BotHostTauriPlugin(private val hostActivity: Activity) : Plugin(hostActivi
         if (destroyed) return
         main.post {
             // 取消本进程的观察/语音捕获；Host/Agent 与在途请求语义不变。
-            if (!destroyed) client?.pause()
+            if (!destroyed) {
+                if (inFlight != null) {
+                    failStream()
+                } else client?.pause()
+            }
         }
         // 离开前台即解绑 Bot 屏幕画面并结束接管；回到前台后按观看状态重连（需重新接管）。
         screenOverlay?.pause()
     }
 
+    private fun probeClientConnection() {
+        if (foregroundUi()) client?.request("clientConnectionProbe", JSONObject())
+    }
+
     override fun onResume(activity: AppCompatActivity) {
-        if (!destroyed) screenOverlay?.resume()
-        // TauriMainActivity 在 super.onResume() 返回后才置 resumed=true，所以推迟一轮：
-        // 权限已授予、但回调早于 onResume 的 pending 在这里补完（不轮询、不弱化前台判定）。
-        if (destroyed || pendingVoiceInvoke == null) return
-        main.post { if (!destroyed) completePendingVoice() }
+        if (destroyed) return
+        screenOverlay?.resume()
+        // TauriMainActivity 在 super.onResume() 返回后才置 resumed=true。
+        main.post {
+            if (!destroyed) {
+                probeClientConnection()
+                if (pendingVoiceInvoke != null) completePendingVoice()
+            }
+        }
     }
 
     override fun onStop(activity: AppCompatActivity) {
@@ -791,7 +836,7 @@ class BotHostTauriPlugin(private val hostActivity: Activity) : Plugin(hostActivi
             "observe", "cancelObservation", "voiceSettings", "saveVoiceSettings",
             "startVoice", "finishVoice", "cancelVoice", "uiSettings", "pause",
             // M20 客户端（远端 Host）固定入口；内层 broker 操作另有 16 项白名单。
-            "clientRequest", "clientObserve", "clientUnobserve"
+            "clientRequest", "clientObserve", "clientUnobserve", "clientChatVisibility"
         )
     }
 }

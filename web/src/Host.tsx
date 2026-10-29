@@ -50,14 +50,14 @@ import {
   type HostVoiceSaveInput,
   type HostVoiceSettings,
 } from './native';
-import { onMobileStreamFailure } from './native/tauri-host';
+import { mobileLocalRequest, onMobileStreamFailure } from './native/tauri-host';
 import { ActiveCenter, useCenterConnection } from './native/CenterGate';
 import { useDrafts } from '../../desktop/web/src/drafts';
 import { PendingPanel } from '../../desktop/web/src/PendingPanel';
 import { Scopes } from '../../desktop/web/src/Scopes';
-import type { DesktopIdentity, DesktopPanelApi } from '../../desktop/web/src/types';
+import type { DesktopDraftEntry, DesktopIdentity, DesktopPanelApi } from '../../desktop/web/src/types';
 import type { DesktopConnectionInput, DesktopUiProfile } from '../../host-core/desktop-client.js';
-import type { DevicesDirectoryItem, ShowerTarget } from '../../host-core/index.js';
+import type { DevicesDirectoryItem, PendingCursor, PendingListPage, ShowerTarget } from '../../host-core/index.js';
 import type { ShowerCall } from './ShowerPreview';
 import { Markdown } from './Markdown';
 import { BotScreenPanel } from './BotScreenPanel';
@@ -340,6 +340,36 @@ function formatScheduleNextRun(
   }
 }
 
+interface ChatPending {
+  botKey: string;
+  scopeKey: string;
+  requestId: string;
+  text: string;
+  afterEntryId: number;
+  pendingId?: string;
+  draft?: DesktopDraftEntry;
+  phase: 'sending' | 'recovering' | 'accepted';
+}
+interface ChatPendingEntry { pending: ChatPending; receipt?: HostSubmission }
+
+function chatStorageKey(center: string, deviceId: string, botId: string): string {
+  return `bot-chat-v1:${JSON.stringify([center, deviceId, botId])}`;
+}
+function readChatPending(key: string): ChatPendingEntry | undefined {
+  try {
+    const entry = JSON.parse(localStorage.getItem(`${key}:pending`) || 'null') as ChatPendingEntry | null;
+    if (!entry?.pending?.requestId || entry.pending.scopeKey !== key) return undefined;
+    return { ...entry, pending: { ...entry.pending, phase: entry.receipt ? 'accepted' : 'recovering' } };
+  } catch { return undefined; }
+}
+function readChatDraft(key: string): string {
+  try { return localStorage.getItem(`${key}:draft`) || ''; } catch { return ''; }
+}
+function writeChatDraft(key: string, text: string): boolean {
+  try { if (text) localStorage.setItem(`${key}:draft`, text); else localStorage.removeItem(`${key}:draft`); return true; }
+  catch { return false; }
+}
+
 interface ChatTurn {
   id: string;
   role: 'user' | 'assistant';
@@ -540,6 +570,12 @@ function parseHistoryEntries(items: Array<Record<string, unknown>>, clearedAfter
   return turns;
 }
 
+function mergeHistory(previous: Array<Record<string, unknown>>, next: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
+  const items = new Map(previous.map(item => [String(item.id), item]));
+  for (const item of next) if (!items.has(String(item.id))) items.set(String(item.id), item);
+  return [...items.values()];
+}
+
 function maxHistoryEntryId(items: Array<Record<string, unknown>>): number {
   let max = 0;
   for (const item of items) {
@@ -587,6 +623,9 @@ export function HostPage({
   const t = useText();
   const action = useAction();
   const activeCenter = useContext(ActiveCenter);
+  const centerConn = useCenterConnection();
+  const centerConnectionRef = useRef(centerConn);
+  centerConnectionRef.current = centerConn;
 
   // Screen stack navigation
   const [screen, setScreen] = useState<HubScreen>('hub');
@@ -648,6 +687,13 @@ export function HostPage({
   const [chatHistory, setChatHistory] = useState<Array<Record<string, unknown>>>([]);
   const [chatLive, setChatLive] = useState<HostLiveFrame>();
   const [chatReceipt, setChatReceipt] = useState<HostSubmission>();
+  const [chatPending, setChatPending] = useState<ChatPending>();
+  const pendingByBot = useRef(new Map<string, ChatPendingEntry>());
+  const currentChatScope = useRef('');
+  const selectedChatTarget = useRef<{ hostKind: 'local' | 'remote'; hostId: string; botId: string } | undefined>(undefined);
+  const localInFlight = useRef(new Set<string>());
+  const [chatObservationError, setChatObservationError] = useState('');
+  const [chatResumeEpoch, setChatResumeEpoch] = useState(0);
   const chatSubmissionRef = useRef<{ botKey: string; requestId: string; afterEntryId: number } | undefined>(undefined);
   const [chatDraft, setChatDraft] = useState('');
   const [composerMenuOpen, setComposerMenuOpen] = useState(false);
@@ -656,6 +702,7 @@ export function HostPage({
   const [chatSearchQuery, setChatSearchQuery] = useState('');
   const [clearNotice, setClearNotice] = useState('');
   const [voiceCapturing, setVoiceCapturing] = useState<{ botId: string; requestId: string }>();
+
 
   // Bot Edit / Create mode state (15847.jpg)
   const [editMode, setEditMode] = useState<'create' | 'edit'>('edit');
@@ -881,6 +928,7 @@ export function HostPage({
       writeCachedRemoteDevices(directory.devices);
       setRemoteBots(previous => {
         const failed = new Set(directory.errors.map(error => error.deviceId));
+        for (const device of directory.devices) if (!device.online) failed.add(device.deviceId);
         const returnedKeys = new Set(directory.bots.map(b => `${b.deviceId}:${b.botId}`));
         const merged = [
           ...directory.bots,
@@ -1017,6 +1065,85 @@ export function HostPage({
     return allBotItems.find(b => b.key === activeBotKey) ?? null;
   }, [activeBotKey, primaryBot, allBotItems]);
 
+  const scopeForBot = (bot: UnifiedBotItem) => {
+    const deviceId = bot.hostKind === 'local'
+      ? localHost?.deviceId || localBots.find(item => item.botId === bot.botId)?.deviceId || ''
+      : bot.hostId;
+    const center = centerConn.saved?.url || centerConn.url || activeCenter || localStorage.getItem('active-center-url') || '';
+    return center && deviceId ? chatStorageKey(center, deviceId, bot.botId) : '';
+  };
+  const updatePending = (entry: ChatPendingEntry, persist = true) => {
+    pendingByBot.current.set(entry.pending.scopeKey, entry);
+    let saved = true;
+    if (persist) { try { localStorage.setItem(`${entry.pending.scopeKey}:pending`, JSON.stringify(entry)); } catch { saved = false; } }
+    if (currentChatScope.current === entry.pending.scopeKey) {
+      setChatPending(entry.pending);
+      setChatReceipt(entry.receipt);
+    }
+    return saved;
+  };
+  const removePending = (scopeKey: string, requestId: string) => {
+    const entry = pendingByBot.current.get(scopeKey);
+    if (!entry || entry.pending.requestId !== requestId) return;
+    pendingByBot.current.delete(scopeKey);
+    try { localStorage.removeItem(`${scopeKey}:pending`); } catch { /* retain safe copy */ }
+    if (currentChatScope.current === scopeKey) {
+      chatSubmissionRef.current = undefined;
+      setChatPending(undefined);
+      setChatReceipt(undefined);
+    }
+  };
+
+  const activeChatScope = activeBot ? scopeForBot(activeBot) : '';
+  useEffect(() => {
+    if (!activeBot || screen !== 'chat' || !activeChatScope) return;
+    if (currentChatScope.current === activeChatScope) {
+      const entry = pendingByBot.current.get(activeChatScope);
+      if (entry && entry.pending.botKey !== activeBot.key) {
+        const pending = { ...entry.pending, botKey: activeBot.key };
+        chatSubmissionRef.current = pending;
+        updatePending({ ...entry, pending });
+      }
+      return;
+    }
+    currentChatScope.current = activeChatScope;
+    const stored = pendingByBot.current.get(activeChatScope) || readChatPending(activeChatScope);
+    const entry = stored ? { ...stored, pending: { ...stored.pending, botKey: activeBot.key } } : undefined;
+    if (entry) pendingByBot.current.set(activeChatScope, entry);
+    chatSubmissionRef.current = entry ? { botKey: activeBot.key, requestId: entry.pending.requestId, afterEntryId: entry.pending.afterEntryId } : undefined;
+    setChatPending(entry?.pending);
+    setChatReceipt(entry?.receipt);
+    setChatDraft(readChatDraft(activeChatScope));
+  }, [activeChatScope, activeBot?.key, screen]);
+
+  useEffect(() => {
+    const target = selectedChatTarget.current;
+    if (screen !== 'chat' || activeBot || !target) return;
+    const replacement = allBotItems.find(bot => bot.hostKind === target.hostKind && bot.hostId === target.hostId && bot.botId === target.botId);
+    if (replacement) setActiveBotKey(replacement.key);
+  }, [screen, activeBot, allBotItems]);
+
+  // Visibility is advisory; reporting it must never delay a chat operation.
+  const visibilityChain = useRef<Promise<unknown>>(Promise.resolve());
+  useEffect(() => {
+    if (!getOrCreateRemoteClient || !activeBot || screen !== 'chat') return;
+    const deviceId = activeBot.hostKind === 'local' ? localHost?.deviceId : activeBot.hostId;
+    if (!deviceId) return;
+    const botId = activeBot.botId;
+    const report = (visible: boolean) => {
+      visibilityChain.current = visibilityChain.current.catch(() => {}).then(() =>
+        mobileLocalRequest('clientChatVisibility', { deviceId, botId, visible }),
+      ).catch(() => {});
+    };
+    const update = () => report(active && !document.hidden);
+    update();
+    document.addEventListener('visibilitychange', update);
+    return () => {
+      document.removeEventListener('visibilitychange', update);
+      report(false);
+    };
+  }, [getOrCreateRemoteClient, active, screen, activeBot?.key, activeBot?.botId, activeBot?.hostKind, activeBot?.hostId, localHost?.deviceId]);
+
   const mustCreatePrimaryBot = Boolean(localHost?.phase === 'running' && localBotsLoaded && !primaryBot);
 
   const filteredBotItems = useMemo(() => {
@@ -1058,6 +1185,7 @@ export function HostPage({
         if (!alive || ev.observationId !== observeIdRef.current) return;
         if (ev.error) {
           observeIdRef.current = undefined;
+          setChatObservationError(t('连接中断，正在恢复…', 'Connection interrupted; recovering…'));
           return;
         }
         const f = ev.frame;
@@ -1094,7 +1222,12 @@ export function HostPage({
     };
   }, [connectionEpoch]);
 
-  useEffect(() => onMobileStreamFailure(() => { chatLoadGeneration.current += 1; profileLoadGeneration.current += 1; cancelActiveObservation(); }), [cancelActiveObservation]);
+  useEffect(() => onMobileStreamFailure(() => { chatLoadGeneration.current += 1; profileLoadGeneration.current += 1; cancelActiveObservation(); setChatObservationError(t('连接中断，正在恢复…', 'Connection interrupted; recovering…')); }), [cancelActiveObservation]);
+  useEffect(() => {
+    const resume = () => { if (!document.hidden) setChatResumeEpoch(value => value + 1); };
+    document.addEventListener('visibilitychange', resume);
+    return () => document.removeEventListener('visibilitychange', resume);
+  }, []);
 
   // Load per-Bot Scheduled Tasks
   const loadBotSchedules = useCallback(
@@ -1193,9 +1326,7 @@ export function HostPage({
       cancelActiveObservation();
       const generation = ++chatLoadGeneration.current;
       const current = () => generation === chatLoadGeneration.current;
-      chatSubmissionRef.current = undefined;
       setChatLive(undefined);
-      setChatReceipt(undefined);
 
       if (bot.hostKind === 'local') {
         const snap = await ensureLocalHostRunning();
@@ -1205,7 +1336,7 @@ export function HostPage({
           if (!current()) return;
           const page = histEnv.result as HostHistoryPage;
           const items = page?.items ?? [];
-          setChatHistory(items);
+          setChatHistory(previous => mergeHistory(previous, items));
           const turns = parseHistoryEntries(items, clearedMap[bot.key] ?? 0);
           const lastTurn = turns.at(-1);
           if (lastTurn?.text) {
@@ -1219,9 +1350,10 @@ export function HostPage({
           const obsId = uuid();
           observeIdRef.current = obsId;
           await BotHost.observe({ observationId: obsId, target: { kind: 'primary', botId: bot.botId } });
+          if (current()) setChatObservationError('');
           if (!current()) void BotHost.cancelObservation({ observationId: obsId }).catch(() => {});
         } catch {
-          if (current()) observeIdRef.current = undefined;
+          if (current()) { observeIdRef.current = undefined; setChatObservationError(t('连接中断，正在恢复…', 'Connection interrupted; recovering…')); }
         }
       } else if (bot.hostKind === 'remote' && bot.remoteIdentity && remoteClientRef.current) {
         const api = remoteClientRef.current.api;
@@ -1231,7 +1363,7 @@ export function HostPage({
           const page = await api.call(identity, 'history', { botId: bot.botId, limit: 50 });
           if (!current()) return;
           const items = (page?.items ?? []) as unknown as Array<Record<string, unknown>>;
-          setChatHistory(items);
+          setChatHistory(previous => mergeHistory(previous, items));
           const turns = parseHistoryEntries(items, clearedMap[bot.key] ?? 0);
           const lastTurn = turns.at(-1);
           if (lastTurn?.text) {
@@ -1243,7 +1375,8 @@ export function HostPage({
         if (!current()) return;
         try {
           const handle = api.observe(identity, { kind: 'primary', botId: bot.botId }, ev => {
-            if (!current() || 'error' in ev) return;
+            if (!current()) return;
+            if ('error' in ev) { setChatObservationError(t('连接中断，正在恢复…', 'Connection interrupted; recovering…')); return; }
             const frame = ev.frame as unknown as HostLiveFrame;
             if (frame.type === 'snapshot') setChatLive(frame);
             else if (frame.type === 'update') {
@@ -1257,13 +1390,30 @@ export function HostPage({
             }
           });
           remoteObserveRef.current = handle;
+          void handle.ready.then(() => { if (current()) setChatObservationError(''); }, () => { if (current()) setChatObservationError(t('连接中断，正在恢复…', 'Connection interrupted; recovering…')); });
         } catch {
           remoteObserveRef.current = null;
+          if (current()) setChatObservationError(t('连接中断，正在恢复…', 'Connection interrupted; recovering…'));
         }
       }
     },
-    [cancelActiveObservation, clearedMap, ensureLocalHostRunning, updateBotMeta],
+    [cancelActiveObservation, clearedMap, ensureLocalHostRunning, updateBotMeta, t],
   );
+
+  useEffect(() => {
+    if (screen !== 'chat' || !active || !activeBot || document.hidden) return;
+    if (activeBot.hostKind === 'remote' && (!remoteConnected || activeBot.online === false)) return;
+    void loadBotHistoryAndObserve(activeBot);
+    return () => { chatLoadGeneration.current += 1; cancelActiveObservation(); };
+    // Rebuild for a new target, transport generation, or foreground transition, not display metadata.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [screen, active, activeBot?.key, activeBot?.remoteIdentity?.generation, activeBot?.online, remoteConnected, chatResumeEpoch, connectionEpoch]);
+
+  useEffect(() => {
+    if (!chatObservationError || screen !== 'chat' || !active || document.hidden || (activeBot?.hostKind === 'remote' && (!remoteConnected || activeBot.online === false))) return;
+    const timer = window.setTimeout(() => setChatResumeEpoch(value => value + 1), 2000);
+    return () => window.clearTimeout(timer);
+  }, [chatObservationError, screen, active, activeBot?.hostKind, activeBot?.online, remoteConnected, chatResumeEpoch]);
 
   const chatBotKey = activeBot?.key;
   const chatBotId = activeBot?.botId;
@@ -1274,12 +1424,20 @@ export function HostPage({
   } = activeBot?.remoteIdentity ?? {};
   const chatRemoteApi = chatHostKind === 'remote' ? remoteClientRef.current?.api : undefined;
   const chatRemoteConnected = chatHostKind === 'remote' && remoteConnected;
-  const chatRequestId = chatReceipt?.requestId;
+  const chatRequestId = chatPending?.requestId ?? chatReceipt?.requestId;
   const chatReceiptStatus = chatReceipt?.status;
+
+  useEffect(() => {
+    if (chatHostKind !== 'remote' || (chatRemoteConnected && activeBot?.online !== false)) return;
+    const pending = chatPending;
+    if (!pending || pending.phase === 'recovering' || chatReceipt?.status === 'done' || chatReceipt?.status === 'unanswered') return;
+    const entry = pendingByBot.current.get(pending.scopeKey);
+    if (entry?.pending.requestId === pending.requestId) updatePending({ ...entry, pending: { ...pending, phase: 'recovering' } });
+  }, [chatHostKind, chatRemoteConnected, activeBot?.online, chatPending?.requestId, chatPending?.phase, chatReceipt?.status]);
 
   // 依赖实际目标与回执标识，不随 Bot 展示对象或历史数组重建而重复补读终态。
   useEffect(() => {
-    if (screen !== 'chat' || !chatBotKey || !chatBotId || !chatRequestId || !chatReceiptStatus) return;
+    if (screen !== 'chat' || !chatBotKey || !chatBotId || !chatRequestId) return;
     if (
       chatSubmissionRef.current?.botKey !== chatBotKey ||
       chatSubmissionRef.current.requestId !== chatRequestId
@@ -1324,27 +1482,30 @@ export function HostPage({
     // 语音提交也可能直接返回终态，没有 queued/placed 可供轮询。
     if (chatReceiptStatus === 'done' || chatReceiptStatus === 'unanswered') {
       void readHistory().then(items => {
-        if (alive && chatSubmissionRef.current === submission && items) setChatHistory(items);
+        if (alive && chatSubmissionRef.current === submission && items) setChatHistory(previous => mergeHistory(previous, items));
       }).catch(() => {});
       return () => {
         alive = false;
       };
     }
     const timer = window.setInterval(async () => {
-      if (!alive || document.hidden) return;
+      if (!alive || document.hidden || (chatHostKind === 'local' && localInFlight.current.has(requestId))) return;
       try {
         const next = await readSubmission();
         if (!alive || chatSubmissionRef.current !== submission || !next || next.requestId !== requestId) return;
+        const entry = chatPending && pendingByBot.current.get(chatPending.scopeKey);
         if (next.status !== 'done' && next.status !== 'unanswered') {
-          setChatReceipt(next);
+          if (entry?.pending.requestId === requestId) updatePending({ pending: { ...entry.pending, phase: 'accepted' }, receipt: next });
+          else setChatReceipt(next);
           return;
         }
         // 终态：先回读历史再提交 receipt，避免 receipt 重渲染 cleanup 把 alive 置 false 丢掉后续写入。
         const items = await readHistory().catch(() => null);
         if (!alive || chatSubmissionRef.current !== submission) return;
         // 回读失败也要落终态 receipt，不能停在生成中；随后同步提交，无新的异步窗口。
-        setChatReceipt(next);
-        if (items) setChatHistory(items);
+        if (entry?.pending.requestId === requestId) updatePending({ pending: { ...entry.pending, phase: 'accepted' }, receipt: next });
+        else setChatReceipt(next);
+        if (items) setChatHistory(previous => mergeHistory(previous, items));
         // 摘要只取真实答案；无答案（unanswered）保留 submit 时写入的用户消息摘要，不被历史旧文本覆盖。
         if (next.answerText) {
           updateBotMeta(chatBotKey, { lastText: next.answerText, updatedAt: Date.now(), unread: false });
@@ -1362,17 +1523,25 @@ export function HostPage({
   }, [
     screen, chatBotKey, chatBotId, chatHostKind, chatProfileId, chatDeviceId, chatGeneration,
     chatConnectionKind, chatRemoteApi, chatRemoteConnected, connectionEpoch,
-    chatRequestId, chatReceiptStatus, updateBotMeta, syncLocalBots, syncRemoteBots,
+    chatRequestId, chatReceiptStatus, chatResumeEpoch, chatPending?.scopeKey, updateBotMeta, syncLocalBots, syncRemoteBots,
   ]);
 
   const openBotChat = (bot: UnifiedBotItem) => {
     profileLoadGeneration.current += 1;
     scheduleLoadGeneration.current += 1;
-    chatSubmissionRef.current = undefined;
+    const scopeKey = scopeForBot(bot);
+    currentChatScope.current = scopeKey;
+    selectedChatTarget.current = { hostKind: bot.hostKind, hostId: bot.hostId, botId: bot.botId };
+    const stored = scopeKey ? pendingByBot.current.get(scopeKey) || readChatPending(scopeKey) : undefined;
+    const saved = stored ? { ...stored, pending: { ...stored.pending, botKey: bot.key } } : undefined;
+    if (saved) pendingByBot.current.set(scopeKey, saved);
+    chatSubmissionRef.current = saved ? { botKey: bot.key, requestId: saved.pending.requestId, afterEntryId: saved.pending.afterEntryId } : undefined;
     setActiveBotKey(bot.key);
     setChatHistory([]);
     setChatLive(undefined);
-    setChatReceipt(undefined);
+    setChatPending(saved?.pending);
+    setChatReceipt(saved?.receipt);
+    setChatDraft(scopeKey ? readChatDraft(scopeKey) : '');
     setComposerMenuOpen(false);
     setChatTopMenuOpen(false);
     setChatSearchOpen(false);
@@ -1380,8 +1549,44 @@ export function HostPage({
     setClearNotice('');
     updateBotMeta(bot.key, { unread: false });
     setScreen('chat');
-    void loadBotHistoryAndObserve(bot);
   };
+
+  const [launchTarget, setLaunchTarget] = useState<{ deviceId: string; botId: string } | null>(null);
+  const readLaunchTarget = useRef<() => void>(() => {});
+  useEffect(() => {
+    if (!getOrCreateRemoteClient) return;
+    let live = true;
+    let reading = false;
+    let again = false;
+    const read = async () => {
+      if (reading) { again = true; return; }
+      reading = true;
+      try {
+        const target = await mobileLocalRequest<{ deviceId: string; botId: string } | null>('clientLaunchTarget');
+        if (live && target && typeof target.deviceId === 'string' && target.deviceId && typeof target.botId === 'string' && target.botId) setLaunchTarget(target);
+      } catch { /* native may still be restoring IPC */ }
+      finally { reading = false; if (live && again) { again = false; void read(); } }
+    };
+    const resume = () => { if (!document.hidden) void read(); };
+    readLaunchTarget.current = () => void read();
+    void read();
+    window.addEventListener('assistant-open-chat', read);
+    document.addEventListener('visibilitychange', resume);
+    return () => { live = false; readLaunchTarget.current = () => {}; window.removeEventListener('assistant-open-chat', read); document.removeEventListener('visibilitychange', resume); };
+  }, [getOrCreateRemoteClient]);
+  useEffect(() => { if (connectionEpoch) readLaunchTarget.current(); }, [connectionEpoch]);
+
+  useEffect(() => {
+    if (!launchTarget || document.hidden) return;
+    const bot = allBotItems.find(item => item.botId === launchTarget.botId &&
+      (item.hostKind === 'remote' ? item.hostId === launchTarget.deviceId :
+        (localBots.find(local => local.botId === item.botId)?.deviceId || localHost?.deviceId) === launchTarget.deviceId));
+    if (!bot || (bot.hostKind === 'remote' && (!remoteIdentity || !remoteConnected))) return;
+    if (screen !== 'chat' || activeBotKey !== bot.key) openBotChat(bot);
+    setLaunchTarget(null);
+    // The target is consumed once; directory/identity changes only resolve a pending target.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [launchTarget, allBotItems, localBots, localHost?.deviceId, remoteIdentity?.generation, remoteConnected, chatResumeEpoch]);
 
   const openBotProfile = (bot: UnifiedBotItem) => {
     setChatTopMenuOpen(false);
@@ -1453,6 +1658,10 @@ export function HostPage({
 
   const clearCurrentBotHistory = useCallback(() => {
     if (!activeBot) return;
+    if (chatPending?.botKey === activeBot.key && chatPending.phase !== 'accepted') {
+      setClearNotice(t('原请求尚未确认，不能清空。', 'The original request is unconfirmed; history cannot be cleared.'));
+      return;
+    }
     // 水位同时覆盖 raw 历史与 live 投影（lastEntryId 是最新可显示条目），避免新投影又回来。
     const liveLastEntryId = Number(chatLive?.state?.lastEntryId);
     const maxId = Math.max(
@@ -1466,75 +1675,95 @@ export function HostPage({
       return updated;
     });
     chatSubmissionRef.current = undefined;
+    if (chatPending) removePending(chatPending.scopeKey, chatPending.requestId);
+    setChatPending(undefined);
     setChatHistory([]);
     setChatLive(undefined);
     setChatReceipt(undefined);
     setChatDraft('');
+    if (currentChatScope.current) writeChatDraft(currentChatScope.current, '');
     setComposerMenuOpen(false);
     setChatTopMenuOpen(false);
     updateBotMeta(activeBot.key, { lastText: t('对话已清空', 'History cleared'), updatedAt: Date.now(), unread: false });
     setClearNotice(t('已清空当前对话历史', 'Conversation history cleared'));
     window.setTimeout(() => setClearNotice(''), 2500);
-  }, [activeBot, chatHistory, chatLive, clearedMap, t, updateBotMeta]);
+  }, [activeBot, chatHistory, chatLive, chatPending, clearedMap, t, updateBotMeta]);
 
   const sendMessage = () =>
     action.run(async () => {
-      if (!activeBot) return;
-      if (activeBot.archivedAt) {
-        throw new Error(t('该智能体已归档，请先恢复后再发送消息', 'This bot is archived. Unarchive it first to send messages.'));
-      }
-      const trimmed = chatDraft.trim();
+      const bot = activeBot;
+      if (!bot) return;
+      if (bot.hostKind === 'remote') throw new Error(t('目标离线，草稿已保留。', 'Target offline; draft retained.'));
+      if (chatPending?.botKey === bot.key && chatPending.phase !== 'accepted') throw new Error(t('原请求尚未确认，请勿重复发送。', 'Original request is unconfirmed; do not resend.'));
+      if (bot.archivedAt) throw new Error(t('该智能体已归档，请先恢复后再发送消息', 'This bot is archived. Unarchive it first.'));
+      const draftSnapshot = chatDraft;
+      const trimmed = draftSnapshot.trim();
       if (!trimmed) return;
-
-      if (trimmed === '/clear' || trimmed === '/new') {
-        clearCurrentBotHistory();
-        return;
+      if (trimmed === '/clear' || trimmed === '/new') { clearCurrentBotHistory(); return; }
+      if (centerConn.remoteClient && !centerConn.ready || centerConn.status?.state === 'disconnected') {
+        throw new Error(t('中心离线，草稿已保留。', 'Center offline; draft retained.'));
       }
-
+      const scopeKey = scopeForBot(bot);
+      if (!scopeKey) throw new Error(t('目标身份尚未就绪，草稿已保留。', 'Target identity unavailable; draft retained.'));
       const submission = {
-        botKey: activeBot.key,
-        requestId: uuid(),
-        afterEntryId: Math.max(
-          maxHistoryEntryId(chatHistory), Number(chatLive?.state?.lastEntryId) || 0, clearedMap[activeBot.key] ?? 0,
-        ),
+        botKey: bot.key, scopeKey, requestId: uuid(), text: trimmed, phase: 'sending' as const,
+        afterEntryId: Math.max(maxHistoryEntryId(chatHistory), Number(chatLive?.state?.lastEntryId) || 0, clearedMap[bot.key] ?? 0),
       };
       chatSubmissionRef.current = submission;
-      setChatReceipt(undefined);
+      updatePending({ pending: submission }, false);
       setChatDraft('');
       setComposerMenuOpen(false);
       setChatTopMenuOpen(false);
-
-      if (activeBot.hostKind === 'local') {
+      localInFlight.current.add(submission.requestId);
+      const stillOwned = () => pendingByBot.current.get(scopeKey)?.pending.requestId === submission.requestId;
+      const restore = () => {
+        if (!stillOwned()) return;
+        const newer = readChatDraft(scopeKey);
+        const restored = newer && newer !== draftSnapshot ? `${draftSnapshot}
+${newer}` : draftSnapshot;
+        const saved = writeChatDraft(scopeKey, restored);
+        if (saved) removePending(scopeKey, submission.requestId);
+        else updatePending({ pending: { ...submission, phase: 'recovering' } }, false);
+        if (currentChatScope.current === scopeKey) {
+          setChatDraft(restored);
+          if (!saved) setClearNotice(t('草稿未能保存，请保持页面打开。', 'Draft could not be saved; keep this page open.'));
+        }
+      };
+      try {
+        // Let React paint the optimistic turn before persistent storage or IPC.
+        await new Promise<void>(resolve => requestAnimationFrame(() => setTimeout(resolve, 0)));
+        if (!stillOwned()) return;
+        if (!updatePending({ pending: submission })) { restore(); if (currentChatScope.current === scopeKey) throw new Error(t('无法保存请求，未发送。', 'Cannot save request; not sent.')); return; }
+        if (readChatDraft(scopeKey) === draftSnapshot) writeChatDraft(scopeKey, '');
         const snap = await ensureLocalHostRunning();
-        if (chatSubmissionRef.current !== submission) return;
-        if (!snap || snap.phase !== 'running') {
-          setChatDraft(trimmed);
-          throw new Error(t('本机服务正在启动，请稍后重试', 'Local service is starting, please try again'));
+        const center = centerConnectionRef.current;
+        if (!snap || snap.phase !== 'running' || !snap.deviceId || (center.remoteClient && !center.ready) || center.status?.state === 'disconnected' || chatStorageKey(center.saved?.url || center.url || '', snap.deviceId, bot.botId) !== scopeKey) {
+          restore();
+          if (currentChatScope.current === scopeKey) throw new Error(t('目标离线，草稿已保留。', 'Target offline; draft retained.'));
+          return;
         }
-        const targetBotId = activeBot.botId;
-        const targetKey = activeBot.key;
-
-        updateBotMeta(targetKey, { lastText: trimmed, updatedAt: Date.now(), unread: false });
-        const reqId = submission.requestId;
-        const subEnv = await BotHost.call({
-          method: 'submit',
-          params: { botId: targetBotId, requestId: reqId, text: trimmed },
-        });
-        const receipt = subEnv.result as HostSubmission;
-        if (chatSubmissionRef.current !== submission) return;
-        setChatReceipt(receipt);
-
-        const histEnv = await BotHost.call({ method: 'history', params: { botId: targetBotId, limit: 50 } });
-        const page = histEnv.result as HostHistoryPage;
-        if (chatSubmissionRef.current !== submission) return;
-        if (page?.items) setChatHistory(page.items);
-        if (!observeIdRef.current) {
-          const obsId = uuid();
-          observeIdRef.current = obsId;
-          void BotHost.observe({ observationId: obsId, target: { kind: 'primary', botId: targetBotId } }).catch(() => {
-            observeIdRef.current = undefined;
-          });
+        updateBotMeta(bot.key, { lastText: trimmed, updatedAt: Date.now(), unread: false });
+        let receipt: HostSubmission;
+        try {
+          const result = await BotHost.call({ method: 'submit', params: { botId: bot.botId, requestId: submission.requestId, text: trimmed } });
+          receipt = result.result as HostSubmission;
+        } catch (error) {
+          if (stillOwned()) {
+            if ((error as { outcome?: string })?.outcome === 'not-sent') restore();
+            else updatePending({ pending: { ...submission, phase: 'recovering' } });
+          }
+          if (currentChatScope.current === scopeKey) throw error;
+          return;
         }
+        if (!stillOwned()) return;
+        updatePending({ pending: { ...submission, phase: 'accepted' }, receipt });
+        const result = await BotHost.call({ method: 'history', params: { botId: bot.botId, limit: 50 } }).catch(() => null);
+        if (currentChatScope.current === scopeKey && stillOwned() && result?.result) {
+          const page = result.result as HostHistoryPage;
+          if (page.items) setChatHistory(previous => mergeHistory(previous, page.items));
+        }
+      } finally {
+        localInFlight.current.delete(submission.requestId);
       }
     });
 
@@ -2040,10 +2269,13 @@ export function HostPage({
       [...byId.values()].sort((a, b) => numericId(a) - numericId(b)),
       clearedAfter,
     );
+    if (chatPending?.botKey === activeBot.key && !all.some(turn =>
+      turn.role === 'user' && turn.entryId > chatPending.afterEntryId && turn.text === chatPending.text,
+    )) all.push({ id: `pending-${chatPending.requestId}`, role: 'user', text: chatPending.text, entryId: chatPending.afterEntryId + 0.5 });
     const q = chatSearchQuery.trim().toLowerCase();
     if (!chatSearchOpen || !q) return all;
     return all.filter(turn => turn.text.toLowerCase().includes(q));
-  }, [chatHistory, chatLive, activeBot, clearedMap, chatSearchOpen, chatSearchQuery]);
+  }, [chatHistory, chatLive, activeBot, clearedMap, chatSearchOpen, chatSearchQuery, chatPending]);
 
   const submission = chatSubmissionRef.current;
   const submissionFailure = submission && chatReceipt?.status === 'unanswered' &&
@@ -2054,12 +2286,14 @@ export function HostPage({
         : t('本次请求未获得回答，请重试。', 'No answer was generated for this request. Please retry.')
       : undefined;
 
-  const liveGeneratingText = chatLive?.state?.generation?.text ?? '';
+  const recoveringChat = chatPending?.botKey === activeBot?.key && chatPending?.phase === 'recovering';
+  const liveGeneratingText = recoveringChat ? '' : chatLive?.state?.generation?.text ?? '';
 
-  const isBotBusy = Boolean(
-    chatLive?.state?.busy ||
-      (chatLive?.state?.queuedCount ?? 0) > 0 ||
-      (submission?.botKey === activeBot?.key && chatReceipt &&
+  const isBotBusy = !recoveringChat && Boolean(
+    (chatPending?.botKey === activeBot?.key && chatPending?.phase === 'sending') ||
+    ((chatHostKind !== 'remote' || (chatRemoteConnected && activeBot?.online !== false)) &&
+      (chatLive?.state?.busy || (chatLive?.state?.queuedCount ?? 0) > 0)) ||
+      (submission?.botKey === activeBot?.key && chatPending?.phase !== 'recovering' && chatReceipt &&
         (chatReceipt.status === 'queued' || chatReceipt.status === 'placed')),
   );
 
@@ -2085,7 +2319,6 @@ export function HostPage({
     }
   }, [screen, visibleTurns.length, liveGeneratingText, isBotBusy, activeLiveToolName, submissionFailure]);
 
-  const centerConn = useCenterConnection();
   const [hubRefreshing, setHubRefreshing] = useState(false);
   const [pullDistance, setPullDistance] = useState(0);
   const hubScrollRef = useRef<HTMLDivElement | null>(null);
@@ -2497,7 +2730,7 @@ export function HostPage({
 
             {/* Regular and archived Bots */}
             <section className="hub-bot-list" aria-label={t('智能体列表', 'Bots')}>
-              <ErrorNotice error={directoryError} />
+              <ErrorNotice error={directoryError || (!centerConn.ready && centerConn.status?.error ? centerConn.error : '')} />
               {filteredBotItems.length === 0 ? (
                 <div className="hub-empty-list">
                   <p>
@@ -2932,6 +3165,8 @@ export function HostPage({
               botKey={activeBot.key}
               preset={resolveBotAvatarPreset(activeBot.key, activeBot.role, activeBot.isPrimary)}
               isBusy={isBotBusy}
+              isSending={chatPending?.botKey === activeBot.key && chatPending.phase === 'sending'}
+              isRecovering={chatPending?.botKey === activeBot.key && chatPending.phase === 'recovering'}
               isStreaming={Boolean(liveGeneratingText)}
               activeToolName={activeLiveToolName}
               hasThinking={Boolean(
@@ -2940,10 +3175,16 @@ export function HostPage({
                   !liveGeneratingText,
               )}
               queuedCount={chatLive?.state?.queuedCount ?? 0}
-              hasError={Boolean(submissionFailure)}
+              hasError={Boolean(submissionFailure) || chatReceipt?.status === 'unanswered'}
               t={t}
             />
-            <ErrorNotice error={submissionFailure} />
+            <ErrorNotice error={submissionFailure || (!centerConn.ready && centerConn.status?.error ? centerConn.error : '')} />
+            {((chatObservationError && !(centerConn.status?.state === 'disconnected' && centerConn.status.error)) || (chatPending?.botKey === activeBot.key && chatPending.phase === 'recovering')) && (
+              <div className="bot-chat-system-notice" role="status">
+                {chatPending?.phase === 'recovering' ? t('发送结果待确认，保留原请求 ID；不会自动重发。', 'Send result unconfirmed; retaining the original request ID without resending.') : activeBot.online === false ? t('目标节点离线，上线后自动恢复。', 'Target offline; restoring when it returns.') : chatObservationError}
+                {chatPending?.phase === 'recovering' && activeBot.hostKind === 'local' && <button type="button" className="hub-outline-btn" onClick={() => setChatResumeEpoch(value => value + 1)}>{t('按原 ID 对账', 'Reconcile ID')}</button>}
+              </div>
+            )}
             {clearNotice && (
               <div className="bot-chat-system-notice" role="status">
                 {clearNotice}
@@ -2978,6 +3219,7 @@ export function HostPage({
                 botId={activeBot.botId}
                 botRole={activeBot.role}
                 isBotBusy={isBotBusy}
+                online={remoteConnected && activeBot.online !== false}
                 composerMenuOpen={composerMenuOpen}
                 onToggleComposerMenu={() => setComposerMenuOpen(v => !v)}
                 onOpenProfile={() => {
@@ -2994,18 +3236,41 @@ export function HostPage({
                     }
                   })
                 }
-                onAccepted={() => {
-                  const generation = chatLoadGeneration.current;
-                  const api = remoteClientRef.current?.api;
-                  const identity = activeBot.remoteIdentity;
-                  if (!api || !identity) return;
-                  void api.call(identity, 'history', { botId: activeBot.botId, limit: 50 }).then(page => {
-                    if (generation === chatLoadGeneration.current) setChatHistory(page.items as unknown as Array<Record<string, unknown>>);
-                  }).catch(() => {});
+                pending={chatPending?.scopeKey === activeChatScope ? chatPending : undefined}
+                fallbackDraft={chatDraft}
+                onFallbackTransferred={() => { if (currentChatScope.current === activeChatScope) setChatDraft(''); writeChatDraft(activeChatScope, ''); }}
+                blocked={chatPending?.scopeKey === activeChatScope && chatPending.phase === 'recovering'}
+                onStarted={(requestId, text, draft) => {
+                  const old = pendingByBot.current.get(activeChatScope)?.pending;
+                  const pending: ChatPending = old?.requestId === requestId ? old : {
+                    botKey: activeBot.key, scopeKey: activeChatScope, requestId, text, draft, phase: 'sending',
+                    afterEntryId: Math.max(maxHistoryEntryId(chatHistory), Number(chatLive?.state?.lastEntryId) || 0, clearedMap[activeBot.key] ?? 0),
+                  };
+                  if (currentChatScope.current === activeChatScope) chatSubmissionRef.current = pending;
+                  const entry = pendingByBot.current.get(activeChatScope);
+                  updatePending({ pending, receipt: entry?.pending.requestId === requestId ? entry.receipt : undefined }, false);
                 }}
+                onPersist={requestId => {
+                  const entry = pendingByBot.current.get(activeChatScope);
+                  return Boolean(activeChatScope && entry?.pending.requestId === requestId && updatePending(entry));
+                }}
+                onQueued={(requestId, pendingId) => {
+                  const entry = pendingByBot.current.get(activeChatScope);
+                  if (entry?.pending.requestId === requestId) updatePending({ ...entry, pending: { ...entry.pending, pendingId } });
+                }}
+                onAccepted={receipt => {
+                  const entry = pendingByBot.current.get(activeChatScope);
+                  if (entry?.pending.requestId === receipt.requestId) updatePending({ pending: { ...entry.pending, phase: 'accepted' }, receipt });
+                }}
+                onUnconfirmed={requestId => {
+                  const entry = pendingByBot.current.get(activeChatScope);
+                  if (entry?.pending.requestId === requestId && !entry.receipt) updatePending({ ...entry, pending: { ...entry.pending, phase: 'recovering' } });
+                }}
+                onNotSent={requestId => removePending(activeChatScope, requestId)}
               />
             ) : <>
             <ErrorNotice error={action.error} />
+            {!activeChatScope && <div className="bot-chat-system-notice" role="status">{t('正在读取目标身份…', 'Loading target identity…')}</div>}
 
             {showSlashHints && (
               <div className="bot-slash-popover" role="listbox" aria-label={t('斜杠命令', 'Slash commands')}>
@@ -3057,7 +3322,8 @@ export function HostPage({
                   rows={1}
                   className={chatDraft ? 'has-text' : 'is-empty'}
                   value={chatDraft}
-                  onChange={e => setChatDraft(e.target.value)}
+                  disabled={!activeChatScope}
+                  onChange={e => { setChatDraft(e.target.value); if (currentChatScope.current && !writeChatDraft(currentChatScope.current, e.target.value)) setClearNotice(t('草稿未能保存，请保持页面打开。', 'Draft could not be saved; keep this page open.')); }}
                   placeholder={
                     activeBot.role.length > 8
                       ? t('发消息…', 'Message…')
@@ -3131,7 +3397,7 @@ export function HostPage({
                     type="button"
                     className="grok-composer-action-pill send"
                     aria-label={t('发送', 'Send')}
-                    disabled={action.busy}
+                    disabled={action.busy || (chatPending?.botKey === activeBot.key && chatPending.phase === 'recovering')}
                     onClick={() => void sendMessage()}
                   >
                     <ArrowUp size={18} />
@@ -4617,7 +4883,7 @@ export function HostPage({
                     ? t('正在连接中心…', 'Connecting…')
                     : centerConn.ready
                       ? t('中心已连接', 'Center Online')
-                      : t('本机模式', 'Local Mode')}
+                      : centerConn.saved ? t('连接已断开', 'Disconnected') : t('本机模式', 'Local Mode')}
                 </span>
               </div>
             </div>
@@ -4678,29 +4944,52 @@ function RemotePendingComposer({
   botId,
   botRole,
   isBotBusy,
+  online,
   composerMenuOpen,
   onToggleComposerMenu,
   onOpenProfile,
   onClearHistory,
   onAbort,
   onAccepted,
+  onStarted,
+  onPersist,
+  onQueued,
+  pending,
+  fallbackDraft,
+  onFallbackTransferred,
+  blocked,
+  onUnconfirmed,
+  onNotSent,
 }: {
   api: DesktopPanelApi;
   identity: DesktopIdentity;
   botId: string;
   botRole: string;
   isBotBusy: boolean;
+  online: boolean;
   composerMenuOpen: boolean;
   onToggleComposerMenu(): void;
   onOpenProfile(): void;
   onClearHistory(): void;
   onAbort(): void;
-  onAccepted(): void;
+  onAccepted(receipt: HostSubmission): void;
+  onStarted(requestId: string, text: string, draft: DesktopDraftEntry): void;
+  onPersist(requestId: string): boolean;
+  onQueued(requestId: string, pendingId: string): void;
+  pending?: ChatPending;
+  fallbackDraft: string;
+  onFallbackTransferred(): void;
+  blocked: boolean;
+  onUnconfirmed(requestId: string): void;
+  onNotSent(requestId: string): void;
 }) {
   const t = useText();
   const target = useMemo(() => ({ kind: 'primary' as const, id: botId }), [botId]);
   const drafts = useDrafts({ api, identity, target });
   const [notice, setNotice] = useState('');
+  const [recoveryTick, setRecoveryTick] = useState(0);
+  const [confirmedConflict, setConfirmedConflict] = useState<{ requestId: string; pendingId: string; original: DesktopDraftEntry; handle?: { key: string; attemptId: string } }>();
+  const [resolvingConflict, setResolvingConflict] = useState(false);
   const sending = useRef(false);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
@@ -4715,12 +5004,184 @@ function RemotePendingComposer({
     }
   }, [drafts.text]);
 
+  const [transfer, setTransfer] = useState<{ source: string; text: string }>();
+  useEffect(() => {
+    if (!transfer || !drafts.key || drafts.dirty || drafts.text !== transfer.text) return;
+    if (api.snapshot?.state.drafts[drafts.key]?.text !== transfer.text) return;
+    if (fallbackDraft === transfer.source) onFallbackTransferred();
+    setTransfer(undefined);
+    // The offline copy is removed only after the existing draft store confirms the merge.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [transfer, drafts.key, drafts.dirty, drafts.text, api.snapshot, fallbackDraft]);
+
+  const restoredAttempt = useRef('');
+  useEffect(() => {
+    const attempt = drafts.attempt;
+    if (!attempt || attempt.input.kind !== 'primary' || attempt.phase === 'locked' || attempt.phase === 'enqueued' || attempt.phase === 'cleared' || confirmedConflict?.requestId === attempt.input.requestId) return;
+    const input = attempt.input;
+    if (restoredAttempt.current !== attempt.id) {
+      restoredAttempt.current = attempt.id;
+      onStarted(input.requestId, input.text, attempt.draft);
+      onUnconfirmed(input.requestId);
+    }
+    if (!online || !api.transportConnected) return;
+    let alive = true;
+    let reading = false;
+    const recover = async () => {
+      if (reading || document.hidden) return;
+      reading = true;
+      try {
+        const handle = { key: drafts.key!, attemptId: attempt.id };
+        if (!attempt.pendingId && !attempt.cleared) {
+          await drafts.reconcile(handle);
+          return;
+        }
+        if (attempt.pendingId) {
+          let pending = await api.pending(identity, 'pending_get', { id: attempt.pendingId });
+          if (pending && (pending.kind !== 'primary' || pending.requestId !== input.requestId || pending.botId !== botId || pending.targetDeviceId !== identity.targetDeviceId || pending.text !== input.text)) return;
+          if (pending?.state === 'sending' || pending?.state === 'unconfirmed') pending = await api.pending(identity, 'pending_reconcile', { id: attempt.pendingId });
+          if (pending?.state === 'pending') pending = await api.pending(identity, 'pending_cancel', { id: attempt.pendingId });
+          if (!alive) return;
+          if (pending?.state === 'rejected' && pending.lastError?.code === 'CANCELLED' && pending.lastError.outcome === 'not-sent') {
+            const newer = drafts.conflict ?? api.snapshot?.state.drafts[handle.key];
+            const matches = (draft: DesktopDraftEntry) => Boolean(newer && newer.text === draft.text && JSON.stringify(newer.files) === JSON.stringify(draft.files));
+            const changed = newer && (attempt.cleared ? Boolean(newer.text || newer.files.length) && !matches(attempt.draft) : !matches(attempt.draft) && !matches(attempt.baseDraft));
+            if (drafts.conflict || changed) {
+              setConfirmedConflict({ requestId: input.requestId, pendingId: pending.id, original: attempt.draft, handle });
+              return;
+            }
+            if (attempt.cleared) {
+              await api.queueWrite(state => {
+                const current = state.drafts[handle.key];
+                if (current && (current.text || current.files.length) && (current.text !== attempt.draft.text || JSON.stringify(current.files) !== JSON.stringify(attempt.draft.files))) throw new Error('草稿已更新，不能覆盖。');
+                return { ...state, drafts: { ...state.drafts, [handle.key]: attempt.draft } };
+              });
+              if (!alive) return;
+            }
+            drafts.finishSend(handle);
+            if (attempt.cleared) {
+              drafts.editText(attempt.draft.text);
+              attempt.draft.files.forEach(file => drafts.addFile(file));
+            }
+            onNotSent(input.requestId);
+            setNotice(t('请求未发送，草稿已恢复。', 'Request not sent; draft restored.'));
+            return;
+          }
+        }
+        const receipt = await api.call(identity, 'getSubmission', { botId, requestId: input.requestId });
+        if (!alive || !receipt || receipt.requestId !== input.requestId) return;
+        onAccepted(receipt as unknown as HostSubmission);
+        if (attempt.cleared || await drafts.confirmCleared(handle) === 'cleared') drafts.finishSend(handle);
+      } catch {
+        // A failed or missing read does not authorize a resend.
+      } finally { reading = false; }
+    };
+    void recover();
+    const timer = window.setInterval(recover, 2000);
+    return () => { alive = false; window.clearInterval(timer); };
+    // Callbacks are scoped to this mounted bot; identity generation fences old requests.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [api, identity.generation, identity.targetDeviceId, botId, online, drafts.key, drafts.attempt?.id, drafts.attempt?.phase, drafts.attempt?.pendingId, drafts.conflict, confirmedConflict?.requestId, recoveryTick]);
+
+  useEffect(() => {
+    if (!pending || !blocked || drafts.attempt || !drafts.key || !online || !api.transportConnected || confirmedConflict?.requestId === pending.requestId) return;
+    let alive = true;
+    let reading = false;
+    const recover = async () => {
+      if (reading || document.hidden) return;
+      reading = true;
+      try {
+        let record = pending.pendingId ? await api.pending(identity, 'pending_get', { id: pending.pendingId }) : null;
+        if (!record && !pending.pendingId) {
+          let cursor: PendingCursor | null = null;
+          for (let i = 0; i < 20; i++) {
+            const page: PendingListPage = await api.pending(identity, 'pending_list', { options: { limit: 50, cursor } });
+            record = page.items.find(item => item.kind === 'primary' && item.requestId === pending.requestId && item.botId === botId && item.targetDeviceId === identity.targetDeviceId) ?? null;
+            if (record || !page.nextCursor) break;
+            cursor = page.nextCursor;
+          }
+        }
+        if (!record || !alive || record.kind !== 'primary' || record.requestId !== pending.requestId || record.botId !== botId || record.targetDeviceId !== identity.targetDeviceId || record.text !== pending.text) return;
+        if (record.state === 'sending' || record.state === 'unconfirmed') record = await api.pending(identity, 'pending_reconcile', { id: record.id });
+        if (record.state === 'accepted' && record.receipt) {
+          if (alive) onAccepted(record.receipt as unknown as HostSubmission);
+          return;
+        }
+        if (record.state === 'pending') record = await api.pending(identity, 'pending_cancel', { id: record.id });
+        if (!alive || record.state !== 'rejected' || record.lastError?.code !== 'CANCELLED' || record.lastError.outcome !== 'not-sent' || !pending.draft) return;
+        const draft = pending.draft;
+        const currentText = drafts.text;
+        const newer = api.snapshot?.state.drafts[drafts.key!];
+        if ((currentText && currentText !== draft.text) || (drafts.files.length && JSON.stringify(drafts.files) !== JSON.stringify(draft.files)) ||
+          (newer && (newer.text || newer.files.length) && (newer.text !== draft.text || JSON.stringify(newer.files) !== JSON.stringify(draft.files)))) {
+          setConfirmedConflict({ requestId: pending.requestId, pendingId: record.id, original: draft });
+          return;
+        }
+        await api.queueWrite(state => {
+          const existing = state.drafts[drafts.key!];
+          if (existing && (existing.text || existing.files.length) && (existing.text !== draft.text || JSON.stringify(existing.files) !== JSON.stringify(draft.files))) throw new Error('草稿已更新，不能覆盖。');
+          return { ...state, drafts: { ...state.drafts, [drafts.key!]: draft } };
+        });
+        if (!alive) return;
+        drafts.editText(draft.text);
+        if (!drafts.files.length) draft.files.forEach(file => drafts.addFile(file));
+        onNotSent(pending.requestId);
+        setNotice(t('请求未发送，草稿已恢复。', 'Request not sent; draft restored.'));
+      } catch { /* preserve the original request when reconciliation fails */ }
+      finally { reading = false; }
+    };
+    void recover();
+    const timer = window.setInterval(recover, 2000);
+    return () => { alive = false; window.clearInterval(timer); };
+    // Current generation and the persisted request identify the only safe target.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pending?.requestId, pending?.pendingId, blocked, drafts.attempt?.id, drafts.key, online, identity.generation, identity.targetDeviceId, api, confirmedConflict?.requestId, recoveryTick]);
+
+  const keepNewerDraft = async () => {
+    const conflict = confirmedConflict;
+    const key = drafts.key;
+    if (!conflict || !key || resolvingConflict) return;
+    setResolvingConflict(true);
+    try {
+      const original = await api.pending(identity, 'pending_get', { id: conflict.pendingId });
+      if (!original || original.kind !== 'primary' || original.requestId !== conflict.requestId || original.botId !== botId ||
+        original.targetDeviceId !== identity.targetDeviceId || original.state !== 'rejected' ||
+        original.lastError?.code !== 'CANCELLED' || original.lastError.outcome !== 'not-sent') {
+        throw new Error(t('尚未确认请求已取消，无法结束旧尝试。', 'Cancellation is not confirmed; the original attempt remains locked.'));
+      }
+      if (!api.snapshot) throw new Error(t('持久草稿尚未加载。', 'Saved draft is not loaded.'));
+      if (conflict.handle && drafts.attempt?.id === conflict.handle.attemptId) {
+        if (drafts.conflict && !drafts.attempt.cleared) {
+          const verified = await drafts.reconcile(conflict.handle);
+          if (!verified.found || verified.recordState !== 'rejected') throw new Error(verified.note || '无法核实旧请求');
+          const adopted = drafts.adoptNewerDraftAndFinish(conflict.handle);
+          if (!adopted.ok) throw new Error(adopted.error || '无法采用新版草稿');
+        } else {
+          drafts.finishSend(conflict.handle);
+        }
+      }
+      const adopted = await drafts.adoptPersistedDraft(key);
+      if (!adopted.ok) throw new Error(adopted.error || '无法读取新版草稿');
+      onNotSent(conflict.requestId);
+      setConfirmedConflict(undefined);
+      setNotice(t('已保留新版草稿，旧请求已取消。', 'Kept the newer draft; the original request was cancelled.'));
+    } catch (error) {
+      setNotice(errorText(error));
+    } finally {
+      setResolvingConflict(false);
+    }
+  };
+
   const send = async () => {
-    if (sending.current || !drafts.text.trim()) return;
+    if (sending.current || blocked || fallbackDraft || !drafts.text.trim()) return;
     const trimmed = drafts.text.trim();
     if (trimmed === '/clear' || trimmed === '/new') {
       drafts.editText('');
       onClearHistory();
+      return;
+    }
+    if (!online || !api.transportConnected) {
+      setNotice(t('目标离线，草稿已保留。', 'Target offline; draft retained.'));
       return;
     }
     const text =
@@ -4737,20 +5198,39 @@ function RemotePendingComposer({
     });
     if (!started) return;
     sending.current = true;
+    if (started.attempt.input.kind !== 'primary') return;
+    const requestId = started.attempt.input.requestId;
+    onStarted(requestId, text, started.attempt.draft);
     setNotice('');
     try {
+      await new Promise<void>(resolve => requestAnimationFrame(() => setTimeout(resolve, 0)));
+      if (!onPersist(requestId)) {
+        drafts.markNotSent(started.handle, '无法保存请求');
+        drafts.releaseIfNotSent(started.handle);
+        onNotSent(requestId);
+        setNotice(t('无法保存请求，未发送。', 'Cannot save request; not sent.'));
+        return;
+      }
       await drafts.waitQuiet(started.handle);
+      if (!api.transportConnected) {
+        drafts.markNotSent(started.handle, '目标离线');
+        drafts.releaseIfNotSent(started.handle);
+        onNotSent(requestId);
+        setNotice(t('目标离线，草稿已保留。', 'Target offline; draft retained.'));
+        return;
+      }
       let pending;
       try {
         pending = await api.pending(identity, 'pending_enqueue', { input: started.attempt.input });
       } catch (error) {
         const message = errorText(error);
-        if ((error as { outcome?: string })?.outcome === 'not-sent') drafts.markNotSent(started.handle, message);
-        else drafts.markUnconfirmed(started.handle);
+        if ((error as { outcome?: string })?.outcome === 'not-sent') { drafts.markNotSent(started.handle, message); drafts.releaseIfNotSent(started.handle); onNotSent(requestId); }
+        else { drafts.markUnconfirmed(started.handle); onUnconfirmed(requestId); }
         setNotice(`${message} · requestId ${started.attempt.input.kind === 'primary' ? started.attempt.input.requestId : ''}`);
         return;
       }
       drafts.setPending(started.handle, pending.id);
+      onQueued(requestId, pending.id);
       const cleared = await drafts.confirmCleared(started.handle);
       if (cleared !== 'cleared') {
         const message = t(
@@ -4758,26 +5238,30 @@ function RemotePendingComposer({
           'Draft not cleared; queued item not sent. Reconcile before continuing.',
         );
         drafts.markFailed(started.handle, message);
+        onUnconfirmed(requestId);
         setNotice(message);
         return;
       }
       if (!api.transportConnected) {
-        drafts.finishSend(started.handle);
-        setNotice(t('已入队，请连接后在待发送中显式发送。', 'Queued; send explicitly from Pending after reconnecting.'));
+        drafts.markUnconfirmed(started.handle);
+        onUnconfirmed(requestId);
+        setNotice(t('连接中断，请按原 ID 确认结果。', 'Connection interrupted; reconcile the original ID.'));
         return;
       }
       try {
         const sent = await api.pending(identity, 'pending_send', { id: pending.id });
-        if (sent.state === 'unconfirmed' || sent.state === 'sending') drafts.markUnconfirmed(started.handle);
-        else drafts.finishSend(started.handle);
+        if (sent.state === 'accepted') drafts.finishSend(started.handle);
+        else drafts.markUnconfirmed(started.handle);
         if (sent.state === 'accepted') {
           setNotice('');
-          onAccepted();
+          if (sent.receipt) onAccepted(sent.receipt as unknown as HostSubmission);
         } else {
+          onUnconfirmed(requestId);
           setNotice(`${sent.state} · ${pending.id}`);
         }
       } catch (error) {
         drafts.markUnconfirmed(started.handle);
+        onUnconfirmed(requestId);
         setNotice(`${t('回执未确认，请按原 ID 对账', 'Receipt unconfirmed; reconcile the original ID')} · ${pending.id} · ${errorText(error)}`);
       }
     } finally {
@@ -4785,64 +5269,40 @@ function RemotePendingComposer({
     }
   };
 
-  const handle = drafts.key && drafts.attempt ? { key: drafts.key, attemptId: drafts.attempt.id } : null;
   const showSlashHints = drafts.text.startsWith('/') && drafts.text.length <= 8;
 
   return (
     <>
       <ErrorNotice error={drafts.error || notice} />
-
-      {drafts.attempt && (
-        <section className="grok-card-group grok-pending-freeze-card" style={{ marginBottom: 8 }}>
+      {fallbackDraft && (
+        <section className="grok-card-group" role="status">
+          <p>{t('离线输入已保留：', 'Offline draft retained:')} {fallbackDraft}</p>
+          <button type="button" className="hub-outline-btn" disabled={!drafts.key || Boolean(drafts.attempt) || Boolean(transfer)} onClick={() => {
+            const text = drafts.text === fallbackDraft ? drafts.text : [drafts.text, fallbackDraft].filter(Boolean).join('\n');
+            setTransfer({ source: fallbackDraft, text });
+            drafts.editText(text);
+          }}>{t('合并到草稿', 'Merge into draft')}</button>
+        </section>
+      )}
+      {confirmedConflict && (
+        <section className="grok-card-group" aria-label={t('草稿冲突', 'Draft conflict')}>
+          <p>{t('原请求已确认未发送。请先查看或复制原文，再选择保留新版草稿。', 'The original request was not sent. Review or copy it before keeping the newer draft.')}</p>
+          <textarea readOnly rows={4} value={confirmedConflict.original.text} aria-label={t('原草稿，可选择复制', 'Original draft, selectable for copying')} style={{ width: '100%' }} />
+          {confirmedConflict.original.files.map((file, index) => <div key={`${file.path}:${index}`} className="pre-wrap">{file.name}: {file.path}</div>)}
+          <button type="button" className="hub-outline-btn" disabled={resolvingConflict} onClick={() => void keepNewerDraft()}>
+            {t('保留新版草稿，结束旧尝试', 'Keep newer draft and end original attempt')}
+          </button>
+        </section>
+      )}
+      {(drafts.attempt || blocked) && (
+        <section className="grok-card-group grok-pending-freeze-card" role="status" style={{ marginBottom: 8 }}>
           <div className="grok-pending-freeze-head">
-            <span className="grok-pending-freeze-badge">{t('发送已冻结', 'Send Frozen')}</span>
-            <code className="grok-pending-freeze-id">
-              {drafts.attempt.phase}
-              {drafts.attempt.pendingId ? ` · ${drafts.attempt.pendingId.slice(0, 10)}` : ''}
-            </code>
+            <span className="grok-pending-freeze-badge">{t('发送结果待确认', 'Send result unconfirmed')}</span>
+            <code className="grok-pending-freeze-id">{pending?.requestId || (drafts.attempt?.input.kind === 'primary' ? drafts.attempt.input.requestId : '')}</code>
           </div>
-          {handle && (
-            <div className="grok-pending-freeze-actions">
-              <button
-                type="button"
-                className="grok-done-pill-btn"
-                onClick={() =>
-                  void drafts.reconcile(handle).then(result =>
-                    setNotice(result.note || `${result.action} · ${result.recordId || ''}`),
-                  )
-                }
-              >
-                {t('按原 ID 对账', 'Reconcile ID')}
-              </button>
-              <button
-                type="button"
-                className="hub-outline-btn"
-                onClick={() => {
-                  const result = drafts.releaseIfNotSent(handle);
-                  setNotice(result.error || '');
-                }}
-              >
-                {t('释放未入队草稿', 'Release Draft')}
-              </button>
-              <button
-                type="button"
-                className="hub-outline-btn"
-                onClick={() => void drafts.retryClearAfterVerify(handle).then(result => setNotice(result))}
-              >
-                {t('核实后重试清稿', 'Retry Clear')}
-              </button>
-              <button
-                type="button"
-                className="hub-outline-btn"
-                onClick={() => {
-                  const result = drafts.adoptNewerDraftAndFinish(handle);
-                  setNotice(result.error || '');
-                }}
-              >
-                {t('保留新版草稿', 'Keep Newer')}
-              </button>
-            </div>
-          )}
+          <button type="button" className="grok-done-pill-btn" onClick={() => setRecoveryTick(value => value + 1)}>
+            {t('按原 ID 对账', 'Reconcile ID')}
+          </button>
         </section>
       )}
 
@@ -4853,7 +5313,7 @@ function RemotePendingComposer({
               <span>{file.name}</span>
               <button
                 type="button"
-                disabled={Boolean(drafts.attempt)}
+                disabled={Boolean(drafts.attempt) || blocked}
                 onClick={() => drafts.removeFile(index)}
                 aria-label={t('移除', 'Remove')}
               >
@@ -4878,6 +5338,7 @@ function RemotePendingComposer({
             type="button"
             className="bot-slash-item"
             onClick={() => {
+              if (blocked || drafts.attempt) { onClearHistory(); return; }
               drafts.editText('');
               onClearHistory();
             }}
@@ -4889,6 +5350,7 @@ function RemotePendingComposer({
             type="button"
             className="bot-slash-item"
             onClick={() => {
+              if (blocked || drafts.attempt) { onClearHistory(); return; }
               drafts.editText('');
               onClearHistory();
             }}
@@ -4910,6 +5372,7 @@ function RemotePendingComposer({
             role="menuitem"
             className="danger"
             onClick={() => {
+              if (blocked || drafts.attempt) { onClearHistory(); return; }
               drafts.editText('');
               onClearHistory();
             }}
@@ -4937,7 +5400,7 @@ function RemotePendingComposer({
             rows={1}
             className={drafts.text ? 'has-text' : 'is-empty'}
             value={drafts.text}
-            disabled={Boolean(drafts.attempt)}
+            disabled={Boolean(drafts.attempt) || blocked}
             onChange={event => drafts.editText(event.target.value)}
             aria-label={t('消息', 'Message')}
             placeholder={
@@ -4966,7 +5429,7 @@ function RemotePendingComposer({
             <button
               type="button"
               className="grok-composer-action-pill send"
-              disabled={!drafts.text.trim() || Boolean(drafts.attempt)}
+              disabled={!drafts.text.trim() || Boolean(drafts.attempt) || blocked || Boolean(fallbackDraft)}
               onClick={() => void send()}
               aria-label={t('发送', 'Send')}
             >

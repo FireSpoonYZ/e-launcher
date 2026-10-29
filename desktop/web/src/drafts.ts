@@ -106,6 +106,8 @@ export interface DraftWidgetState {
   retryClearAfterVerify(handle: DraftHandle): Promise<'cleared' | 'conflict' | 'failed'>;
   /** 冲突且原记录已读核实：采用读到的新版草稿为本地编辑并结束旧 attempt，不清磁盘、不发送。 */
   adoptNewerDraftAndFinish(handle: DraftHandle): { ok: boolean; error?: string };
+  /** 结束确定未派发的尝试后，仅从当前持久快照更新内存，不写磁盘。 */
+  adoptPersistedDraft(key: string): Promise<{ ok: boolean; error?: string }>;
 }
 
 function errText(e: unknown): string {
@@ -830,6 +832,33 @@ export function useDrafts(opts: {
     return { ok: true };
   }, []);
 
+  const adoptPersistedDraft = useCallback(async (key: string): Promise<{ ok: boolean; error?: string }> => {
+    const mem = getMem(key);
+    if (mem.chain) await mem.chain;
+    if (keyRef.current !== key) return { ok: false, error: '当前聊天已切换' };
+    if (mem.attempt) return { ok: false, error: '发送尝试仍被锁定' };
+    const snapshot = api.snapshot;
+    if (!snapshot) return { ok: false, error: '持久草稿尚未加载' };
+    const saved = snapshot.state.drafts[key] ?? { text: '', files: [] };
+    if (mem.timer !== null) { window.clearTimeout(mem.timer); mem.timer = null; }
+    mem.text = saved.text;
+    mem.files = saved.files.map(file => ({ ...file }));
+    mem.dirty = false;
+    mem.lastError = null;
+    mem.conflict = null;
+    mem.savePaused = false;
+    mem.version += 1;
+    mem.savedVersion = mem.version;
+    setText(mem.text);
+    setFiles([...mem.files]);
+    setDirty(false);
+    setError(null);
+    setConflict(null);
+    setSavePaused(false);
+    notify(key);
+    return { ok: true };
+  }, [api]);
+
   useEffect(() => {
     return () => {
       const k = keyRef.current;
@@ -872,5 +901,6 @@ export function useDrafts(opts: {
     releaseIfNotSent,
     retryClearAfterVerify,
     adoptNewerDraftAndFinish,
+    adoptPersistedDraft,
   };
 }

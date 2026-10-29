@@ -76,9 +76,8 @@ const NATIVE_RESULT_ERROR_CODES = new Set([
 // Private bridge legacy migration codes: the public remote control table must
 // stay untouched; these extra codes are allowed on this private JSONL IPC only.
 export const BRIDGE_LEGACY_CODES = new Set(['INVALID_SOURCE', 'BUSY', 'IO_ERROR', 'TOO_LARGE']);
-// Client-mode codes: the desktop broker reports these two stable codes on top of
-// CONTROL_ERROR_CODES; forwarding them verbatim keeps the original outcome.
-export const BRIDGE_CLIENT_CODES = new Set(['REPLACED', 'PENDING_BUSY']);
+// Client-mode codes extend CONTROL_ERROR_CODES on the private broker bridge.
+export const BRIDGE_CLIENT_CODES = new Set(['REPLACED', 'PENDING_BUSY', 'CERTIFICATE_ERROR']);
 export const BRIDGE_ERROR_CODES = new Set([
   ...CONTROL_ERROR_CODES,
   ...ANDROID_NATIVE_CODES,

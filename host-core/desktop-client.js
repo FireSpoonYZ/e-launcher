@@ -6,7 +6,7 @@
 // close/disconnect aborts client transports and observations only.
 import fs from 'node:fs';
 import path from 'node:path';
-import { connectCenter } from './center-client.js';
+import { connectCenter, validateCenterUrl } from './center-client.js';
 import { createHash } from 'node:crypto';
 import { assertId, assertRevision, messageError } from './message-protocol.js';
 import { assertUuid } from './pending-store.js';
@@ -26,7 +26,7 @@ import {
   LIVE_MAX_CLIENT_SUBSCRIPTIONS,
   normalizeLiveTarget,
 } from './remote-live-protocol.js';
-import { parseRelayUrl, assertDeviceToken } from './relay-protocol.js';
+import { parseRelayUrl, assertDeviceToken, isCertificateError } from './relay-protocol.js';
 import { normalizeHostSettings } from './host-settings.js';
 import {
   openDesktopUiStore,
@@ -47,7 +47,9 @@ export const INTENT_METHODS = new Set([
 ]);
 const MAX_CA_PEM_BYTES = 65536; // 64 KiB
 const MAX_ERROR_MESSAGE_BYTES = 512;
-const STABLE_ERROR_CODES = new Set([...CONTROL_ERROR_CODES, 'REPLACED', 'PENDING_BUSY']);
+const STABLE_ERROR_CODES = new Set([...CONTROL_ERROR_CODES, 'REPLACED', 'PENDING_BUSY', 'CERTIFICATE_ERROR']);
+const LOCAL_OFFLINE_OPS = new Set(['pending_enqueue', 'pending_get', 'pending_list', 'pending_cancel', 'ui_get', 'ui_set']);
+const CENTER_LIFECYCLE_OPS = new Set(['center_connect', 'center_status', 'center_disconnect', 'status', 'disconnect', 'unobserve']);
 
 function isPlainObject(value) {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
@@ -242,13 +244,16 @@ export function openDesktopClient(options) {
   if (!isPlainObject(options)) {
     throw invalid('openDesktopClient: options must be a plain object');
   }
-  rejectUnknownFields(options, new Set(['dataRoot', 'onEvent']), 'openDesktopClient options');
-  const { dataRoot, onEvent } = options;
+  rejectUnknownFields(options, new Set(['dataRoot', 'onEvent', 'persistCenterCredentials']), 'openDesktopClient options');
+  const { dataRoot, onEvent, persistCenterCredentials = true } = options;
   if (typeof dataRoot !== 'string' || dataRoot.trim() === '' || !path.isAbsolute(dataRoot)) {
     throw invalid('openDesktopClient: dataRoot must be a non-empty absolute path');
   }
   if (onEvent !== undefined && typeof onEvent !== 'function') {
     throw invalid('openDesktopClient: onEvent must be a function when provided');
+  }
+  if (typeof persistCenterCredentials !== 'boolean') {
+    throw invalid('openDesktopClient: persistCenterCredentials must be a boolean');
   }
 
   const resolvedDataRoot = path.resolve(dataRoot);
@@ -270,9 +275,19 @@ export function openDesktopClient(options) {
   let centerGeneration = 0;
   let centerState = 'disconnected';
   let centerUrl = '';
+  let centerError = null;
+  let centerCredentials = null;
+  let centerRelayConnection = null;
+  let centerAttempt = null;
+  let centerAttemptChain = Promise.resolve();
+  let centerProbe = null;
+  let centerRetryTimer = null;
+  let centerRetryCount = 0;
+  let selectedCenterKey = null;
   const credentialsFile = path.join(resolvedDataRoot, 'center-credentials.json');
 
   function readSavedCenterCredentials() {
+    if (!persistCenterCredentials) return null;
     try {
       if (!fs.existsSync(credentialsFile)) return null;
       const parsed = JSON.parse(fs.readFileSync(credentialsFile, 'utf8'));
@@ -291,6 +306,7 @@ export function openDesktopClient(options) {
   }
 
   function writeSavedCenterCredentials(record) {
+    if (!persistCenterCredentials) return;
     try {
       fs.mkdirSync(resolvedDataRoot, { recursive: true });
       fs.writeFileSync(credentialsFile, JSON.stringify(record), { encoding: 'utf8', mode: 0o600 });
@@ -300,11 +316,182 @@ export function openDesktopClient(options) {
   }
 
   function clearSavedCenterCredentials() {
+    if (!persistCenterCredentials) return;
     try {
       if (fs.existsSync(credentialsFile)) fs.unlinkSync(credentialsFile);
     } catch {
       /* ignore unlink errors */
     }
+  }
+
+  function centerProfileKey(credentials) {
+    const origin = validateCenterUrl(credentials.url).origin;
+    assertId(credentials.deviceId, 'deviceId');
+    assertDeviceToken(credentials.deviceToken);
+    if (credentials.ca !== '') validateCaPem(credentials.ca);
+    return createHash('sha256').update(JSON.stringify([origin, credentials.deviceId, credentials.ca]), 'utf8').digest('hex');
+  }
+
+  function readCenterPendingProfile(centerKey, credentials) {
+    try {
+      const file = path.join(resolvedDataRoot, 'pending', 'center-profiles', centerKey + '.json');
+      const { centerUrl, deviceId, relayUrl } = JSON.parse(fs.readFileSync(file, 'utf8'));
+      if (centerUrl !== validateCenterUrl(credentials.url).origin || deviceId !== credentials.deviceId) return null;
+      parseRelayUrl(relayUrl);
+      const profileKey = derivePendingProfileKey({ kind: 'relay', url: relayUrl, deviceId });
+      return fs.existsSync(path.join(resolvedDataRoot, 'pending', profileKey, 'client-pending.sqlite')) ? profileKey : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function writeCenterPendingProfile(centerKey, credentials, relayUrl) {
+    try {
+      const directory = path.join(resolvedDataRoot, 'pending', 'center-profiles');
+      fs.mkdirSync(directory, { recursive: true });
+      const mapping = { centerUrl: validateCenterUrl(credentials.url).origin, deviceId: credentials.deviceId, relayUrl };
+      fs.writeFileSync(path.join(directory, centerKey + '.json'), JSON.stringify(mapping), { encoding: 'utf8', mode: 0o600 });
+    } catch {
+      /* An unavailable mapping must not affect the authenticated connection. */
+    }
+  }
+
+  function describeCenterFailure(error) {
+    if (error?.code === 'CERTIFICATE_ERROR' || isCertificateError(error)) {
+      return { code: 'CERTIFICATE_ERROR', message: 'center or relay certificate validation failed', permanent: true };
+    }
+    if (error?.code === 'UNAUTHORIZED' || error?.code === 'REVOKED') {
+      return { code: error.code, message: 'center or relay authentication was rejected', permanent: true };
+    }
+    if (error?.code === 'INVALID_ARGUMENT' || error?.code === 'CONTROL_IDENTITY_MISMATCH') {
+      return { code: 'INVALID_ARGUMENT', message: 'invalid center or relay connection parameters', permanent: true };
+    }
+    return { code: 'CENTER_OFFLINE', message: 'center or relay unavailable', permanent: false };
+  }
+
+  function cancelCenterRetry() {
+    if (centerRetryTimer) clearTimeout(centerRetryTimer);
+    centerRetryTimer = null;
+    if (centerAttempt) centerAttempt.controller.abort();
+  }
+
+  function abortCenterRequests() {
+    for (const record of inflightRequests.values()) {
+      if (!CENTER_LIFECYCLE_OPS.has(record.op) && !LOCAL_OFFLINE_OPS.has(record.op)) record.controller.abort();
+    }
+  }
+
+  function endConnectionObservations(error) {
+    for (const record of observations.values()) {
+      if (record.connection && !record.settled) {
+        record.settled = true;
+        void Promise.resolve(emitEvent({ type: 'event', observationId: record.id, error })).catch(() => {});
+        record.controller.abort();
+      }
+    }
+  }
+
+  function scheduleCenterRetry(myGeneration) {
+    if (closed || myGeneration !== centerGeneration || !centerCredentials || centerRetryTimer || centerAttempt) return;
+    const base = Math.min(30000, 1000 * 2 ** Math.min(centerRetryCount++, 5));
+    const delay = Math.min(30000, Math.round(base * (0.75 + Math.random() * 0.5)));
+    centerRetryTimer = setTimeout(() => {
+      centerRetryTimer = null;
+      void startCenterAttempt(myGeneration).catch(() => {});
+    }, delay);
+    centerRetryTimer.unref?.();
+  }
+
+  function failCenter(error, myGeneration) {
+    if (closed || myGeneration !== centerGeneration) return;
+    const failure = describeCenterFailure(error);
+    centerError = { code: failure.code, message: failure.message };
+    centerState = failure.permanent ? 'disconnected' : 'connecting';
+    endConnectionObservations({ ...centerError, outcome: 'unconfirmed' });
+    dropTransportForCenter();
+    abortCenterRequests();
+    const previous = centerClient;
+    centerClient = null;
+    if (previous) void previous.close();
+    if (failure.permanent) {
+      centerCredentials = null;
+      cancelCenterRetry();
+      phase = 'failed';
+      errorCode = failure.code;
+    } else {
+      scheduleCenterRetry(myGeneration);
+    }
+  }
+
+  function startCenterAttempt(myGeneration, rec) {
+    if (centerAttempt?.generation === myGeneration && !centerAttempt.controller.signal.aborted) return centerAttempt.promise;
+    const credentials = centerCredentials;
+    const attempt = { generation: myGeneration, controller: new AbortController(), failure: null, promise: null };
+    const run = centerAttemptChain.then(async () => {
+      if (closed || myGeneration !== centerGeneration || attempt.controller.signal.aborted) {
+        throw brokerError('CANCELLED', 'not-sent', 'center connection superseded');
+      }
+      let client = null;
+      try {
+        const centerKey = centerProfileKey(credentials);
+        selectedCenterKey = centerKey;
+        const savedProfile = readCenterPendingProfile(centerKey, credentials);
+        if (savedProfile) await ensurePendingProfile(savedProfile, centerKey, myGeneration);
+        if (closed || myGeneration !== centerGeneration || attempt.controller.signal.aborted) {
+          throw brokerError('CANCELLED', 'not-sent', 'center connection superseded');
+        }
+        client = await connectCenter({
+          centerUrl: credentials.url, deviceId: credentials.deviceId, deviceToken: credentials.deviceToken,
+          ca: credentials.ca || undefined, signal: attempt.controller.signal,
+          onDisconnect: (error) => {
+            if (myGeneration !== centerGeneration || (centerAttempt !== attempt && centerClient !== client)) return;
+            attempt.failure = error;
+            attempt.controller.abort();
+            failCenter(error, myGeneration);
+          },
+          onChange: () => {},
+        });
+        if (closed || myGeneration !== centerGeneration || attempt.controller.signal.aborted) {
+          await client.close();
+          throw brokerError('CANCELLED', 'not-sent', 'center connection superseded');
+        }
+        centerClient = client;
+        const { linkUrl } = await client.getConnection(attempt.controller.signal);
+        if (closed || myGeneration !== centerGeneration || centerClient !== client || attempt.controller.signal.aborted) {
+          throw brokerError('CANCELLED', 'not-sent', 'center connection superseded');
+        }
+        await opConnect({ connection: { kind: 'relay', url: linkUrl, deviceId: credentials.deviceId,
+          token: credentials.deviceToken, ...(credentials.ca ? { ca: credentials.ca } : {}) } },
+        attempt.controller.signal, rec, true);
+        if (closed || myGeneration !== centerGeneration || centerClient !== client || attempt.controller.signal.aborted) {
+          throw brokerError('CANCELLED', 'not-sent', 'center connection superseded');
+        }
+        centerRelayConnection = { url: linkUrl, deviceId: credentials.deviceId, ca: credentials.ca };
+        centerState = 'ready';
+        centerError = null;
+        centerRetryCount = 0;
+        writeCenterPendingProfile(centerKey, credentials, linkUrl);
+        writeSavedCenterCredentials(credentials);
+        return centerStatus();
+      } catch (error) {
+        if (client && centerClient !== client) await client.close();
+        if (!closed && myGeneration === centerGeneration) {
+          const failure = describeCenterFailure(attempt.failure || error);
+          failCenter(attempt.failure || error, myGeneration);
+          throw brokerError(failure.permanent ? failure.code : 'NOT_CONNECTED', 'not-sent', failure.message);
+        }
+        throw brokerError('CANCELLED', 'not-sent', 'center connection superseded');
+      } finally {
+        if (centerAttempt === attempt) {
+          centerAttempt = null;
+          if (centerState === 'connecting') scheduleCenterRetry(myGeneration);
+        }
+      }
+    });
+    attempt.promise = run;
+    centerAttempt = attempt;
+    centerAttemptChain = run.catch(() => {});
+    return run;
   }
 
   async function opCenterConnect(params, reqSignal, rec) {
@@ -316,66 +503,39 @@ export function openDesktopClient(options) {
         effectiveToken = saved.deviceToken;
       }
     }
+    const credentials = { url: params.url, deviceId: params.deviceId, deviceToken: effectiveToken, ca: params.ca ?? '' };
+    if (centerCredentials && Object.keys(credentials).every((key) => credentials[key] === centerCredentials[key])) {
+      if (centerState === 'ready') return centerStatus();
+      if (centerAttempt?.generation === centerGeneration && !centerAttempt.controller.signal.aborted) return centerAttempt.promise;
+      if (centerRetryTimer) {
+        clearTimeout(centerRetryTimer);
+        centerRetryTimer = null;
+        return startCenterAttempt(centerGeneration, rec);
+      }
+    }
+
+    cancelCenterRetry();
     const myGeneration = ++centerGeneration;
-    const previous = centerClient;
-    centerClient = null;
+    centerCredentials = credentials;
+    selectedCenterKey = null;
     centerState = 'connecting';
+    centerError = null;
+    centerRetryCount = 0;
     centerUrl = '';
     try {
       const parsed = new URL(params.url);
       if (!parsed.username && !parsed.password && !parsed.search && !parsed.hash) centerUrl = parsed.origin;
     } catch { /* connectCenter rejects invalid input */ }
+    endConnectionObservations({ code: 'CANCELLED', message: 'center connection replaced', outcome: 'unconfirmed' });
     dropTransportForCenter();
-    for (const rec of inflightRequests.values()) {
-      if (rec.op !== 'center_connect' && rec.op !== 'center_status') rec.controller.abort();
-    }
+    abortCenterRequests();
+    const previous = centerClient;
+    centerClient = null;
     if (previous) await previous.close();
-    try {
-      const client = await connectCenter({ centerUrl: params.url, deviceId: params.deviceId,
-        deviceToken: effectiveToken, ca: params.ca,
-        onDisconnect: () => {
-          if (myGeneration !== centerGeneration) return;
-          centerClient = null;
-          centerState = 'disconnected';
-          dropTransportForCenter();
-          for (const rec of inflightRequests.values()) {
-            if (rec.op !== 'center_connect' && rec.op !== 'center_status') rec.controller.abort();
-          }
-        }, onChange: () => {} });
-      if (closed || myGeneration !== centerGeneration || centerState !== 'connecting') {
-        await client.close();
-        throw brokerError('NOT_CONNECTED', 'not-sent', 'center connection superseded');
-      }
-      centerClient = client;
-      const { linkUrl } = await client.getConnection();
-      if (closed || myGeneration !== centerGeneration || centerClient !== client) {
-        await client.close();
-        throw brokerError('NOT_CONNECTED', 'not-sent', 'center connection superseded');
-      }
-      await opConnect({ connection: { kind: 'relay', url: linkUrl, deviceId: params.deviceId,
-        token: effectiveToken, ...(params.ca ? { ca: params.ca } : {}) } }, reqSignal, rec);
-      if (closed || myGeneration !== centerGeneration || centerClient !== client) {
-        await client.close();
-        throw brokerError('NOT_CONNECTED', 'not-sent', 'center connection superseded');
-      }
-      writeSavedCenterCredentials({
-        url: params.url,
-        deviceId: params.deviceId,
-        deviceToken: effectiveToken,
-        ca: params.ca || '',
-      });
-      centerState = 'ready';
-      return centerStatus();
-    } catch {
-      if (myGeneration === centerGeneration) {
-        centerState = 'disconnected';
-        dropTransportForCenter();
-        const failed = centerClient;
-        centerClient = null;
-        if (failed) await failed.close();
-      }
-      throw brokerError('NOT_CONNECTED', 'not-sent', 'center connection failed');
+    if (closed || myGeneration !== centerGeneration || reqSignal?.aborted) {
+      throw brokerError('CANCELLED', 'not-sent', 'center connection superseded');
     }
+    return startCenterAttempt(myGeneration, rec);
   }
 
   function centerStatus() {
@@ -384,24 +544,76 @@ export function openDesktopClient(options) {
       state: centerState,
       centerUrl,
       appliedRevision: null,
-      error: null,
+      error: centerError,
       clientId,
       ...(saved ? { savedConnection: { url: saved.url, deviceId: saved.deviceId, ca: saved.ca } } : {}),
     };
   }
+
+  function cancelCenterProbe() {
+    const probe = centerProbe;
+    centerProbe = null;
+    if (probe) probe.controller.abort();
+  }
+
+  function probeReadyCenter() {
+    if (centerProbe) return centerProbe.promise;
+    const myGeneration = centerGeneration;
+    const client = centerClient;
+    const session = activeSession;
+    const transportGeneration = generation;
+    if (!client || phase !== 'connected' || session?.kind !== 'relay' || !session.remote) {
+      failCenter(brokerError('NOT_CONNECTED', 'not-sent', 'center or relay unavailable'), myGeneration);
+      return Promise.resolve();
+    }
+    const probe = { controller: new AbortController(), promise: null };
+    const timeout = withCallTimeout(probe.controller.signal, 5000);
+    centerProbe = probe;
+    probe.promise = (async () => {
+      try {
+        await Promise.all([
+          client.getConnection(timeout.signal),
+          session.remote.listDevices({ limit: 1, signal: timeout.signal }),
+        ]);
+      } catch (error) {
+        if (!probe.controller.signal.aborted && !closed && centerState === 'ready' &&
+            myGeneration === centerGeneration && centerClient === client &&
+            activeSession === session && generation === transportGeneration) {
+          failCenter(error, myGeneration);
+        }
+      } finally {
+        probe.controller.abort();
+        timeout.cleanup();
+        if (centerProbe === probe) centerProbe = null;
+      }
+    })();
+    return probe.promise;
+  }
+
   async function opCenterStatus(params) {
-    rejectUnknownFields(params, new Set(), 'center_status params');
+    rejectUnknownFields(params, new Set(['probe']), 'center_status params');
+    if (params.probe !== undefined && typeof params.probe !== 'boolean') throw invalid('probe must be a boolean');
+    if (params.probe && centerState === 'ready') {
+      await probeReadyCenter();
+    } else if (params.probe && centerState === 'connecting' && centerCredentials) {
+      if (centerRetryTimer) clearTimeout(centerRetryTimer);
+      centerRetryTimer = null;
+      void startCenterAttempt(centerGeneration).catch(() => {});
+    }
     return centerStatus();
   }
+
   async function opCenterDisconnect(params) {
     rejectUnknownFields(params, new Set(), 'center_disconnect params');
     clearSavedCenterCredentials();
+    cancelCenterRetry();
     centerGeneration += 1;
+    centerCredentials = null;
     centerState = 'disconnected';
+    centerError = null;
+    endConnectionObservations({ code: 'CANCELLED', message: 'center disconnected', outcome: 'unconfirmed' });
     dropTransportForCenter();
-    for (const rec of inflightRequests.values()) {
-      if (rec.op !== 'center_disconnect' && rec.op !== 'center_status') rec.controller.abort();
-    }
+    abortCenterRequests();
     const previous = centerClient;
     centerClient = null;
     if (previous) await previous.close();
@@ -439,6 +651,8 @@ export function openDesktopClient(options) {
     if (centerState !== 'ready') throw brokerError('NOT_CONNECTED', 'not-sent', 'center is disconnected');
   }
   function dropTransportForCenter() {
+    cancelCenterProbe();
+    centerRelayConnection = null;
     generation += 1;
     phase = 'disconnected';
     redactedConn = null;
@@ -455,6 +669,7 @@ export function openDesktopClient(options) {
 
   // Pending profile management
   let currentProfileKey = null;
+  let pendingCenterKey = null;
   let pendingClient = null;
   let pendingSwitchChain = Promise.resolve();
 
@@ -490,10 +705,10 @@ export function openDesktopClient(options) {
     await Promise.allSettled([...observations.values()].map((obs) => obs.promise));
   }
 
-  async function cancelAndJoinInflight(excludeRec) {
+  async function cancelAndJoinInflight(excludeRec, preserveCenterOps = false) {
     const pending = [];
     for (const rec of inflightRequests.values()) {
-      if (rec !== excludeRec) {
+      if (rec !== excludeRec && !(preserveCenterOps && (CENTER_LIFECYCLE_OPS.has(rec.op) || LOCAL_OFFLINE_OPS.has(rec.op)))) {
         rec.controller.abort();
         pending.push(rec.promise);
       }
@@ -545,7 +760,7 @@ export function openDesktopClient(options) {
         throw brokerError('TIMEOUT', 'unconfirmed', 'control call timed out');
       }
       const norm = normalizeDesktopError(err, 'unconfirmed');
-      if (sessionGen === generation && (norm.code === 'DISCONNECTED' || norm.code === 'REPLACED' || norm.code === 'REVOKED' || norm.code === 'BAD_FRAME')) {
+      if (sessionGen === generation && session.kind === 'local' && (norm.code === 'DISCONNECTED' || norm.code === 'REPLACED' || norm.code === 'REVOKED' || norm.code === 'BAD_FRAME')) {
         phase = 'failed';
         errorCode = norm.code;
       }
@@ -555,19 +770,26 @@ export function openDesktopClient(options) {
     }
   }
 
-  async function ensurePendingProfile(profileKey) {
+  async function ensurePendingProfile(profileKey, centerKey = selectedCenterKey, myGeneration = centerGeneration) {
     const run = pendingSwitchChain.then(async () => {
-      if (closed) throw brokerError('NOT_CONNECTED', 'not-sent', 'desktop client is closed');
+      const checkCurrent = () => {
+        if (closed || myGeneration !== centerGeneration || !centerKey || centerKey !== selectedCenterKey) {
+          throw brokerError('CANCELLED', 'not-sent', 'pending profile selection superseded');
+        }
+      };
+      checkCurrent();
       if (currentProfileKey === profileKey && pendingClient) {
+        pendingCenterKey = centerKey;
         return pendingClient;
       }
       if (pendingClient) {
         const old = pendingClient;
         pendingClient = null;
         currentProfileKey = null;
+        pendingCenterKey = null;
         await old.close();
       }
-      if (closed) throw brokerError('NOT_CONNECTED', 'not-sent', 'desktop client is closed');
+      checkCurrent();
       const profileDir = path.join(resolvedDataRoot, 'pending', profileKey);
       pendingClient = openPendingClient({
         dataRoot: profileDir,
@@ -575,6 +797,7 @@ export function openDesktopClient(options) {
         call: pendingTransportCall,
       });
       currentProfileKey = profileKey;
+      pendingCenterKey = centerKey;
       return pendingClient;
     });
     pendingSwitchChain = run.catch(() => {});
@@ -582,7 +805,7 @@ export function openDesktopClient(options) {
   }
 
   function requirePendingClient() {
-    if (!pendingClient) {
+    if (!pendingClient || !selectedCenterKey || pendingCenterKey !== selectedCenterKey) {
       throw brokerError('NOT_CONNECTED', 'not-sent', 'no connection profile has been configured for pending operations');
     }
     return pendingClient;
@@ -610,7 +833,7 @@ export function openDesktopClient(options) {
 
   // ---- Operations ----
 
-  async function opConnect(params, reqSignal, rec) {
+  async function opConnect(params, reqSignal, rec, centerManaged = false) {
     if (switching) {
       throw brokerError('RPC_BUSY', 'not-sent', 'another connect/disconnect is already in progress');
     }
@@ -619,13 +842,23 @@ export function openDesktopClient(options) {
       rejectUnknownFields(params, new Set(['connection']), 'connect params');
       let rawConnection = params.connection;
       if (isPlainObject(rawConnection) && (rawConnection.token === '' || rawConnection.token === undefined)) {
-        const saved = readSavedCenterCredentials();
-        if (saved?.deviceToken) {
-          rawConnection = { ...rawConnection, token: saved.deviceToken };
+        if (persistCenterCredentials) {
+          const saved = readSavedCenterCredentials();
+          if (saved?.deviceToken) rawConnection = { ...rawConnection, token: saved.deviceToken };
+        } else if (
+          rawConnection.kind === 'relay' && centerState === 'ready' && centerClient && centerCredentials &&
+          phase === 'connected' && activeSession?.kind === 'relay' && activeSession.remote &&
+          centerRelayConnection && redactedConn?.kind === 'relay' &&
+          rawConnection.url === centerRelayConnection.url && rawConnection.url === redactedConn.url &&
+          rawConnection.deviceId === centerRelayConnection.deviceId && rawConnection.deviceId === redactedConn.deviceId &&
+          (rawConnection.ca === undefined ? '' : rawConnection.ca) === centerRelayConnection.ca
+        ) {
+          rawConnection = { ...rawConnection, token: centerCredentials.deviceToken };
         }
       }
       const conn = normalizeConnectionInput(rawConnection);
       const profileKey = derivePendingProfileKey(conn);
+      cancelCenterProbe();
 
       // Update phase after validation but before the first await so concurrent
       // requests never target the old session during the drain.
@@ -638,7 +871,7 @@ export function openDesktopClient(options) {
       // Issue every abort before joining; then re-check close/supersede before
       // publishing the new session so a concurrent close cannot be overwritten.
       abortAllObservations();
-      await cancelAndJoinInflight(rec);
+      await cancelAndJoinInflight(rec, centerManaged);
       await joinObservations();
       if (closed || (reqSignal && reqSignal.aborted) || myGen !== generation) {
         throw brokerError('CANCELLED', 'not-sent', 'connect superseded or cancelled');
@@ -703,6 +936,7 @@ export function openDesktopClient(options) {
 
         // Relay connection
         const timeout = withCallTimeout(connectController.signal, DESKTOP_CALL_TIMEOUT_MS);
+        const sessionCenterGeneration = centerGeneration;
         let remote;
         try {
           remote = await openRemoteControl({
@@ -723,6 +957,10 @@ export function openDesktopClient(options) {
                   void Promise.resolve(emitEvent({ type: 'event', observationId: record.id, error })).catch(() => {});
                   record.controller.abort();
                 }
+              }
+              if (centerManaged && sessionCenterGeneration === centerGeneration) {
+                if (centerAttempt) centerAttempt.failure = err;
+                failCenter(err, sessionCenterGeneration);
               }
             },
           });
@@ -768,28 +1006,23 @@ export function openDesktopClient(options) {
     }
   }
 
-  async function opDisconnect(params, reqSignal, rec) {
-    if (switching) {
-      throw brokerError('RPC_BUSY', 'not-sent', 'another connect/disconnect is already in progress');
-    }
-    switching = true;
-    try {
-      rejectUnknownFields(params, new Set(), 'disconnect params');
-      phase = 'disconnected';
-      errorCode = null;
-      generation += 1;
-      abortAllObservations();
-      await cancelAndJoinInflight(rec);
-      await joinObservations();
-      if (activeSession) {
-        closeTransportSession(activeSession);
-        activeSession = null;
-      }
-      // Leave current profile's pendingClient open for offline enqueue/list/get.
-      return buildStatusSnapshot();
-    } finally {
-      switching = false;
-    }
+  async function opDisconnect(params) {
+    rejectUnknownFields(params, new Set(), 'disconnect params');
+    cancelCenterRetry();
+    centerGeneration += 1;
+    centerCredentials = null;
+    centerState = 'disconnected';
+    centerError = null;
+    errorCode = null;
+    const oldObservations = [...observations.values()].map((obs) => obs.promise);
+    endConnectionObservations({ code: 'CANCELLED', message: 'center disconnected', outcome: 'unconfirmed' });
+    dropTransportForCenter();
+    abortCenterRequests();
+    const previous = centerClient;
+    centerClient = null;
+    if (previous) await previous.close();
+    await Promise.allSettled(oldObservations);
+    return buildStatusSnapshot();
   }
 
   async function opStatus(params) {
@@ -862,7 +1095,7 @@ export function openDesktopClient(options) {
         throw brokerError('TIMEOUT', 'unconfirmed', 'devices query timed out');
       }
       const norm = normalizeDesktopError(err, 'unconfirmed');
-      if (sessionGen === generation && (norm.code === 'DISCONNECTED' || norm.code === 'REPLACED' || norm.code === 'REVOKED' || norm.code === 'BAD_FRAME')) {
+      if (sessionGen === generation && session.kind === 'local' && (norm.code === 'DISCONNECTED' || norm.code === 'REPLACED' || norm.code === 'REVOKED' || norm.code === 'BAD_FRAME')) {
         phase = 'failed';
         errorCode = norm.code;
       }
@@ -951,7 +1184,7 @@ export function openDesktopClient(options) {
         throw brokerError('TIMEOUT', 'unconfirmed', 'control call timed out');
       }
       const norm = normalizeDesktopError(err, 'unconfirmed');
-      if (sessionGen === generation && (norm.code === 'DISCONNECTED' || norm.code === 'REPLACED' || norm.code === 'REVOKED' || norm.code === 'BAD_FRAME')) {
+      if (sessionGen === generation && session.kind === 'local' && (norm.code === 'DISCONNECTED' || norm.code === 'REPLACED' || norm.code === 'REVOKED' || norm.code === 'BAD_FRAME')) {
         phase = 'failed';
         errorCode = norm.code;
       }
@@ -1259,14 +1492,15 @@ export function openDesktopClient(options) {
           } else {
             error = normalizeDesktopError(err, 'unconfirmed');
           }
-          if (sessionGen === generation && (error.code === 'DISCONNECTED' || error.code === 'REPLACED' || error.code === 'REVOKED' || error.code === 'BAD_FRAME')) {
+          // Relay transport failures are handled by onClose; a target may fail independently.
+          if (sessionGen === generation && session.kind === 'local' && (error.code === 'DISCONNECTED' || error.code === 'REPLACED' || error.code === 'REVOKED' || error.code === 'BAD_FRAME')) {
             phase = 'failed';
             errorCode = error.code;
           }
           await emitEvent({ type: 'event', observationId, error });
         }
       } finally {
-        observations.delete(observationId);
+        if (observations.get(observationId) === record) observations.delete(observationId);
         try {
           await iter.return?.();
         } catch {
@@ -1335,7 +1569,7 @@ export function openDesktopClient(options) {
     if (!isPlainObject(params)) {
       throw invalid(`${op} params must be a plain object`);
     }
-    if (!['center_connect', 'center_status', 'center_disconnect', 'status', 'disconnect', 'unobserve'].includes(op)) requireCenter();
+    if (!CENTER_LIFECYCLE_OPS.has(op) && !LOCAL_OFFLINE_OPS.has(op)) requireCenter();
     if (op === 'settings_set') throw brokerError('NOT_CONNECTED', 'not-sent', 'settings are managed by the center');
     // unobserve only aborts a local subscription synchronously (no network, no wait): it must
     // never queue behind the 8 in-flight RPCs or a connect/disconnect switch (a switch already
@@ -1343,9 +1577,8 @@ export function openDesktopClient(options) {
     // observation would leak its broker slot. It cannot accumulate: opUnobserve returns at once.
     const localCancel = op === 'unobserve';
     if (
-      !localCancel && switching &&
-      op !== 'status' && op !== 'ui_get' && op !== 'ui_set' &&
-      op !== 'connect' && op !== 'disconnect'
+      !localCancel && switching && !CENTER_LIFECYCLE_OPS.has(op) && !LOCAL_OFFLINE_OPS.has(op) &&
+      op !== 'connect'
     ) {
       throw brokerError('RPC_BUSY', 'not-sent', 'desktop client is switching connections');
     }
@@ -1374,9 +1607,14 @@ export function openDesktopClient(options) {
     if (!closePromise) {
       closePromise = (async () => {
         closed = true;
+        cancelCenterProbe();
+        cancelCenterRetry();
+        centerRelayConnection = null;
         centerGeneration += 1;
+        centerCredentials = null;
         centerState = 'disconnected';
-        if (centerClient) { await centerClient.close(); centerClient = null; }
+        const previousCenter = centerClient;
+        centerClient = null;
         generation += 1;
         // Abort all in-flight broker requests and observations
         for (const rec of inflightRequests.values()) {
@@ -1389,6 +1627,8 @@ export function openDesktopClient(options) {
         }
         phase = 'disconnected';
 
+        if (previousCenter) await previousCenter.close();
+        await centerAttemptChain;
         await Promise.allSettled([...inflightRequests.values()].map((r) => r.promise));
         await Promise.allSettled([...observations.values()].map((r) => r.promise));
 
@@ -1402,6 +1642,7 @@ export function openDesktopClient(options) {
           const p = pendingClient;
           pendingClient = null;
           currentProfileKey = null;
+          pendingCenterKey = null;
           try {
             await p.close();
           } catch {
@@ -1417,6 +1658,9 @@ export function openDesktopClient(options) {
     }
     return closePromise;
   }
+
+  const savedCenter = readSavedCenterCredentials();
+  if (savedCenter) void opCenterConnect(savedCenter).catch(() => {});
 
   return {
     request,

@@ -3,7 +3,12 @@ import { BotHost, openCenterUrl } from './index';
 import { mobileClientRequest } from './tauri-host';
 
 export type SavedConnection = { url: string; deviceId: string; ca: string };
-export type CenterStatus = { state: 'disconnected' | 'connecting' | 'ready'; centerUrl: string; clientId?: string; savedConnection?: SavedConnection; savedConnectionError?: string };
+export type CenterStatus = { state: 'disconnected' | 'connecting' | 'ready'; centerUrl: string; clientId?: string; savedConnection?: SavedConnection; savedConnectionError?: string; brokerGeneration?: number; error?: { code?: string; message?: string } | string | null };
+const permanentCenterErrors = new Set(['UNAUTHENTICATED', 'UNAUTHORIZED', 'CONTROL_UNAUTHORIZED', 'INVALID_ARGUMENT', 'INVALID_CREDENTIALS', 'CREDENTIALS_NOT_FOUND', 'INVALID_TOKEN', 'REVOKED', 'CREDENTIALS', 'CERTIFICATE_ERROR', 'CERTIFICATE_INVALID', 'CERT_HAS_EXPIRED', 'UNABLE_TO_VERIFY_LEAF_SIGNATURE', 'SELF_SIGNED_CERT_IN_CHAIN']);
+const transientCenterErrors = new Set(['NOT_CONNECTED', 'DISCONNECTED', 'EVENT_STREAM_CLOSED', 'RPC_BUSY', 'TIMEOUT', 'TRANSPORT_RESET', 'CENTER_OFFLINE', 'CENTER_REQUEST_FAILED']);
+const centerErrorCode = (error: unknown) => typeof error === 'object' && error !== null && 'code' in error ? String(error.code) : '';
+const centerErrorMessage = (error: unknown) => typeof error === 'string' ? error : error instanceof Error ? error.message : typeof error === 'object' && error !== null && 'message' in error ? String(error.message) : '';
+
 export const ActiveCenter = createContext('');
 
 export interface CenterConnectionContextValue {
@@ -63,7 +68,7 @@ const defaultCenterContext: CenterConnectionContextValue = {
 export const CenterConnectionContext = createContext<CenterConnectionContextValue>(defaultCenterContext);
 export const useCenterConnection = () => useContext(CenterConnectionContext);
 
-export function CenterGate({ children, remoteClient = false, onDisconnected, onReady }: { children: ReactNode; remoteClient?: boolean; onDisconnected?: () => void; onReady?: (centerUrl: string) => Promise<void> }) {
+export function CenterGate({ children, remoteClient = false, onDisconnected, onReady, recoveryEpoch = 0 }: { children: ReactNode; remoteClient?: boolean; onDisconnected?: () => void; onReady?: (centerUrl: string) => Promise<void>; recoveryEpoch?: number }) {
   const [url, setUrl] = useState('');
   const [deviceId, setDeviceId] = useState(() => localStorage.getItem('center-client-device-id') ?? '');
   const [token, setToken] = useState('');
@@ -80,6 +85,7 @@ export function CenterGate({ children, remoteClient = false, onDisconnected, onR
   const [error, setError] = useState('');
   const [preparedCenter, setPreparedCenter] = useState('');
   const [preparing, setPreparing] = useState(false);
+  const [prepareRetry, setPrepareRetry] = useState(0);
 
   useEffect(() => {
     let live = true;
@@ -106,8 +112,16 @@ export function CenterGate({ children, remoteClient = false, onDisconnected, onR
       setStatus(next);
       setSaved(next.savedConnection);
       if (next.savedConnectionError) setError(next.savedConnectionError);
+      else if (next.error && permanentCenterErrors.has(centerErrorCode(next.error))) setError(centerErrorMessage(next.error) || centerErrorCode(next.error));
+      else if (next.state === 'connecting') setError('正在重连…');
     };
-    const readStatus = () => mobileClientRequest<CenterStatus>('center_status', {});
+    const readStatus = async () => {
+      const next = await mobileClientRequest<CenterStatus>('center_status', {});
+      if (next.state !== 'ready') return next;
+      const broker = await mobileClientRequest<{ phase: string; generation: number }>('status', {});
+      return { ...next, state: broker.phase === 'connected' ? 'ready' as const : 'connecting' as const,
+        brokerGeneration: broker.generation };
+    };
     const poll = async () => {
       const issued = epoch.current;
       try {
@@ -138,7 +152,7 @@ export function CenterGate({ children, remoteClient = false, onDisconnected, onR
           setUrl(connection.url);
           setDeviceId(connection.deviceId);
           setCa(connection.ca);
-          if (next.state !== 'ready' && !autoAttempted.current) {
+          if (next.state === 'disconnected' && !autoAttempted.current && !next.savedConnectionError && !permanentCenterErrors.has(centerErrorCode(next.error))) {
             autoAttempted.current = true;
             autoConnection.current = mobileClientRequest<CenterStatus>('center_connect', {
               url: connection.url, deviceId: connection.deviceId, deviceToken: '',
@@ -149,11 +163,15 @@ export function CenterGate({ children, remoteClient = false, onDisconnected, onR
             const attempt = ++epoch.current;
             setBusy(true);
             try {
-              const connected = await autoConnection.current;
+              await autoConnection.current;
+              const connected = await readStatus();
               if (live && attempt === epoch.current) updateStatus(connected);
             } catch (failure) {
-              if (live && attempt === epoch.current) setError(failure instanceof Error ? failure.message : '自动连接失败，请重试。');
+              if (live && attempt === epoch.current) {
+                setError(permanentCenterErrors.has(centerErrorCode(failure)) ? centerErrorMessage(failure) || centerErrorCode(failure) : '正在重连…');
+              }
             } finally {
+              autoConnection.current = null;
               if (live && attempt === epoch.current) setBusy(false);
             }
           }
@@ -178,16 +196,22 @@ export function CenterGate({ children, remoteClient = false, onDisconnected, onR
 
   useEffect(() => {
     let live = true;
+    let retry: ReturnType<typeof setTimeout> | undefined;
     setPreparedCenter('');
     if (status?.state !== 'ready' || !onReady) { setPreparing(false); return; }
+    const preparedKey = `${status.centerUrl}:${status.brokerGeneration ?? ''}`;
     setPreparing(true);
     onReady(status.centerUrl).then(() => {
-      if (live) { setPreparedCenter(status.centerUrl); setError(''); }
+      if (live) { setPreparedCenter(preparedKey); setError(''); }
     }, failure => {
-      if (live) setError(failure instanceof Error ? failure.message : '设备连接初始化失败，请重试');
+      if (live) {
+        const permanent = !transientCenterErrors.has(centerErrorCode(failure));
+        setError(permanent ? centerErrorMessage(failure) || centerErrorCode(failure) : '正在重连…');
+        if (!permanent) retry = setTimeout(() => setPrepareRetry(value => value + 1), 2000);
+      }
     }).finally(() => { if (live) setPreparing(false); });
-    return () => { live = false; };
-  }, [status?.state, status?.centerUrl, onReady]);
+    return () => { live = false; if (retry) clearTimeout(retry); };
+  }, [status?.state, status?.centerUrl, status?.brokerGeneration, onReady, prepareRetry, recoveryEpoch]);
 
   const connect = async (event?: FormEvent) => {
     event?.preventDefault();
@@ -216,7 +240,9 @@ export function CenterGate({ children, remoteClient = false, onDisconnected, onR
         localStorage.setItem('center-client-device-id', deviceId.trim());
         localStorage.setItem('active-center-url', url.trim());
         setSaved(next.savedConnection);
-        setStatus(next);
+        const broker = next.state === 'ready' ? await mobileClientRequest<{ phase: string; generation: number }>('status', {}) : undefined;
+        if (issued !== epoch.current) return;
+        setStatus(broker ? { ...next, state: broker.phase === 'connected' ? 'ready' : 'connecting', brokerGeneration: broker.generation } : next);
       } else {
         await BotHost.start();
       }
@@ -257,7 +283,7 @@ export function CenterGate({ children, remoteClient = false, onDisconnected, onR
     });
   };
 
-  const ready = Boolean(status?.state === 'ready' && (!onReady || preparedCenter === status.centerUrl));
+  const ready = Boolean(status?.state === 'ready' && (!onReady || preparedCenter === `${status.centerUrl}:${status.brokerGeneration ?? ''}`));
   const connecting = Boolean(!initialized || busy || preparing || status?.state === 'connecting');
   const activeCenterUrl = ready && status ? status.centerUrl : '';
 

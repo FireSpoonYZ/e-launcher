@@ -5,6 +5,7 @@
     <uses-permission android:name="android.permission.WRITE_SECURE_SETTINGS"
         tools:ignore="ProtectedPermissions" />
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <!-- Requested at first dictation; used by the system recognizer and remote transcription. -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"
@@ -92,6 +93,13 @@
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="Explicitly user-enabled on-device AI Host and remote link; runs only while a user-started AI session is active" />
+        </service>
+        <service
+            android:name=".BotClientService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="User-enabled persistent connection to their AI center" />
         </service>
         <!-- M18 UI 桥：默认进程、同 UID 私有 Binder；只转发既有 Host 数据操作，不启动 Host/模型。 -->
         <service

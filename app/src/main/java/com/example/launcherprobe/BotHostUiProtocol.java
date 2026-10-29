@@ -72,7 +72,7 @@ final class BotHostUiProtocol {
      * 与 BotHostPlugin 的 Host 数据操作一一对应；start/stop/openLegacy/reconnect/hide
      * 属 UI 本地动作，不经服务派发。拒绝任何泛化转发。
      * client* 为 M20 无参数化的客户端入口：内层 broker 操作另有 16 项白名单（Node 侧强制）。
-     * 客户端子进程的释放只由 UI 会话 close/EOF 驱动，不存在显式关闭入口。
+     * UI 会话只释放自己的观察，客户端进程由应用级 broker 持有。
      */
     private static final Set<String> OPERATIONS = Collections.unmodifiableSet(new HashSet<>(Arrays.asList(
             "snapshot", "status", "centerSettings", "saveCenterSettings", "settingsGet", "settingsSet", "saveCredentials", "call",
@@ -80,7 +80,7 @@ final class BotHostUiProtocol {
             "observe", "cancelObservation",
             "voiceSettings", "saveVoiceSettings", "startVoice", "finishVoice", "cancelVoice",
             "uiSettings", OP_PAUSE,
-            "clientRequest", "clientObserve", "clientUnobserve")));
+            "clientRequest", "clientObserve", "clientUnobserve", "clientChatVisibility", "clientConnectionProbe")));
 
     private BotHostUiProtocol() {
     }

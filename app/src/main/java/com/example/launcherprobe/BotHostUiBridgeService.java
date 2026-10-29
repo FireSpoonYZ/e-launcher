@@ -44,8 +44,7 @@ import java.util.regex.Pattern;
  * 冷访问只读现有快照；绝不启动/停止 Host、不重放请求；saveCredentials 仅按旧插件语义把别名交给
  * BotHostManager 受控转发（本层无 getter、不落盘、不打印）。
  * 每个 UI 进程一个 socket 会话：EOF/关闭只释放本会话登记过的观察与语音捕获。
- * M20 新增 client* 固定入口：只在显式 clientRequest 时才启动独立客户端子进程（BotHostClient），
- * 与本机 Host/FGS 无关；客户端状态/凭据不经本层截取、不落盘、不打印。
+ * client* 固定入口使用应用级独立客户端 broker，与本机 Host 生命周期隔离。
  */
 public final class BotHostUiBridgeService extends Service {
     private static final int MAX_OBSERVATIONS = 8;
@@ -59,6 +58,8 @@ public final class BotHostUiBridgeService extends Service {
     private boolean destroyed;
 
     @Override public IBinder onBind(Intent intent) {
+        client().resumeSavedService();
+        client().checkConnection(true);
         return binder;
     }
 
@@ -266,8 +267,8 @@ public final class BotHostUiBridgeService extends Service {
             outputBytes.set(0);
             outputFrames.set(0);
             releaseOwnedResources(failure, false);
-            // 只回收本会话持有的客户端子进程（未持有则为空操作）；不触碰本机 Host。
-            client().release(clientOwner);
+            BotClientService.clearVisibility(clientOwner);
+
             out = null;
             ParcelFileDescriptor endpoint;
             synchronized (fdLock) {
@@ -346,7 +347,17 @@ public final class BotHostUiBridgeService extends Service {
                     return manager.saveCredentials(optionalObject(params, "aliases"))
                             .thenApply(ignored -> new JSONObject());
                 case "call":
-                    return manager.call(required(params, "method"), optionalObject(params, "params"));
+                    String method = required(params, "method");
+                    JSONObject callParams = optionalObject(params, "params");
+                    if ("submit".equals(method) && callParams != null) {
+                        String localDeviceId = manager.snapshot().optString("deviceId", "");
+                        String localBotId = callParams.optString("botId");
+                        String localRequestId = callParams.optString("requestId");
+                        return manager.call(method, callParams).whenComplete((value, failure) ->
+                                BotClientService.trackLocalResult(BotHostUiBridgeService.this, localDeviceId,
+                                        localBotId, localRequestId, failure));
+                    }
+                    return manager.call(method, callParams);
                 case "legacyList":
                     return legacyList(manager, params);
                 case "legacyPreview":
@@ -388,6 +399,16 @@ public final class BotHostUiBridgeService extends Service {
                     return cancelVoice(params);
                 case "uiSettings":
                     return done(uiSettings());
+                case "clientConnectionProbe":
+                    client().checkConnection(true);
+                    return done(new JSONObject());
+                case "clientChatVisibility":
+                    String deviceId = required(params, "deviceId");
+                    String botId = required(params, "botId");
+                    Object visible = params.opt("visible");
+                    if (!(visible instanceof Boolean)) throw new IllegalArgumentException("visible is required");
+                    BotClientService.setVisibility(clientOwner, deviceId, botId, (Boolean) visible);
+                    return done(new JSONObject());
                 case "clientRequest":
                     return clientRequest(params);
                 case "clientObserve":
@@ -414,7 +435,12 @@ public final class BotHostUiBridgeService extends Service {
             JSONObject input = params.has("params") && !params.isNull("params")
                     ? requiredObject(params, "params")
                     : new JSONObject();
-            return client().request(clientOwner, () -> !closed.get(), op, input);
+            CompletableFuture<JSONObject> result = client().request(clientOwner, () -> !closed.get(), op, input);
+            if ("pending_send".equals(op)) result.whenComplete((value, failure) -> {
+                if (failure == null || "unconfirmed".equals(BotHostUiProtocol.errorOutcome(failure)))
+                    BotClientService.requestPoll();
+            });
+            return result;
         }
 
         /** 先登记再派发：broker 首个 snapshot 早于客户端句柄也能路由回本会话。 */
@@ -622,13 +648,12 @@ public final class BotHostUiBridgeService extends Service {
             }
             for (Observation record : records) {
                 if (record.client) {
-                    // pause 只撤销本会话的客户端观察（连接、待发账本与目标 Agent 不变）；
-                    // close 路径直接回收子进程，不再逐个发 unobserve。
+                    // 每个会话只释放自己的观察，客户端进程由应用共享。
                     if (notify) {
                         send(BotHostUiProtocol.event(BotHostUiProtocol.EVENT_CLIENT_FRAME,
                                 BotHostUiProtocol.clientErrorEvent(record.id, BotHostUiProtocol.errorObject(failure))));
-                        client().cancel(clientOwner, record.id);
                     }
+                    client().cancel(clientOwner, record.id);
                     continue;
                 }
                 if (notify) {
@@ -728,6 +753,7 @@ public final class BotHostUiBridgeService extends Service {
         }
 
         private CompletableFuture<JSONObject> pause() {
+            BotClientService.clearVisibility(clientOwner);
             // 保留清理：只撤销本会话观察/捕获，不改已有请求结果、不关闭 Host。
             releaseOwnedResources(new BridgeException("CANCELLED", "responded", "页面暂停，观察已结束"), true);
             return done(new JSONObject());
@@ -773,9 +799,11 @@ public final class BotHostUiBridgeService extends Service {
 
         /** 唯一一次原生提交：Node submit schema 权威；失败只回事件，不自动重试。 */
         private void submitTranscript(String botId, String requestId, String text) {
-            BotHostManager.get(BotHostUiBridgeService.this)
-                    .call("submit", BotHostUiProtocol.object("botId", botId, "requestId", requestId, "text", text))
+            BotHostManager manager = BotHostManager.get(BotHostUiBridgeService.this);
+            String deviceId = manager.snapshot().optString("deviceId", "");
+            manager.call("submit", BotHostUiProtocol.object("botId", botId, "requestId", requestId, "text", text))
                     .whenComplete((envelope, failure) -> {
+                        BotClientService.trackLocalResult(BotHostUiBridgeService.this, deviceId, botId, requestId, failure);
                         if (failure != null) {
                             emitVoice("error", botId, requestId, text, null,
                                     BotHostUiProtocol.errorCode(failure),

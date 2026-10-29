@@ -1,6 +1,8 @@
 package com.example.launcherprobe;
 
 import android.content.Context;
+import android.os.Handler;
+import android.os.Looper;
 
 import com.example.launcherprobe.BotHostProcess.BridgeException;
 
@@ -9,6 +11,8 @@ import org.json.JSONObject;
 
 import java.io.File;
 import java.io.IOException;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
@@ -22,9 +26,8 @@ import java.util.function.Consumer;
 /**
  * M20 Android 独立客户端子进程：复用 libnode_launcher/BotHostProcess，以 mode=client 懒启动
  * 桌面 broker（openDesktopClient），dataRoot 固定 files/bot-client，与 files/bot-host 隔离。
- * 只转发固定 broker 操作，绝不启动/停止本机 Host、Runtime、FGS，也不发 native 工具调用。
- * 单写者：一个 clientRoot 同时只允许一个 UI 会话持有；其他会话按 BUSY 拒绝（不复用错误会话、
- * 不绕过独占）。关闭只释放本会话观察与该子进程；不自动重连，也不重放任何变更。
+ * 只转发固定 broker 操作，不启动/停止本机 Host、Runtime，也不发 native 工具调用。
+ * 单写者：应用内共享同一 broker，UI 只拥有观察；不重放业务变更。
  * 进程占有权按默认进程共享（{@link #get}）：Bound Service 重建不会重置上一代的
  * starting/closing 状态，只有确认退出才允许下一代启动。
  */
@@ -42,11 +45,45 @@ final class BotHostClient {
     private long centerRevision;
     private boolean centerPending;
     private boolean centerBlocked;
+    private boolean restoreNeeded = true;
+    private boolean restoreQueued;
+    private JSONObject pendingCredentials;
+    private final Handler main = new Handler(Looper.getMainLooper());
+    private final Runnable pendingStatus = new Runnable() {
+        @Override public void run() {
+            synchronized (lock) {
+                if (pendingCredentials == null || centerBlocked) return;
+                if (generation == null) {
+                    restore();
+                    main.postDelayed(this, 5000);
+                    return;
+                }
+                if (generation.closing) {
+                    main.postDelayed(this, 5000);
+                    return;
+                }
+            }
+            checkStatus()
+                    .whenComplete((v, e) -> {
+                        synchronized (lock) {
+                            if (pendingCredentials != null && !centerBlocked)
+                                main.postDelayed(this, 5000);
+                        }
+                    });
+        }
+    };
     /** 串行化启动/关闭与帧派发；读响应不占用本线程。 */
     private final ThreadPoolExecutor control;
 
     /** 唯一一代客户端进程；从启动占位起占有，只有真实 onExit 才清空。 */
     private Generation generation;
+    private final Map<String, ClientObservation> clientObservations = new HashMap<>();
+
+    private static final class ClientObservation {
+        final String owner;
+        final BotHostProcess process;
+        ClientObservation(String owner, BotHostProcess process) { this.owner = owner; this.process = process; }
+    }
 
     /** 默认进程内唯一的管理器：冷状态只构造（不启动 Node、不准备资产）。 */
     static BotHostClient get(Context context) {
@@ -89,8 +126,17 @@ final class BotHostClient {
      * {value:&lt;broker 结果&gt;}，null/数组原样保留；不重放、不二次包装原始错误。
      */
     CompletableFuture<JSONObject> request(String ownerId, BooleanSupplier ownerOpen, String op, JSONObject params) {
+        return request(ownerId, ownerOpen, op, params, null);
+    }
+
+    private CompletableFuture<JSONObject> request(String ownerId, BooleanSupplier ownerOpen, String op,
+                                                   JSONObject params, Long backgroundRevision) {
         final JSONObject input = params == null ? new JSONObject() : params;
         return onControl(() -> {
+            if (backgroundRevision != null) synchronized (lock) {
+                if (centerBlocked || backgroundRevision.longValue() != centerRevision)
+                    throw new BridgeException("CANCELLED", "not-sent", "后台连接已停止");
+            }
             BotHostProcess process = acquire(ownerId, ownerOpen);
             JSONObject forwarded = input;
             long revision = 0;
@@ -101,6 +147,8 @@ final class BotHostClient {
                     revision = ++centerRevision;
                     centerPending = true;
                     centerBlocked = false;
+                    pendingCredentials = null;
+                    main.removeCallbacks(pendingStatus);
                 }
                 if ("".equals(input.opt("deviceToken"))) {
                     JSONObject saved;
@@ -126,48 +174,57 @@ final class BotHostClient {
                     ++centerRevision;
                     centerPending = false;
                     centerBlocked = true;
+                    restoreNeeded = false;
+                    pendingCredentials = null;
+                    main.removeCallbacks(pendingStatus);
+                    boolean disabled = context.getSharedPreferences("bot_client_connection", Context.MODE_PRIVATE)
+                            .edit().putBoolean("enabled", false).commit();
+                    BotClientService.stop(context);
+                    if (!disabled) throw new BridgeException("CREDENTIALS", "not-sent", "无法保存断开状态，请重试");
                     try { credentials.clear(); }
                     catch (Exception failure) {
                         throw new BridgeException("CREDENTIALS", "not-sent", "无法清除已保存的中心凭据，请重试");
                     }
                 }
             }
+            if ("center_connect".equals(op)) synchronized (lock) {
+                pendingCredentials = new JSONObject(forwarded.toString());
+            }
             final JSONObject sent = forwarded;
             final long attempt = revision;
+            final long statusRevision;
+            synchronized (lock) { statusRevision = centerRevision; }
             CompletableFuture<JSONObject> reply;
             try {
                 reply = process.request("call", new JSONObject().put("method", op).put("params", sent));
             } catch (IOException | JSONException failure) {
-                if ("center_connect".equals(op)) synchronized (lock) { centerPending = false; centerBlocked = true; }
+                if ("center_connect".equals(op)) synchronized (lock) {
+                    centerPending = false;
+                    main.postDelayed(pendingStatus, 5000);
+                }
                 return failed(failure);
             }
             if ("center_connect".equals(op)) {
                 return reply.handle((value, failure) -> onControl(() -> {
                     synchronized (lock) {
                         if (attempt != centerRevision || generation == null || generation.process != process
-                                || generation.closing || !generation.owner.equals(ownerId) || !ownerOpen.getAsBoolean()) {
+                                || generation.closing) {
                             throw new BridgeException("CANCELLED", "not-sent", "中心连接已被替换或会话已关闭");
                         }
                         centerPending = false;
                         if (failure != null) {
-                            centerBlocked = true;
+                            String code = BotHostUiProtocol.errorCode(failure);
+                            centerBlocked = centerBlocked || isPermanentCenterError(code);
+                            if (centerBlocked) pendingCredentials = null;
+                            else main.postDelayed(pendingStatus, 5000);
                             return failed(failure);
                         }
-                        centerBlocked = true;
                         JSONObject envelope = valueEnvelope(value);
-                        try {
-                            JSONObject record = new JSONObject().put("url", sent.getString("url"))
-                                    .put("deviceId", sent.getString("deviceId"))
-                                    .put("deviceToken", sent.getString("deviceToken"))
-                                    .put("ca", sent.optString("ca", ""));
-                            credentials.save(record);
-                        } catch (Exception saveFailure) {
-                            centerBlocked = true;
-                            try { process.request("call", new JSONObject().put("method", "center_disconnect")
-                                    .put("params", new JSONObject())); } catch (Exception ignored) { }
-                            throw new BridgeException("CREDENTIALS", "responded", "连接成功但无法加密保存中心凭据，请重试");
+                        if ("ready".equals(envelope.getJSONObject("value").optString("state"))) {
+                            persistReady(process);
+                        } else {
+                            main.postDelayed(pendingStatus, 5000);
                         }
-                        centerBlocked = false;
                         return CompletableFuture.completedFuture(centerMetadata(envelope));
                     }
                 })).thenCompose(future -> future);
@@ -175,15 +232,57 @@ final class BotHostClient {
             if ("center_status".equals(op) || "center_disconnect".equals(op)) {
                 return reply.thenCompose(value -> onControl(() -> {
                     synchronized (lock) {
+                        if (statusRevision != centerRevision || generation == null || generation.process != process
+                                || generation.closing) {
+                            throw new BridgeException("CANCELLED", "responded", "中心状态已被替换");
+                        }
                         JSONObject envelope = valueEnvelope(value);
                         JSONObject status = envelope.getJSONObject("value");
-                        if (centerPending || centerBlocked) status.put("state", "disconnected");
+                        JSONObject error = status.optJSONObject("error");
+                        boolean permanentError = "center_status".equals(op) && error != null
+                                && isPermanentCenterError(error.optString("code"));
+                        if (permanentError) {
+                            centerBlocked = true;
+                            pendingCredentials = null;
+                            restoreNeeded = false;
+                            main.removeCallbacks(pendingStatus);
+                        }
+                        if ("center_status".equals(op) && !centerBlocked && pendingCredentials != null
+                                && "ready".equals(status.optString("state"))) persistReady(process);
+                        if ((centerPending || centerBlocked) && !permanentError) status.put("state", "disconnected");
                         return CompletableFuture.completedFuture(centerMetadata(envelope));
                     }
                 }));
             }
             return reply.thenApply(BotHostClient::valueEnvelope);
         });
+    }
+
+    private static boolean isPermanentCenterError(String code) {
+        return "INVALID_ARGUMENT".equals(code) || "CREDENTIALS".equals(code)
+                || "UNAUTHORIZED".equals(code) || "FORBIDDEN".equals(code)
+                || "REVOKED".equals(code) || "CERTIFICATE_ERROR".equals(code);
+    }
+
+    /** 调用方持 lock；只有 broker 确认 ready 才保存本次凭据。 */
+    private void persistReady(BotHostProcess process) throws BridgeException {
+        try {
+            credentials.save(pendingCredentials);
+            if (!context.getSharedPreferences("bot_client_connection", Context.MODE_PRIVATE)
+                    .edit().putBoolean("enabled", true).commit()) throw new IOException("无法保存连接状态");
+            new File(new File(context.getFilesDir(), DATA_ROOT), "center-credentials.json").delete();
+        } catch (Exception failure) {
+            centerBlocked = true;
+            pendingCredentials = null;
+            try { process.request("call", new JSONObject().put("method", "center_disconnect")
+                    .put("params", new JSONObject())); } catch (Exception ignored) { }
+            throw new BridgeException("CREDENTIALS", "responded", "连接成功但无法加密保存中心凭据，请重试");
+        }
+        pendingCredentials = null;
+        centerBlocked = false;
+        restoreNeeded = false;
+        main.removeCallbacks(pendingStatus);
+        BotClientService.start(context);
     }
 
     private JSONObject centerMetadata(JSONObject envelope) throws JSONException {
@@ -211,14 +310,30 @@ final class BotHostClient {
                 throw new BridgeException("CANCELLED", "not-sent", "观察已取消");
             }
             BotHostProcess process = acquire(ownerId, ownerOpen);
+            ClientObservation record = new ClientObservation(ownerId, process);
+            synchronized (lock) {
+                if (clientObservations.containsKey(observationId))
+                    throw new BridgeException("BUSY", "not-sent", "观察身份已被占用");
+                clientObservations.put(observationId, record);
+            }
             String id;
             try {
-                id = process.observe(observationId, target, onFrame, onError);
+                id = process.observe(observationId, target, frame -> {
+                    JSONObject body = frame.optJSONObject("frame");
+                    if (frame.has("error") || (body != null && "end".equals(body.optString("type")))) {
+                        synchronized (lock) { clientObservations.remove(observationId, record); }
+                    }
+                    onFrame.accept(frame);
+                }, error -> {
+                    synchronized (lock) { clientObservations.remove(observationId, record); }
+                    onError.accept(error);
+                });
             } catch (IOException | RuntimeException failure) {
+                synchronized (lock) { clientObservations.remove(observationId, record); }
                 return failed(failure);
             }
             if (!observationOpen.getAsBoolean()) {
-                // 派发期间记录已关闭：立即撤销刚建立的观察（Node 侧 cancel 再发 broker unobserve）。
+                synchronized (lock) { clientObservations.remove(observationId, record); }
                 process.cancel(id);
                 throw new BridgeException("CANCELLED", "not-sent", "观察已取消");
             }
@@ -228,38 +343,71 @@ final class BotHostClient {
 
     /** 只撤销本会话自己的客户端观察（broker unobserve），从不影响目标 Host 或 Agent。 */
     void cancel(String ownerId, String observationId) {
-        BotHostProcess process;
+        ClientObservation record;
         synchronized (lock) {
-            Generation current = generation;
-            if (current == null || current.process == null || current.closing
-                    || !current.owner.equals(ownerId)) {
-                return;
-            }
-            process = current.process;
+            record = clientObservations.get(observationId);
+            if (record == null || !record.owner.equals(ownerId)) return;
+            clientObservations.remove(observationId);
         }
-        process.cancel(observationId);
+        record.process.cancel(observationId);
     }
 
-    /**
-     * 释放独占：锁内先原子标记 closing（此后同目录不再出现新写者），锁外只发起一次异步幂等
-     * close；占有权由真实 onExit 解除。启动期间调用同样在此登记，启动完成即回收。
-     * 只由 UI 会话 close/EOF 调用（不提供显式关闭入口）：调用方已先置 closed，排队中的
-     * 旧请求会因 ownerOpen 为假而被拒，不会在关闭后重新拉起子进程。
-     */
-    void release(String ownerId) {
-        BotHostProcess process;
+    void resumeSavedService() {
+        onControl(() -> {
+            synchronized (lock) {
+                if (!centerBlocked && context.getSharedPreferences("bot_client_connection", Context.MODE_PRIVATE)
+                        .getBoolean("enabled", true) && credentials.read() != null) BotClientService.start(context);
+            }
+            return CompletableFuture.completedFuture(new JSONObject());
+        });
+    }
+
+    /** 只恢复中心连接，不重发业务请求。 */
+    void restore() {
+        JSONObject saved;
+        long revision;
         synchronized (lock) {
-            Generation current = generation;
-            if (current == null || !current.owner.equals(ownerId) || current.closing) return;
-            current.closing = true;
-            current.current = false;
-            ++centerRevision;
-            centerPending = false;
-            centerBlocked = false;
-            // 启动中可能仍为 null：onStarting 登记后由 acquire 的放弃分支统一回收。
-            process = current.process;
+            if (centerBlocked || restoreQueued || centerPending || (generation != null && !restoreNeeded)) return;
+            try {
+                if (pendingCredentials != null) saved = new JSONObject(pendingCredentials.toString());
+                else {
+                    if (!context.getSharedPreferences("bot_client_connection", Context.MODE_PRIVATE)
+                            .getBoolean("enabled", true)) return;
+                    saved = credentials.read();
+                    if (saved == null) return;
+                    saved.put("deviceToken", "");
+                }
+                restoreNeeded = false;
+                restoreQueued = true;
+                revision = centerRevision;
+            } catch (Exception ignored) { return; }
         }
-        closeQuietly(process);
+        request("background", () -> true, "center_connect", saved, revision).whenComplete((v, e) -> {
+            synchronized (lock) { restoreQueued = false; }
+        });
+    }
+
+    void checkConnection() {
+        checkConnection(false);
+    }
+
+    void checkConnection(boolean probe) {
+        synchronized (lock) {
+            if (generation == null || restoreNeeded) { restore(); return; }
+            if (!generation.current || generation.closing || centerPending || centerBlocked) return;
+        }
+        checkStatus(probe);
+    }
+
+    private CompletableFuture<JSONObject> checkStatus() {
+        return checkStatus(false);
+    }
+
+    private CompletableFuture<JSONObject> checkStatus(boolean probe) {
+        long revision;
+        synchronized (lock) { revision = centerRevision; }
+        JSONObject params = probe ? BotHostUiProtocol.object("probe", true) : new JSONObject();
+        return request("background", () -> true, "center_status", params, revision);
     }
 
     // ---------- 单写者与懒启动 ----------
@@ -268,12 +416,12 @@ final class BotHostClient {
         if (!ownerOpen.getAsBoolean()) throw new BridgeException("CANCELLED", "not-sent", "界面会话已关闭");
         synchronized (lock) {
             if (generation != null) {
-                if (generation.current && !generation.closing && generation.owner.equals(ownerId)) {
+                if (generation.current && !generation.closing) {
                     return generation.process;
                 }
                 throw new BridgeException("BUSY", "not-sent", "客户端由其他界面会话占用或上一代未回收");
             }
-            // 启动占位：从此刻起同目录的下一代一律 BUSY；release 也能在启动期间登记关闭。
+            // 启动占位：从此刻起同目录的下一代一律 BUSY。
             generation = new Generation(ownerId);
         }
         JSONObject init;
@@ -286,7 +434,7 @@ final class BotHostClient {
         BotHostProcess launched = null;
         BridgeException launchError = null;
         try {
-            // 只有显式首次进入客户端才创建 child（冷启动 HostPage 绝不触发）。
+            // 首次请求或前台服务恢复时创建 child。
             launched = BotHostProcess.launch(context, init, listener).join();
         } catch (Throwable failure) {
             launchError = launchFailure(failure);
@@ -359,7 +507,16 @@ final class BotHostClient {
         /** 唯一解除占有的地方：BotHostProcess 保证真实退出（或回收结果未知时推迟）后通知一次。 */
         @Override public void onExit(BotHostProcess process, int exitCode, boolean graceful) {
             synchronized (lock) {
-                if (generation != null && generation.process == process) generation = null;
+                if (generation != null && generation.process == process) {
+                    generation = null;
+                    clientObservations.entrySet().removeIf(entry -> entry.getValue().process == process);
+                    centerPending = false;
+                    ++centerRevision;
+                    if (!centerBlocked) {
+                        restoreNeeded = true;
+                        if (pendingCredentials != null) main.post(pendingStatus);
+                    }
+                }
             }
         }
     };

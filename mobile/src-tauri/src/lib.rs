@@ -43,6 +43,7 @@ const ALLOWED_METHODS: &[&str] = &[
   "openLegacy",
   "openCenter",
   "reconnect",
+  "clientLaunchTarget",
   "hide",
   // Bot 屏幕：Kotlin 侧 UI-local 原生覆盖层（只观看/接管已有屏幕，不进 bridge 服务）
   "screenOpen",
@@ -75,10 +76,11 @@ const ALLOWED_METHODS: &[&str] = &[
   "uiSettings",
   "pause",
   // M20 客户端（远端 Host）固定入口；内层 broker 操作由 Kotlin/Node 再校验 16 项白名单。
-  // 客户端子进程的释放只由 UI 会话 close/EOF 驱动，不提供显式关闭命令。
+  // 客户端进程由应用级 broker 持有；UI 会话只释放自己的观察。
   "clientRequest",
   "clientObserve",
   "clientUnobserve",
+  "clientChatVisibility",
 ];
 
 /// 不占普通准入槽的本地 UI 动作：普通槽满时仍可执行，不产生 bridge 请求堆积。

@@ -7,22 +7,38 @@ function centerError(code, message) {
   return Object.assign(new Error(message), { code });
 }
 
-export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, onDisconnect, onChange }) {
+export function validateCenterUrl(centerUrl) {
   let base;
   try { base = new URL(centerUrl); } catch { throw centerError('INVALID_ARGUMENT', 'invalid center URL'); }
   if ((base.protocol !== 'https:' && !(base.protocol === 'http:' && ['127.0.0.1', '[::1]'].includes(base.hostname))) ||
       base.username || base.password || base.search || base.hash || base.pathname !== '/') {
     throw centerError('INVALID_ARGUMENT', 'center URL must be an HTTPS origin or loopback HTTP origin');
   }
+  return base;
+}
+
+export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, signal, onDisconnect, onChange }) {
+  const base = validateCenterUrl(centerUrl);
   assertId(deviceId, 'deviceId');
   assertDeviceToken(deviceToken);
   const transport = base.protocol === 'https:' ? https : http;
   const requests = new Set();
   let closed = false;
   let events;
+  let watchdog;
   let ownerCookie = '';
   let ownerCsrf = '';
   let ownerQueue = Promise.resolve();
+  const disconnect = (error) => {
+    if (closed) return;
+    closed = true;
+    clearTimeout(watchdog);
+    ownerCookie = '';
+    ownerCsrf = '';
+    for (const active of requests) active.destroy();
+    events?.destroy();
+    onDisconnect?.(error);
+  };
   const headers = { Authorization: `Bearer ${deviceToken}`, 'X-Device-Id': deviceId };
   const start = (path, { method = 'GET', body, signal } = {}) => {
     if (closed) throw centerError('CENTER_OFFLINE', 'center is disconnected');
@@ -43,7 +59,12 @@ export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, onDi
     if (response.statusCode < 200 || response.statusCode >= 300) {
       response.resume();
       if (response.statusCode === 409) throw centerError('REQUEST_CONFLICT', 'center revision conflict; reload before saving');
-      throw centerError(response.statusCode === 401 || response.statusCode === 403 ? 'UNAUTHENTICATED' : 'CENTER_REQUEST_FAILED', 'center request failed');
+      if (response.statusCode === 401 || response.statusCode === 403) {
+        const error = centerError('UNAUTHORIZED', 'center authentication failed');
+        if (response.statusCode === 401 || path === '/api/host/connection' || path.startsWith('/api/host/bot-directory')) disconnect(error);
+        throw error;
+      }
+      throw centerError('CENTER_REQUEST_FAILED', 'center request failed');
     }
     const chunks = [];
     let size = 0;
@@ -115,25 +136,23 @@ export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, onDi
   const botModelPath = (targetDeviceId, botId) => '/api/devices/' + encodeURIComponent(targetDeviceId) + '/bots/' + encodeURIComponent(botId) + '/model-config';
   const hostBotModelPath = (targetDeviceId, botId) => '/api/host/devices/' + encodeURIComponent(targetDeviceId) + '/bots/' + encodeURIComponent(botId) + '/model-config';
   try {
-    const req = start('/api/host/events');
+    const req = start('/api/host/events', { signal });
     req.setTimeout(15000, () => req.destroy(centerError('CENTER_OFFLINE', 'center connection timed out')));
     events = await new Promise((resolve, reject) => { req.once('response', resolve); req.once('error', reject); });
     req.setTimeout(0);
     if (events.statusCode !== 200 || !String(events.headers['content-type'] ?? '').startsWith('text/event-stream')) {
       events.resume();
-      throw centerError('UNAUTHENTICATED', 'center event stream rejected');
+      throw events.statusCode === 401 || events.statusCode === 403
+        ? centerError('UNAUTHORIZED', 'center authentication failed')
+        : centerError('CENTER_OFFLINE', 'center event stream unavailable');
     }
     let buffer = '';
-    let watchdog;
     const arm = () => {
       clearTimeout(watchdog);
       watchdog = setTimeout(() => events.destroy(), 45000);
       watchdog.unref?.();
     };
-    const disconnected = () => {
-      clearTimeout(watchdog);
-      if (!closed) { closed = true; ownerCookie = ''; ownerCsrf = ''; for (const active of requests) active.destroy(); onDisconnect?.(centerError('CENTER_OFFLINE', 'center event stream disconnected')); }
-    };
+    const disconnected = () => disconnect(centerError('CENTER_OFFLINE', 'center event stream disconnected'));
     events.setEncoding('utf8');
     events.on('data', (chunk) => {
       arm();
@@ -174,7 +193,7 @@ export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, onDi
       const query = qs.toString();
       return request('/api/host/bot-directory' + (query ? '?' + query : ''), { signal });
     },
-    getConnection: () => request('/api/host/connection'),
+    getConnection: (signal) => request('/api/host/connection', { signal }),
     getSnapshot: () => request('/api/host/snapshot'),
     reportRuntime: (receipt) => request('/api/host/receipt', { method: 'POST', body: receipt }),
     getDeployments: () => request('/api/host/deployments'),
@@ -182,6 +201,6 @@ export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, onDi
     fetchArtifact: (ref) => request('/api/host/artifacts/' + encodeURIComponent(ref), { binary: true }),
     listCapabilityTools: (id, botId, options = {}) => request('/api/host/capabilities/' + encodeURIComponent(id) + '/tools/list', { method: 'POST', body: { botId }, signal: options.signal }),
     callCapabilityTool: (id, botId, name, args, callId, options = {}) => request('/api/host/capabilities/' + encodeURIComponent(id) + '/tools/call', { method: 'POST', body: { botId, name, args, callId }, signal: options.signal }),
-    async close() { closed = true; ownerCookie = ''; ownerCsrf = ''; for (const active of requests) active.destroy(); events.destroy(); },
+    async close() { closed = true; clearTimeout(watchdog); ownerCookie = ''; ownerCsrf = ''; for (const active of requests) active.destroy(); events.destroy(); },
   };
 }

@@ -162,8 +162,9 @@ export interface DesktopCenterStatus {
   state: 'disconnected' | 'connecting' | 'ready';
   centerUrl: string;
   appliedRevision: null;
-  error: null;
+  error: { code: string; message: string } | null;
   clientId: string;
+  savedConnection?: { url: string; deviceId: string; ca: string };
 }
 
 export interface CenterModelSelection { modelRef?: string | null; thinkingLevel?: string | null }
@@ -175,7 +176,8 @@ export interface DesktopOperationMap {
     result: DesktopCenterStatus;
   };
   center_status: {
-    params: Record<string, never>;
+    /** Probe both links when ready, or request an immediate retry while connecting. */
+    params: { probe?: boolean };
     result: DesktopCenterStatus;
   };
   center_disconnect: {
@@ -271,6 +273,7 @@ export interface DesktopOperationMap {
 export interface OpenDesktopClientOptions {
   dataRoot: string;
   onEvent?: (event: DesktopObservationEvent) => void | Promise<void>;
+  persistCenterCredentials?: boolean;
 }
 
 export interface DesktopClient {

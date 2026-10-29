@@ -1,6 +1,7 @@
 package com.example.launcherprobe;
 
 import android.graphics.Color;
+import android.content.Intent;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Process;
@@ -14,6 +15,8 @@ import androidx.core.view.ViewCompat;
 import androidx.core.view.WindowCompat;
 import androidx.core.view.WindowInsetsCompat;
 import androidx.core.view.WindowInsetsControllerCompat;
+
+import org.json.JSONObject;
 
 /**
  * M18 Tauri 界面入口：独立 {@code :tauri_ui} 进程，SDK 退出只结束本进程，
@@ -31,8 +34,17 @@ public class TauriMainActivity extends TauriActivity {
     private WebView activeWebView;
     private int lastSafeTopDp;
     private int lastSafeBottomDp;
+    private String launchDeviceId;
+    private String launchBotId;
+    private static final String TARGET_DEVICE = "assistant_device_id";
+    private static final String TARGET_BOT = "assistant_bot_id";
 
     @Override protected void onCreate(Bundle savedInstanceState) {
+        if (savedInstanceState != null) {
+            launchDeviceId = savedInstanceState.getString(TARGET_DEVICE);
+            launchBotId = savedInstanceState.getString(TARGET_BOT);
+        }
+        captureLaunchTarget(getIntent());
         super.onCreate(savedInstanceState);
         WindowCompat.setDecorFitsSystemWindows(getWindow(), false);
         if (Build.VERSION.SDK_INT >= 28) {
@@ -58,6 +70,43 @@ public class TauriMainActivity extends TauriActivity {
                 handleBackNavigation();
             }
         });
+    }
+
+    @Override protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        if (captureLaunchTarget(intent) && activeWebView != null) {
+            activeWebView.evaluateJavascript("window.dispatchEvent(new Event('assistant-open-chat'))", null);
+        }
+    }
+
+    @Override protected void onSaveInstanceState(Bundle state) {
+        if (launchDeviceId != null && launchBotId != null) {
+            state.putString(TARGET_DEVICE, launchDeviceId);
+            state.putString(TARGET_BOT, launchBotId);
+        }
+        super.onSaveInstanceState(state);
+    }
+
+    private boolean captureLaunchTarget(Intent intent) {
+        if (intent == null) return false;
+        String deviceId = intent.getStringExtra(TARGET_DEVICE);
+        String botId = intent.getStringExtra(TARGET_BOT);
+        intent.removeExtra(TARGET_DEVICE);
+        intent.removeExtra(TARGET_BOT);
+        if (deviceId == null || deviceId.isEmpty() || botId == null || botId.isEmpty()) return false;
+        launchDeviceId = deviceId;
+        launchBotId = botId;
+        return true;
+    }
+
+    /** 在主线程消费一次；目标名字由前端重新查目录。 */
+    JSONObject takeClientLaunchTarget() {
+        if (launchDeviceId == null || launchBotId == null) return null;
+        JSONObject result = BotHostUiProtocol.object("deviceId", launchDeviceId, "botId", launchBotId);
+        launchDeviceId = null;
+        launchBotId = null;
+        return result;
     }
 
     private void handleBackNavigation() {

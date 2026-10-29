@@ -9,6 +9,7 @@
   .mobile-toolbar .button { flex: 1 1 auto; }
 }
 .mobile-body { flex: 1; min-height: 0; min-width: 0; height: 100%; display: flex; flex-direction: column; overflow: hidden; }
+.mobile-body .bot-hub-shell { max-width: none; }
 .mobile-shell > .inline-error { flex: none; margin: 8px 12px; }
 /* desktop app.css 是全局样式（先加载）：在本机页容器内恢复 styles.css 的排版基线，
  * 避免字体族/字号/行高/字重/段落下边距被桌面元素规则改变。 */

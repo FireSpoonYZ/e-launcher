@@ -9,6 +9,7 @@ import WebSocket from 'ws';
 import {
   parseRelayUrl,
   assertDeviceToken,
+  isCertificateError,
   encodeRelayFrame,
   readServerFrame,
   MAX_RELAY_FRAME_BYTES,
@@ -105,6 +106,7 @@ export async function openRemoteControl(options) {
     violated: false,
     startAborted: false,
     readyTimedOut: false,
+    connectFailure: null,
     pending: new Map(),
     readyTimer: null,
     watchdogTimer: null,
@@ -545,6 +547,8 @@ export async function openRemoteControl(options) {
       error = new RemoteControlError('BAD_FRAME', client.ready ? 'unconfirmed' : 'not-sent');
     } else if (client.startAborted) {
       error = new RemoteControlError('CANCELLED', client.ready ? 'unconfirmed' : 'not-sent');
+    } else if (client.connectFailure && !client.ready) {
+      error = client.connectFailure;
     } else if (client.readyTimedOut && !client.ready) {
       error = new RemoteControlError('TIMEOUT', 'not-sent');
     } else {
@@ -577,8 +581,8 @@ export async function openRemoteControl(options) {
         followRedirects: false,
         handshakeTimeout: RELAY_HELLO_TIMEOUT_MS,
       });
-    } catch {
-      failOpen(new RemoteControlError('CONNECT_FAILED', 'not-sent'));
+    } catch (error) {
+      failOpen(new RemoteControlError(isCertificateError(error) ? 'CERTIFICATE_ERROR' : 'CONNECT_FAILED', 'not-sent'));
       return;
     }
     client.ws = ws;
@@ -608,8 +612,17 @@ export async function openRemoteControl(options) {
     ws.on('pong', () => {
       if (ws === client.ws && !client.closed) armWatchdog(ws);
     });
-    // 吞掉原始错误，仅由 close 汇总为固定 code，绝不向外部暴露网络错误文本。
-    ws.on('error', () => {});
+    // Preserve only fixed authentication/certificate codes, never raw network errors.
+    ws.on('unexpected-response', (_request, response) => {
+      if (response.statusCode === 401 || response.statusCode === 403) {
+        client.connectFailure = new RemoteControlError('UNAUTHORIZED', 'not-sent');
+      }
+      response.resume();
+      ws.terminate();
+    });
+    ws.on('error', (error) => {
+      if (isCertificateError(error)) client.connectFailure = new RemoteControlError('CERTIFICATE_ERROR', 'not-sent');
+    });
 
     ws.on('close', (code) => onClose(ws, code));
   }

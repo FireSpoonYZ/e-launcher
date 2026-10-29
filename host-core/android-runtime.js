@@ -1230,7 +1230,7 @@ export function createAndroidBridge(options = {}) {
       // Never opens a Host/Runtime, never reads model credentials, never emits
       // native tool calls. The broker's clientId (not secret) is the ready id.
       try {
-        broker = openDesktopClient({ dataRoot: init.dataRoot, onEvent: handleClientEvent });
+        broker = openDesktopClient({ dataRoot: init.dataRoot, onEvent: handleClientEvent, persistCenterCredentials: false });
         const status = await broker.request('status', {});
         deviceId = status && typeof status.clientId === 'string' && status.clientId !== '' ? status.clientId : null;
         if (!deviceId) throw messageError('INTERNAL', 'client broker reported no clientId');

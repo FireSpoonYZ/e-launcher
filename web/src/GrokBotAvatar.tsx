@@ -409,6 +409,8 @@ export function GrokBotWorkingSlot({
   hasThinking,
   queuedCount = 0,
   hasError = false,
+  isSending = false,
+  isRecovering = false,
   t,
 }: {
   botKey: string;
@@ -419,6 +421,8 @@ export function GrokBotWorkingSlot({
   hasThinking?: boolean;
   queuedCount?: number;
   hasError?: boolean;
+  isSending?: boolean;
+  isRecovering?: boolean;
   t: (zh: string, en: string) => string;
 }) {
   const [elapsedSec, setElapsedSec] = useState(0);
@@ -438,6 +442,11 @@ export function GrokBotWorkingSlot({
       }, 1000);
       return () => window.clearInterval(timer);
     }
+    if (isRecovering) {
+      wasBusyRef.current = false;
+      setSettlementOutcome(null);
+      return undefined;
+    }
     if (wasBusyRef.current) {
       wasBusyRef.current = false;
       setSettlementOutcome(hasError ? 'error' : 'success');
@@ -448,7 +457,7 @@ export function GrokBotWorkingSlot({
       return () => window.clearTimeout(settleTimer);
     }
     return undefined;
-  }, [isBusy, hasError]);
+  }, [isBusy, hasError, isRecovering]);
 
   useEffect(() => {
     if (!isBusy || isStreaming || activeToolName) {
@@ -463,7 +472,7 @@ export function GrokBotWorkingSlot({
     return () => window.clearInterval(cycle);
   }, [isBusy, isStreaming, activeToolName]);
 
-  if (!isBusy && !settlementOutcome) return null;
+  if (!isBusy && (isRecovering || !settlementOutcome)) return null;
 
   const baseState = resolveGrokMascotState({
     isBusy,
@@ -482,6 +491,7 @@ export function GrokBotWorkingSlot({
         ? t('执行中断', 'Interrupted')
         : t('已完成', 'Done');
     }
+    if (isSending) return t('正在发送…', 'Sending…');
     if (isStreaming) {
       return t('正在回复…', 'Replying…');
     }
@@ -509,7 +519,7 @@ export function GrokBotWorkingSlot({
       return t('正在深入思考…', 'Thinking…');
     }
     if (queuedCount > 0) {
-      return t('正在处理消息…', 'Processing…');
+      return t('正在等待…', 'Waiting…');
     }
     return t('正在思考…', 'Working…');
   })();
