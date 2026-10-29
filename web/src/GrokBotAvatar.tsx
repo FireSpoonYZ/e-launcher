@@ -464,8 +464,7 @@ export function GrokBotWorkingSlot({
       setPulseThinkingMorph(false);
       return undefined;
     }
-    // Primarily play the 2.5D Cloud Working_A..F clips so the cloud eyes & expressions are visible,
-    // and periodically pulse the Grok 'thinking' dots morph during long reasoning pauses.
+    // Animate the selected avatar, with periodic thinking-dot morphs during long reasoning pauses.
     const cycle = window.setInterval(() => {
       setPulseThinkingMorph(prev => !prev);
     }, 4200);
@@ -536,7 +535,7 @@ export function GrokBotWorkingSlot({
       <div className="sand-activity-mark">
         <GrokBotAnimatedMark
           seedId={botKey}
-          shape="cloud"
+          shape={preset.shape}
           color={preset.color}
           eyeColor="#FAF8F5"
           state={mascotState}
