@@ -6,6 +6,8 @@ import type {
   SubmissionInput,
   HistoryOptions,
   HistoryPage,
+  ClearHistoryResult,
+  CompactResult,
   ContextStatus,
   WorkContextRecord,
   WorkSyncOptions,
@@ -122,6 +124,8 @@ export interface ControlClient {
   submit(botId: string, input: SubmissionInput, options?: ControlClientCallOptions): Promise<PrimarySubmission>;
   getSubmission(botId: string, requestId: string, options?: ControlClientCallOptions): Promise<PrimarySubmission>;
   history(botId: string, options?: HistoryClientOptions): Promise<HistoryPage>;
+  clearHistory(botId: string, options?: ControlClientCallOptions): Promise<ClearHistoryResult>;
+  compact(botId: string, options?: ControlClientCallOptions): Promise<CompactResult>;
   abort(botId: string, options?: ControlClientCallOptions): Promise<{ botId: string }>;
   contextStatus(botId: string, options?: ControlClientCallOptions): Promise<ContextStatus>;
   getWorkContext(botId: string, scopeId: string, options?: ControlClientCallOptions): Promise<WorkContextRecord>;

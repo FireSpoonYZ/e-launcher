@@ -1,4 +1,4 @@
-import { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useContext, useEffect, useId, useMemo, useRef, useState } from 'react';
 import {
   Archive,
   ArrowLeft,
@@ -57,7 +57,7 @@ import { PendingPanel } from '../../desktop/web/src/PendingPanel';
 import { Scopes } from '../../desktop/web/src/Scopes';
 import type { DesktopDraftEntry, DesktopIdentity, DesktopPanelApi } from '../../desktop/web/src/types';
 import type { DesktopConnectionInput, DesktopUiProfile } from '../../host-core/desktop-client.js';
-import type { DevicesDirectoryItem, PendingCursor, PendingListPage, ShowerTarget } from '../../host-core/index.js';
+import type { ClearHistoryResult, CompactResult, DevicesDirectoryItem, PendingCursor, PendingListPage, ShowerTarget } from '../../host-core/index.js';
 import type { ShowerCall } from './ShowerPreview';
 import { Markdown } from './Markdown';
 import { BotScreenPanel } from './BotScreenPanel';
@@ -583,6 +583,91 @@ function maxHistoryEntryId(items: Array<Record<string, unknown>>): number {
     if (Number.isFinite(id) && id > max) max = id;
   }
   return max;
+}
+
+// 聊天 slash 命令：只有 /clear 与 /compact；执行全部走后端控制方法，不经过模型 submit。
+const SLASH_COMMANDS = [
+  { name: '/clear', zh: '清空当前对话并重置模型上下文', en: 'Clear history and reset model context' },
+  { name: '/compact', zh: '压缩较早的上下文', en: 'Compact earlier context' },
+] as const;
+type SlashCommandName = (typeof SLASH_COMMANDS)[number]['name'];
+
+function slashMatches(text: string) {
+  return text.startsWith('/') && !/\s/.test(text)
+    ? SLASH_COMMANDS.filter(command => command.name.startsWith(text))
+    : [];
+}
+
+function parseSlashCommand(text: string): SlashCommandName | undefined {
+  const trimmed = text.trim();
+  return SLASH_COMMANDS.find(command => command.name === trimmed)?.name;
+}
+
+/**
+ * 两处输入框共用的 slash 补全：仅整段输入为 / 或命令前缀时出现，按前缀筛选；↑↓ 选择，Tab/点击只补全，
+ * Enter 在未完整匹配时补全、已输入完整命令时执行，Esc 隐藏至输入再次变化；Shift+Enter 与 IME 不触发。
+ * 补全只写调用方给的现有草稿路径。
+ */
+function useSlashAutocomplete({ text, disabled, onText, onRun }: {
+  text: string;
+  disabled: boolean;
+  onText(text: string): void;
+  onRun(command: SlashCommandName): void;
+}) {
+  const listboxId = useId();
+  const [active, setActive] = useState(0);
+  const [dismissed, setDismissed] = useState<string | null>(null);
+  const matches = slashMatches(text);
+  const open = !disabled && matches.length > 0 && dismissed !== text;
+  const activeIndex = Math.min(active, Math.max(0, matches.length - 1));
+  // 输入一变就清掉 Esc 的隐藏标记与选中项：/ → Esc → /c → / 应重新展开。
+  useEffect(() => { setActive(0); setDismissed(null); }, [text]);
+  const choose = (index: number) => {
+    const command = matches[index];
+    if (command) onText(command.name);
+  };
+  // true 表示已消费该按键，调用方不再执行原有发送逻辑。
+  const onKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>): boolean => {
+    if (!open || event.nativeEvent.isComposing || event.keyCode === 229) return false;
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault();
+      setActive(previous => (previous + (event.key === 'ArrowDown' ? 1 : -1) + matches.length) % matches.length);
+      return true;
+    }
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      setDismissed(text);
+      return true;
+    }
+    if (event.key === 'Tab' && !event.shiftKey) {
+      event.preventDefault();
+      choose(activeIndex);
+      return true;
+    }
+    if (event.key === 'Enter' && !event.shiftKey) {
+      event.preventDefault();
+      if (matches.some(command => command.name === text)) onRun(text as SlashCommandName);
+      else choose(activeIndex);
+      return true;
+    }
+    return false;
+  };
+  const textareaProps = {
+    'aria-autocomplete': 'list' as const,
+    'aria-controls': open ? listboxId : undefined,
+    'aria-expanded': open,
+    'aria-activedescendant': open ? `${listboxId}-${activeIndex}` : undefined,
+  };
+  const optionProps = (index: number) => ({
+    id: `${listboxId}-${index}`,
+    role: 'option' as const,
+    'aria-selected': index === activeIndex,
+    // 不抢 textarea 焦点：点击补全后输入框仍保持聚焦。
+    onMouseDown: (event: React.MouseEvent) => event.preventDefault(),
+    onClick: () => choose(index),
+    onMouseEnter: () => setActive(index),
+  });
+  return { open, matches, activeIndex, listboxId, textareaProps, optionProps, onKeyDown };
 }
 
 const soulBytes = (text: string): number => {
@@ -1693,40 +1778,94 @@ export function HostPage({
     setScreen('bot-avatar');
   };
 
-  const clearCurrentBotHistory = useCallback(() => {
-    if (!activeBot) return;
-    if (chatPending?.botKey === activeBot.key && chatPending.phase !== 'accepted') {
-      setClearNotice(t('原请求尚未确认，不能清空。', 'The original request is unconfirmed; history cannot be cleared.'));
-      return;
+  const [slashBusy, setSlashBusy] = useState<SlashCommandName>();
+  const slashBusyRef = useRef(false);
+
+  // /clear 与 /compact 都先等后端成功，再用服务端边界重置本地可见历史；失败保留草稿与原历史。
+  // 返回 true 表示服务端已成功（即使 UI 已切到别的会话），false 表示 UI 切走后不再报错的过期结果。
+  const runSlashCommand = useCallback(async (command: SlashCommandName): Promise<boolean> => {
+    const bot = activeBot;
+    if (!bot) throw new Error(t('请先选择一个智能体。', 'Select a bot first.'));
+    if (slashBusyRef.current) throw new Error(t('上一个命令仍在执行，请稍候。', 'The previous command is still running.'));
+    if (chatPending?.botKey === bot.key && chatPending.phase !== 'accepted') {
+      throw new Error(t('原请求尚未确认，不能清空或压缩。', 'The original request is unconfirmed; clear or compact is blocked.'));
     }
-    // 水位同时覆盖 raw 历史与 live 投影（lastEntryId 是最新可显示条目），避免新投影又回来。
-    const liveLastEntryId = Number(chatLive?.state?.lastEntryId);
-    const maxId = Math.max(
-      maxHistoryEntryId(chatHistory),
-      Number.isFinite(liveLastEntryId) ? liveLastEntryId : 0,
-    );
-    const nextCutoff = Math.max(maxId, clearedMap[activeBot.key] ?? 0, 1);
-    setClearedMap(prev => {
-      const updated = { ...prev, [activeBot.key]: nextCutoff };
-      writeClearedMap(updated);
-      return updated;
-    });
-    chatSubmissionRef.current = undefined;
-    if (chatPending) removePending(chatPending.scopeKey, chatPending.requestId);
-    setChatPending(undefined);
-    setChatHistory([]);
-    setChatLive(undefined);
-    setChatObservationError('');
-    setChatHistoryError('');
-    setChatReceipt(undefined);
-    setChatDraft('');
-    if (currentChatScope.current) writeChatDraft(currentChatScope.current, '');
-    setComposerMenuOpen(false);
-    setChatTopMenuOpen(false);
-    updateBotMeta(activeBot.key, { lastText: t('对话已清空', 'History cleared'), updatedAt: Date.now(), unread: false });
-    setClearNotice(t('已清空当前对话历史', 'Conversation history cleared'));
-    window.setTimeout(() => setClearNotice(''), 2500);
-  }, [activeBot, chatHistory, chatLive, chatPending, clearedMap, t, updateBotMeta]);
+    if (bot.archivedAt) throw new Error(t('该智能体已归档，请先恢复后再操作。', 'This bot is archived. Unarchive it first.'));
+    const scopeKey = scopeForBot(bot);
+    if (!scopeKey) throw new Error(t('目标身份尚未就绪，草稿已保留。', 'Target identity unavailable; draft retained.'));
+    const draftSnapshot = readChatDraft(scopeKey);
+    slashBusyRef.current = true;
+    setSlashBusy(command);
+    setClearNotice(command === '/clear'
+      ? t('正在清空对话…', 'Clearing conversation…')
+      : t('正在压缩上下文…', 'Compacting context…'));
+    try {
+      let cleared: ClearHistoryResult | undefined;
+      let compacted: CompactResult | undefined;
+      if (bot.hostKind === 'local') {
+        const snap = await ensureLocalHostRunning();
+        if (!snap || snap.phase !== 'running') throw new Error(t('本机服务未运行，草稿已保留。', 'Local host is not running; draft retained.'));
+        const env = await BotHost.call({ method: command === '/clear' ? 'clearHistory' : 'compact', params: { botId: bot.botId } });
+        if (command === '/clear') cleared = env.result as ClearHistoryResult;
+        else compacted = env.result as CompactResult;
+      } else {
+        if (!bot.remoteIdentity || !remoteClientRef.current || !remoteConnected) {
+          throw new Error(t('目标离线，草稿已保留。', 'Target offline; draft retained.'));
+        }
+        const result = await remoteClientRef.current.api.call(
+          bot.remoteIdentity,
+          command === '/clear' ? 'clearHistory' : 'compact',
+          { botId: bot.botId },
+        );
+        if (command === '/clear') cleared = result as unknown as ClearHistoryResult;
+        else compacted = result as unknown as CompactResult;
+      }
+      // 切换 Bot 后只影响服务端，不清新 Bot 的草稿/UI。
+      if (currentChatScope.current !== scopeKey) return true;
+      setComposerMenuOpen(false);
+      setChatTopMenuOpen(false);
+      if (command === '/clear') {
+        // 以服务端 reset 条目为唯一水位；未建会话时 0 也是真实水位，不额外抬高。
+        const nextCutoff = Math.max(cleared?.clearedThroughEntryId ?? 0, clearedMap[bot.key] ?? 0);
+        setClearedMap(prev => {
+          const updated = { ...prev, [bot.key]: nextCutoff };
+          writeClearedMap(updated);
+          return updated;
+        });
+        chatSubmissionRef.current = undefined;
+        if (chatPending) removePending(chatPending.scopeKey, chatPending.requestId);
+        setChatPending(undefined);
+        setChatHistory([]);
+        setChatLive(undefined);
+        setChatObservationError('');
+        setChatHistoryError('');
+        setChatReceipt(undefined);
+        setChatDraft('');
+        writeChatDraft(scopeKey, '');
+        updateBotMeta(bot.key, { lastText: t('对话已清空', 'History cleared'), updatedAt: Date.now(), unread: false });
+        setClearNotice(t('已清空当前对话并重置上下文', 'Conversation cleared and context reset'));
+      } else {
+        // /compact 成功后才清掉实际命令草稿；若等待期间已写入新文本则保留，不误删。
+        if (draftSnapshot.trim() === command) {
+          if (readChatDraft(scopeKey) === draftSnapshot) writeChatDraft(scopeKey, '');
+          setChatDraft(previous => previous.trim() === command ? '' : previous);
+        }
+        setClearNotice(compacted?.compacted
+          ? t('已压缩较早的上下文', 'Earlier context compacted')
+          : t('没有可压缩的历史', 'Nothing to compact'));
+      }
+      window.setTimeout(() => setClearNotice(''), 2500);
+      return true;
+    } catch (error) {
+      // 异步完成时已切到别的会话：不向新会话写错误/提示，也不把失败当成成功。
+      if (currentChatScope.current !== scopeKey) return false;
+      setClearNotice('');
+      throw error;
+    } finally {
+      slashBusyRef.current = false;
+      setSlashBusy(undefined);
+    }
+  }, [activeBot, chatPending, clearedMap, ensureLocalHostRunning, remoteConnected, removePending, t, updateBotMeta]);
 
   const sendMessage = () =>
     action.run(async () => {
@@ -1741,7 +1880,8 @@ export function HostPage({
       const draftSnapshot = chatDraft;
       const trimmed = draftSnapshot.trim();
       if (!trimmed) return;
-      if (trimmed === '/clear' || trimmed === '/new') { clearCurrentBotHistory(); return; }
+      const command = parseSlashCommand(trimmed);
+      if (command) { await runSlashCommand(command); return; }
       if (!centerConn.ready || centerConn.status?.state === 'disconnected') {
         setOfflineNotice({ botKey: bot.key, text: t('中心离线，草稿已保留。', 'Center offline; draft retained.') });
         return;
@@ -2588,7 +2728,17 @@ ${newer}` : draftSnapshot;
     }
   }, [chatDraft, screen]);
 
-  const showSlashHints = chatDraft.startsWith('/') && chatDraft.length <= 8;
+  const slash = useSlashAutocomplete({
+    text: chatDraft,
+    // 未确认/待对账的原请求也不得用命令绕过（recovering 不意味着可以清空）。
+    disabled: !activeChatScope || Boolean(slashBusy) ||
+      Boolean(activeBot && chatPending?.botKey === activeBot.key && chatPending.phase !== 'accepted'),
+    onText: text => {
+      setChatDraft(text);
+      if (currentChatScope.current) writeChatDraft(currentChatScope.current, text);
+    },
+    onRun: command => void action.run(() => runSlashCommand(command)),
+  });
   const anyDrawerOpen = leftDrawerOpen;
   const primaryPreset = primaryBot
     ? resolveBotAvatarPreset(primaryBot.key, primaryBot.role, true)
@@ -3113,7 +3263,12 @@ ${newer}` : draftSnapshot;
                     type="button"
                     role="menuitem"
                     className="danger"
-                    onClick={() => clearCurrentBotHistory()}
+                    onClick={() => {
+                      const scope = activeChatScope;
+                      void runSlashCommand('/clear').catch(error => {
+                        if (currentChatScope.current === scope) setClearNotice(errorText(error));
+                      });
+                    }}
                   >
                     <Trash2 size={19} />
                     <span>{t('清空当前对话', 'Clear History')}</span>
@@ -3303,7 +3458,8 @@ ${newer}` : draftSnapshot;
                   setComposerMenuOpen(false);
                   openBotProfile(activeBot);
                 }}
-                onClearHistory={clearCurrentBotHistory}
+                onRunCommand={runSlashCommand}
+                commandBusy={Boolean(slashBusy)}
                 onAbort={() =>
                   void action.run(async () => {
                     if (activeBot.remoteIdentity && remoteClientRef.current) {
@@ -3349,16 +3505,18 @@ ${newer}` : draftSnapshot;
             <ErrorNotice error={action.error} compact onDismiss={() => action.setError('')} />
             {!activeChatScope && <div className="bot-chat-system-notice" role="status">{t('正在读取目标身份…', 'Loading target identity…')}</div>}
 
-            {showSlashHints && (
-              <div className="bot-slash-popover" role="listbox" aria-label={t('斜杠命令', 'Slash commands')}>
-                <button type="button" className="bot-slash-item" onClick={() => clearCurrentBotHistory()}>
-                  <code>/clear</code>
-                  <span>{t('清空当前对话历史', 'Clear current conversation history')}</span>
-                </button>
-                <button type="button" className="bot-slash-item" onClick={() => clearCurrentBotHistory()}>
-                  <code>/new</code>
-                  <span>{t('清空历史并开启新话题', 'Reset and start fresh')}</span>
-                </button>
+            {slash.open && (
+              <div id={slash.listboxId} className="bot-slash-popover" role="listbox" aria-label={t('斜杠命令', 'Slash commands')}>
+                {slash.matches.map((command, index) => (
+                  <div
+                    key={command.name}
+                    {...slash.optionProps(index)}
+                    className={`bot-slash-item${index === slash.activeIndex ? ' active' : ''}`}
+                  >
+                    <code>{command.name}</code>
+                    <span>{t(command.zh, command.en)}</span>
+                  </div>
+                ))}
               </div>
             )}
 
@@ -3375,7 +3533,7 @@ ${newer}` : draftSnapshot;
                   <User size={18} />
                   <span>{t('查看 Bot 资料与设定', 'View Bot Profile & Settings')}</span>
                 </button>
-                <button type="button" role="menuitem" className="danger" onClick={() => clearCurrentBotHistory()}>
+                <button type="button" role="menuitem" className="danger" onClick={() => void action.run(() => runSlashCommand('/clear'))}>
                   <Trash2 size={18} />
                   <span>{t('清空当前对话历史 (/clear)', 'Clear conversation history (/clear)')}</span>
                 </button>
@@ -3399,7 +3557,8 @@ ${newer}` : draftSnapshot;
                   rows={1}
                   className={chatDraft ? 'has-text' : 'is-empty'}
                   value={chatDraft}
-                  disabled={!activeChatScope}
+                  disabled={!activeChatScope || Boolean(slashBusy)}
+                  {...slash.textareaProps}
                   onChange={e => { setChatDraft(e.target.value); if (currentChatScope.current && !writeChatDraft(currentChatScope.current, e.target.value)) setClearNotice(t('草稿未能保存，请保持页面打开。', 'Draft could not be saved; keep this page open.')); }}
                   placeholder={
                     activeBot.role.length > 8
@@ -3408,7 +3567,9 @@ ${newer}` : draftSnapshot;
                   }
                   aria-label={t('消息', 'Message')}
                   onKeyDown={e => {
-                    if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+                    if (e.nativeEvent.isComposing || e.keyCode === 229) return;
+                    if (slash.onKeyDown(e)) return;
+                    if (e.key === 'Enter' && !e.shiftKey) {
                       e.preventDefault();
                       void sendMessage();
                     }
@@ -3474,7 +3635,7 @@ ${newer}` : draftSnapshot;
                     type="button"
                     className="grok-composer-action-pill send"
                     aria-label={t('发送', 'Send')}
-                    disabled={action.busy || (chatPending?.botKey === activeBot.key && chatPending.phase === 'recovering')}
+                    disabled={action.busy || Boolean(slashBusy) || (chatPending?.botKey === activeBot.key && chatPending.phase === 'recovering')}
                     onClick={() => void sendMessage()}
                   >
                     <ArrowUp size={18} />
@@ -5032,7 +5193,8 @@ function RemotePendingComposer({
   composerMenuOpen,
   onToggleComposerMenu,
   onOpenProfile,
-  onClearHistory,
+  onRunCommand,
+  commandBusy,
   onAbort,
   onAccepted,
   onStarted,
@@ -5055,7 +5217,10 @@ function RemotePendingComposer({
   composerMenuOpen: boolean;
   onToggleComposerMenu(): void;
   onOpenProfile(): void;
-  onClearHistory(): void;
+  /** 执行 /clear 与 /compact；true 表示服务端已成功（可清命令草稿），false 表示 UI 已切走后不再报错的过期结果。 */
+  onRunCommand(command: SlashCommandName): Promise<boolean>;
+  /** 顶栏菜单等 Host 侧发起的命令执行中：锁住输入与发送，避免绕过。 */
+  commandBusy?: boolean;
   onAbort(): void;
   onAccepted(receipt: HostSubmission): void;
   onStarted(requestId: string, text: string, draft: DesktopDraftEntry): void;
@@ -5075,6 +5240,8 @@ function RemotePendingComposer({
   const [recoveryTick, setRecoveryTick] = useState(0);
   const [confirmedConflict, setConfirmedConflict] = useState<{ requestId: string; pendingId: string; original: DesktopDraftEntry; handle?: { key: string; attemptId: string } }>();
   const [resolvingConflict, setResolvingConflict] = useState(false);
+  const [slashBusy, setSlashBusy] = useState<SlashCommandName>();
+  const slashBusyRef = useRef(false);
   const sending = useRef(false);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
@@ -5257,12 +5424,46 @@ function RemotePendingComposer({
     }
   };
 
+  // 命令先等后端成功，成功后才走现有草稿写入路径清空；失败/离线保留命令草稿。
+  const commandLocked = Boolean(commandBusy) || Boolean(slashBusy);
+  const runCommand = async (command: SlashCommandName) => {
+    if (sending.current || slashBusyRef.current || commandLocked || blocked || drafts.attempt) return;
+    if (!online || !api.transportConnected) {
+      onOffline();
+      return;
+    }
+    slashBusyRef.current = true;
+    setSlashBusy(command);
+    // 进度提示由 Host 的 clearNotice（status）统一展示；此处不重复写错误卡片。
+    setNotice('');
+    try {
+      const applied = await onRunCommand(command);
+      // 仅服务端确认成功时才清命令草稿；过期 scope 的 false 不清草稿。
+      if (applied) {
+        drafts.editText('');
+        setNotice('');
+      }
+    } catch (error) {
+      setNotice(errorText(error));
+    } finally {
+      slashBusyRef.current = false;
+      setSlashBusy(undefined);
+    }
+  };
+
+  const slash = useSlashAutocomplete({
+    text: drafts.text,
+    disabled: Boolean(drafts.attempt) || blocked || commandLocked || Boolean(fallbackDraft),
+    onText: text => drafts.editText(text),
+    onRun: command => void runCommand(command),
+  });
+
   const send = async () => {
-    if (sending.current || blocked || fallbackDraft || !drafts.text.trim()) return;
+    if (sending.current || commandLocked || blocked || fallbackDraft || !drafts.text.trim()) return;
     const trimmed = drafts.text.trim();
-    if (trimmed === '/clear' || trimmed === '/new') {
-      drafts.editText('');
-      onClearHistory();
+    const command = parseSlashCommand(trimmed);
+    if (command) {
+      await runCommand(command);
       return;
     }
     if (!online || !api.transportConnected) {
@@ -5354,8 +5555,6 @@ function RemotePendingComposer({
     }
   };
 
-  const showSlashHints = drafts.text.startsWith('/') && drafts.text.length <= 8;
-
   return (
     <>
       <ErrorNotice
@@ -5421,32 +5620,18 @@ function RemotePendingComposer({
         </div>
       )}
 
-      {showSlashHints && (
-        <div className="bot-slash-popover" role="listbox" aria-label={t('斜杠命令', 'Slash commands')}>
-          <button
-            type="button"
-            className="bot-slash-item"
-            onClick={() => {
-              if (blocked || drafts.attempt) { onClearHistory(); return; }
-              drafts.editText('');
-              onClearHistory();
-            }}
-          >
-            <code>/clear</code>
-            <span>{t('清空当前对话历史', 'Clear current conversation history')}</span>
-          </button>
-          <button
-            type="button"
-            className="bot-slash-item"
-            onClick={() => {
-              if (blocked || drafts.attempt) { onClearHistory(); return; }
-              drafts.editText('');
-              onClearHistory();
-            }}
-          >
-            <code>/new</code>
-            <span>{t('清空历史并开启新话题', 'Reset and start fresh')}</span>
-          </button>
+      {slash.open && (
+        <div id={slash.listboxId} className="bot-slash-popover" role="listbox" aria-label={t('斜杠命令', 'Slash commands')}>
+          {slash.matches.map((command, index) => (
+            <div
+              key={command.name}
+              {...slash.optionProps(index)}
+              className={`bot-slash-item${index === slash.activeIndex ? ' active' : ''}`}
+            >
+              <code>{command.name}</code>
+              <span>{t(command.zh, command.en)}</span>
+            </div>
+          ))}
         </div>
       )}
 
@@ -5460,11 +5645,7 @@ function RemotePendingComposer({
             type="button"
             role="menuitem"
             className="danger"
-            onClick={() => {
-              if (blocked || drafts.attempt) { onClearHistory(); return; }
-              drafts.editText('');
-              onClearHistory();
-            }}
+            onClick={() => void runCommand('/clear')}
           >
             <Trash2 size={18} />
             <span>{t('清空当前对话历史 (/clear)', 'Clear conversation history (/clear)')}</span>
@@ -5489,7 +5670,8 @@ function RemotePendingComposer({
             rows={1}
             className={drafts.text ? 'has-text' : 'is-empty'}
             value={drafts.text}
-            disabled={Boolean(drafts.attempt) || blocked}
+            disabled={Boolean(drafts.attempt) || blocked || commandLocked}
+            {...slash.textareaProps}
             onChange={event => drafts.editText(event.target.value)}
             aria-label={t('消息', 'Message')}
             placeholder={
@@ -5498,6 +5680,8 @@ function RemotePendingComposer({
                 : t(`向 ${botRole} 发消息…`, `Message ${botRole}…`)
             }
             onKeyDown={e => {
+              if (e.nativeEvent.isComposing || e.keyCode === 229) return;
+              if (slash.onKeyDown(e)) return;
               if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();
                 void send();
@@ -5518,7 +5702,7 @@ function RemotePendingComposer({
             <button
               type="button"
               className="grok-composer-action-pill send"
-              disabled={!drafts.text.trim() || Boolean(drafts.attempt) || blocked || Boolean(fallbackDraft)}
+              disabled={!drafts.text.trim() || Boolean(drafts.attempt) || blocked || Boolean(fallbackDraft) || commandLocked}
               onClick={() => void send()}
               aria-label={t('发送', 'Send')}
             >

@@ -336,9 +336,19 @@ await control.close(); // 幂等：先关 listener/连接与进行中 handler，
 | GET `/v1/bots/:botId/submissions/:requestId` | — | 200 `PrimarySubmission`，否则 404 `SUBMISSION_NOT_FOUND` |
 | GET `/v1/bots/:botId/history?limit=&cursor=` | — | 200 `HistoryPage`；limit 须为严格正整数十进制数，cursor 须为 JSON 对象 |
 | POST `/v1/bots/:botId/abort` | — | 200 `{botId}`；显式停止，客户端断开不是 abort |
+| POST `/v1/bots/:botId/history/clear` | — | 200 `{botId, conversationId, clearedThroughEntryId}`；用 SDK `pi.reset` 开新上下文，不新建会话 |
+| POST `/v1/bots/:botId/compact` | — | 200 `{botId, conversationId, compacted}`；等手动压缩任务终态，无可压内容时 `compacted:false` |
 | GET `/v1/bots/:botId/context` | — | 200 `ContextStatus` |
 
 错误响应统一为 `{"error":{"code":...,"message":...}}`（不带堆栈、不泄漏 token）。错误码到 HTTP 状态映射：`INVALID_ARGUMENT`/`INVALID_CWD`→400，`REQUEST_CONFLICT`/`MODEL_REQUIRED`/`MODEL_NOT_FOUND`/`RUNTIME_BUSY`→409，`BOT_NOT_FOUND`/`BOT_REQUEST_NOT_FOUND`/`SUBMISSION_NOT_FOUND`→404，`UNSUPPORTED_SCHEMA`→503，其他代码返回 500，并保留已有错误码；没有错误码时使用 `INTERNAL`；另有 `UNAUTHORIZED`→401、`ORIGIN_FORBIDDEN`→403、`REQUEST_TOO_LARGE`→413、`UNSUPPORTED_MEDIA_TYPE`→415、`METHOD_NOT_ALLOWED`→405、`NOT_FOUND`→404。
+
+### 对话命令 `/clear` 与 `/compact`
+
+聊天输入框的 slash 命令只有这两个，均经控制面的同名 additive v2 方法（`clearHistory`/`compact`，params 仅 `{botId}`）执行，不进入模型 submit 或 pending 队列；执行中不接受第二个命令，后端成功后才清输入框，失败/离线保留命令草稿并显示原因。
+
+- `/clear`：`Runtime.clearHistory` 在 Bot 准入内先确认主会话无排队提交/活动任务（含手动压缩），再调用 SDK `conversation.reset(undefined, CTX)` 写入 `pi.reset` 开新上下文（自动压缩仍关闭，`settings.compaction.enabled:false` 不影响手动压缩）。原始持久条目保留以维持 requestId 回执/去重；`history` 读取时倒序沿 cursor 扫到最近一次 `pi.reset`（不设扫描上限），再用 `minEntryId` 只返回其后的条目，因此重开/其他客户端也不再显示清空前的消息。返回的 `clearedThroughEntryId` 是该 reset 条目的真实 id（取 `conversation.context().head`，不是猜测；无会话为 0），是客户端唯一可见历史水位。
+- `/compact`：`Runtime.compact` 在准入内只创建手动压缩任务，`waitForTask` 等终态与摘要落地在准入外（不长期占用 Bot FIFO，第二个命令仍因活动任务而被 `RUNTIME_BUSY` 拒绝）。任务失败/中止抛 `COMPACTION_FAILED`；任务返回 `submissionId` 时还要求该 write 已 `done`（会话空闲时 SDK 在同一个 terminal commit 内落地），否则不算成功。返回 `compacted:false` 表示没有可压缩内容（无会话或任务结果无 summary）。压缩沿用长运行超时链（与 memory 方法同一组 135s/140s/145s 期限和 130s HTTP 空闲窗口），不把入队当成功。
+- 两个方法都是归档 Bot 只读（`BOT_ARCHIVED`），主会话有活动任务/排队提交时 `RUNTIME_BUSY`；手动压缩任务本身也计入该检查，避免对正在压缩的会话重复压缩或清空。
 
 ### 控制 CLI（常驻）
 
@@ -1066,7 +1076,7 @@ node host-core/control-cli.js work-resume --url http://127.0.0.1:8787 \
 | `correctMemory(botId, input)` | `memory-correct` | `hindsight_correct` |
 | `retryMemory(botId, input)` | `memory-retry` | `hindsight_retry` |
 
-HTTP 状态入口为 GET `/v1/bots/:botId/memory`，其余七个操作为 POST `/v1/bots/:botId/memory/{recall,reflect,retain,get,source,correct,retry}`。retain/correct/retry 返回 202 回执，其他操作返回 200。原远端十方法白名单保持不变，远端记忆与实时接线留给模块 14（模块 14 v2 起已扩展为固定方法表，现共 40 个，并加入远端记忆/实时接线，见[模块 14](#模块-14统一-host-服务与设备接入已完成父助手限定范围验收)一节）。这八个方法也是唯一使用“后端 120s ≤ 本机 HTTP 130s ≤ 中继/目标 135s ≤ 客户端 140s ≤ 桌面 broker 145s ≤ 原生外层 150s”超时链的 RPC，其余方法超时不变（详见[Bot 级扩展与 SOUL.md](#bot-级扩展与-soulmdhost-契约增量)一节）。
+HTTP 状态入口为 GET `/v1/bots/:botId/memory`，其余七个操作为 POST `/v1/bots/:botId/memory/{recall,reflect,retain,get,source,correct,retry}`。retain/correct/retry 返回 202 回执，其他操作返回 200。原远端十方法白名单保持不变，远端记忆与实时接线留给模块 14（模块 14 v2 起已扩展为固定方法表，并加入远端记忆/实时接线，见[模块 14](#模块-14统一-host-服务与设备接入已完成父助手限定范围验收)一节）。这八个方法（以及手动压缩 `/compact`，见“对话命令”一节）使用“后端 120s ≤ 本机 HTTP 130s ≤ 中继/目标 135s ≤ 客户端 140s ≤ 桌面 broker 145s ≤ 原生外层 150s”超时链，其余方法超时不变（详见[Bot 级扩展与 SOUL.md](#bot-级扩展与-soulmdhost-契约增量)一节）。
 
 `memoryStatus` 输入为 `{target?,state?,limit?,cursor?}`，state 为 pending/accepted/completed/failed，limit 为 1–200（默认 20）。游标 `{bankId,state,afterOperationId}` 绑定派生记忆库与过滤条件，不赋予跨库权限。计数覆盖整个上下文，state 只过滤分页 jobs；返回 `jobs/nextCursor` 可发现自动投递失败的 operation ID。状态查询不创建记忆库、不发起后端请求，可读取已有库。禁用时计数与 jobs 为 null；配置但未建库时计数为 0、jobs 为 []。
 
@@ -1143,6 +1153,7 @@ scopeKey/messageKey 固定 `~` 前缀再逐段编码，保护 `.`/`..`/Unicode/�
 - relay 协议不变：protocolVersion 1；scopeProtocol 仅 host 侧 1。Host hello controlProtocol 可为 1 或 2，client hello 可省略（legacy）或声明 2（client 声明 1 无效）。ready 可带 controlProtocol:2，省略即 legacy。**v2 client/link 必须要求 ready 回显 2**；旧 client/host 经 v1 方法兼容。
 - 控制方法表 `CONTROL_METHODS` 共 40 个：旧 v1 十方法（getHostInfo/listBots/createBot/getBot/findByRequest/submit/getSubmission/history/abort/contextStatus）+ v2 30 个 = M14 原 25 个（getModelCatalog/getWorkContext/syncWorkContext/workHistory/workContextStatus/getWorkActivity/stopWork/resumeWork/listScopeStates/createScope/getScopeState/updateScope/publishUserMessage/listScopeReplicas/scopeHistory/getScopeMessage/getScopeMessageDelivery/memoryStatus/recallMemory/reflectMemory/retainMemory/getMemory/getMemorySource/correctMemory/retryMemory）不变 + 扩展/SOUL 5 个（getExtensionCatalog/getBotExtensions/setBotExtensions/getBotSoul/setBotSoul）。memory 方法 wire params 均为 `{botId,input}`；分页/scope 参数提取 limit/cursor；扩展 setter 也是 `{botId,input}`，input 分别带 `expectedRevision` 数字/`expectedRevision` SHA-256/`extensions`/`text`。
 - 能力门控：legacy client（省略 controlProtocol）只能 v1 方法；v2 client 可用 v1/v2，但目标 host.controlProtocol 必须 ≥ controlMethodVersion。无 capability 回 CONTROL_UNAVAILABLE/not-sent；离线 OFFLINE/not-sent；不转发不支持的方法、不创建中央邮箱。settings/status 不加入远端表，无通用代理。结果三态（not-sent/unconfirmed/responded）沿用。
+- 聊天命令增量：`CONTROL_METHODS` 追加 `clearHistory`/`compact` 两个 additive v2 方法，params 仅 `{botId}`，见“对话命令”一节。
 - 阶段澄清：M10–M13 历史验收记录的“远端仅十方法/远程 work 不可用”在该时间点成立；M14 v2 起远端已是固定方法表（M14 交付时 35 个，含扩展/SOUL 增量现为 40 个），支持固定 work/memory RPC；各模块历史验收文字中的“35 方法”是该次验收时的方法数，不是当前契约。relay 仅有界瞬时转发业务，不持久保存业务正文/工作上下文/模型与 Hindsight API 凭证，也不运行推理；中心仅持久保存设备登记、名称/平台与认证校验信息（设备 token 哈希/credentialVersion），设备认证校验数据不与模型/Hindsight 业务凭证混同。无通用代理、中心变更邮箱、自动重放或 E2E 作者签名/加密声明。
 - 设备目录：`devices-list` 是中继自有帧，不转发给 Host；新客户端请求 `names:1` 后返回持久化的 `displayName` 和可选 `platform`，旧请求仍仅返回原四个字段。未命名设备回退 deviceId，离线设备也保留名称；`deviceId` 始终是路由键。认证的 controlProtocol 2 client 可调用 `renameDevice({deviceId, displayName})`（CLI 用 `renameDevice --input`），只能改名有效注册的设备；Host 重连只填首次默认名，不覆盖已有名称。注册可选 `--display-name`，凭据仍只从环境变量读取。注册/轮换/撤销仍是本地特权动作。
 - **升级顺序：先中继，再 Host 和客户端。** 新 Host hello 和新客户端设备目录请求使用扩展字段，旧中继会拒绝并断开，不能把该错误当成功；旧 Host/客户端仍可连接新版中继。中继数据库在事务中从版本 1 添加名称/平台字段，不改变设备凭据或撤销状态。
@@ -1494,6 +1505,6 @@ Android 搜索工具（rg/fd）固定 API 29，不改变 App minSdk33。NDK/16Ki
 - 适配器只用包公开导出 `createClient`/`createConfig`/`sdk`，不使用上游 `.pi` 源或内部路径，也不打全局 fetch 补丁；每实例自有 fetch 恢复 `redirect:error`、2 MiB 请求/响应上限与 AbortController，无自动重试或变更重放。
 - 新增可选 `timeoutMs`（默认 30000）与 `reflectTimeoutMs`（默认 120000），须为 ≤120000 的正安全整数（未知字段拒绝）；`HINDSIGHT_MAX_TIMEOUT_MS=120000` 供传输层对齐。未显式给出时不写进已存配置（保持 seed/CAS 兼容）。
 
-### 超时链（仅八个 memory 方法）
+### 超时链（八个 memory 方法与手动 compact）
 
-Hindsight 后端 120s ≤ 本机控制 HTTP 空闲 130s ≤ 中继/目标执行 135s ≤ 远端/本机客户端 140s ≤ 桌面 broker 145s ≤ 原生外层 150s，每层严格包含内层。其他 RPC 与并发/准入/请求体/头/写超时不变（仍 20s/25s，在途 8/8、128 槽位）。调用方统一经 `controlMethodTimeoutMs`/`controlClientTimeoutMs`/`controlBrokerTimeoutMs` 取值，不使用过期常量。
+Hindsight 后端 120s ≤ 本机控制 HTTP 空闲 130s ≤ 中继/目标执行 135s ≤ 远端/本机客户端 140s ≤ 桌面 broker 145s ≤ 原生外层 150s，每层严格包含内层。手动压缩 `/compact` 复用同一组期限（摘要请求可能超过默认 20s/25s），其 HTTP 路由也使用 130s 空闲窗口。其他 RPC 与并发/准入/请求体/头/写超时不变（仍 20s/25s，在途 8/8、128 槽位）。调用方统一经 `controlMethodTimeoutMs`/`controlClientTimeoutMs`/`controlBrokerTimeoutMs` 取值，不使用过期常量。

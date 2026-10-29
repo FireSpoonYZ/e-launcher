@@ -71,19 +71,25 @@ export function isMemoryControlMethod(method) {
   return MEMORY_METHODS.has(method);
 }
 
+// Slow RPCs share the memory timeout chain: one manual compaction waits on a
+// model summarization request and must not be cut off by the 20s/25s default.
+function isSlowControlMethod(method) {
+  return method === 'compact' || isMemoryControlMethod(method);
+}
+
 /** Relay/target execution deadline for one control method. */
 export function controlMethodTimeoutMs(method) {
-  return isMemoryControlMethod(method) ? CONTROL_MEMORY_DEADLINE_MS : CONTROL_TIMEOUT_MS;
+  return isSlowControlMethod(method) ? CONTROL_MEMORY_DEADLINE_MS : CONTROL_TIMEOUT_MS;
 }
 
 /** Remote/local control client call deadline for one control method. */
 export function controlClientTimeoutMs(method) {
-  return isMemoryControlMethod(method) ? CONTROL_MEMORY_CLIENT_DEADLINE_MS : CONTROL_CLIENT_TIMEOUT_MS;
+  return isSlowControlMethod(method) ? CONTROL_MEMORY_CLIENT_DEADLINE_MS : CONTROL_CLIENT_TIMEOUT_MS;
 }
 
 /** Desktop broker wrapper deadline for one control method. */
 export function controlBrokerTimeoutMs(method) {
-  return isMemoryControlMethod(method) ? CONTROL_MEMORY_BROKER_DEADLINE_MS : CONTROL_CLIENT_TIMEOUT_MS;
+  return isSlowControlMethod(method) ? CONTROL_MEMORY_BROKER_DEADLINE_MS : CONTROL_CLIENT_TIMEOUT_MS;
 }
 
 // Legacy v1 method table (unchanged wire shape).
@@ -150,6 +156,9 @@ const CONTROL_V2_METHODS = Object.freeze([
   'sendShowerInput',
   'takeoverShower',
   'releaseShowerSession',
+  // 对话命令：/clear 与 /compact 是 additive v2，只接 {botId}。
+  'clearHistory',
+  'compact',
 ]);
 
 export const CONTROL_METHODS = Object.freeze([...CONTROL_V1_METHODS, ...CONTROL_V2_METHODS]);
@@ -175,6 +184,7 @@ export const CONTROL_ERROR_CODES = new Set([
   'SUBMISSION_NOT_FOUND',
   'MODEL_REQUIRED',
   'MODEL_NOT_FOUND',
+  'COMPACTION_FAILED',
   'RUNTIME_BUSY',
   'PRIMARY_BOT_PROTECTED',
   'BOT_ARCHIVED',
@@ -325,7 +335,9 @@ function normalizeControlParams(method, params) {
     case 'unarchiveBot':
     case 'deleteBot':
     case 'abort':
-    case 'contextStatus': {
+    case 'contextStatus':
+    case 'clearHistory':
+    case 'compact': {
       rejectUnknownFields(params, new Set(['botId']), 'params');
       assertId(params.botId, 'botId');
       return { botId: params.botId };

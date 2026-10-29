@@ -57,6 +57,8 @@ const routes = [
   { method: 'GET', key: '/v1/bots/:botId/submissions/:requestId', pattern: /^\/v1\/bots\/([^/]+)\/submissions\/([^/]+)\/?$/, params: ['botId', 'requestId'], hasBody: false, handler: getSubmission },
   { method: 'GET', key: '/v1/bots/:botId/history', pattern: /^\/v1\/bots\/([^/]+)\/history\/?$/, params: ['botId'], hasBody: false, handler: history },
   { method: 'POST', key: '/v1/bots/:botId/abort', pattern: /^\/v1\/bots\/([^/]+)\/abort\/?$/, params: ['botId'], hasBody: true, handler: abort },
+  { method: 'POST', key: '/v1/bots/:botId/history/clear', pattern: /^\/v1\/bots\/([^/]+)\/history\/clear\/?$/, params: ['botId'], hasBody: true, handler: clearHistory },
+  { method: 'POST', key: '/v1/bots/:botId/compact', pattern: /^\/v1\/bots\/([^/]+)\/compact\/?$/, params: ['botId'], hasBody: true, handler: compact },
   { method: 'GET', key: '/v1/bots/:botId/memory', pattern: /^\/v1\/bots\/([^/]+)\/memory\/?$/, params: ['botId'], hasBody: false, handler: memoryStatus },
   { method: 'POST', key: '/v1/bots/:botId/memory/recall', pattern: /^\/v1\/bots\/([^/]+)\/memory\/recall\/?$/, params: ['botId'], hasBody: true, handler: memoryRecall },
   { method: 'POST', key: '/v1/bots/:botId/memory/reflect', pattern: /^\/v1\/bots\/([^/]+)\/memory\/reflect\/?$/, params: ['botId'], hasBody: true, handler: memoryReflect },
@@ -104,8 +106,9 @@ const routes = [
 ];
 
 // The eight Hindsight routes may legitimately stay silent for up to the 120s
-// backend cap; only these responses extend the socket inactivity window.
-const MEMORY_ROUTE_KEYS = new Set([
+// backend cap and one manual compaction can wait on a model summarization;
+// only these responses extend the socket inactivity window.
+const SLOW_ROUTE_KEYS = new Set([
   '/v1/bots/:botId/memory',
   '/v1/bots/:botId/memory/recall',
   '/v1/bots/:botId/memory/reflect',
@@ -114,6 +117,7 @@ const MEMORY_ROUTE_KEYS = new Set([
   '/v1/bots/:botId/memory/source',
   '/v1/bots/:botId/memory/correct',
   '/v1/bots/:botId/memory/retry',
+  '/v1/bots/:botId/compact',
 ]);
 
 /**
@@ -297,9 +301,9 @@ async function dispatch(host, runtime, authorize, req, res, ctx) {
   } else {
     req.resume(); // 排空多余请求体，避免占用保活连接
   }
-  // 只有 memory 路由放宽处理期间 socket 空闲上限；请求体/头/其他路由不变，
+  // 只有 memory/compact 路由放宽处理期间 socket 空闲上限；请求体/头/其他路由不变，
   // 响应结束后恢复默认值，keep-alive 复用连接不继承 130s。
-  const extendedIdle = MEMORY_ROUTE_KEYS.has(match.route.key);
+  const extendedIdle = SLOW_ROUTE_KEYS.has(match.route.key);
   if (extendedIdle) res.setTimeout(MEMORY_HTTP_INACTIVITY_MS);
   try {
     await match.route.handler(host, runtime, params, body, req, res, ctx);
@@ -399,6 +403,15 @@ async function history(host, runtime, params, body, req, res) {
 async function abort(host, runtime, params, body, req, res) {
   await runtime.abort(params.botId);
   writeControlJson(res, 200, { botId: params.botId });
+}
+
+// /clear 与 /compact 不读取请求体（与 abort 一致），成功才返回新的可见历史边界/压缩结果。
+async function clearHistory(host, runtime, params, body, req, res) {
+  writeControlJson(res, 200, await runtime.clearHistory(params.botId));
+}
+
+async function compact(host, runtime, params, body, req, res) {
+  writeControlJson(res, 200, await runtime.compact(params.botId));
 }
 
 async function memoryStatus(host, runtime, params, body, req, res) {

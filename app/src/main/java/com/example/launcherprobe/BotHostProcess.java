@@ -85,10 +85,10 @@ final class BotHostProcess {
     private static final long QUEUE_BYTE_BUDGET = 24L * 1024 * 1024;
     private static final List<String> REQUEST_TYPES =
             Arrays.asList("call", "status", "settings_get", "settings_set");
-    /** 八个 Hindsight 记忆控制方法；其余方法沿用 REQUEST_TIMEOUT_MS。 */
+    /** 长运行方法（八个 Hindsight 记忆 + 手动压缩）；其余方法沿用 REQUEST_TIMEOUT_MS。 */
     private static final List<String> MEMORY_METHODS =
             Arrays.asList("memoryStatus", "recallMemory", "reflectMemory", "retainMemory",
-                    "getMemory", "getMemorySource", "correctMemory", "retryMemory");
+                    "getMemory", "getMemorySource", "correctMemory", "retryMemory", "compact");
 
     private final Context context;
     private final JSONObject init;

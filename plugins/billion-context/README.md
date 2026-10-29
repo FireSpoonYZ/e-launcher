@@ -26,6 +26,8 @@ npm pack ./plugins/billion-context --pack-destination "$ARTIFACT_DIR"
 
 BC 按 Durable conversation 保存原有 `host.bc-context` v1 状态，未知 kernel 版本拒绝使用而非重置。原始历史保留；仅纯文本 user/assistant 消息可折叠，其余复杂内容保留。工具保留原名 `compress`、`decompress`、`search_context`、`acp_status`，以便恢复旧的待执行工具任务；会话的 selectedExtensions 与所有权检查隔离 Bot，不能跨 Bot 访问原文。主会话和工作会话的 `contextStatus` 动作是只读的，输入分别为 `{}` 和 `{"scopeId":"<非空scopeId>"}`；未绑定会话返回空状态，不创建会话。插件禁用或卸载时查询返回 `EXTENSION_DISABLED`，不是伪造空状态。
 
+上下文边界（`view.head`：`pi.reset` 或 `pi.compaction`）变化时，`prepare` 用本插件的 initial factory 重建该会话内的 `state`/`contentStore`/`prepared` 并清空 `operations`，避免 `/clear` 前的 block 摘要或旧 prepared 重新进入下一次模型请求；Durable 原历史/回执不删。
+
 ## acp-kernel 许可
 
 以下为 acp-kernel 上游完整许可及附加署名条款：

@@ -205,6 +205,12 @@ export function createControlClient({ url, token, fetch: fetchImpl = globalThis.
     abort(botId, options) {
       return request('POST', ['v1', 'bots', botId, 'abort'], { ...callOptions(options), body: {} });
     },
+    clearHistory(botId, options) {
+      return request('POST', ['v1', 'bots', botId, 'history', 'clear'], { ...callOptions(options), body: {} });
+    },
+    compact(botId, options) {
+      return request('POST', ['v1', 'bots', botId, 'compact'], { ...callOptions(options), body: {} });
+    },
     contextStatus(botId, options) {
       return request('GET', ['v1', 'bots', botId, 'context'], callOptions(options));
     },

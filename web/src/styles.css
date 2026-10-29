@@ -535,6 +535,8 @@ small, .secondary { font-size: .85rem; color: var(--muted); }
 .bot-plus-popover button:hover, .bot-slash-item:hover { background: var(--surface); }
 .bot-plus-popover button.danger { color: var(--danger); }
 .bot-slash-item code { font-weight: 650; color: #2B70F6; }
+.bot-slash-item { cursor: pointer; }
+.bot-slash-item.active { background: var(--surface); }
 .grok-composer-row { display: flex; align-items: flex-end; gap: 10px; }
 .grok-composer-plus-circle { width: 46px; height: 46px; border-radius: 50%; background: color-mix(in srgb, var(--bg) 94%, #fff); border: 1px solid color-mix(in srgb, var(--line) 85%, transparent); box-shadow: 0 2px 10px rgb(0 0 0 / .06); display: inline-flex; align-items: center; justify-content: center; flex: none; color: var(--text); transition: transform 160ms cubic-bezier(.22, 1, .36, 1); }
 .grok-composer-pill { flex: 1; min-width: 0; min-height: 46px; display: flex; align-items: center; gap: 6px; padding: 4px 6px 4px 16px; border-radius: 24px; background: color-mix(in srgb, var(--bg) 94%, #fff); border: 1px solid color-mix(in srgb, var(--line) 85%, transparent); box-shadow: 0 2px 10px rgb(0 0 0 / .05); }

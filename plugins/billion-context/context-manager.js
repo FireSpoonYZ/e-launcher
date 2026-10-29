@@ -56,11 +56,19 @@ export function createContextManager({ getHarness, models, ContextState }) {
 
     // 请求投影去重键：taskId + 消息投影的 SHA-256；不含 attempt，重试不重复推进 state。
     const key = String(api.taskId) + sha256(JSON.stringify(codec.messages));
+    // 当前上下文边界：reset 或（之后）新 compaction 都会改变它；旧 BC 投影不属于新上下文。
+    const headEntryId = view.head?.id ?? null;
 
     // beforeRequest 在 Session 行之外：用宿主 harness.commit 保存文档，HookApi 无 commit。
     return harness.commit(async (tx) => {
       const doc = await tx.doc(ContextState, api.conversationId);
       assertKernelVersion(doc);
+      // head 一变（/clear 的 pi.reset，或随后 SDK compaction），旧 state/contentStore/prepared/operations
+      // 可能把清空前的摘要重新注入请求；直接按本插件的 initial factory 重建会话内投影。SDK 原历史不动。
+      if ((doc.prepared?.headEntryId ?? null) !== headEntryId) {
+        Object.assign(doc, ContextState.definition.initial());
+        doc.operations = {};
+      }
       // 在 commit callback 仍活跃时复制草稿内容，避免事务外访问 Draft Proxy。
       if (doc.prepared?.key === key) return { messages: JSON.parse(JSON.stringify(doc.prepared.messages)) };
 
@@ -86,7 +94,7 @@ export function createContextManager({ getHarness, models, ContextState }) {
       }
       doc.state = JSON.parse(JSON.stringify(result.state));
       doc.contentStore = JSON.parse(JSON.stringify(result.contentStore));
-      doc.prepared = { key, taskId: String(api.taskId), cutoff, contextWindow: model.contextWindow, tokenCount: projectedTokenCount, messages };
+      doc.prepared = { key, taskId: String(api.taskId), cutoff, headEntryId, contextWindow: model.contextWindow, tokenCount: projectedTokenCount, messages };
       return { messages };
     }, context);
   }

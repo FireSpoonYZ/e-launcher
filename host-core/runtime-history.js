@@ -1,9 +1,11 @@
 // 模块 2：Pi Durable 本机主私聊的只读 helper。
 // 不启动调度、不写记录、不合成回答；由后续运行时集成 worker 调用。
-import { StorageRequestError } from '@earendil-works/pi-durable';
+import { ResetEntry, StorageRequestError } from '@earendil-works/pi-durable';
 
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 200;
+const RESET_KIND = ResetEntry.kind;
+const RESET_SCAN_LIMIT = 200;
 
 function invalidArgument(message) {
   const err = new Error(message);
@@ -28,12 +30,33 @@ export function normalizeHistoryOptions(options = {}) {
 }
 
 /**
- * 分页读取主私聊历史（最旧在前）。只读，不触发调度，不修改原文。
+ * 最近一次 pi.reset 之后的可见历史起点；无 reset 返回 0。清空用 reset 保留原始回执条目，
+ * 因此只在读取时按 reset 裁剪，不动存储。倒序沿 cursor 扫到 reset 或历史起点，不设页数上限，
+ * 否则更早的 reset 之前的历史会在清空后重新出现。
  */
-export async function readPrimaryHistory(conversation, options = {}, context) {
+async function latestResetEntryId(conversation, context) {
+  let cursor;
+  for (;;) {
+    const result = await conversation.entries({ order: 'descending' }, RESET_SCAN_LIMIT, cursor, context);
+    const reset = result.items.find((entry) => entry.kind === RESET_KIND);
+    if (reset) return reset.id;
+    if (!result.next) return 0;
+    cursor = result.next;
+  }
+}
+
+/**
+ * 分页读取主私聊历史（最旧在前）。只读，不触发调度，不修改原文。
+ * afterReset 为真时从最近一次 pi.reset 之后开始（主私聊可见历史）；work 历史不传该选项。
+ */
+export async function readPrimaryHistory(conversation, options = {}, context, { afterReset = false } = {}) {
   const { limit, cursor } = normalizeHistoryOptions(options);
   try {
-    const page = await conversation.entries({ order: 'ascending' }, limit, cursor, context);
+    const resetId = afterReset ? await latestResetEntryId(conversation, context) : 0;
+    const page = await conversation.entries(
+      resetId > 0 ? { order: 'ascending', minEntryId: resetId + 1 } : { order: 'ascending' },
+      limit, cursor, context,
+    );
     return { items: page.items, nextCursor: page.next ?? null };
   } catch (err) {
     // SDK 1.3.0 没有细分游标错误码，不能把其余 StorageRequestError 当成参数错误。

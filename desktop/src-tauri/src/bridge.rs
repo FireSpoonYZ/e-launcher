@@ -30,9 +30,9 @@ const MAX_OBSERVERS: usize = 8;
 const WRITER_QUEUE_CAP: usize = 16;
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
-/// Nested memory calls wait for the Hindsight backend (reflect up to 120s).
+/// Nested long RPCs: Hindsight memory calls and one manual compaction wait on a model/backend request.
 const MEMORY_RESPONSE_TIMEOUT: Duration = Duration::from_secs(150);
-/// Exact Hindsight control methods carried inside the generic `call` broker op.
+/// Exact long control methods carried inside the generic `call` broker op.
 const MEMORY_METHODS: &[&str] = &[
   "memoryStatus",
   "recallMemory",
@@ -42,6 +42,7 @@ const MEMORY_METHODS: &[&str] = &[
   "getMemorySource",
   "correctMemory",
   "retryMemory",
+  "compact",
 ];
 const MAX_OBSERVER_FRAME_FIFO: usize = 8;
 const MAX_OBSERVER_FIFO_BYTES: usize = 4 * 1024 * 1024;

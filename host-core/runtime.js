@@ -676,19 +676,32 @@ function createRuntime({ host, harness, models, defaultModel, releaseOwner, clea
     return bot;
   }
 
-  /** 编辑准入：Bot 的任一已映射会话有 queued/placed 提交或挂起工作决策则忙。 */
+  /** 编辑准入：Bot 的任一已映射会话有 queued/placed 提交、活动任务（含手动压缩）或挂起工作决策则忙。 */
   async function assertBotIdle(bot) {
     const nativeIds = await botConversations(bot);
     if (nativeIds.length === 0) return;
     const inspection = await harness.inspect(CTX);
     const known = new Set(nativeIds);
-    if (inspection.submissions.some((submission) => known.has(submission.conversationId))) {
+    if (inspection.submissions.some((submission) => known.has(submission.conversationId)) ||
+        inspection.tasks.some((task) => known.has(task.record.conversationId))) {
       throw errWithCode('bot has active or queued work', 'RUNTIME_BUSY');
     }
     for (const nativeId of nativeIds) {
       const state = await harness.snapshot(WorkDecisionState, nativeId, CTX);
       if (state?.pending) throw errWithCode('bot has an active work decision', 'RUNTIME_BUSY');
     }
+  }
+
+  /** 主会话的编辑前置：无会话返回 null；有活动任务/排队提交则忙（含手动压缩任务）。 */
+  async function idlePrimaryConversation(bot) {
+    const conversation = await getPrimaryConversation(harness, bot, {}, CTX);
+    if (!conversation) return null;
+    const inspection = await harness.inspect(CTX);
+    if (inspection.submissions.some((submission) => submission.conversationId === conversation.id) ||
+        inspection.tasks.some((task) => task.record.conversationId === conversation.id)) {
+      throw errWithCode('bot has active or queued work', 'RUNTIME_BUSY');
+    }
+    return conversation;
   }
 
   async function purgeOneExpiredBot(botId) {
@@ -1032,8 +1045,66 @@ function createRuntime({ host, harness, models, defaultModel, releaseOwner, clea
       if (!conversation) {
         return { botId, conversationId: bot.primaryConversationId, items: [], nextCursor: null };
       }
-      const page = await readPrimaryHistory(conversation, { limit, cursor }, CTX);
+      const page = await readPrimaryHistory(conversation, { limit, cursor }, CTX, { afterReset: true });
       return { botId, conversationId: bot.primaryConversationId, ...page };
+    },
+
+    // /clear：SDK 用 pi.reset 开新上下文（不换 conversationId、保留原始回执条目以维持 requestId 幂等），
+    // 返回 reset 条目 id 作为所有客户端的可见历史起点。
+    clearHistory: (botId) => admitBot(botId, async () => {
+      const bot = await requireBot(botId);
+      if (bot.archivedAt !== null && bot.archivedAt !== undefined) {
+        throw errWithCode('bot is archived and read-only', 'BOT_ARCHIVED');
+      }
+      const conversation = await idlePrimaryConversation(bot);
+      const conversationId = bot.primaryConversationId;
+      if (!conversation) return { botId, conversationId, clearedThroughEntryId: 0 };
+      await conversation.reset(undefined, CTX);
+      // 空闲且无并发主会话操作时，reset 就是新的 head 标记；不猜其他条目 id。
+      const head = (await conversation.context(CTX)).head;
+      if (head?.kind !== durable.ResetEntry.kind) {
+        throw errWithCode('reset entry is not the active context head', 'INVALID_STATE');
+      }
+      return { botId, conversationId, clearedThroughEntryId: head.id };
+    }),
+
+    // /compact：准入内只创建手动压缩任务（再来 clear/compact 会被活动任务检查拒绝），
+    // 等待任务终态与摘要落地在准入外，不长期占用该 Bot 的 FIFO。
+    async compact(botId) {
+      assertNonBlank(botId, 'botId');
+      const started = await admitBot(botId, async () => {
+        const bot = await requireBot(botId);
+        if (bot.archivedAt !== null && bot.archivedAt !== undefined) {
+          throw errWithCode('bot is archived and read-only', 'BOT_ARCHIVED');
+        }
+        const conversation = await idlePrimaryConversation(bot);
+        const conversationId = bot.primaryConversationId;
+        if (!conversation) return { conversationId, taskId: null };
+        return { conversationId, taskId: await conversation.compact(undefined, CTX) };
+      });
+      if (started.taskId === null) return { botId, conversationId: started.conversationId, compacted: false };
+      const settled = await harness.waitForTask(started.taskId, CTX);
+      const outcome = settled.state.outcome;
+      if (outcome.status !== 'completed') {
+        const reason = outcome.status === 'failed' || outcome.status === 'faulted'
+          ? outcome.error.message
+          : outcome.reason ?? outcome.status;
+        throw errWithCode(`compaction ${outcome.status}: ${reason}`, 'COMPACTION_FAILED');
+      }
+      if (outcome.result?.entryId !== undefined) {
+        return { botId, conversationId: started.conversationId, compacted: true };
+      }
+      const submissionId = outcome.result?.submissionId;
+      if (submissionId === undefined) return { botId, conversationId: started.conversationId, compacted: false };
+      // 会话空闲时 SDK 在任务的同一个 terminal commit 内已把摘要 write 置为 done；未落地就不算成功。
+      const submission = await harness.submission(submissionId, CTX);
+      if (!submission) throw errWithCode('compaction summary submission is missing', 'COMPACTION_FAILED');
+      let record = await submission.status(CTX);
+      if (record.status === 'queued' || record.status === 'placed') record = await submission.wait(CTX);
+      if (record.status !== 'done') {
+        throw errWithCode(`compaction summary is ${record.status}${record.status === 'unanswered' ? `: ${record.reason}` : ''} rather than placed`, 'COMPACTION_FAILED');
+      }
+      return { botId, conversationId: started.conversationId, compacted: true };
     },
 
     async abort(botId) {

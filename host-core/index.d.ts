@@ -125,6 +125,21 @@ export interface HistoryPage {
   nextCursor: Record<string, unknown> | null;
 }
 
+/** /clear 结果：SDK 用 pi.reset 开新上下文，conversationId 不变。 */
+export interface ClearHistoryResult {
+  botId: string;
+  conversationId: string;
+  /** reset 条目 id；无会话时为 0。所有客户端据此隐藏更早的可见历史。 */
+  clearedThroughEntryId: number;
+}
+
+/** /compact 结果：只等待一次手动压缩任务终态并确认摘要 write 已落地；无可压内容时 compacted 为 false。 */
+export interface CompactResult {
+  botId: string;
+  conversationId: string;
+  compacted: boolean;
+}
+
 /** Billion Context plugin status, returned only when the capability is enabled. */
 interface CompressionBlock {
   blockId: string;
@@ -537,6 +552,10 @@ export interface Runtime {
   wait(botId: string, requestId: string): Promise<PrimarySubmission>;
   getSubmission(botId: string, requestId: string): Promise<PrimarySubmission | null>;
   history(botId: string, options?: HistoryOptions): Promise<HistoryPage>;
+  /** /clear：清空主私聊可见历史并重置模型上下文（pi.reset，不新建 conversationId）。 */
+  clearHistory(botId: string): Promise<ClearHistoryResult>;
+  /** /compact：跑一次手动压缩并等待任务终态；失败抛 COMPACTION_FAILED。 */
+  compact(botId: string): Promise<CompactResult>;
   /** Abort only the primary conversation; does not stop room/DM work contexts. */
   abort(botId: string): Promise<void>;
   contextStatus(botId: string): Promise<ContextStatus>;
@@ -812,6 +831,8 @@ export interface ControlClient {
   submit(botId: string, input: SubmissionInput, options?: ControlClientCallOptions): Promise<PrimarySubmission>;
   getSubmission(botId: string, requestId: string, options?: ControlClientCallOptions): Promise<PrimarySubmission>;
   history(botId: string, options?: HistoryOptions & ControlClientCallOptions): Promise<HistoryPage>;
+  clearHistory(botId: string, options?: ControlClientCallOptions): Promise<ClearHistoryResult>;
+  compact(botId: string, options?: ControlClientCallOptions): Promise<CompactResult>;
   abort(botId: string, options?: ControlClientCallOptions): Promise<{ botId: string }>;
   contextStatus(botId: string, options?: ControlClientCallOptions): Promise<ContextStatus>;
   memoryStatus(botId: string, input?: MemoryStatusInput, options?: ControlClientCallOptions): Promise<MemoryStatus>;
@@ -1656,6 +1677,8 @@ export interface RemoteControlMethodMap {
   submit: { params: { botId: string; requestId: string; text: string }; result: PrimarySubmission };
   getSubmission: { params: { botId: string; requestId: string }; result: PrimarySubmission };
   history: { params: { botId: string; limit?: number; cursor?: Record<string, unknown> | null }; result: HistoryPage };
+  clearHistory: { params: { botId: string }; result: ClearHistoryResult };
+  compact: { params: { botId: string }; result: CompactResult };
   abort: { params: { botId: string }; result: { botId: string } };
   contextStatus: { params: { botId: string }; result: ContextStatus };
   /* Module 14 v2 additions; memory wire params are always {botId,input}. */
