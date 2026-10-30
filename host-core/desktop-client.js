@@ -653,11 +653,12 @@ export function openDesktopClient(options) {
     if (centerState !== 'ready') throw brokerError('NOT_CONNECTED', 'not-sent', 'center is disconnected');
   }
 
-  // Owner-authenticated center reads/writes on fixed paths built from validated ids.
-  async function ownerCenterRequest(path, options) {
+  // Device-token-first center reads/writes on fixed paths built from validated ids,
+  // with fallback to ownerRequest for older center servers or test mocks.
+  async function runCenterAction(action) {
     const client = centerClient;
     try {
-      return await client.ownerRequest(path, options);
+      return await action(client);
     } catch (err) {
       const norm = normalizeDesktopError(err, 'unconfirmed');
       throw brokerError(
@@ -685,7 +686,11 @@ export function openDesktopClient(options) {
     rejectUnknownFields(params, new Set(['deviceId', 'botId']), 'center_bot_capabilities_get params');
     const deviceId = pathId(params.deviceId, 'deviceId');
     const botId = pathId(params.botId, 'botId');
-    return ownerCenterRequest(capabilityPath(deviceId, botId), { signal: reqSignal });
+    return runCenterAction((client) =>
+      typeof client.botCapabilitiesGet === 'function'
+        ? client.botCapabilitiesGet(deviceId, botId, reqSignal)
+        : client.ownerRequest(capabilityPath(deviceId, botId), { signal: reqSignal }),
+    );
   }
 
   async function opCenterBotCapabilitySet(params, reqSignal) {
@@ -710,15 +715,23 @@ export function openDesktopClient(options) {
       throw invalid('overrides must be serializable JSON');
     }
     if (Buffer.byteLength(text, 'utf8') > 64 * 1024) throw invalid('capability write must be at most 64 KiB');
-    return ownerCenterRequest(capabilityPath(deviceId, botId) + '/' + encodeURIComponent(installationId), {
-      method: 'PUT', body: payload, signal: reqSignal,
-    });
+    return runCenterAction((client) =>
+      typeof client.botCapabilitySet === 'function'
+        ? client.botCapabilitySet(deviceId, botId, installationId, payload, reqSignal)
+        : client.ownerRequest(capabilityPath(deviceId, botId) + '/' + encodeURIComponent(installationId), {
+          method: 'PUT', body: payload, signal: reqSignal,
+        }),
+    );
   }
 
   async function opCenterRuntimeStatus(params, reqSignal) {
     rejectUnknownFields(params, new Set(['deviceId']), 'center_runtime_status params');
     const deviceId = pathId(params.deviceId, 'deviceId');
-    return ownerCenterRequest('/api/devices/' + encodeURIComponent(deviceId) + '/runtime-status', { signal: reqSignal });
+    return runCenterAction((client) =>
+      typeof client.runtimeStatus === 'function'
+        ? client.runtimeStatus(deviceId, reqSignal)
+        : client.ownerRequest('/api/devices/' + encodeURIComponent(deviceId) + '/runtime-status', { signal: reqSignal }),
+    );
   }
 
   function dropTransportForCenter() {

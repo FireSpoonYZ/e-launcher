@@ -326,8 +326,27 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
     return store.getBotSync({ epoch, sinceSeq, devices: bridge.listDevices() });
   });
   host('GET', '/api/host/connection', req => ({ protocol: 1, deviceId: req.centerDevice.deviceId, linkUrl }));
+  host('GET', '/api/host/devices/:deviceId/runtime-status', req => {
+    const device = bridge.listDevices().find(item => item.deviceId === req.params.deviceId);
+    if (!device) fail('NOT_FOUND', 'Device not found');
+    return store.getDeviceRuntimeStatus(device.deviceId, device.online);
+  });
   host('GET', '/api/host/devices/:deviceId/bots/:botId/model-config', req => store.getBotModelConfig(req.params.deviceId, req.params.botId));
   host('PUT', '/api/host/devices/:deviceId/bots/:botId/model-config', req => { const b = object(req.body); return changed(store.putBotModelConfig(req.params.deviceId, req.params.botId, b.expectedRevision, validate(selectionSchema, b.value)), req.params.deviceId); });
+  host('GET', '/api/host/devices/:deviceId/bots/:botId/capabilities', req => {
+    const { deviceId, botId } = req.params;
+    if (!store.listDeviceBots(deviceId).some(bot => bot.botId === botId)) fail('NOT_FOUND', 'Bot not found');
+    return store.listBotCapabilities(deviceId, botId);
+  });
+  host('GET', '/api/host/devices/:deviceId/bots/:botId/capabilities/:id', req => store.getBotCapability(req.params.deviceId, req.params.botId, req.params.id));
+  host('PUT', '/api/host/devices/:deviceId/bots/:botId/capabilities/:id', async req => {
+    const { deviceId, botId, id } = req.params;
+    const body = object(req.body);
+    assertConfigCredentials(store.getInstallationConfig(id).configSchema, body.overrides);
+    const result = store.putBotCapability(deviceId, botId, id, body);
+    try { await packages.reconcileDevice(deviceId); } finally { notify(deviceId); }
+    return result;
+  });
   host('GET', '/api/host/snapshot', req => snapshot(req.centerDevice.deviceId));
   host('POST', '/api/host/receipt', (req, reply) => {
     const body = object(req.body);

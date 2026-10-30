@@ -500,6 +500,11 @@ export async function openDeviceLink(options) {
     deviceId: log.deviceId,
     getStatus,
     wake: () => {
+      if (!closed && phase === 'backoff') {
+        cancelReconnect();
+        backoffBase = BACKOFF_MIN_MS;
+        startConnect();
+      }
       delivery.wake();
       scopeDelivery.wake();
       replicaSync.wake();

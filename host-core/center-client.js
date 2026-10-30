@@ -59,10 +59,13 @@ export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, sign
     if (response.statusCode < 200 || response.statusCode >= 300) {
       response.resume();
       if (response.statusCode === 409) throw centerError('REQUEST_CONFLICT', 'center revision conflict; reload before saving');
-      if (response.statusCode === 401 || response.statusCode === 403) {
+      if (response.statusCode === 401 || (response.statusCode === 403 && !path.startsWith('/api/host/devices/'))) {
         const error = centerError('UNAUTHORIZED', 'center authentication failed');
         if (response.statusCode === 401 || path === '/api/host/connection' || path.startsWith('/api/host/bot-directory')) disconnect(error);
         throw error;
+      }
+      if (path.startsWith('/api/host/devices/') && response.statusCode !== 404) {
+        throw centerError('BAD_RESPONSE', `center request failed (${response.statusCode})`);
       }
       throw centerError('CENTER_REQUEST_FAILED', 'center request failed');
     }
@@ -140,6 +143,10 @@ export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, sign
   };
   const botModelPath = (targetDeviceId, botId) => '/api/devices/' + encodeURIComponent(targetDeviceId) + '/bots/' + encodeURIComponent(botId) + '/model-config';
   const hostBotModelPath = (targetDeviceId, botId) => '/api/host/devices/' + encodeURIComponent(targetDeviceId) + '/bots/' + encodeURIComponent(botId) + '/model-config';
+  const botCapabilitiesPath = (targetDeviceId, botId) => '/api/devices/' + encodeURIComponent(targetDeviceId) + '/bots/' + encodeURIComponent(botId) + '/capabilities';
+  const hostBotCapabilitiesPath = (targetDeviceId, botId) => '/api/host/devices/' + encodeURIComponent(targetDeviceId) + '/bots/' + encodeURIComponent(botId) + '/capabilities';
+  const runtimeStatusPath = (targetDeviceId) => '/api/devices/' + encodeURIComponent(targetDeviceId) + '/runtime-status';
+  const hostRuntimeStatusPath = (targetDeviceId) => '/api/host/devices/' + encodeURIComponent(targetDeviceId) + '/runtime-status';
   try {
     const req = start('/api/host/events', { signal });
     req.setTimeout(15000, () => req.destroy(centerError('CENTER_OFFLINE', 'center connection timed out')));
@@ -194,6 +201,35 @@ export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, sign
     },
     botModelGet: (targetDeviceId, botId, signal) => request(hostBotModelPath(targetDeviceId, botId), { signal }).catch(err => err?.code === 'CENTER_REQUEST_FAILED' ? ownerRequest(botModelPath(targetDeviceId, botId), { signal }) : Promise.reject(err)),
     botModelSet: (targetDeviceId, botId, input, signal) => request(hostBotModelPath(targetDeviceId, botId), { method: 'PUT', body: input, signal }).catch(err => err?.code === 'CENTER_REQUEST_FAILED' ? ownerRequest(botModelPath(targetDeviceId, botId), { method: 'PUT', body: input, signal }) : Promise.reject(err)),
+    botCapabilitiesGet: (targetDeviceId, botId, signal) => request(hostBotCapabilitiesPath(targetDeviceId, botId), { signal }).catch(err => {
+      if (err?.code !== 'CENTER_REQUEST_FAILED') return Promise.reject(err);
+      return ownerRequest(botCapabilitiesPath(targetDeviceId, botId), { signal }).catch(async (ownerErr) => {
+        if (ownerErr?.code !== 'BAD_RESPONSE' || !String(ownerErr.message).includes('(404)')) throw ownerErr;
+        const installations = await ownerRequest('/api/capabilities', { signal });
+        if (!Array.isArray(installations)) throw ownerErr;
+        return Promise.all(installations.map(async (installation) => {
+          const id = encodeURIComponent(installation.installationId);
+          const [config, global] = await Promise.all([
+            ownerRequest(botCapabilitiesPath(targetDeviceId, botId) + '/' + id, { signal }),
+            ownerRequest('/api/installations/' + id + '/config', { signal }),
+          ]);
+          return {
+            installation: {
+              ...installation,
+              activation: installation.activation ?? {
+                status: installation.enabled ? 'enabled' : 'disabled',
+                error: null,
+                updatedAt: installation.updatedAt ?? null,
+              },
+            },
+            config,
+            ...(global?.uiSchema === undefined ? {} : { uiSchema: global.uiSchema }),
+          };
+        }));
+      });
+    }),
+    botCapabilitySet: (targetDeviceId, botId, installationId, input, signal) => request(hostBotCapabilitiesPath(targetDeviceId, botId) + '/' + encodeURIComponent(installationId), { method: 'PUT', body: input, signal }).catch(err => err?.code === 'CENTER_REQUEST_FAILED' ? ownerRequest(botCapabilitiesPath(targetDeviceId, botId) + '/' + encodeURIComponent(installationId), { method: 'PUT', body: input, signal }) : Promise.reject(err)),
+    runtimeStatus: (targetDeviceId, signal) => request(hostRuntimeStatusPath(targetDeviceId), { signal }).catch(err => err?.code === 'CENTER_REQUEST_FAILED' ? ownerRequest(runtimeStatusPath(targetDeviceId), { signal }) : Promise.reject(err)),
     bootstrap: (bots) => request('/api/host/bootstrap', { method: 'POST', body: { deviceId, capabilityProtocol: 1, bots } }),
     syncBots: (bots) => request('/api/host/bots-sync', { method: 'POST', body: { deviceId, bots } }).catch(() => request('/api/host/bootstrap', { method: 'POST', body: { deviceId, capabilityProtocol: 1, bots } })),
     getBotSync: ({ epoch, sinceSeq } = {}, signal) => {

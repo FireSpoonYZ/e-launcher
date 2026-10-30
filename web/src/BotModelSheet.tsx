@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Check, Cpu, X } from 'lucide-react';
+import { Check, Cpu, ExternalLink, X } from 'lucide-react';
 import type { CenterBotModelConfig, CenterModelSelection } from '../../host-core/desktop-client.js';
 import type { ModelCatalog } from '../../host-core/index.js';
 import type { DesktopIdentity, DesktopPanelApi } from '../../desktop/web/src/types';
@@ -9,42 +9,45 @@ import { ErrorNotice, errorText, useText } from './ui';
 
 const levels = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
 
-type Props = { api: DesktopPanelApi; identity: DesktopIdentity; botId: string; onClose(): void };
+export type BotSettingsTab = 'model' | 'capabilities';
 
-export function BotModelSheet({ api, identity, botId, onClose }: Props) {
+type Props = { api: DesktopPanelApi; identity: DesktopIdentity; botId: string; initialTab?: BotSettingsTab; onClose(): void };
+
+export function BotModelSheet({ api, identity, botId, initialTab = 'model', onClose }: Props) {
   const t = useText();
   const [target] = useState(() => ({ identity, deviceId: identity.targetDeviceId, botId }));
   const alive = useRef(false);
-  const [authenticated, setAuthenticated] = useState(false);
+  const [authenticated, setAuthenticated] = useState(true);
   const [config, setConfig] = useState<CenterBotModelConfig>();
   const [draft, setDraft] = useState<CenterModelSelection>({});
   const [catalog, setCatalog] = useState<ModelCatalog>();
   const [password, setPassword] = useState('');
   const [query, setQuery] = useState('');
   const [busy, setBusy] = useState(true);
-  const [tab, setTab] = useState<'model' | 'capabilities'>('model');
+  const [tab, setTab] = useState<BotSettingsTab>(initialTab);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
 
+  const isAuthError = (failure: unknown) =>
+    typeof failure === 'object' && failure !== null && (failure as { code?: unknown }).code === 'CONTROL_UNAUTHORIZED';
+
   const loadConfig = async () => {
     const next = await api.broker(target.identity, 'center_bot_model_get', { deviceId: target.deviceId, botId: target.botId });
-    if (alive.current) { setConfig(next); setDraft({ ...next.overrides }); }
+    if (alive.current) { setConfig(next); setDraft({ ...next.overrides }); setAuthenticated(true); }
   };
   useEffect(() => {
     alive.current = true;
     void (async () => {
       try {
-        const [session, models] = await Promise.all([
-          api.broker(target.identity, 'center_owner_session', {}),
-          api.call(target.identity, 'getModelCatalog', {}),
-        ]);
+        const models = await api.call(target.identity, 'getModelCatalog', {});
         if (!alive.current) return;
         setCatalog(models);
-        setAuthenticated(session.authenticated);
-        // 模型配置读取走 host 设备令牌路径，未登录也照常显示；写入缺少 owner CSRF 时再提示登录。
+        // 模型配置读写优先走 host 设备令牌路径；仅当旧中心要求 owner 会话时才回退弹出密码登录。
         await loadConfig();
       } catch (failure) {
-        if (alive.current) setError(errorText(failure));
+        if (!alive.current) return;
+        if (isAuthError(failure)) setAuthenticated(false);
+        else setError(errorText(failure));
       } finally {
         if (alive.current) setBusy(false);
       }
@@ -74,9 +77,11 @@ export function BotModelSheet({ api, identity, botId, onClose }: Props) {
       const next = await api.broker(target.identity, 'center_bot_model_set', {
         deviceId: target.deviceId, botId: target.botId, expectedRevision: config.revision, value: draft,
       });
-      if (alive.current) { setConfig(next); setDraft({ ...next.overrides }); setNotice(t('模型设置已保存', 'Model settings saved')); }
+      if (alive.current) { setConfig(next); setDraft({ ...next.overrides }); setAuthenticated(true); setNotice(t('模型设置已保存', 'Model settings saved')); }
     } catch (failure) {
-      if (alive.current) setError(errorText(failure));
+      if (!alive.current) return;
+      if (isAuthError(failure)) setAuthenticated(false);
+      setError(errorText(failure));
     } finally {
       if (alive.current) setBusy(false);
     }
@@ -92,24 +97,23 @@ export function BotModelSheet({ api, identity, botId, onClose }: Props) {
   const describe = (value: string | null | undefined) => value === undefined ? t('继承', 'Inherit') : value === null ? t('显式清空', 'Explicitly cleared') : value;
   const q = query.trim().toLowerCase();
 
-  return <div className="grok-sheet-backdrop" role="dialog" aria-modal="true" aria-label={t('Bot 模型设置', 'Bot model settings')} onClick={onClose}>
+  return <div className="grok-sheet-backdrop" role="dialog" aria-modal="true" aria-label={t('Bot 设置', 'Bot settings')} onClick={onClose}>
     <section className="grok-model-sheet" onClick={e => e.stopPropagation()}>
       <header className="grok-model-sheet-header">
-        <div className="grok-model-sheet-title-wrap"><h3>{t('Bot 模型设置', 'Bot model settings')}</h3></div>
+        <div className="grok-model-sheet-title-wrap"><h3>{t('Bot 设置', 'Bot settings')}</h3></div>
         <div className="grok-model-sheet-actions">
-          <button type="button" className="grok-done-pill-btn" onClick={() => void openCenterManagement().catch(failure => setError(errorText(failure)))}>{t('配置服务商 / 中心管理', 'Providers / Center')}</button>
           <button type="button" className="grok-floating-circle-btn" aria-label={t('关闭', 'Close')} onClick={onClose}><X size={18}/></button>
         </div>
       </header>
       <div className="grok-model-sheet-body">
         <div className="grok-segmented-tabs" role="tablist" aria-label={t('Bot 设置视图', 'Bot settings views')}>
           <button type="button" role="tab" aria-selected={tab === 'model'} className={tab === 'model' ? 'active' : undefined} onClick={() => setTab('model')}>{t('模型', 'Model')}</button>
-          <button type="button" role="tab" aria-selected={tab === 'capabilities'} className={tab === 'capabilities' ? 'active' : undefined} onClick={() => setTab('capabilities')}>{t('能力', 'Capabilities')}</button>
+          <button type="button" role="tab" aria-selected={tab === 'capabilities'} className={tab === 'capabilities' ? 'active' : undefined} onClick={() => setTab('capabilities')}>{t('插件 / 技能 / MCP', 'Plugins / Skills / MCP')}</button>
         </div>
-        {tab === 'capabilities' && <BotCapabilities api={api} identity={identity} deviceId={identity.targetDeviceId} botId={botId} t={t}/>}
+        {tab === 'capabilities' && <BotCapabilities api={api} identity={identity} deviceId={identity.targetDeviceId} botId={botId} t={t} showTitle={false} onAuthenticated={() => setAuthenticated(true)}/>}
         {tab === 'model' && <>
         {busy && <p role="status">{t('正在处理…', 'Working…')}</p>}
-        {!busy && !authenticated && catalog && <form onSubmit={e => { e.preventDefault(); void login(); }}>
+        {!busy && !authenticated && catalog && <form className="grok-sheet-login" onSubmit={e => { e.preventDefault(); void login(); }}>
           <label className="grok-section-label" htmlFor="center-owner-password">{t('中心管理员密码', 'Center administrator password')}</label>
           <input id="center-owner-password" type="password" autoComplete="current-password" value={password} onChange={e => setPassword(e.target.value)} />
           <button type="submit" className="grok-done-pill-btn" disabled={!password}>{t('中心管理员登录', 'Center administrator login')}</button>
@@ -136,6 +140,13 @@ export function BotModelSheet({ api, identity, botId, onClose }: Props) {
           </select>
           <button type="button" className="grok-done-pill-btn" disabled={busy} onClick={() => void save()}>{t('保存', 'Save')}</button>
         </>}
+        <section className="grok-card-group">
+          <button type="button" className="grok-card-row" onClick={() => void openCenterManagement().catch(failure => setError(errorText(failure)))}>
+            <span className="grok-row-label">{t('管理模型服务商', 'Manage model providers')}</span>
+            <span className="grok-row-value">{t('在中心管理中打开', 'Opens Center management')}</span>
+            <ExternalLink size={16} className="grok-row-chevron"/>
+          </button>
+        </section>
         <ErrorNotice error={error} onDismiss={() => setError('')}/>{notice && <ErrorNotice error={notice} tone="success" compact onDismiss={() => setNotice('')}/>}
         </>}
       </div>

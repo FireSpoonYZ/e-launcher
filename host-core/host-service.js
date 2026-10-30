@@ -84,9 +84,17 @@ export async function openHostService(options) {
     await current.reportRuntime(body);
     lastReported = key;
   }
+  const linkWaiters = new Set();
+  function notifyLinkStatus(status) {
+    for (const waiter of linkWaiters) waiter(status);
+    if (phase === 'running' && !closed) {
+      if (status.phase === 'blocked' || (status.phase === 'online' && state.error)) changed();
+    }
+  }
   function disconnect() {
     // 只有真实断线才递增 generation、关闭准入并重建连接。
     generation++;
+    for (const waiter of linkWaiters) waiter({ phase: 'closed' });
     const previous = client;
     client = null;
     if (previous) void previous.close();
@@ -102,21 +110,59 @@ export async function openHostService(options) {
     timer = setTimeout(() => { timer = null; void enqueue(reconnect).catch(() => { if (!closed) scheduleReconnect(); }); }, 2000);
     timer.unref?.();
   }
-  async function connectLink(url) {
-    let resolveReady, rejectReady;
-    const ready = new Promise((resolve, reject) => { resolveReady = resolve; rejectReady = reject; });
-    const timeout = setTimeout(() => rejectReady(offlineError()), 15000);
-    let next;
+  async function waitLinkOnline(target) {
+    const initial = target.getStatus().phase;
+    if (initial === 'online') return;
+    if (closed || initial === 'blocked' || initial === 'closed') throw offlineError();
+    let onStatus;
+    const ready = new Promise((resolve, reject) => {
+      onStatus = (status) => {
+        if (closed || target !== link) reject(offlineError());
+        else if (status.phase === 'online') resolve();
+        else if (status.phase === 'blocked' || status.phase === 'closed') reject(offlineError());
+      };
+    });
+    const timeout = setTimeout(() => onStatus({ phase: 'closed' }), 15000);
+    linkWaiters.add(onStatus);
     try {
-      next = await openDeviceLink({ dataRoot, url, token: center.deviceToken, ca: center.ca, displayName, platform, control: { url: control.url, token }, onStatus: (status) => {
-        if (status.phase === 'online') resolveReady();
-        else if (status.phase === 'blocked') rejectReady(offlineError());
-      } });
-      if (next.getStatus().phase === 'online') resolveReady();
+      const now = target.getStatus().phase;
+      if (now === 'online') return;
+      if (closed || now === 'blocked' || now === 'closed') throw offlineError();
+      target.wake();
       await ready;
-      return next;
-    } catch (err) { if (next) await next.close(); throw err; }
-    finally { clearTimeout(timeout); }
+    } finally {
+      clearTimeout(timeout);
+      linkWaiters.delete(onStatus);
+    }
+  }
+  async function ensureLinkOnline(url) {
+    parseRelayUrl(url);
+    const currentPhase = link?.getStatus().phase;
+    if (!link || url !== linkUrl || currentPhase === 'blocked' || currentPhase === 'closed') {
+      if (link) {
+        const previous = link;
+        link = null;
+        linkUrl = undefined;
+        await previous.close();
+      }
+      link = await openDeviceLink({
+        dataRoot, url, token: center.deviceToken, ca: center.ca, displayName, platform,
+        control: { url: control.url, token },
+        onStatus: notifyLinkStatus,
+      });
+      linkUrl = url;
+    }
+    try {
+      await waitLinkOnline(link);
+    } catch (err) {
+      if (link && (link.getStatus().phase === 'blocked' || link.getStatus().phase === 'closed')) {
+        const failed = link;
+        link = null;
+        linkUrl = undefined;
+        await failed.close().catch(() => {});
+      }
+      throw err;
+    }
   }
   async function applyPlans(current) {
     let waiting = false;
@@ -153,12 +199,7 @@ export async function openHostService(options) {
     void control.revokeCenterCapabilities(snapshot);
     const plans = plansApplied ? (planning ?? { waiting: false, planned: [], failed: [] }) : await applyPlans(current);
     if (gen !== generation || current !== client) throw offlineError();
-    if (snapshot.linkUrl !== linkUrl || link.getStatus().phase !== 'online') {
-      parseRelayUrl(snapshot.linkUrl);
-      await link.close();
-      link = await connectLink(snapshot.linkUrl);
-      linkUrl = snapshot.linkUrl;
-    }
+    await ensureLinkOnline(snapshot.linkUrl);
     if (gen !== generation || current !== client) throw offlineError();
     const previousRevision = state.appliedRevision;
     if (previousRevision !== snapshot.revision) {
@@ -335,8 +376,7 @@ export async function openHostService(options) {
       }),
     });
     if (current !== client) throw offlineError();
-    linkUrl = snapshot.linkUrl;
-    link = await connectLink(linkUrl);
+    await ensureLinkOnline(snapshot.linkUrl);
     await apply(snapshot, current, initialGeneration, { plansApplied: true, resume: true, planning: bootPlans });
     phase = 'running';
     startReconcile();
@@ -345,6 +385,7 @@ export async function openHostService(options) {
     clearTimeout(timer);
     clearTimeout(retryTimer);
     if (reconcileTimer) clearInterval(reconcileTimer);
+    for (const waiter of linkWaiters) waiter({ phase: 'closed' });
     if (client) await client.close().catch(() => {});
     if (link) await link.close().catch(() => {});
     if (control) await control.close().catch(() => {});
@@ -369,16 +410,17 @@ export async function openHostService(options) {
         clearTimeout(retryTimer);
         if (reconcileTimer) clearInterval(reconcileTimer);
         generation++;
+        for (const waiter of linkWaiters) waiter({ phase: 'closed' });
         state = { ...state, state: 'disconnected' };
         const errors = [];
         try { await control.setCenterOnline(false); } catch (err) { errors.push(err); }
         try { if (client) await client.close(); } catch (err) { errors.push(err); }
         try { await serial; } catch (err) { errors.push(err); }
-        try { await link.close(); } catch (err) { errors.push(err); }
+        try { if (link) await link.close(); } catch (err) { errors.push(err); }
         try { await control.close(); } catch (err) { errors.push(err); }
         try { await installer.close(); } catch (err) { errors.push(err); }
         try { settingsStore.close(); } catch (err) { errors.push(err); }
-        frozen = { deviceId, phase: 'closed', control: { url: control.url, listening: false }, relay: link.getStatus(), activeSettingsRevision: activeRevision, settingsRevision: lastRevision, restartRequired: lastRevision !== activeRevision, center: { ...state } };
+        frozen = { deviceId, phase: 'closed', control: { url: control.url, listening: false }, relay: link?.getStatus() ?? null, activeSettingsRevision: activeRevision, settingsRevision: lastRevision, restartRequired: lastRevision !== activeRevision, center: { ...state } };
         if (errors.length) throw new AggregateError(errors, 'host service close failed');
       })();
     },

@@ -4,6 +4,7 @@ import {
   ArrowLeft,
   ArrowUp,
   AudioLines,
+  Brain,
   Check,
   ChevronDown,
   ChevronRight,
@@ -61,7 +62,7 @@ import type { ClearHistoryResult, CompactResult, DevicesDirectoryItem, PendingCu
 import type { ShowerCall } from './ShowerPreview';
 import { Markdown } from './Markdown';
 import { BotScreenPanel } from './BotScreenPanel';
-import { BotModelSheet } from './BotModelSheet';
+import { BotModelSheet, type BotSettingsTab } from './BotModelSheet';
 import {
   GROK_AVATAR_PRESETS,
   GROK_COLOR_PALETTE,
@@ -805,7 +806,7 @@ export function HostPage({
     deleteAfterRun: false,
   });
 
-  const [modelTarget, setModelTarget] = useState<{ botKey: string; botId: string; center: string; identity: DesktopIdentity; api: DesktopPanelApi } | null>(null);
+  const [modelTarget, setModelTarget] = useState<{ botKey: string; botId: string; center: string; identity: DesktopIdentity; api: DesktopPanelApi; tab: BotSettingsTab } | null>(null);
 
   const observeIdRef = useRef<string | undefined>(undefined);
   const remoteObserveRef = useRef<{ close(): Promise<void> } | null>(null);
@@ -2152,12 +2153,12 @@ ${newer}` : draftSnapshot;
       setScreen('hub');
     });
 
-  const openModelPickerSheet = (_target: 'bot-edit' | 'bot-profile') => {
+  const openModelPickerSheet = (_target: 'bot-edit' | 'bot-profile', tab: BotSettingsTab = 'model') => {
     if (!activeBot || !remoteIdentity || !remoteConnected || !remoteClientRef.current) return;
     const deviceId = activeBot.hostKind === 'local' ? localHost?.deviceId : activeBot.hostId;
     if (!deviceId) return;
     const api = remoteClientRef.current.api;
-    setModelTarget({ botKey: activeBot.key, botId: activeBot.botId, center: activeCenter, identity: api.identityForTarget(deviceId), api });
+    setModelTarget({ botKey: activeBot.key, botId: activeBot.botId, center: activeCenter, identity: api.identityForTarget(deviceId), api, tab });
   };
 
   useEffect(() => {
@@ -2412,31 +2413,6 @@ ${newer}` : draftSnapshot;
       });
       if (activeBot) await loadBotSchedules(activeBot);
     });
-
-  const visibleTurns = useMemo(() => {
-    if (!activeBot) return [];
-    const clearedAfter = clearedMap[activeBot.key] ?? 0;
-    // raw history 是旧页，live 投影是新窗口：按 entry id 去重排序；同 id 保留 raw（工具/思考细节更全）。
-    const byId = new Map<string, Record<string, unknown>>();
-    for (const item of array<Record<string, unknown>>(chatLive?.state?.history)) {
-      byId.set(String(item.id), item);
-    }
-    for (const item of chatHistory) byId.set(String(item.id), item);
-    const numericId = (item: Record<string, unknown>) => {
-      const id = Number(item.id);
-      return Number.isFinite(id) ? id : 0;
-    };
-    const all = parseHistoryEntries(
-      [...byId.values()].sort((a, b) => numericId(a) - numericId(b)),
-      clearedAfter,
-    );
-    if (chatPending?.botKey === activeBot.key && !all.some(turn =>
-      turn.role === 'user' && turn.entryId > chatPending.afterEntryId && turn.text === chatPending.text,
-    )) all.push({ id: `pending-${chatPending.requestId}`, role: 'user', text: chatPending.text, entryId: chatPending.afterEntryId + 0.5 });
-    const q = chatSearchQuery.trim().toLowerCase();
-    if (!chatSearchOpen || !q) return all;
-    return all.filter(turn => turn.text.toLowerCase().includes(q));
-  }, [chatHistory, chatLive, activeBot, clearedMap, chatSearchOpen, chatSearchQuery, chatPending]);
 
   const submission = chatSubmissionRef.current;
   const submissionFailure = submission && chatReceipt?.status === 'unanswered' &&
@@ -3507,6 +3483,7 @@ ${newer}` : draftSnapshot;
               )}
               queuedCount={chatLive?.state?.queuedCount ?? 0}
               hasError={Boolean(submissionFailure) || chatReceipt?.status === 'unanswered'}
+              startedAt={activeTurnStartedAt}
               t={t}
             />
             <ErrorNotice
@@ -3848,6 +3825,20 @@ ${newer}` : draftSnapshot;
               <button
                 type="button"
                 className="grok-card-row"
+                onClick={() => openModelPickerSheet('bot-profile', 'capabilities')}
+                disabled={!getOrCreateRemoteClient || !remoteConnected || !remoteIdentity || (activeBot.hostKind === 'local' && !localHost?.deviceId)}
+              >
+                <Puzzle size={20} className="grok-row-icon" />
+                <span className="grok-row-label">{t('插件 / 技能 / MCP', 'Plugins / Skills / MCP')}</span>
+                <span className="grok-row-value grok-row-value-path">
+                  {getOrCreateRemoteClient ? t('设置', 'Settings') : t('请在独立助手中设置 Bot 能力', 'Set bot capabilities in the standalone assistant')}
+                </span>
+                <ChevronRight size={18} className="grok-row-chevron" />
+              </button>
+
+              <button
+                type="button"
+                className="grok-card-row"
                 onClick={() => {
                   setSubPageReturnScreen('bot-profile');
                   setScreen('bot-soul');
@@ -3884,10 +3875,10 @@ ${newer}` : draftSnapshot;
                 className="grok-card-row"
                 onClick={() => void openCenterManagement()}
               >
-                <Puzzle size={20} className="grok-row-icon" />
+                <Brain size={20} className="grok-row-icon" />
                 <span className="grok-row-label">{t('长期记忆', 'Memory')}</span>
-                <span className="grok-row-value">{t('中心管理', 'Center managed')}</span>
-                <ChevronRight size={18} className="grok-row-chevron" />
+                <span className="grok-row-value">{t('在中心管理中打开', 'Opens Center management')}</span>
+                <ExternalLink size={16} className="grok-row-chevron" />
               </button>
 
               <div className="grok-card-row no-active">
@@ -4252,13 +4243,18 @@ ${newer}` : draftSnapshot;
             )}
 
             <div className="grok-field-section">
-              <label className="grok-section-label">{t('模型', 'Model')}</label>
+              <label className="grok-section-label">{t('模型与能力', 'Model & Capabilities')}</label>
               <div className="grok-card-group">
                 {editMode === 'create' ? <div className="grok-card-row no-active">{t('创建后在模型设置中选择，默认继承中心', 'Choose a model after creation; inherits from the center by default')}</div>
                   : !getOrCreateRemoteClient ? <div className="grok-card-row no-active">{t('请在独立助手中设置 Bot 模型', 'Set the bot model in the standalone assistant')}</div>
-                  : <button type="button" className="grok-card-row" onClick={() => openModelPickerSheet('bot-edit')} disabled={!remoteConnected || !remoteIdentity || !activeBot || (activeBot.hostKind === 'local' && !localHost?.deviceId)}>
-                    <Cpu size={18} className="grok-row-icon"/><span className="grok-row-label">{t('Bot 模型设置', 'Bot model settings')}</span><ChevronRight size={18} className="grok-row-chevron"/>
-                  </button>}
+                  : <>
+                    <button type="button" className="grok-card-row" onClick={() => openModelPickerSheet('bot-edit')} disabled={!remoteConnected || !remoteIdentity || !activeBot || (activeBot.hostKind === 'local' && !localHost?.deviceId)}>
+                      <Cpu size={18} className="grok-row-icon"/><span className="grok-row-label">{t('Bot 模型设置', 'Bot model settings')}</span><ChevronRight size={18} className="grok-row-chevron"/>
+                    </button>
+                    <button type="button" className="grok-card-row" onClick={() => openModelPickerSheet('bot-edit', 'capabilities')} disabled={!remoteConnected || !remoteIdentity || !activeBot || (activeBot.hostKind === 'local' && !localHost?.deviceId)}>
+                      <Puzzle size={18} className="grok-row-icon"/><span className="grok-row-label">{t('插件 / 技能 / MCP', 'Plugins / Skills / MCP')}</span><ChevronRight size={18} className="grok-row-chevron"/>
+                    </button>
+                  </>}
               </div>
             </div>
 
@@ -5215,7 +5211,7 @@ ${newer}` : draftSnapshot;
         activeCenter === modelTarget.center && remoteConnected && remoteIdentity?.generation === modelTarget.identity.generation &&
         (activeBot.hostKind === 'local' ? localHost?.deviceId : activeBot.hostId) === modelTarget.identity.targetDeviceId &&
         (screen === 'bot-profile' || (screen === 'bot-edit' && editMode === 'edit')) &&
-        <BotModelSheet key={`${modelTarget.center}|${modelTarget.botKey}|${modelTarget.identity.generation}`} api={modelTarget.api} identity={modelTarget.identity} botId={modelTarget.botId} onClose={() => setModelTarget(null)}/>}
+        <BotModelSheet key={`${modelTarget.center}|${modelTarget.botKey}|${modelTarget.identity.generation}|${modelTarget.tab}`} api={modelTarget.api} identity={modelTarget.identity} botId={modelTarget.botId} initialTab={modelTarget.tab} onClose={() => setModelTarget(null)}/>}
 
       {/* ==================== LEFT HIDDEN SIDEBAR DRAWER (Persistent for smooth slide animation) ==================== */}
       <div
