@@ -1,8 +1,12 @@
-import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
+import { createContext, useContext, useEffect, useLayoutEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { Copy, ExternalLink } from 'lucide-react';
+import { GrokBotAvatar, JARVIS_AVATAR_PRESET } from '../../../web/src/GrokBotAvatar';
+import { ErrorNotice, errorText, useText } from '../../../web/src/ui';
+import './CenterGate.css';
 
 type SavedConnection = { url: string; deviceId: string; ca: string };
-type CenterStatus = {
+export type CenterStatus = {
   state: 'disconnected' | 'connecting' | 'ready';
   centerUrl: string;
   clientId: string;
@@ -13,7 +17,41 @@ type Props = { children: ReactNode; onDisconnected(): void };
 const request = <T,>(op: string, params: object = {}) =>
   invoke<T>('desktop_request', { request: { op, params } });
 
+type CenterConnection = { status: CenterStatus | undefined; disconnectCenter: () => Promise<void> };
+const CenterConnectionContext = createContext<CenterConnection>({ status: undefined, disconnectCenter: () => Promise.resolve() });
+
+export function useCenterConnection(): CenterConnection {
+  return useContext(CenterConnectionContext);
+}
+
+export type DesktopTheme = 'light' | 'dark' | 'system';
+
+const readDesktopTheme = (): DesktopTheme => {
+  const value = localStorage.getItem('desktop-theme');
+  return value === 'light' || value === 'dark' || value === 'system' ? value : 'system';
+};
+
+const applyDesktopTheme = (theme: DesktopTheme) => {
+  document.documentElement.dataset.theme = theme;
+};
+
+export function useDesktopTheme(): { theme: DesktopTheme; setTheme: (theme: DesktopTheme) => void } {
+  const [theme, setThemeState] = useState<DesktopTheme>(readDesktopTheme);
+  const setTheme = (next: DesktopTheme) => {
+    localStorage.setItem('desktop-theme', next);
+    applyDesktopTheme(next);
+    setThemeState(next);
+  };
+  return { theme, setTheme };
+}
+
 export function CenterGate({ children, onDisconnected }: Props) {
+  const t = useText();
+  // 主题应用放在真实桌面入口挂载处：本模块会被 BotSettings -> openCenterManagement 间接导入，
+  // 而 BotSettings 可被手机端引用，模块加载即写 data-theme 会污染移动端。
+  useLayoutEffect(() => {
+    applyDesktopTheme(readDesktopTheme());
+  }, []);
   const [url, setUrl] = useState(() => localStorage.getItem('center-url') ?? '');
   const [deviceId, setDeviceId] = useState(() => localStorage.getItem('center-device-id') ?? '');
   const [token, setToken] = useState('');
@@ -22,6 +60,7 @@ export function CenterGate({ children, onDisconnected }: Props) {
   const [saved, setSaved] = useState<SavedConnection>();
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+  const [copied, setCopied] = useState(false);
   const epoch = useRef(0);
   const autoAttempted = useRef(false);
   const wasReady = useRef(false);
@@ -79,9 +118,9 @@ export function CenterGate({ children, onDisconnected }: Props) {
                   setStatus(connected);
                   setSaved(connected.savedConnection);
                 }
-              } catch {
+              } catch (e) {
                 if (live && attempt === epoch.current) {
-                  setError('自动连接中心失败，请核对已保存凭据或重新输入令牌。');
+                  setError(t('自动连接中心失败，请核对已保存凭据或重新输入令牌。', 'Auto-connect to the center failed. Check the saved credentials or re-enter the token.') + ' ' + errorText(e));
                 }
               } finally {
                 if (live && attempt === epoch.current) setBusy(false);
@@ -124,30 +163,102 @@ export function CenterGate({ children, onDisconnected }: Props) {
       localStorage.setItem('center-device-id', deviceId.trim());
       setStatus(next);
       setSaved(next.savedConnection);
-    } catch {
+    } catch (e) {
       setStatus(undefined);
-      setError('中心连接失败，请检查地址、设备身份、令牌与证书。');
+      setError(t('中心连接失败，请检查地址、设备身份、令牌与证书。', 'Failed to connect to the center. Check the address, device identity, token and certificate.') + ' ' + errorText(e));
     } finally {
       setToken('');
       setBusy(false);
     }
   };
 
-  if (status?.state === 'ready') return <><button type="button" onClick={() => { epoch.current += 1; void request<CenterStatus>('center_disconnect').then((next) => { setStatus(next); setSaved(next.savedConnection); }); }}>更换中心连接</button>{children}</>;
-  return <main className="desktop-shell error-shell">
-    <h1>连接中心</h1>
-    <p>请先在中心登记客户端设备并输入其设备身份和令牌。</p>
-    {status?.clientId && <p>本客户端标识：{status.clientId}</p>}
-    <form onSubmit={connect}>
-      <label>中心 HTTPS 地址<input required type="url" value={url} onChange={e => setUrl(e.target.value)} /></label>
-      <label>设备身份<input required value={deviceId} onChange={e => setDeviceId(e.target.value)} /></label>
-      <label>设备令牌{matchesSaved ? '（已保存，留空即可重连）' : ''}<input required={!matchesSaved} type="password" autoComplete="off" value={token} onChange={e => setToken(e.target.value)} placeholder={matchesSaved ? '已保存凭据，留空使用已存令牌' : ''} /></label>
-      <label>CA 证书（可选）<textarea value={ca} onChange={e => setCa(e.target.value)} /></label>
-      <button disabled={busy} type="submit">{busy ? '连接中…' : '连接 / 重试'}</button>
-    </form>
-    <button disabled={!url} onClick={() => void invoke('desktop_open_center', { url: url.trim() }).catch(() => setError('无法打开中心管理页面。'))}>打开中心管理 / 登录</button>
-    {error && <p role="alert">{error}</p>}
-  </main>;
+  const disconnectCenter = async () => {
+    epoch.current += 1;
+    const next = await request<CenterStatus>('center_disconnect');
+    setStatus(next);
+    setSaved(next.savedConnection);
+  };
+
+  if (status?.state === 'ready') {
+    return (
+      <CenterConnectionContext.Provider value={{ status, disconnectCenter }}>
+        {children}
+      </CenterConnectionContext.Provider>
+    );
+  }
+
+  const copyClientId = () => {
+    if (!status?.clientId) return;
+    void navigator.clipboard?.writeText(status.clientId).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1600);
+    }).catch(() => {});
+  };
+
+  const connecting = busy || status?.state === 'connecting';
+
+  return (
+    <main className="desktop-shell gate-shell">
+      <section className="gate-card">
+        <div className="gate-hero">
+          <GrokBotAvatar preset={JARVIS_AVATAR_PRESET} busy={connecting} size={72} />
+          <h1>{t('连接 e-助手中心', 'Connect to e-Assistant Center')}</h1>
+          <p className="gate-subtitle">{t('统一管理多端智能体、模型、插件与记忆', 'Manage agents, models, plugins and memory across devices')}</p>
+        </div>
+        {status?.clientId && (
+          <div className="gate-client-id">
+            <span className="gate-client-label">{t('本客户端标识', 'Client ID')}</span>
+            <code>{status.clientId}</code>
+            <button type="button" className="icon-button" onClick={copyClientId} title={t('复制', 'Copy')}>
+              <Copy size={14} />
+            </button>
+            {copied && <span className="gate-copied">{t('已复制', 'Copied')}</span>}
+          </div>
+        )}
+        <form className="gate-form" onSubmit={connect}>
+          <label className="gate-field">
+            <span>{t('中心 HTTPS 地址', 'Center HTTPS URL')}</span>
+            <input required type="url" value={url} onChange={e => setUrl(e.target.value)} placeholder="https://center.example.com" />
+          </label>
+          <label className="gate-field">
+            <span>{t('设备身份', 'Device identity')}</span>
+            <input required value={deviceId} onChange={e => setDeviceId(e.target.value)} />
+          </label>
+          <label className="gate-field">
+            <span>
+              {t('设备令牌', 'Device token')}
+              {matchesSaved && <em className="gate-saved-badge">{t('已保存，留空即可重连', 'Saved — leave blank to reconnect')}</em>}
+            </span>
+            <input
+              required={!matchesSaved}
+              type="password"
+              autoComplete="off"
+              value={token}
+              onChange={e => setToken(e.target.value)}
+              placeholder={matchesSaved ? t('已保存凭据，留空使用已存令牌', 'Saved credentials — leave blank to reuse') : ''}
+            />
+          </label>
+          <details className="gate-advanced">
+            <summary>{t('高级 TLS / 自签 CA 证书（可选）', 'Advanced TLS / self-signed CA certificate (optional)')}</summary>
+            <textarea value={ca} onChange={e => setCa(e.target.value)} placeholder="-----BEGIN CERTIFICATE-----" rows={4} />
+          </details>
+          <button disabled={busy} type="submit" className="primary-button gate-submit">
+            {connecting ? t('连接中…', 'Connecting…') : t('连接中心', 'Connect')}
+          </button>
+        </form>
+        <button
+          type="button"
+          className="secondary-button gate-manage"
+          disabled={!url}
+          onClick={() => void invoke('desktop_open_center', { url: url.trim() }).catch((e) => setError(t('无法打开中心管理页面。', 'Could not open the center management page.') + ' ' + errorText(e)))}
+        >
+          <ExternalLink size={14} />
+          {t('在浏览器打开中心管理', 'Open center management in browser')}
+        </button>
+        <ErrorNotice error={error} onDismiss={() => setError('')} />
+      </section>
+    </main>
+  );
 }
 
 export function openCenterManagement() {

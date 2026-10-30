@@ -1,12 +1,16 @@
 // Module 17 待发送面板（core-owned，stage1 修正）：pending 列表/分页/筛选、显式发送、
 // 只读 reconcile、仅 pending 本地 cancel；冻结创建/成员变更 intents 展示与对账。
 // 断开后保留队列 identity/目标，本面板仍可离线 list/get/enqueue/cancel。
+// 桌面重构（5.7）：中文用户语言 + 状态筛选 + 对账卡片 + 折叠回执；技术术语与业务 ID
+// 收进「处理说明 / 技术详情」，不默认铺满卡片。新样式仅在 .desktop-shell 作用域生效，
+// 手机端（grok-pending-mobile-container / 共享样式）继续命中原有结构类。
 import { Component } from 'react';
 import type { ReactNode } from 'react';
 import type { PendingCursor, PendingRecord, PendingState } from '../../../host-core/index.js';
 import type { DesktopUiIntent } from '../../../host-core/desktop-client.js';
 import type { DesktopIdentity, DesktopPanelApi } from './types';
 import { toError } from './api';
+import './PendingPanel.css';
 
 interface Props {
   api: DesktopPanelApi;
@@ -24,18 +28,47 @@ interface State {
 }
 
 const STATE_LABELS: Record<PendingState, string> = {
-  pending: 'pending',
-  sending: 'sending',
-  unconfirmed: 'unconfirmed',
-  accepted: 'accepted',
-  rejected: 'rejected',
+  pending: '待发送',
+  sending: '发送中',
+  unconfirmed: '待确认',
+  accepted: '已受理',
+  rejected: '已拒绝',
 };
 
 const INTENT_METHOD_LABELS: Record<DesktopUiIntent['method'], string> = {
-  createBot: '创建 Bot',
-  createScope: '创建 scope',
-  updateScope: '更新 scope',
+  createBot: '创建助手',
+  createScope: '创建群聊',
+  updateScope: '更新群聊',
 };
+
+/** 回执/结果 JSON 统一收进折叠 <details>，避免长 payload 直接铺满对账列表。 */
+function RawBlock({ label, value }: { label: string; value: unknown }): ReactNode {
+  return (
+    <details className="pending-raw raw-history">
+      <summary>{label}</summary>
+      <pre className="raw-history-content">{JSON.stringify(value ?? null, null, 2)}</pre>
+    </details>
+  );
+}
+
+/** 业务 ID 与技术元数据统一进「技术详情」折叠块，卡片首屏只留用户语言。 */
+function TechDetails({ rows, rawLabel, rawValue }: {
+  rows: string[];
+  rawLabel?: string;
+  rawValue?: unknown;
+}): ReactNode {
+  return (
+    <details className="pending-tech">
+      <summary>技术详情</summary>
+      <div className="pending-tech-body">
+        {rows.map((r) => (
+          <span key={r} className="metadata pending-mono">{r}</span>
+        ))}
+        {rawLabel !== undefined && <RawBlock label={rawLabel} value={rawValue} />}
+      </div>
+    </details>
+  );
+}
 
 export class PendingPanel extends Component<Props, State> {
   state: State = {
@@ -218,27 +251,38 @@ export class PendingPanel extends Component<Props, State> {
     const canReconcileRow =
       item.state === 'unconfirmed' || item.state === 'pending' || item.state === 'rejected';
     const canCancel = item.state === 'pending';
+    const title =
+      item.kind === 'primary' ? '发给助手的消息' : '发到群聊的消息';
+    const target =
+      item.kind === 'primary' ? item.botId : item.scopeId;
     return (
-      <div key={item.id} className="entity-row">
+      <div key={item.id} className="entity-row pending-card">
         <div className="entity-main">
-          <span className="entity-title">
-            {item.kind === 'primary' ? `primary · ${item.botId}` : `room · ${item.scopeId}`}
-          </span>
-          <span className="status">{STATE_LABELS[item.state]}</span>
-          <span className="metadata">{`target ${item.targetDeviceId}`}</span>
-          <span className="metadata">
-            {'requestId' in item ? item.requestId : `message ${item.messageId}`}
-          </span>
+          <div className="pending-card-head">
+            <span className="entity-title">{title + ' · ' + target}</span>
+            <span className={'status pending-state-' + item.state}>{STATE_LABELS[item.state]}</span>
+          </div>
+          {item.text && <p className="pending-text">{item.text}</p>}
           {item.lastError && (
             <span className="metadata error-banner">
-              {`${item.lastError.code} · ${item.lastError.outcome}`}
+              {item.lastError.code + ' · ' + item.lastError.outcome}
             </span>
           )}
-          <pre className="raw-history">{JSON.stringify(item.receipt ?? null, null, 2)}</pre>
+          <TechDetails
+            rows={[
+              '目标设备 ' + item.targetDeviceId,
+              'requestId' in item
+                ? 'requestId ' + item.requestId
+                : 'messageId ' + item.messageId,
+            ]}
+            rawLabel="回执 JSON"
+            rawValue={item.receipt}
+          />
         </div>
-        <div className="toolbar">
+        <div className="toolbar pending-actions">
           {canSend && (
             <button
+              className="pending-action-primary"
               onClick={() => void this.run(item.id, 'pending_send')}
               disabled={busy || offline}
             >
@@ -250,7 +294,7 @@ export class PendingPanel extends Component<Props, State> {
               onClick={() => void this.run(item.id, 'pending_reconcile')}
               disabled={busy || offline}
             >
-              对账
+              核对结果
             </button>
           )}
           {canCancel && (
@@ -259,7 +303,7 @@ export class PendingPanel extends Component<Props, State> {
             </button>
           )}
           {!canSend && !canReconcileRow && (
-            <span className="metadata">终态无发送/对账</span>
+            <span className="metadata">已结束，无需操作</span>
           )}
         </div>
       </div>
@@ -271,31 +315,41 @@ export class PendingPanel extends Component<Props, State> {
     const offline = !this.props.transportConnected;
     const canDelete = intent.outcome === 'responded' || intent.outcome === 'not-sent';
     const canReconcileNow = this.canReconcile(intent);
+    const outcomeLabel =
+      intent.outcome === 'responded'
+        ? '已生效'
+        : intent.outcome === 'unconfirmed'
+          ? '待确认'
+          : '未发送';
     return (
-      <div key={intent.id} className="entity-row">
+      <div key={intent.id} className="entity-row pending-card pending-intent">
         <div className="entity-main">
-          <span className="entity-title">{INTENT_METHOD_LABELS[intent.method]}</span>
-          <span className="status">{intent.outcome}</span>
-          <span className="metadata">
-            {`target ${intent.targetDeviceId} · profile ${intent.profileId}`}
-          </span>
-          <span className="metadata">
-            {`requestId ${(intent.params as { requestId?: string }).requestId ?? '—'}`}
-          </span>
+          <div className="pending-card-head">
+            <span className="entity-title">{INTENT_METHOD_LABELS[intent.method]}</span>
+            <span className={'status pending-outcome-' + intent.outcome}>{outcomeLabel}</span>
+          </div>
           {intent.error && (
             <span className="metadata error-banner">
-              {`${intent.error.code} · ${intent.error.outcome}`}
+              {intent.error.code + ' · ' + intent.error.outcome}
             </span>
           )}
-          <pre className="raw-history">{JSON.stringify(intent.result ?? null, null, 2)}</pre>
+          <TechDetails
+            rows={[
+              '目标设备 ' + intent.targetDeviceId,
+              'profile ' + intent.profileId,
+              'requestId ' + ((intent.params as { requestId?: string }).requestId ?? '—'),
+            ]}
+            rawLabel="结果 JSON"
+            rawValue={intent.result}
+          />
         </div>
-        <div className="toolbar">
+        <div className="toolbar pending-actions">
           {intent.method === 'createBot' && (
             <button
               onClick={() => void this.reconcileBotIntent(intent)}
               disabled={busy || !canReconcileNow || offline}
             >
-              对账 findByRequest
+              核对结果
             </button>
           )}
           {canDelete && (
@@ -304,7 +358,7 @@ export class PendingPanel extends Component<Props, State> {
             </button>
           )}
           {!canDelete && !canReconcileNow && (
-            <span className="metadata">unconfirmed 不可删除或编辑身份</span>
+            <span className="metadata">待确认期间不可删除</span>
           )}
         </div>
       </div>
@@ -314,14 +368,37 @@ export class PendingPanel extends Component<Props, State> {
   render(): ReactNode {
     const identity = this.props.identity;
     if (!identity) {
-      return <div className="empty-state">未配置当前队列，请先连接目标 Host</div>;
+      return <div className="empty-state">未配置队列，请先连接目标设备</div>;
     }
     const offline = !this.props.transportConnected;
+    const FILTERS: Array<{ key: PendingState | null; label: string }> = [
+      { key: null, label: '全部' },
+      { key: 'pending', label: STATE_LABELS.pending },
+      { key: 'sending', label: STATE_LABELS.sending },
+      { key: 'unconfirmed', label: STATE_LABELS.unconfirmed },
+      { key: 'accepted', label: STATE_LABELS.accepted },
+      { key: 'rejected', label: STATE_LABELS.rejected },
+    ];
     return (
-      <div className="conversation-layout">
-        <div className="entity-list">
+      <div className="pending-panel">
+        <div className="pending-panel-head">
           <h3>待发送</h3>
-          <label>
+          {/* 桌面壳内用胶囊筛选；移动容器隐藏本控件，改用下方 select（见 PendingPanel.css）。 */}
+          <div className="pending-filter-tabs pill-tabs" role="tablist" aria-label="状态筛选">
+            {FILTERS.map((f) => (
+              <button
+                key={f.key ?? 'all'}
+                type="button"
+                className={this.state.filter === f.key ? 'active' : ''}
+                aria-pressed={this.state.filter === f.key}
+                onClick={() => this.setState({ filter: f.key }, () => void this.load())}
+              >
+                {f.label}
+              </button>
+            ))}
+          </div>
+          {/* 移动容器内的单一筛选控件；桌面壳内由 CSS 隐藏。 */}
+          <label className="pending-filter-select">
             筛选
             <select
               value={this.state.filter ?? ''}
@@ -340,27 +417,34 @@ export class PendingPanel extends Component<Props, State> {
               ))}
             </select>
           </label>
-          <h3>冻结创建/成员变更 intents</h3>
-          <p className="empty-state">
-            Bot create 仅支持只读 findByRequest 对账；scope create/update 无 request lookup，不虚构对账或自动重放。
-          </p>
-          <p className="empty-state">已确认或 not-sent 可显式删除；unconfirmed 不可删除或编辑身份。</p>
+          <details className="pending-howto">
+            <summary>处理说明</summary>
+            <p className="pending-hint">
+              发送失败或回执丢失的消息不会自动重发，需手动点「发送」或「核对结果」。
+              「创建助手」支持按原编号只读查询结果；群聊的创建/更新无此查询，结果未知时
+              保持「待确认」，不会伪造结果。已生效或未发送的变更可删除；待确认期间不可删除。
+            </p>
+          </details>
         </div>
-        <div className="chat-pane">
-          <h3>Pending 队列</h3>
+        <div className="chat-pane pending-panel-body">
           {offline && (
-            <p className="status">
-              客户端未连接：队列仍可本地读取/取消；发送与对账已禁用，重连后再操作。
+            <p className="status error">
+              客户端未连接：队列仍可查看或取消；发送与核对已禁用，重连后再操作。
             </p>
           )}
           {this.state.error && (
             <div className="error-banner" role="alert">
-              {`操作失败：${this.state.error}`}
+              {'操作失败：' + this.state.error}
               <button onClick={() => void this.load()}>重试</button>
             </div>
           )}
+          <h3>消息队列</h3>
           {this.state.items.length === 0 ? (
-            this.state.error ? null : <p className="empty-state">暂无 pending 记录</p>
+            this.state.error ? null : (
+              <p className="empty-state">
+                {this.state.filter ? '该状态下暂无消息' : '暂无待发送消息'}
+              </p>
+            )
           ) : (
             this.state.items.map((it) => this.renderItem(it))
           )}
@@ -369,9 +453,9 @@ export class PendingPanel extends Component<Props, State> {
               加载更多
             </button>
           )}
-          <h3>Intents</h3>
+          <h3>待确认的变更</h3>
           {this.state.intents.length === 0 ? (
-            <p className="empty-state">暂无冻结 intents</p>
+            <p className="empty-state">暂无待确认的变更</p>
           ) : (
             this.state.intents.map((it) => this.renderIntent(it))
           )}

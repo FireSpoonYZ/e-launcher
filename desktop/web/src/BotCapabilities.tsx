@@ -1,7 +1,10 @@
 // 手机与桌面共用的 Bot 能力面板（插件/MCP/技能）。
 // 只经中心管理接口（owner 会话 + CAS 写入）读写，不经过目标 Host、不启用旧本地 getBotExtensions；
 // 目标离线仍可在中心保存，但只有中心回执 applied 才显示“已生效”，不伪报。
+// 桌面端视觉重构（Lane 6）：新增桌面专属样式以 .desktop-shell/.desktop-dialog 作用域，
+// 不影响手机端 BotModelSheet 中 .grok-model-sheet 作用域样式；props/数据/CAS/显式发送语义不变。
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { Plug, Lock, ChevronDown, Save, RotateCcw, Download, Layers } from 'lucide-react';
 import type {
   CenterBotCapabilityEntry,
   CenterCapabilityActivationStatus,
@@ -13,6 +16,7 @@ import type {
 } from '../../../host-core/desktop-client.js';
 import type { DesktopIdentity, DesktopPanelApi } from './types';
 import { toError } from './api';
+import './BotCapabilities.css';
 
 type Props = {
   api: DesktopPanelApi;
@@ -128,6 +132,8 @@ export function BotCapabilities({ api, identity, deviceId, botId, t = identityTe
   const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
+  /** 诊断区默认折叠；展开后显示底层 revision / 时间戳 / per-bot 回执。 */
+  const [diagOpen, setDiagOpen] = useState(false);
   const alive = useRef(false);
   const seq = useRef(0);
   const busyRef = useRef('');
@@ -328,27 +334,42 @@ export function BotCapabilities({ api, identity, deviceId, botId, t = identityTe
   return (
     <section className="bot-cap" aria-label={t('Bot 能力', 'Bot capabilities')} style={{ display: 'grid', gap: 10 }}>
       {showTitle ? <h4 className="bot-cap-title" style={{ margin: 0 }}>{t('插件 / MCP / 技能', 'Plugins / MCP / skills')}</h4> : null}
+
       {runtime ? (
         <div className="bot-cap-runtime">
           <p className="metadata bot-cap-runtime-main" role="status">
             <span className={`bot-cap-dot ${runtime.online ? 'is-online' : 'is-offline'}`} aria-hidden="true" />
             {`${t('目标设备', 'Target')}: ${runtime.online ? t('在线', 'online') : t('离线', 'offline')} · ${t('应用状态', 'Status')}: ${statusText(runtime.status)}`}
           </p>
-          <p className="metadata bot-cap-runtime-detail">
-            {`${t('已下发', 'Desired')} revision ${runtime.desiredRevision ?? '—'} · ${t('已应用', 'Applied')} revision ${runtime.appliedRevision ?? '—'} · ${t('更新', 'Updated')} ${timeText(runtime.updatedAt)} · ${t('生效时间', 'Applied at')} ${timeText(runtime.appliedAt)}`}
-          </p>
           {runtime.error ? <p className="bot-cap-error" role="alert">{`${runtime.error.code}: ${runtime.error.message}`}</p> : null}
-          {receipt ? (
-            <p className="metadata bot-cap-runtime-detail">
-              {`${t('该 Bot', 'This bot')}: ${statusText(receipt.status)} · ${t('已应用', 'Applied')} revision ${receipt.appliedRevision ?? '—'}`}
-            </p>
-          ) : null}
           {capabilityErrors.map((item) => (
             <p className="bot-cap-error" role="alert" key={item.installationId}>{`${item.installationId}: ${item.error.code}`}</p>
           ))}
           {!runtime.online
             ? <p className="metadata bot-cap-runtime-detail">{t('目标离线：能力保存仍会写入中心，等设备上线后同步。', 'Target offline: saves still go to the center and sync when the device reconnects.')}</p>
             : null}
+          {/* 诊断区折叠：主视图只保留在线态+应用状态摘要，revision/时间戳按需展开。 */}
+          <button
+            type="button"
+            className="bot-cap-diag-toggle"
+            aria-expanded={diagOpen}
+            onClick={() => setDiagOpen((v) => !v)}
+          >
+            <ChevronDown size={13} className={`bot-cap-diag-chevron${diagOpen ? ' open' : ''}`} aria-hidden="true" />
+            {diagOpen ? t('收起诊断详情', 'Hide diagnostics') : t('诊断详情', 'Diagnostics')}
+          </button>
+          {diagOpen ? (
+            <div className="bot-cap-diag">
+              <p className="metadata bot-cap-runtime-detail">
+                {`${t('已下发', 'Desired')} revision ${runtime.desiredRevision ?? '—'} · ${t('已应用', 'Applied')} revision ${runtime.appliedRevision ?? '—'} · ${t('更新', 'Updated')} ${timeText(runtime.updatedAt)} · ${t('生效时间', 'Applied at')} ${timeText(runtime.appliedAt)}`}
+              </p>
+              {receipt ? (
+                <p className="metadata bot-cap-runtime-detail">
+                  {`${t('该 Bot', 'This bot')}: ${statusText(receipt.status)} · ${t('已应用', 'Applied')} revision ${receipt.appliedRevision ?? '—'}`}
+                </p>
+              ) : null}
+            </div>
+          ) : null}
         </div>
       ) : null}
 
@@ -356,6 +377,10 @@ export function BotCapabilities({ api, identity, deviceId, botId, t = identityTe
 
       {needLogin ? (
         <form className="bot-cap-login" onSubmit={(event) => { event.preventDefault(); void login(); }}>
+          <p className="bot-cap-login-head">
+            <Lock size={14} aria-hidden="true" />
+            {t('需要中心管理员身份才能管理该 Bot 的能力。', 'Center administrator sign-in is required to manage this bot’s capabilities.')}
+          </p>
           <label className="bot-cap-field">
             <span className="bot-cap-field-label">{t('中心管理员密码', 'Center administrator password')}</span>
             <input
@@ -373,13 +398,20 @@ export function BotCapabilities({ api, identity, deviceId, botId, t = identityTe
       {notice ? <p className="bot-cap-notice" role="status">{notice}</p> : null}
 
       {loaded && !needLogin && entries.length === 0
-        ? <p className="metadata bot-cap-empty">{t('中心暂无可用于该 Bot 的能力。', 'No capability is available for this bot.')}</p>
+        ? (
+          <p className="metadata bot-cap-empty">
+            <Plug size={18} aria-hidden="true" />
+            {t('中心暂无可用于该 Bot 的能力。', 'No capability is available for this bot.')}
+          </p>
+        )
         : null}
 
       {entries.map((entry) => {
         const { installation, config } = entry;
         const draft = editor?.installationId === installation.installationId ? editor : null;
         const fields = flatFields(config.configSchema, entry.uiSchema);
+        const itemBusy = busy === installation.installationId;
+        const overrideCount = Object.keys(config.overrides).length;
         return (
           <section
             key={installation.installationId}
@@ -388,53 +420,76 @@ export function BotCapabilities({ api, identity, deviceId, botId, t = identityTe
             aria-label={installation.displayName}
             style={{ display: 'grid', gap: 6 }}
           >
-            <p className="bot-cap-item-head">
-              <strong>{installation.displayName}</strong>
-              <span className="bot-cap-item-tags">{` · ${kindText(installation.kind)} · ${targetText(installation.target)}`}</span>
-            </p>
+            {/* 卡片头：名称 + 类型/目标徽章 + 为该 Bot 启用的 iOS 拨动开关 */}
+            <div className="bot-cap-item-head">
+              <div className="bot-cap-item-title">
+                <Layers size={15} className="bot-cap-item-icon" aria-hidden="true" />
+                <strong>{installation.displayName}</strong>
+                <span className="bot-cap-item-tags">{`${kindText(installation.kind)} · ${targetText(installation.target)}`}</span>
+              </div>
+              <label className="bot-cap-toggle">
+                <input
+                  type="checkbox"
+                  checked={config.enabled}
+                  disabled={busy !== '' || (!config.enabled && !globallyReady(entry))}
+                  onChange={(event) => {
+                    const next = event.target.checked;
+                    // 不得用 Bot 开关打开全局；全局未生效时拒绝开启，但允许关闭。
+                    if (next && !globallyReady(entry)) {
+                      setError(t('该能力全局未启用（或启用未完成），不能为本 Bot 开启；请先在中心启用并等待生效。', 'The capability is not enabled globally yet; enable it in the center first.'));
+                      return;
+                    }
+                    void save(entry, next, config.overrides, config.revision);
+                  }}
+                />
+                <span className="bot-cap-toggle-text">{t('为该 Bot 启用', 'Enable for this bot')}</span>
+              </label>
+            </div>
+
+            {/* 全局状态行 + 覆写摘要 */}
             <p className="metadata bot-cap-item-global">
               {`${globalStateText(entry)} · ${t('全局更新', 'global updated')} ${timeText(installation.activation?.updatedAt ?? null)}`}
             </p>
             {installation.activation?.error
               ? <p className="bot-cap-error" role="alert">{`${installation.activation.error.code}: ${installation.activation.error.message}`}</p>
               : null}
-            <label className="bot-cap-toggle">
-              <input
-                type="checkbox"
-                checked={config.enabled}
-                disabled={busy !== '' || (!config.enabled && !globallyReady(entry))}
-                onChange={(event) => {
-                  const next = event.target.checked;
-                  // 不得用 Bot 开关打开全局；全局未生效时拒绝开启，但允许关闭。
-                  if (next && !globallyReady(entry)) {
-                    setError(t('该能力全局未启用（或启用未完成），不能为本 Bot 开启；请先在中心启用并等待生效。', 'The capability is not enabled globally yet; enable it in the center first.'));
-                    return;
-                  }
-                  void save(entry, next, config.overrides, config.revision);
-                }}
-              />
-              <span className="bot-cap-toggle-text">{t('为该 Bot 启用', 'Enable for this bot')}</span>
-            </label>
             {!globallyReady(entry) && !config.enabled
               ? <p className="metadata bot-cap-item-note">{t('全局未生效：本 Bot 无法开启该能力，请先在中心启用并等待生效。', 'Not active globally: this bot cannot switch it on until the center enables it.')}</p>
               : null}
             {config.enabled && !globallyReady(entry)
               ? <p className="metadata bot-cap-item-note">{t('当前不生效：本 Bot 偏好已保留，全局生效后会重新加载。', 'Currently inactive: the bot preference is kept and loads again once the global capability is active.')}</p>
               : null}
-            <p className="metadata bot-cap-item-note">
-              {Object.keys(config.overrides).length
-                ? t('已覆写本 Bot 配置', 'Bot overrides configured')
+            <p className="metadata bot-cap-item-note bot-cap-override-summary">
+              {overrideCount
+                ? t(`已覆写本 Bot 配置（${overrideCount} 项）`, `${overrideCount} bot override(s) configured`)
                 : t('继承全局配置', 'Inherits global config')}
             </p>
+
             {draft === null ? (
-              <button className="bot-cap-secondary" type="button" disabled={busy !== ''} onClick={() => openEditor(entry)}>
+              <button className="bot-cap-secondary bot-cap-configure" type="button" disabled={busy !== ''} onClick={() => openEditor(entry)}>
                 {t('配置本 Bot', 'Configure for this bot')}
               </button>
             ) : (
               <div className="bot-cap-editor" style={{ display: 'grid', gap: 6 }}>
+                {/* 编辑/启用开关（含 CAS 基线提示） */}
+                <div className="bot-cap-editor-top">
+                  <label className="bot-cap-toggle">
+                    <input
+                      type="checkbox"
+                      checked={draft.enabled}
+                      disabled={busy !== ''}
+                      onChange={(event) => setEditor((current) => (current ? { ...current, enabled: event.target.checked } : current))}
+                    />
+                    <span>{t('为该 Bot 启用', 'Enable for this bot')}</span>
+                  </label>
+                  <span className="metadata bot-cap-rev">{`rev ${draft.revision}`}</span>
+                </div>
+
                 {fields === null ? (
                   <label className="bot-cap-field">
-                    {t('覆盖配置 JSON（整段覆写，数组整体替换）', 'Overrides JSON (whole-value; arrays replace)')}
+                    <span className="bot-cap-field-label">
+                      {t('覆盖配置 JSON（整段覆写，数组整体替换）', 'Overrides JSON (whole-value; arrays replace)')}
+                    </span>
                     <textarea
                       rows={6}
                       spellCheck={false}
@@ -457,6 +512,7 @@ export function BotCapabilities({ api, identity, deviceId, botId, t = identityTe
                   const describedBy = field.description ? controlId + '-desc' : undefined;
                   return (
                     <div className="bot-cap-override" key={field.key}>
+                      {/* 字段继承开关：勾选 = 覆盖该字段，取消 = 继承全局 */}
                       <label className="bot-cap-override-head" htmlFor={controlId + '-override'}>
                         <input
                           id={controlId + '-override'}
@@ -467,7 +523,11 @@ export function BotCapabilities({ api, identity, deviceId, botId, t = identityTe
                           aria-describedby={describedBy}
                           onChange={(event) => setOverride(field.key, event.target.checked ? initialOverride(field, config.globalConfig[field.key]) : undefined)}
                         />
-                        {label + ' · ' + (overridden ? t('覆写', 'override') : t('继承全局', 'inherit')) + ' (' + json(effectiveGlobal) + ')'}
+                        <span className="bot-cap-override-label">{label}</span>
+                        <span className={`bot-cap-inherit-badge${overridden ? ' is-override' : ''}`}>
+                          {overridden ? t('覆写', 'override') : t('继承全局', 'inherit')}
+                        </span>
+                        <span className="bot-cap-override-default">{`(${json(effectiveGlobal)})`}</span>
                       </label>
                       {field.description
                         ? <p className="metadata bot-cap-item-note" id={controlId + '-desc'}>{field.description}</p>
@@ -518,7 +578,8 @@ export function BotCapabilities({ api, identity, deviceId, botId, t = identityTe
                 })}
                 <div className="bot-cap-actions">
                   <button className="bot-cap-primary" type="button" disabled={busy !== ''} onClick={() => void saveEditor(entry)}>
-                    {t('保存', 'Save')}
+                    <Save size={13} aria-hidden="true" />
+                    {itemBusy ? t('保存中…', 'Saving…') : t('保存', 'Save')}
                   </button>
                   <button className="bot-cap-secondary" type="button" disabled={busy !== ''} onClick={() => setEditor(null)}>
                     {t('取消', 'Cancel')}
@@ -539,8 +600,13 @@ export function BotCapabilities({ api, identity, deviceId, botId, t = identityTe
                       setError('');
                     }}
                   >
+                    <Download size={13} aria-hidden="true" />
                     {t('采用远端（丢弃草稿）', 'Adopt remote (discard draft)')}
                   </button>
+                  <span className="metadata bot-cap-cas-hint">
+                    <RotateCcw size={11} aria-hidden="true" />
+                    {t(`基线 rev ${draft.revision}；保存时以 CAS 保护，冲突时不会覆盖远端。`, `Baseline rev ${draft.revision}; saved with CAS — conflicts never overwrite the remote.`)}
+                  </span>
                 </div>
               </div>
             )}

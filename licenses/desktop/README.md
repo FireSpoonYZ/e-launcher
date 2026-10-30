@@ -1,7 +1,8 @@
 # Desktop client vendored license texts
 
 These files back the third-party notices for Rust dependencies whose published
-crate archives do not include a license file. Each file is copied verbatim from
+crate archives do not include a license file, plus two npm UI packages
+(`remark-math`, `rehype-katex`) whose published archives likewise omit one. Each file is copied verbatim from
 the upstream source listed below (note: extraction/retrieval may normalize
 formatting such as line endings, and the saved text hash identifies the saved
 text, not the original raw HTTP bytes). No copyright notice or text was added,
@@ -20,6 +21,8 @@ removed, or rewritten.
 | `webview2-rs-MIT.txt` | webview2-com | 0.39.1 | MIT | https://raw.githubusercontent.com/wravery/webview2-rs/edc2caf886175ccaebe86078c9cfe1ae2a187328/LICENSE |
 | `webview2-rs-MIT.txt` | webview2-com-sys | 0.39.1 | MIT | same commit as webview2-com (edc2caf886175ccaebe86078c9cfe1ae2a187328) |
 | `webview2-rs-MIT.txt` | webview2-com-macros | 0.8.1 | MIT | https://raw.githubusercontent.com/wravery/webview2-rs/dffa41a8a46d3f5565eefbff2de57d38d399f158/LICENSE (text identical to the webview2-com commit, shared file) |
+| `remark-math-6.0.0-MIT.txt` | remark-math | 6.0.0 | MIT | https://raw.githubusercontent.com/remarkjs/remark-math/main/license (monorepo root license; npm archive ships none) |
+| `rehype-katex-7.0.1-MIT.txt` | rehype-katex | 7.0.1 | MIT | same remarkjs/remark-math monorepo license text (verbatim copy) |
 
 `plist@1.10.3` is not vendored: its crate archive contains a top-level
 `LICENCE` file, which the packaging script discovers directly via the

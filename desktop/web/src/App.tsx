@@ -2,6 +2,17 @@
 // 导航与面板渲染。token/CA 仅输入态存在，连接尝试结束后立即清空。
 import { Component } from 'react';
 import type { ReactNode } from 'react';
+import * as Dialog from '@radix-ui/react-dialog';
+import {
+  FolderInput,
+  MessageSquare,
+  Monitor,
+  Moon,
+  Radio,
+  Settings,
+  Sun,
+  Users,
+} from 'lucide-react';
 import { DesktopRemoteError, request, toError } from './api';
 import type {
   DesktopClientStatus,
@@ -14,9 +25,15 @@ import { PendingPanel } from './PendingPanel';
 import { SettingsPanel } from './SettingsPanel';
 import { BotChats } from './BotChats';
 import { Scopes } from './Scopes';
-import { CenterGate, openCenterManagement } from './CenterGate';
+import {
+  CenterGate,
+  useCenterConnection,
+  useDesktopTheme,
+  openCenterManagement,
+} from './CenterGate';
 import { targetApi } from './targetApi';
 import type { DesktopViewApi } from './types';
+import './DesktopShell.css';
 
 interface ProfileFormState {
   title: string;
@@ -24,44 +41,6 @@ interface ProfileFormState {
   url: string;
   expectedDeviceId: string;
   deviceId: string;
-}
-
-interface AppState {
-  busy: boolean;
-  profiles: DesktopUiProfile[];
-  profilesError: string | null;
-  selectedProfileId: string | null;
-  status: DesktopClientStatus | null;
-  /** 不可变快照：与 api 可变 getter 分离，供子面板按 props 旧值检测变化。 */
-  identity: DesktopIdentity | null;
-  transportConnected: boolean;
-  view: 'chat' | 'scopes' | 'pending' | 'settings';
-  token: string;
-  ca: string;
-  form: ProfileFormState;
-  globalError: string | null;
-  bannerError: string | null;
-  sidebarCollapsed: boolean;
-  selectedDeviceId: string;
-}
-
-interface AppProps {
-  api: DesktopPanelApi;
-  /** false = 页面不可见（手机切回本机页）：停止面板观察/只读轮询，不断连、不释放会话。 */
-  pageActive?: boolean;
-}
-
-function runId(): string {
-  return `p-${Date.now().toString(36)}-${crypto.randomUUID().slice(0, 8)}`;
-}
-
-/** 实际连接状态统一口径：transport 已断开/身份已作废时，缓存的 connected 不得再当在线。
- * connecting 仍是当前正在连接，failed 指上次连接失败；纯展示，不新增 broker 调用、不自动重连。 */
-function phaseText(status: DesktopClientStatus | null, transportConnected: boolean): string {
-  if (!status) return '未连接';
-  if (status.phase === 'connecting') return '连接中';
-  if (status.phase === 'failed') return '连接失败';
-  return status.phase === 'connected' && transportConnected ? '已连接' : '未连接';
 }
 
 interface DevicesSectionState {
@@ -74,198 +53,73 @@ interface DevicesSectionState {
   loaded: boolean;
 }
 
-interface DevicesSectionProps {
-  api: DesktopPanelApi;
+interface AppState {
+  busy: boolean;
+  profiles: DesktopUiProfile[];
+  profilesError: string | null;
+  selectedProfileId: string | null;
+  status: DesktopClientStatus | null;
+  /** 不可变快照：与 api 可变 getter 分离，供子面板按 props 旧值检测变化。 */
   identity: DesktopIdentity | null;
   transportConnected: boolean;
-  lastObservedAt: string | null;
+  view: 'chat' | 'scopes' | 'pending';
+  token: string;
+  ca: string;
+  form: ProfileFormState;
+  globalError: string | null;
+  bannerError: string | null;
   selectedDeviceId: string;
-  onSelect: (deviceId: string) => void;
+  settingsOpen: boolean;
+  devices: DevicesSectionState;
 }
 
-/** 设备目录（core-owned）：local/relay 均调用真实 broker devices；失败/加载中明确展示。 */
-class DevicesSection extends Component<DevicesSectionProps, DevicesSectionState> {
-  state: DevicesSectionState = {
-    items: [],
-    nextCursor: null,
-    error: null,
-    busy: false,
-    loadedAt: null,
-    loaded: false,
-  };
-
-  private mounted = false;
-
-  componentDidMount(): void {
-    this.mounted = true;
-    void this.load();
-  }
-
-  componentWillUnmount(): void {
-    this.mounted = false;
-  }
-
-  componentDidUpdate(prev: DevicesSectionProps): void {
-    const a = prev.identity;
-    const b = this.props.identity;
-    if (a?.profileId !== b?.profileId || a?.kind !== b?.kind) {
-      this.setState({ items: [], nextCursor: null, error: null, busy: false, loadedAt: null, loaded: false });
-      void this.load();
-    } else if (!prev.transportConnected && this.props.transportConnected) {
-      void this.load();
-    } else if (prev.transportConnected && !this.props.transportConnected) {
-      this.setState({ busy: false });
-    }
-  }
-
-  /** 目录只属于一个连接（profile+kind+transport）；generation 变化不影响已读分页。 */
-  private sameConnection(profileId: string, kind: 'local' | 'relay', generation: number): boolean {
-    const identity = this.props.identity;
-    return (
-      !!identity &&
-      this.props.transportConnected &&
-      identity.profileId === profileId &&
-      identity.kind === kind &&
-      identity.generation === generation
-    );
-  }
-
-  private async load(): Promise<void> {
-    const identity = this.props.identity;
-    if (!identity || !this.props.transportConnected) return;
-    const { profileId, kind, generation } = identity;
-    this.setState({ busy: true, error: null });
-    try {
-      const page = await this.props.api.broker(identity, 'devices', { limit: 20, cursor: null });
-      if (!this.mounted || !this.sameConnection(profileId, kind, generation)) return;
-      this.setState({
-        items: page.items,
-        nextCursor: page.nextCursor,
-        busy: false,
-        loaded: true,
-        loadedAt: new Date().toISOString(),
-      });
-    } catch (e) {
-      if (!this.mounted || !this.sameConnection(profileId, kind, generation)) return;
-      // 同一连接内换目标产生的迟到身份错误不作目录失败展示。
-      const err = toError(e);
-      this.setState({ error: err.code === 'IDENTITY_CHANGED' ? null : err.message, busy: false });
-    }
-  }
-
-  private async loadMore(): Promise<void> {
-    const identity = this.props.identity;
-    if (!identity || !this.props.transportConnected || !this.state.nextCursor) return;
-    const { profileId, kind, generation } = identity;
-    this.setState({ busy: true });
-    try {
-      const page = await this.props.api.broker(identity, 'devices', {
-        limit: 20,
-        cursor: this.state.nextCursor,
-      });
-      if (!this.mounted || !this.sameConnection(profileId, kind, generation)) return;
-      this.setState((s) => ({
-        items: [...s.items, ...page.items],
-        nextCursor: page.nextCursor,
-        busy: false,
-        loadedAt: new Date().toISOString(),
-      }));
-    } catch (e) {
-      if (!this.mounted || !this.sameConnection(profileId, kind, generation)) return;
-      const err = toError(e);
-      this.setState({ error: err.code === 'IDENTITY_CHANGED' ? null : err.message, busy: false });
-    }
-  }
-
-  private async rename(item: DevicesDirectoryItem): Promise<void> {
-    const identity = this.props.identity;
-    if (!identity || identity.kind !== 'relay' || !this.props.transportConnected || this.state.busy) return;
-    const name = window.prompt('中央设备名称', item.displayName || item.deviceId);
-    if (name === null) return;
-    if (!name.trim() || name.trim().length > 120) {
-      this.setState({ error: '设备名称须为 1–120 字符。' });
-      return;
-    }
-    this.setState({ busy: true, error: null });
-    try {
-      await this.props.api.broker(identity, 'rename_device', { deviceId: item.deviceId, displayName: name.trim() });
-      if (!this.mounted || !this.sameConnection(identity.profileId, identity.kind, identity.generation)) return;
-      await this.load();
-    } catch (e) {
-      if (!this.mounted || !this.sameConnection(identity.profileId, identity.kind, identity.generation)) return;
-      this.setState({ busy: false, error: `改名失败或结果未确认：${toError(e).message}；请刷新目录核对。` });
-    }
-  }
-
-  render(): ReactNode {
-    const identity = this.props.identity;
-    if (!identity) return null;
-    const isRelay = identity.kind === 'relay';
-    const { error, busy, loaded, items, nextCursor } = this.state;
-    return (
-      <section className="devices-section">
-        <h3>{isRelay ? '设备目录' : '本地 Host'}</h3>
-        <button onClick={() => void this.load()} disabled={busy || !this.props.transportConnected}>
-          刷新
-        </button>
-        {error ? (
-          <div className="error-banner" role="alert">
-            {`设备查询失败：${error}`}
-            <button onClick={() => this.setState({ error: null })}>关闭</button>
-          </div>
-        ) : !loaded ? (
-          <p className="status">{busy ? '正在加载目录…' : '目录尚未读取（transport 未连接）'}</p>
-        ) : items.length === 0 ? (
-          <p className="empty-state">目录为空（已成功读取）</p>
-        ) : (
-          <ul className="device-list">
-            {items.map((item) => (
-              <li
-                key={item.deviceId}
-                className={item.deviceId === this.props.selectedDeviceId ? 'selected' : undefined}
-              >
-                <button
-                  className="profile-row"
-                  onClick={() => this.props.onSelect(item.deviceId)}
-                >
-                  <span className="profile-title">{item.displayName || item.deviceId}</span>
-                  <span className="metadata">{item.deviceId}</span>
-                  <span className="status">{item.online ? '在线' : '离线'}</span>
-                  {isRelay && (
-                    <span className="metadata">
-                      {`control ${item.controlProtocol} · scope ${item.scopeProtocol}`}
-                    </span>
-                  )}
-                  {!isRelay && (
-                    <span className="metadata">
-                      {`最后观测 ${this.props.lastObservedAt ?? this.state.loadedAt ?? '—'}`}
-                    </span>
-                  )}
-                </button>
-                {isRelay && <button type="button" disabled={busy || !this.props.transportConnected} onClick={() => void this.rename(item)}>重命名</button>}
-              </li>
-            ))}
-          </ul>
-        )}
-        {isRelay && nextCursor && (
-          <button onClick={() => void this.loadMore()} disabled={busy}>
-            加载更多
-          </button>
-        )}
-        {!this.props.transportConnected && loaded && <p className="status">离线：显示上次读取的设备目录。</p>}
-        <p className="metadata">选择设备用于群聊与待发送；Bot 聊天按各自设备路由。</p>
-      </section>
-    );
-  }
+interface CenterConnectionBridge {
+  status?: { state: 'disconnected' | 'connecting' | 'ready'; centerUrl: string; clientId: string };
+  disconnectCenter: () => Promise<void>;
 }
 
-export class App extends Component<AppProps, AppState> {
+interface AppProps {
+  api: DesktopPanelApi;
+  /** false = 页面不可见（手机切回本机页）：停止面板观察/只读轮询，不断连、不释放会话。 */
+  pageActive?: boolean;
+  /** CenterGate hook 桥接：中心会话状态与断开（浏览器标签条目不离开页面）。 */
+  centerConnection: CenterConnectionBridge;
+  /** 主题三档（由 useDesktopTheme 注入）。 */
+  theme: 'light' | 'dark' | 'system';
+  setTheme: (theme: 'light' | 'dark' | 'system') => void;
+}
+
+function runId(): string {
+  return 'p-' + Date.now().toString(36) + '-' + crypto.randomUUID().slice(0, 8);
+}
+
+const emptyDevices: DevicesSectionState = {
+  items: [],
+  nextCursor: null,
+  error: null,
+  busy: false,
+  loadedAt: null,
+  loaded: false,
+};
+
+/** 实际连接状态统一口径：transport 已断开/身份已作废时，缓存的 connected 不得再当在线。
+ * connecting 仍是当前正在连接，failed 指上次连接失败；纯展示，不新增 broker 调用、不自动重连。 */
+function phaseText(status: DesktopClientStatus | null, transportConnected: boolean): string {
+  if (!status) return '未连接';
+  if (status.phase === 'connecting') return '连接中';
+  if (status.phase === 'failed') return '连接失败';
+  return status.phase === 'connected' && transportConnected ? '已连接' : '未连接';
+}
+
+class App extends Component<AppProps, AppState> {
   private unsub: (() => void) | null = null;
   private unsubErrors: (() => void) | null = null;
   /** 同步在途标记：state.busy 在重渲染前不能防双击。 */
   private actionInFlight = false;
   private scopedKey = '';
   private scopedApi: DesktopViewApi | null = null;
+  private devicesMounted = true;
+  private settingsButtonRef: HTMLButtonElement | null = null;
 
   constructor(props: AppProps) {
     super(props);
@@ -283,8 +137,9 @@ export class App extends Component<AppProps, AppState> {
       form: { title: '', kind: 'local', url: '', expectedDeviceId: '', deviceId: '' },
       globalError: null,
       bannerError: null,
-      sidebarCollapsed: false,
       selectedDeviceId: '',
+      settingsOpen: false,
+      devices: emptyDevices,
     };
   }
 
@@ -300,11 +155,30 @@ export class App extends Component<AppProps, AppState> {
       this.setState({ bannerError: message });
     });
     void this.refreshProfiles();
+    void this.loadDevices();
   }
 
   componentWillUnmount(): void {
+    this.devicesMounted = false;
     if (this.unsub) this.unsub();
     if (this.unsubErrors) this.unsubErrors();
+  }
+
+  componentDidUpdate(prev: AppProps, prevState: AppState): void {
+    const a = prevState.identity;
+    const b = this.state.identity;
+    if (a?.profileId !== b?.profileId || a?.kind !== b?.kind) {
+      this.setState({ devices: emptyDevices }, () => void this.loadDevices());
+    } else if (!prevState.transportConnected && this.state.transportConnected) {
+      void this.loadDevices();
+    } else if (prevState.transportConnected && !this.state.transportConnected) {
+      this.setState((s) => ({ devices: { ...s.devices, busy: false } }));
+    }
+    // 群聊/待发送需要目标设备：目录读完后自动选中第一台在线设备；不强行选离线节点。
+    if (this.state.identity && !this.state.selectedDeviceId) {
+      const firstOnline = this.state.devices.items.find((d) => d.online);
+      if (firstOnline) this.setState({ selectedDeviceId: firstOnline.deviceId });
+    }
   }
 
   private async refreshProfiles(): Promise<void> {
@@ -350,9 +224,120 @@ export class App extends Component<AppProps, AppState> {
         profilesError: null,
       }));
     } catch (e) {
-      this.setState({ busy: false, profilesError: `无法读取配置：${toError(e).message}` });
+      this.setState({ busy: false, profilesError: '无法读取配置：' + toError(e).message });
     }
   }
+
+  /* ---------- 设备目录（与连接同生同灭；群聊/待发送选择器与弹窗共享一份读取） ---------- */
+
+  /** 目录只属于一个连接（profile+kind+transport）；generation 变化不影响已读分页。 */
+  private sameConnection(profileId: string, kind: 'local' | 'relay', generation: number): boolean {
+    const identity = this.state.identity;
+    return (
+      !!identity &&
+      this.state.transportConnected &&
+      identity.profileId === profileId &&
+      identity.kind === kind &&
+      identity.generation === generation
+    );
+  }
+
+  private async loadDevices(): Promise<void> {
+    const identity = this.state.identity;
+    if (!identity || !this.state.transportConnected || !this.devicesMounted) return;
+    const { profileId, kind, generation } = identity;
+    this.setState((s) => ({ devices: { ...s.devices, busy: true, error: null } }));
+    try {
+      const page = await this.props.api.broker(identity, 'devices', { limit: 20, cursor: null });
+      if (!this.devicesMounted || !this.sameConnection(profileId, kind, generation)) return;
+      this.setState({
+        devices: {
+          items: page.items,
+          nextCursor: page.nextCursor,
+          busy: false,
+          error: null,
+          loaded: true,
+          loadedAt: new Date().toISOString(),
+        },
+      });
+    } catch (e) {
+      if (!this.devicesMounted || !this.sameConnection(profileId, kind, generation)) return;
+      // 同一连接内换目标产生的迟到身份错误不作目录失败展示。
+      const err = toError(e);
+      this.setState((s) => ({
+        devices: {
+          ...s.devices,
+          error: err.code === 'IDENTITY_CHANGED' ? null : err.message,
+          busy: false,
+        },
+      }));
+    }
+  }
+
+  private async loadMoreDevices(): Promise<void> {
+    const identity = this.state.identity;
+    if (!identity || !this.state.transportConnected || !this.state.devices.nextCursor) return;
+    const { profileId, kind, generation } = identity;
+    this.setState((s) => ({ devices: { ...s.devices, busy: true } }));
+    try {
+      const page = await this.props.api.broker(identity, 'devices', {
+        limit: 20,
+        cursor: this.state.devices.nextCursor,
+      });
+      if (!this.devicesMounted || !this.sameConnection(profileId, kind, generation)) return;
+      this.setState((s) => ({
+        devices: {
+          ...s.devices,
+          items: [...s.devices.items, ...page.items],
+          nextCursor: page.nextCursor,
+          busy: false,
+          loadedAt: new Date().toISOString(),
+        },
+      }));
+    } catch (e) {
+      if (!this.devicesMounted || !this.sameConnection(profileId, kind, generation)) return;
+      const err = toError(e);
+      this.setState((s) => ({
+        devices: {
+          ...s.devices,
+          error: err.code === 'IDENTITY_CHANGED' ? null : err.message,
+          busy: false,
+        },
+      }));
+    }
+  }
+
+  /** 行内改名（仅 relay）：成功后重读目录；失败明确提示核对，不冒充已改。 */
+  private async renameDevice(item: DevicesDirectoryItem, displayName: string): Promise<void> {
+    const identity = this.state.identity;
+    if (!identity || identity.kind !== 'relay' || !this.state.transportConnected || this.state.devices.busy) return;
+    this.setState((s) => ({ devices: { ...s.devices, busy: true, error: null } }));
+    try {
+      await this.props.api.broker(identity, 'rename_device', { deviceId: item.deviceId, displayName });
+      if (!this.devicesMounted || !this.sameConnection(identity.profileId, identity.kind, identity.generation)) return;
+      await this.loadDevices();
+    } catch (e) {
+      if (!this.devicesMounted || !this.sameConnection(identity.profileId, identity.kind, identity.generation)) return;
+      this.setState((s) => ({
+        devices: {
+          ...s.devices,
+          busy: false,
+          error: '改名失败或结果未确认：' + toError(e).message + '；请刷新目录核对。',
+        },
+      }));
+    }
+  }
+
+  /** 更换中心连接：保留 Promise；gate reject 转可见错误而不是被吞。 */
+  private async disconnectCenter(): Promise<void> {
+    try {
+      await this.props.centerConnection.disconnectCenter();
+    } catch (e) {
+      this.setState({ globalError: '更换中心连接失败：' + toError(e).message });
+    }
+  }
+
+  /* ---------- 连接档案 ---------- */
 
   private selectProfile(profile: DesktopUiProfile): void {
     this.setState({ selectedProfileId: profile.id, globalError: null });
@@ -396,7 +381,7 @@ export class App extends Component<AppProps, AppState> {
       this.props.api.setTransportConnected(status.phase === 'connected');
       this.setState({ busy: false, status, bannerError: null, selectedDeviceId: targetDeviceId || (previousIdentity?.profileId === profile.id ? previousDeviceId : '') });
     } catch (e) {
-      this.setState({ busy: false, globalError: `连接失败：${toError(e).message}` });
+      this.setState({ busy: false, globalError: '连接失败：' + toError(e).message });
     } finally {
       // 无论成败都清输入，不保存 token/CA 副本。
       this.actionInFlight = false;
@@ -457,87 +442,89 @@ export class App extends Component<AppProps, AppState> {
       }));
       this.setState({ form: { title: '', kind: 'local', url: '', expectedDeviceId: '', deviceId: '' } });
     } catch (e) {
-      this.setState({ globalError: `保存 profile 失败：${toError(e).message}` });
+      this.setState({ globalError: '保存 profile 失败：' + toError(e).message });
     } finally {
       this.actionInFlight = false;
     }
   }
+
+  /* ---------- 渲染 ---------- */
 
   render(): ReactNode {
     const api = this.props.api;
     const identity = this.state.identity;
     const transportConnected = this.state.transportConnected;
     const status = this.state.status;
-    const connection = status?.connection ?? null;
     const phaseLabel = phaseText(status, transportConnected);
+    const center = this.props.centerConnection.status;
+    const selectedProfile = this.state.profiles.find((p) => p.id === this.state.selectedProfileId) ?? null;
+    const showDeviceSelector = this.state.view !== 'chat' && !!identity;
+    const { theme, setTheme } = this.props
+;
     return (
-      <div className={`desktop-shell${this.state.sidebarCollapsed ? ' sidebar-collapsed' : ''}`}>
-        <aside className="app-sidebar">
-          <header className="workspace-header">
-            <div className="brand-title-row">
-              <h1>e-助手</h1>
-              <span className="brand-badge">Grok × Hermes</span>
-            </div>
-          </header>
-          {this.state.busy ? (
-            <p className="status">加载中…</p>
-          ) : this.state.profilesError ? (
-            <div className="error-banner" role="alert">
-              {this.state.profilesError}
-              <button onClick={() => void this.refreshProfiles()}>重试</button>
-            </div>
-          ) : (
-            this.renderProfiles()
-          )}
-          {this.renderSettingsSide()}
-          <DevicesSection
-            api={api}
-            identity={identity}
-            transportConnected={transportConnected}
-            lastObservedAt={status?.lastObservedAt ?? null}
-            selectedDeviceId={this.state.selectedDeviceId}
-            onSelect={(deviceId) => this.setState({ selectedDeviceId: deviceId })}
-          />
-        </aside>
-        <main className="app-workspace">
-          <div className="connection-strip">
-            <button
-              type="button"
-              className="sidebar-toggle-btn"
-              onClick={() => this.setState((s) => ({ sidebarCollapsed: !s.sidebarCollapsed }))}
-              title={this.state.sidebarCollapsed ? '展开连接与设备边栏' : '收起连接与设备边栏（专注对话）'}
-            >
-              {this.state.sidebarCollapsed ? '🔌 展开连接栏 ▸' : '🔌 收起连接栏 ◂'}
-            </button>
-            <span className={`conn-dot ${transportConnected ? 'online' : 'offline'}`} />
-            <span>{phaseLabel}</span>
-            {identity && <span className="status">{this.state.selectedDeviceId || '群聊/待发送未选设备'}</span>}
-            {connection && (
-              <span className="metadata">{`${connection.kind} · ${connection.url}`}</span>
-            )}
-            <span className="metadata">
-              {transportConnected ? 'transport 已连接' : 'transport 未连接'}
-            </span>
-          </div>
-          <nav className="app-nav">
-            <button type="button" onClick={openCenterManagement}>中心管理</button>
+      <div className="desktop-shell">
+        <aside className="desktop-rail">
+          <div className="rail-group">
             {(
               [
-                { key: 'chat', label: '聊天' },
-                { key: 'scopes', label: '群聊与Bot私聊' },
-                { key: 'pending', label: '待发送' },
-
+                { key: 'chat', label: '对话', Icon: MessageSquare },
+                { key: 'scopes', label: '群聊', Icon: Users },
+                { key: 'pending', label: '待发', Icon: FolderInput },
               ] as const
-            ).map((item) => (
+            ).map(({ key, label, Icon }) => (
               <button
-                key={item.key}
-                className={this.state.view === item.key ? 'active' : undefined}
-                onClick={() => this.setState({ view: item.key })}
+                key={key}
+                type="button"
+                className={'rail-item' + (this.state.view === key ? ' active' : '')}
+                onClick={() => this.setState({ view: key })}
+                aria-pressed={this.state.view === key}
               >
-                {item.label}
+                <Icon size={18} aria-hidden />
+                <span className="rail-label">{label}</span>
               </button>
             ))}
-          </nav>
+            <button type="button" className="rail-item" onClick={openCenterManagement} title="在浏览器打开中心管理">
+              <Radio size={18} aria-hidden />
+              <span className="rail-label">中心</span>
+            </button>
+          </div>
+          <div className="rail-spacer" />
+          <div className="rail-group">
+            <div className="theme-switch" role="group" aria-label="主题">
+              {(
+                [
+                  { key: 'light', Icon: Sun, title: '浅色' },
+                  { key: 'system', Icon: Monitor, title: '跟随系统' },
+                  { key: 'dark', Icon: Moon, title: '深色' },
+                ] as const
+              ).map(({ key, Icon, title }) => (
+                <button
+                  key={key}
+                  type="button"
+                  title={title}
+                  aria-pressed={theme === key}
+                  className={theme === key ? 'active' : undefined}
+                  onClick={() => setTheme(key)}
+                >
+                  <Icon size={12} aria-hidden />
+                </button>
+              ))}
+            </div>
+            <span className="rail-caption">主题</span>
+            <button
+              type="button"
+              className="rail-item"
+              ref={(el) => { this.settingsButtonRef = el; }}
+              onClick={() => this.setState({ settingsOpen: true })}
+              title={identity ? '当前：' + phaseLabel : '打开连接与节点设置'}
+            >
+              <Settings size={18} aria-hidden />
+              <span className="rail-label">设置</span>
+              <span className={'conn-dot ' + (transportConnected ? 'online' : 'offline')} />
+            </button>
+          </div>
+        </aside>
+        <main className="app-workspace">
           {this.state.globalError && (
             <div className="error-banner" role="alert">
               {this.state.globalError}
@@ -550,139 +537,82 @@ export class App extends Component<AppProps, AppState> {
               <button onClick={() => this.setState({ bannerError: null })}>关闭</button>
             </div>
           )}
-          <div className="workspace-body">{this.renderWorkspace()}</div>
+          <div className="workspace-body">
+            {showDeviceSelector ? this.renderDeviceSelector() : null}
+            {this.renderWorkspace()}
+          </div>
         </main>
+        <Dialog.Root open={this.state.settingsOpen} onOpenChange={(open) => this.setState({ settingsOpen: open })}>
+          <Dialog.Portal>
+            <Dialog.Overlay className="desktop-dialog-overlay settings-dialog-overlay" />
+            <Dialog.Content className="desktop-dialog settings-dialog" onCloseAutoFocus={(e) => { e.preventDefault(); this.settingsButtonRef?.focus(); }}>
+              <SettingsPanel
+                profiles={this.state.profiles}
+                profilesError={this.state.profilesError}
+                profilesBusy={this.state.busy}
+                selectedProfile={selectedProfile}
+                onSelectProfile={(p) => this.selectProfile(p)}
+                form={this.state.form}
+                onFormChange={(patch) => this.setState((s) => ({ form: { ...s.form, ...patch } }))}
+                onSaveProfile={(e) => void this.saveProfile(e)}
+                token={this.state.token}
+                ca={this.state.ca}
+                onTokenChange={(token) => this.setState({ token })}
+                onCaChange={(ca) => this.setState({ ca })}
+                onConnect={() => void this.connect()}
+                onDisconnect={() => void this.disconnect()}
+                identity={identity}
+                transportConnected={transportConnected}
+                status={this.state.status}
+                phaseLabel={phaseLabel}
+                centerStatus={center}
+                onDisconnectCenter={() => this.disconnectCenter()}
+                devices={this.state.devices}
+                devicesIsRelay={identity?.kind === 'relay'}
+                lastObservedAt={status?.lastObservedAt ?? null}
+                selectedDeviceId={this.state.selectedDeviceId}
+                onSelectDevice={(deviceId) => this.setState({ selectedDeviceId: deviceId })}
+                onRefreshDevices={() => void this.loadDevices()}
+                onLoadMoreDevices={() => void this.loadMoreDevices()}
+                onRenameDevice={(item, name) => void this.renameDevice(item, name)}
+                onDeviceError={(message) => this.setState((s) => ({ devices: { ...s.devices, error: message } }))}
+              />
+            </Dialog.Content>
+          </Dialog.Portal>
+        </Dialog.Root>
       </div>
     );
   }
 
-  private renderProfiles(): ReactNode {
-    const { profiles, selectedProfileId } = this.state;
-    return (
-      <section className="profiles-section">
-        <h3>连接配置</h3>
-        {profiles.length === 0 ? (
-          <p className="empty-state">尚无保存的配置</p>
-        ) : (
-          <ul className="profile-list">
-            {profiles.map((p) => (
-              <li key={p.id} className={selectedProfileId === p.id ? 'selected' : undefined}>
-                <button className="profile-row" onClick={() => this.selectProfile(p)}>
-                  <span className="profile-title">{p.title}</span>
-                  <span className="metadata">{`${p.kind} · ${p.url}`}</span>
-                </button>
-              </li>
-            ))}
-          </ul>
-        )}
-        <form className="form-grid" onSubmit={(e) => void this.saveProfile(e)}>
-          <label>
-            名称
-            <input
-              value={this.state.form.title}
-              onChange={(e) => this.setState({ form: { ...this.state.form, title: e.target.value } })}
-            />
-          </label>
-          <label>
-            类型
-            <select
-              value={this.state.form.kind}
-              onChange={(e) =>
-                this.setState({
-                  form: { ...this.state.form, kind: e.target.value as 'local' | 'relay' },
-                })
-              }
-            >
-              <option value="local">local</option>
-              <option value="relay">relay</option>
-            </select>
-          </label>
-          <label>
-            URL
-            <input
-              value={this.state.form.url}
-              onChange={(e) => this.setState({ form: { ...this.state.form, url: e.target.value } })}
-            />
-          </label>
-          {this.state.form.kind === 'local' && (
-            <label>
-              期望设备ID（可选）
-              <input
-                value={this.state.form.expectedDeviceId}
-                onChange={(e) =>
-                  this.setState({ form: { ...this.state.form, expectedDeviceId: e.target.value } })
-                }
-              />
-            </label>
-          )}
-          {this.state.form.kind === 'relay' && (
-            <label>
-              设备ID
-              <input
-                value={this.state.form.deviceId}
-                onChange={(e) =>
-                  this.setState({ form: { ...this.state.form, deviceId: e.target.value } })
-                }
-              />
-            </label>
-          )}
-          <button type="submit" disabled={this.state.busy}>保存</button>
-        </form>
-      </section>
-    );
-  }
-
-  private renderSettingsSide(): ReactNode {
-    const profile = this.state.profiles.find((p) => p.id === this.state.selectedProfileId);
-    if (!profile) {
+  /** 群聊/待发送顶部设备选择器：仅列出在线设备，不强行选择离线节点。 */
+  private renderDeviceSelector(): ReactNode {
+    const { devices } = this.state;
+    if (devices.error) {
       return (
-        <div className="settings-side">
-          <p className="empty-state">请选择或保存一个连接配置</p>
+        <div className="error-banner" role="alert">
+          {'设备目录加载失败：' + devices.error}
+          <button onClick={() => void this.loadDevices()} disabled={devices.busy}>重试</button>
         </div>
       );
     }
-    const identity = this.state.identity;
-    const transportConnected = this.state.transportConnected;
+    // 已知离线设备仍可手工选择（待发送本地账本离线可读/可取消）；自动默认仅选在线。
+    // 发送禁用交由原 transport/identity 机制，不在此拦截。
     return (
-      <div className="settings-side">
-        <label>
-          连接 token（留空使用已保存中心令牌）
-          <input
-            type="password"
-            value={this.state.token}
-            onChange={(e) => this.setState({ token: e.target.value })}
-          />
-        </label>
-        {profile.kind === 'relay' && (
-          <label>
-            CA（可选，会话有效）
-            <textarea
-              value={this.state.ca}
-              onChange={(e) => this.setState({ ca: e.target.value })}
-            />
-          </label>
-        )}
-        {identity && transportConnected ? (
-          <button onClick={() => void this.disconnect()} disabled={this.state.busy}>
-            断开
-          </button>
-        ) : (
-          <button
-            onClick={() => void this.connect()}
-            disabled={this.state.busy}
-          >
-            {identity ? '重新连接' : '连接'}
-          </button>
-        )}
-        {this.state.status && (
-          <p className="status">
-            {`阶段：${phaseText(this.state.status, transportConnected)}`}
-            {this.state.status.phase === 'connected' && !transportConnected
-              ? `（最后观测 ${this.state.status.phase}）`
-              : ''}
-            {` · 代次：${this.state.status.generation}`}
-          </p>
-        )}
+      <div className="device-selector">
+        <span className="device-selector-label">目标设备</span>
+        <select
+          value={this.state.selectedDeviceId}
+          disabled={devices.busy || devices.items.length === 0}
+          onChange={(e) => this.setState({ selectedDeviceId: e.target.value })}
+        >
+          <option value="">{devices.items.length === 0 ? '无设备' : '选择设备…'}</option>
+          {devices.items.map((d) => (
+            <option key={d.deviceId} value={d.deviceId}>
+              {(d.displayName || d.deviceId) + (d.online ? '' : '（离线）')}
+            </option>
+          ))}
+        </select>
+        {devices.busy && <span className="metadata">目录加载中…</span>}
       </div>
     );
   }
@@ -694,27 +624,44 @@ export class App extends Component<AppProps, AppState> {
     const transportConnected = this.state.transportConnected;
     const pageActive = this.props.pageActive !== false;
     const snapshot = api.snapshot;
-    if (view === 'settings') {
-      return <SettingsPanel />;
-    }
-    if (!identity || !snapshot) return <div className="empty-state">请先连接 Host 或中继。</div>;
+    if (!identity || !snapshot) return <div className="empty-state">请先连接 Host 或中继（左下角「设置」）。</div>;
     if (view === 'chat') return <BotChats api={api} pageActive={pageActive} />;
     const deviceId = this.state.selectedDeviceId;
-    if (!deviceId) return <div className="empty-state">请从设备目录选择群聊或待发送所属设备。</div>;
-    const key = `${identity.profileId}|${identity.kind}|${identity.generation}|${deviceId}`;
+    if (!deviceId) return <div className="empty-state">请选择目标设备。</div>;
+    const key = identity.profileId + '|' + identity.kind + '|' + identity.generation + '|' + deviceId;
     if (this.scopedKey !== key) {
       this.scopedKey = key;
       this.scopedApi = targetApi(api, deviceId);
     }
-    if (view === 'pending') {
-      return <PendingPanel key={key} api={api} identity={this.scopedApi!.identity} transportConnected={transportConnected} />;
-    }
-    return <Scopes key={key} api={this.scopedApi!} pageActive={pageActive} />;
+    return (
+      <div className="device-view">
+        {view === 'pending' ? (
+          <PendingPanel key={key} api={api} identity={this.scopedApi!.identity} transportConnected={transportConnected} />
+        ) : (
+          <Scopes key={key} api={this.scopedApi!} pageActive={pageActive} />
+        )}
+      </div>
+    );
   }
-
 }
 
-/** 应用装配 ErrorBoundary：加载失败显示明确错误，提供只读重试。 */
+/** CenterGate 就绪后注入 hook 状态到 class App；App 保持类组件（大量既有生命周期逻辑）。 */
+function AppShell({ api, pageActive }: { api: DesktopPanelApi; pageActive?: boolean }) {
+  const centerConnection = useCenterConnection();
+  const { theme, setTheme } = useDesktopTheme();
+  return (
+    <App
+      api={api}
+      pageActive={pageActive}
+      centerConnection={centerConnection}
+      theme={theme}
+      setTheme={setTheme}
+    />
+  );
+}
+
+/** 应用装配 ErrorBoundary：
+ * 加载失败显示明确错误，提供只读重试。 */
 export class DesktopApp extends Component<{ api: DesktopPanelApi; pageActive?: boolean }, { failed: string | null }> {
   state = { failed: null as string | null };
 
@@ -736,6 +683,6 @@ export class DesktopApp extends Component<{ api: DesktopPanelApi; pageActive?: b
         </div>
       );
     }
-    return <CenterGate onDisconnected={this.centerDisconnected}><App api={this.props.api} pageActive={this.props.pageActive} /></CenterGate>;
+    return <CenterGate onDisconnected={this.centerDisconnected}><AppShell api={this.props.api} pageActive={this.props.pageActive} /></CenterGate>;
   }
 }

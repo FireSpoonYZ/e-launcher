@@ -3,6 +3,8 @@
 // 因此这里只 import type host-core 的公共数据形状，不引入任何 Node/平台句柄。
 import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import type { ChangeEvent, CompositionEvent, KeyboardEvent, PointerEvent } from 'react';
+import * as DialogPrimitive from '@radix-ui/react-dialog';
+import { Maximize2, Minimize2, Monitor, X } from 'lucide-react';
 import type {
   ShowerCapabilities,
   ShowerFrame,
@@ -181,13 +183,20 @@ export function ShowerPreview({ call, target, connected, onClose }: ShowerPrevie
   const [takeoverSessionId, setTakeoverSessionId] = useState<string | null>(null);
   /** 本地页面可见性：Capacitor 本机 Host 页面隐藏/息屏时 connected 仍为 true，必须单独跟踪。 */
   const [visible, setVisible] = useState(() => document.visibilityState !== 'hidden');
+  /** 全窗口剧场模式（设计 5.5）：portal 到 <body> 的固定舞台；只改展示层，不影响轮询/输入/释放语义。 */
+  const [isFullscreen, setIsFullscreen] = useState(false);
   const textInputId = useId();
 
   const epochRef = useRef(0);
   const actionSeqRef = useRef(0);
   const busyRef = useRef(false);
-  const imgRef = useRef<HTMLImageElement | null>(null);
+  /** 实际挂载的图像元素：剧场/分屏切换会重挂载 img，必须随挂载点回调更新，供滚轮原生监听重新绑定。 */
+  const [imgEl, setImgEl] = useState<HTMLImageElement | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
+  /** 剧场舞台元素：打开剧场后作为初始聚焦点（onOpenAutoFocus 的 currentTarget 不是 DOM 节点，必须用显式 ref）。 */
+  const stageRef = useRef<HTMLDivElement | null>(null);
+  /** 分屏头部的「全屏」按钮：剧场关闭后焦点显式还原到它（组件没有 DialogPrimitive.Trigger，Radix 不知道触发者）。 */
+  const fullscreenBtnRef = useRef<HTMLButtonElement | null>(null);
   /** IME 组合中；组合期间的 input 事件不发，组合结束由 compositionend 整段发一次。 */
   const composingRef = useRef(false);
   const dragRef = useRef<{ x: number; y: number; at: number; button: number } | null>(null);
@@ -285,6 +294,8 @@ export function ShowerPreview({ call, target, connected, onClose }: ShowerPrevie
     setActionError(null);
     setNotice(null);
     setTakeoverSessionId(null);
+    // 目标/连接/可见性变化：剧场覆盖层一并收起（它唯一绑定的会话上下文已失效）。
+    setIsFullscreen(false);
     // 目标/连接/可见性变化：丢弃输入框里未提交的残留与进行中的组合。
     composingRef.current = false;
     if (inputRef.current) inputRef.current.value = '';
@@ -327,8 +338,9 @@ export function ShowerPreview({ call, target, connected, onClose }: ShowerPrevie
   }, [call, base, connected, visible]);
 
   // 滚轮：原生非被动监听，把三种 deltaMode 折成整数轮格；小增量累积后再发。
+  // 依赖实际挂载的 imgEl（而非只挂一次的 ref）：剧场打开/关闭重挂载 img 后监听会解绑旧元素并绑到新元素。
   useEffect(() => {
-    const el = imgRef.current;
+    const el = imgEl;
     if (!live || !el) return;
     const handler = (ev: WheelEvent): void => {
       if (!inputEnabledRef.current || !canScrollRef.current) return;
@@ -354,7 +366,7 @@ export function ShowerPreview({ call, target, connected, onClose }: ShowerPrevie
     };
     el.addEventListener('wheel', handler, { passive: false });
     return () => el.removeEventListener('wheel', handler);
-  }, [live]);
+  }, [live, imgEl]);
 
   async function runAction(
     kind: 'create' | 'frame' | 'takeover' | 'release',
@@ -441,7 +453,7 @@ export function ShowerPreview({ call, target, connected, onClose }: ShowerPrevie
 
   /** 图像显示像素 → 源输入像素；越界按图像边界收敛。 */
   function sourcePoint(ev: { clientX: number; clientY: number }): { x: number; y: number } | null {
-    const el = imgRef.current;
+    const el = imgEl;
     const s = sessionRef.current;
     if (!el || !s || s.width <= 0 || s.height <= 0) return null;
     const r = el.getBoundingClientRect();
@@ -561,62 +573,50 @@ export function ShowerPreview({ call, target, connected, onClose }: ShowerPrevie
   const pollCode = codeOf(pollError);
   const sessionCode = session?.error?.code ?? null;
   const actionCode = codeOf(actionError);
+  const takenOver = takeoverSessionId !== null && takeoverSessionId === sessionIdNow;
+  const statusClass = !connected || !live ? 'idle' : takenOver ? 'busy' : 'live';
 
-  return (
-    <section className="shower-preview" aria-label="桌面环境预览">
-      <header className="shower-head">
-        <div className="shower-head-text">
-          <div className="shower-title">桌面环境</div>
-          <div
-            className="shower-sub"
-            title={`${botId}${scopeId ? ` · scope ${scopeId}` : ''}`}
-          >
-            {shortId(botId)}
-            {scopeId ? ` · scope ${shortId(scopeId)}` : ' · 主会话'}
-          </div>
-        </div>
-        <button
-          type="button"
-          className="shower-close"
-          onClick={onClose}
-          title="关闭预览（只停轮询，不释放环境）"
-        >
-          关闭预览
-        </button>
-      </header>
+  const statusBlock = (
+    <div
+      className="shower-status"
+      aria-live="polite"
+      title={session?.updatedAt ? `状态更新 ${formatTs(session.updatedAt)}` : undefined}
+    >
+      <span className={`shower-dot ${statusClass}`} aria-hidden="true" />
+      {!connected ? (
+        <span className="shower-offline">离线：已停止轮询，不显示实时画面。</span>
+      ) : (
+        <span>
+          {phaseText(phase)}
+          {session ? ` · ${session.platform} · ${session.width}×${session.height}` : ''}
+          {sessionIdNow ? ` · 会话 ${shortId(sessionIdNow)}` : ' · 无环境'}
+        </span>
+      )}
+    </div>
+  );
 
-      <div
-        className="shower-status"
-        aria-live="polite"
-        title={session?.updatedAt ? `状态更新 ${formatTs(session.updatedAt)}` : undefined}
-      >
-        {!connected ? (
-          <span className="shower-offline">离线：已停止轮询，不显示实时画面。</span>
-        ) : (
-          <span>
-            {phaseText(phase)}
-            {session ? ` · ${session.platform} · ${session.width}×${session.height}` : ''}
-            {sessionIdNow ? ` · 会话 ${shortId(sessionIdNow)}` : ' · 无环境'}
-          </span>
-        )}
-      </div>
+  const capabilitiesBlock = capabilities ? (
+    <div className="shower-caps">
+      <span>
+        输入 {inputKinds.length ? inputKinds.join('/') : '无'} · 启动{' '}
+        {capabilities.launchKinds.length ? capabilities.launchKinds.join('/') : '无'} · 原生预览{' '}
+        {capabilities.nativePreview ? '支持' : '不支持'}
+      </span>
+      {unsupported.length ? <span className="shower-unsupported">不支持：{unsupported.join('/')}</span> : null}
+    </div>
+  ) : null;
 
-      {capabilities ? (
-        <div className="shower-caps">
-          <span>
-            输入 {inputKinds.length ? inputKinds.join('/') : '无'} · 启动{' '}
-            {capabilities.launchKinds.length ? capabilities.launchKinds.join('/') : '无'} · 原生预览{' '}
-            {capabilities.nativePreview ? '支持' : '不支持'}
-          </span>
-          {unsupported.length ? <span className="shower-unsupported">不支持：{unsupported.join('/')}</span> : null}
-        </div>
-      ) : null}
-
+  const phaseGuideBlock = (
+    <>
       {phase === 'authentication-required' ? (
         <div className="shower-guide">等待目标设备本机认证/登录：{guideOf('SHOWER_AUTH_REQUIRED')}</div>
       ) : null}
       {phase === 'unavailable' ? <div className="shower-guide">{guideOf('SHOWER_UNAVAILABLE')}</div> : null}
+    </>
+  );
 
+  const alertBlock = (
+    <>
       {pollError ? (
         <div className="error-banner" role="alert">
           {pollError}
@@ -637,69 +637,191 @@ export function ShowerPreview({ call, target, connected, onClose }: ShowerPrevie
         </div>
       ) : null}
       {notice ? <div className="shower-notice" aria-live="polite">{notice}</div> : null}
+    </>
+  );
 
-      <div className="shower-surface">
-        {live && liveFrame ? (
-          <img
-            ref={imgRef}
-            className={`shower-frame ${inputEnabled ? 'interactive' : ''}`}
-            src={`data:${liveFrame.mimeType};base64,${liveFrame.data}`}
-            alt="桌面环境画面"
-            draggable={false}
-            onPointerDown={onPointerDown}
-            onPointerUp={onPointerUp}
-            onPointerCancel={onPointerCancel}
-            onContextMenu={(e) => e.preventDefault()}
-            onAuxClick={(e) => e.preventDefault()}
-            onDragStart={(e) => e.preventDefault()}
-          />
-        ) : (
-          <div className="shower-empty">
-            {!connected
-              ? '离线：不显示旧画面。'
-              : phase === 'starting'
-                ? '环境启动中…'
-                : phase === 'authentication-required'
-                  ? '等待目标设备本机认证…'
-                  : '暂无画面'}
-          </div>
-        )}
-      </div>
+  const frameBlock = live && liveFrame ? (
+    <img
+      ref={setImgEl}
+      className={`shower-frame ${inputEnabled ? 'interactive' : ''}`}
+      src={`data:${liveFrame.mimeType};base64,${liveFrame.data}`}
+      alt="桌面环境画面"
+      draggable={false}
+      onPointerDown={onPointerDown}
+      onPointerUp={onPointerUp}
+      onPointerCancel={onPointerCancel}
+      onContextMenu={(e) => e.preventDefault()}
+      onAuxClick={(e) => e.preventDefault()}
+      onDragStart={(e) => e.preventDefault()}
+    />
+  ) : (
+    <div className="shower-empty" role="status">
+      <Monitor size={26} aria-hidden="true" />
+      <span>
+        {!connected
+          ? '离线：不显示旧画面。'
+          : phase === 'starting'
+            ? '环境启动中…'
+            : phase === 'authentication-required'
+              ? '等待目标设备本机认证…'
+              : '暂无画面'}
+      </span>
+    </div>
+  );
 
-      {live && liveFrame ? (
-        <div className="shower-meta">
-          实时 · 帧 {formatTs(liveFrame.capturedAt)} · {liveFrame.imageWidth}×{liveFrame.imageHeight} → 源{' '}
-          {liveFrame.width}×{liveFrame.height}
+  const metaBlock = live && liveFrame ? (
+    <div className="shower-meta">
+      实时 · 帧 {formatTs(liveFrame.capturedAt)} · {liveFrame.imageWidth}×{liveFrame.imageHeight} → 源{' '}
+      {liveFrame.width}×{liveFrame.height}
+    </div>
+  ) : null;
+
+  const controlsBlock = (
+    <div className="shower-controls">
+      <button
+        type="button"
+        onClick={createSession}
+        disabled={!connected || busy !== null || (!!sessionIdNow && phase !== 'closed' && phase !== 'error' && phase !== 'idle')}
+      >
+        {busy === 'create' ? '创建中…' : '创建/启动环境'}
+      </button>
+      <button type="button" onClick={refreshFrame} disabled={!connected || !sessionIdNow || busy !== null}>
+        {busy === 'frame' ? '刷新中…' : '刷新画面'}
+      </button>
+      <button
+        type="button"
+        className={takenOver ? 'taken-over' : 'primary'}
+        onClick={takeover}
+        disabled={!connected || !sessionIdNow || phase !== 'ready' || busy !== null}
+        title="调用 takeoverShower：先中止当前回合，返回后才开放输入"
+      >
+        {busy === 'takeover' ? '接管中…' : takenOver ? '已接管 · 重新接管' : '接管控制'}
+      </button>
+    </div>
+  );
+
+  const inputBlock = (
+    <div className="shower-input">
+      <label className="shower-input-label" htmlFor={textInputId}>
+        人工输入（提交即发送；特殊键/组合键走按键）
+      </label>
+      <input
+        id={textInputId}
+        ref={inputRef}
+        className="shower-text"
+        onChange={onTextChange}
+        onCompositionStart={onTextCompositionStart}
+        onCompositionEnd={onTextCompositionEnd}
+        onKeyDown={onKeyDown}
+        disabled={!inputEnabled}
+        placeholder={inputEnabled ? '输入文本或按键…' : '接管成功后可用'}
+        autoComplete="off"
+        spellCheck={false}
+      />
+      {inputHint ? <div className="hint">{inputHint}</div> : null}
+    </div>
+  );
+
+  const releaseBlock = (
+    <>
+      <button
+        type="button"
+        className="shower-release"
+        onClick={releaseSession}
+        disabled={!connected || !sessionIdNow || busy !== null}
+        title="显式结束该桌面环境（与关闭预览不同）"
+      >
+        {busy === 'release' ? '结束中…' : '结束桌面环境（释放会话）'}
+      </button>
+      <span className="hint">关闭预览不释放环境。</span>
+    </>
+  );
+
+  /**
+   * 剧场 Escape：接管后输入通道开放（inputEnabled）时，Esc 属于必须发给远端的按键——
+   * 走输入框的远端 ESCAPE 路径（含图像指针捕获时落在 img 上的 keydown 经捕获路由到输入框），不退出剧场；
+   * 只有未接管且焦点在非输入控件（顶栏按钮/舞台空白）时 Esc 才关闭剧场。Radix 自身的 Esc→关闭
+   * 在 Content.onEscapeKeyDown 里按同一条件拦截。
+   */
+  function onTheaterEscapeKey(ev: KeyboardEvent<HTMLElement>): void {
+    if (ev.key !== 'Escape') return;
+    // 焦点在接管输入框时不处理：留给 onKeyDown 的远端 ESCAPE 发送路径。
+    if ((ev.target as HTMLElement | null)?.tagName === 'INPUT') return;
+    if (inputEnabled) return;
+    ev.preventDefault();
+    setIsFullscreen(false);
+  }
+
+  // 剧场覆盖层：Radix Dialog portal 到 <body>，固定全窗；同一个 inputRef/img 回调 ref 只在此处渲染
+  // （剧场打开时面板内的 stage/输入不渲染），ref 指向唯一实例。
+  const theater = (
+    <DialogPrimitive.Root
+      open={isFullscreen}
+      onOpenChange={(open) => { if (!open) setIsFullscreen(false); }}
+    >
+      <DialogPrimitive.Portal>
+        <DialogPrimitive.Content
+          className="shower-theater"
+          data-shower-overlay
+          aria-label="桌面环境全窗口剧场"
+          onKeyDown={onTheaterEscapeKey}
+          onEscapeKeyDown={(e) => { if (inputEnabled) e.preventDefault(); }}
+          onOpenAutoFocus={(e) => {
+            e.preventDefault();
+            stageRef.current?.focus();
+          }}
+          onCloseAutoFocus={(e) => {
+            // 无 Trigger：Radix 默认还原到打开前焦点；但剧场也可能由会话重置关闭，
+            // 显式还原到「全屏」按钮（若面板已随 onClose 卸载则自然落空）。
+            e.preventDefault();
+            fullscreenBtnRef.current?.focus();
+          }}
+        >
+          <DialogPrimitive.Title className="sr-only">桌面环境全窗口剧场</DialogPrimitive.Title>
+          <DialogPrimitive.Description className="sr-only">
+            虚拟桌面画面与接管输入；未接管时 Esc 返回分屏，接管后 Esc 发往远端。
+          </DialogPrimitive.Description>
+      <header className="shower-theater-top">
+        <button
+          type="button"
+          className="icon-button"
+          onClick={() => setIsFullscreen(false)}
+          title="返回分屏（Esc）"
+        >
+          <Minimize2 size={14} aria-hidden="true" />
+          返回分屏
+        </button>
+        <div className="shower-theater-title">
+          <Monitor size={15} aria-hidden="true" />
+          {shortId(botId)}
+          <span className="shower-sub">
+            {scopeId ? `scope ${shortId(scopeId)}` : '主会话'}
+            {sessionIdNow ? ` · 会话 ${shortId(sessionIdNow)}` : ' · 无环境'}
+          </span>
         </div>
-      ) : null}
-
-      <div className="shower-controls">
         <button
           type="button"
-          onClick={createSession}
-          disabled={!connected || busy !== null || (!!sessionIdNow && phase !== 'closed' && phase !== 'error' && phase !== 'idle')}
+          className="icon-button"
+          onClick={onClose}
+          title="关闭预览（只停轮询，不释放环境）"
+          aria-label="关闭预览"
         >
-          {busy === 'create' ? '创建中…' : '创建/启动环境'}
+          <X size={15} aria-hidden="true" />
         </button>
-        <button type="button" onClick={refreshFrame} disabled={!connected || !sessionIdNow || busy !== null}>
-          {busy === 'frame' ? '刷新中…' : '刷新画面'}
-        </button>
-        <button
-          type="button"
-          onClick={takeover}
-          disabled={!connected || !sessionIdNow || phase !== 'ready' || busy !== null}
-          title="调用 takeoverShower：先中止当前回合，返回后才开放输入"
-        >
-          {busy === 'takeover' ? '接管中…' : takeoverSessionId !== null && takeoverSessionId === sessionIdNow ? '重新接管控制' : '接管控制'}
-        </button>
+      </header>
+      {statusBlock}
+      <div className="shower-theater-alerts">
+        {phaseGuideBlock}
+        {alertBlock}
       </div>
-
-      <div className="shower-input">
-        <label className="shower-input-label" htmlFor={textInputId}>
-          人工输入（提交即发送；特殊键/组合键走按键）
-        </label>
+      <div className="shower-theater-stage" ref={stageRef} tabIndex={-1}>
+        {frameBlock}
+      </div>
+      {metaBlock}
+      <div className="shower-theater-bar">
+        {controlsBlock}
         <input
-          id={textInputId}
+          id={`${textInputId}-theater`}
           ref={inputRef}
           className="shower-text"
           onChange={onTextChange}
@@ -710,22 +832,79 @@ export function ShowerPreview({ call, target, connected, onClose }: ShowerPrevie
           placeholder={inputEnabled ? '输入文本或按键…' : '接管成功后可用'}
           autoComplete="off"
           spellCheck={false}
+          aria-label="人工输入（提交即发送；特殊键/组合键走按键）"
         />
-        {inputHint ? <div className="hint">{inputHint}</div> : null}
+        {releaseBlock}
       </div>
+        </DialogPrimitive.Content>
+      </DialogPrimitive.Portal>
+    </DialogPrimitive.Root>
+  );
 
-      <div className="shower-footer">
-        <button
-          type="button"
-          className="shower-release"
-          onClick={releaseSession}
-          disabled={!connected || !sessionIdNow || busy !== null}
-          title="显式结束该桌面环境（与关闭预览不同）"
-        >
-          {busy === 'release' ? '结束中…' : '结束桌面环境（释放会话）'}
-        </button>
-        <span className="hint">关闭预览不释放环境。</span>
-      </div>
-    </section>
+  return (
+    <>
+      <section className="shower-preview" aria-label="桌面环境预览">
+        <header className="shower-head">
+          <div className="shower-head-text">
+            <div className="shower-title">
+              <Monitor size={14} aria-hidden="true" />
+              虚拟桌面
+            </div>
+            <div
+              className="shower-sub"
+              title={`${botId}${scopeId ? ` · scope ${scopeId}` : ''}`}
+            >
+              {shortId(botId)}
+              {scopeId ? ` · scope ${shortId(scopeId)}` : ' · 主会话'}
+            </div>
+          </div>
+          <div className="shower-head-actions">
+            <button
+              type="button"
+              className="icon-button"
+              ref={fullscreenBtnRef}
+              onClick={() => setIsFullscreen(true)}
+              title="全窗口剧场模式"
+              aria-label="进入全窗口剧场模式"
+            >
+              <Maximize2 size={14} aria-hidden="true" />
+              全屏
+            </button>
+            <button
+              type="button"
+              className="icon-button"
+              onClick={onClose}
+              title="关闭预览（只停轮询，不释放环境）"
+              aria-label="关闭预览"
+            >
+              <X size={15} aria-hidden="true" />
+            </button>
+          </div>
+        </header>
+
+        {statusBlock}
+        {capabilitiesBlock}
+        {phaseGuideBlock}
+        {alertBlock}
+
+        {/* 剧场打开时舞台/输入迁移到覆盖层，面板保留状态与告警供返回后查看。 */}
+        {!isFullscreen ? (
+          <>
+            <div className="shower-surface">
+              {frameBlock}
+            </div>
+            {metaBlock}
+            {controlsBlock}
+            {inputBlock}
+            <div className="shower-footer">
+              {releaseBlock}
+            </div>
+          </>
+        ) : (
+          <div className="shower-empty" role="status">剧场模式已开启（Esc 或「返回分屏」退出）。</div>
+        )}
+      </section>
+      {theater}
+    </>
   );
 }

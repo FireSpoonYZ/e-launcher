@@ -1,4 +1,5 @@
-// Bot 设置（desktop/远程页）：SOUL.md 编辑与 CPA 模型配置。
+// Bot 设置工作台（desktop/远程页）：SOUL.md 编辑、CPA 模型与推理配置、插件能力、定时任务。
+// 外层抽屉由 BotChats 负责；open=true 时直接展示内容，非活动 tab 的能力/任务面板不挂载、不轮询。
 // 显式读取 + CAS 保存：冲突/结果未确认只锁保存，只有显式“采用远端设置（丢弃本地修改）”才换基线；
 // 未保存草稿连同其原始基线（含 revision）按 profile+target+bot 保留，自动读取绝不替换 dirty 部分的基线，
 // 因此旧草稿不会拿到未看过的远端 revision 去覆盖远端；不自动重放、不跨 Host 串数据。
@@ -10,6 +11,7 @@ import { openCenterManagement } from './CenterGate';
 import { BotCapabilities } from './BotCapabilities';
 import { BotSchedules } from './BotSchedules';
 import type { DesktopIdentity, DesktopPanelApi } from './types';
+import './BotSettings.css';
 
 /** 与 Host 的公开上限一致（UTF-8 字节）。 */
 const SOUL_MAX_BYTES = 64 * 1024;
@@ -32,6 +34,15 @@ const SOUL_SNIPPETS: { label: string; content: string }[] = [
     label: '＋ 安全禁区',
     content: '# Safety Boundaries (安全禁区)\n- 严禁修改工作区外的系统文件或泄露凭据密钥。\n- 严守 expectedRevision CAS 与 requestId 幂等对账约束。\n',
   },
+];
+
+type StudioTab = 'soul' | 'model' | 'capabilities' | 'schedules';
+
+const STUDIO_TABS: { id: StudioTab; label: string }[] = [
+  { id: 'soul', label: '🎭 灵魂人设' },
+  { id: 'model', label: '🤖 模型与推理' },
+  { id: 'capabilities', label: '🔌 插件与能力' },
+  { id: 'schedules', label: '⏰ 定时任务' },
 ];
 
 /** 一个 Bot 的本地编辑状态：草稿与其原始基线成对保存，切走/重挂载后 CAS 仍指向同一远端版本。 */
@@ -57,10 +68,10 @@ export function BotSettings({
   api,
   botId,
   open,
-  onOpenChange,
 }: {
   api: DesktopPanelApi;
   botId: string;
+  /** 由外层工作台抽屉控制；true 时直接展示内容。 */
   open?: boolean;
   onOpenChange?: (next: boolean) => void;
 }) {
@@ -76,9 +87,7 @@ export function BotSettings({
   const [saving, setSaving] = useState<'soul' | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const [studioTab, setStudioTab] = useState<'all' | 'soul' | 'extensions' | 'capabilities' | 'schedules' | 'advanced'>('all');
-  // 能力面板只在展开时挂载：收起/后台不轮询中心。
-  const [detailsOpen, setDetailsOpen] = useState(Boolean(open));
+  const [studioTab, setStudioTab] = useState<StudioTab>('soul');
 
   const [modelConfig, setModelConfig] = useState<CenterBotModelConfig | null>(null);
   const [modelDraft, setModelDraft] = useState<CenterModelSelection>({});
@@ -99,10 +108,6 @@ export function BotSettings({
     mountedRef.current = true;
     return () => { mountedRef.current = false; };
   }, []);
-
-  useEffect(() => {
-    setDetailsOpen(Boolean(open));
-  }, [open]);
 
   /** 选择是否已变（profile/target/bot）或已卸载：迟到结果一律丢弃。 */
   const stale = useCallback((sel: string): boolean => {
@@ -339,411 +344,374 @@ export function BotSettings({
     return '继承全局';
   };
 
-  const showSoulPanel = studioTab === 'all' || studioTab === 'soul';
-  const showModelPanel = studioTab === 'all' || studioTab === 'extensions';
-  const showCapabilityPanel = detailsOpen && studioTab === 'capabilities';
-  const showSchedulesPanel = detailsOpen && (studioTab === 'all' || studioTab === 'schedules');
-  const showAdvancedPanel = studioTab === 'advanced';
+  const thinkingValue =
+    modelDraft.thinkingLevel === undefined
+      ? '__inherit'
+      : modelDraft.thinkingLevel === null
+        ? '__null'
+        : modelDraft.thinkingLevel;
+
+  const codemodeValue = (k: 'codemode' | 'codemodeOnly') => {
+    const v = modelDraft[k];
+    return v === undefined ? '__inherit' : v === null ? '__null' : v ? 'true' : 'false';
+  };
+
+  const codemodePill = (
+    k: 'codemode' | 'codemodeOnly',
+    value: string,
+    label: string,
+  ) => (
+    <button
+      key={value}
+      type="button"
+      className={`bot-studio-choice ${codemodeValue(k) === value ? 'active' : ''}`}
+      disabled={busy || !online}
+      onClick={() => updateCodemodeDraft(k, value)}
+    >
+      {label}
+    </button>
+  );
+
+  // 能力/定时任务面板只在其 tab 激活且面板打开时挂载：收起/后台不轮询中心。
+  const panelOpen = Boolean(open);
+  const showCapabilityPanel = panelOpen && studioTab === 'capabilities';
+  const showSchedulesPanel = panelOpen && studioTab === 'schedules';
   const q = modelQuery.trim().toLowerCase();
+  const filteredModels = (modelCatalog?.models ?? []).filter(
+    (m) => !q || `${m.name} ${m.modelRef}`.toLowerCase().includes(q),
+  );
+  const draftModelMissing =
+    !!modelDraft.modelRef &&
+    !modelCatalog?.models.some((m) => m.modelRef === modelDraft.modelRef);
+
+  if (!open) return null;
 
   return (
-    <details
-      className="raw-history soul-studio-details"
-      open={open}
-      onToggle={(e) => {
-        setDetailsOpen(e.currentTarget.open);
-        if (onOpenChange) onOpenChange((e.currentTarget as HTMLDetailsElement).open);
-      }}
-    >
-      <summary className="soul-studio-summary">
-        <div className="soul-studio-summary-main">
-          <h4>{`✨ Bot 设置（SOUL 与模型）${dirty ? ' · 已修改' : ''}`}</h4>
-          <span className="soul-studio-badges">
-            {soul ? (
-              <span className={`studio-pill ${soulDirty ? 'amber' : 'purple'}`}>
-                {`SOUL.md · ${currentBytes} B`}
-              </span>
-            ) : null}
-            {modelConfig ? (
-              <span className="studio-pill emerald">
-                {`模型: ${describeVal(modelConfig.effective.modelRef)}`}
-              </span>
-            ) : null}
-            {locked ? <span className="studio-pill coral">🔒 冲突锁定</span> : null}
-          </span>
+    <section className="bot-studio" aria-label="Bot 设置工作台">
+      <div className="bot-studio-head">
+        <div className="pill-tabs bot-studio-tabs" role="tablist" aria-label="Bot 设置页签">
+          {STUDIO_TABS.map((t) => (
+            <button
+              key={t.id}
+              type="button"
+              role="tab"
+              aria-selected={studioTab === t.id}
+              className={studioTab === t.id ? 'active' : undefined}
+              onClick={() => setStudioTab(t.id)}
+            >
+              {t.id === 'soul' && soulDirty ? `${t.label} ●` : t.label}
+            </button>
+          ))}
         </div>
-      </summary>
-      <div className="raw-history-content soul-studio-body">
-        <div className="soul-studio-topbar">
-          <div className="studio-seg" role="tablist" aria-label="灵魂与扩展视图切换">
-            <button
-              type="button"
-              className={studioTab === 'all' ? 'active' : undefined}
-              onClick={() => setStudioTab('all')}
-            >
-              全部视图
-            </button>
-            <button
-              type="button"
-              className={studioTab === 'soul' ? 'active' : undefined}
-              onClick={() => setStudioTab('soul')}
-            >
-              {`🎭 灵魂文档 (SOUL.md)${soulDirty ? ' ●' : ''}`}
-            </button>
-            <button
-              type="button"
-              className={studioTab === 'extensions' ? 'active' : undefined}
-              onClick={() => setStudioTab('extensions')}
-            >
-              🤖 模型选择
-            </button>
-            <button
-              type="button"
-              className={studioTab === 'capabilities' ? 'active' : undefined}
-              onClick={() => setStudioTab('capabilities')}
-            >
-              🔌 能力（插件 / MCP / 技能）
-            </button>
-            <button
-              type="button"
-              className={studioTab === 'schedules' ? 'active' : undefined}
-              onClick={() => setStudioTab('schedules')}
-            >
-              ⏰ 定时任务
-            </button>
-            <button
-              type="button"
-              className={studioTab === 'advanced' ? 'active' : undefined}
-              onClick={() => setStudioTab('advanced')}
-            >
-              ⚙️ 高级设置
-            </button>
-            <button type="button" onClick={() => void openCenterManagement()}>插件与中心管理</button>
-          </div>
-          <div className="soul-studio-actions">
-            <button type="button" onClick={() => void load(false)} disabled={!online || loading || busy}>
-              {loading ? '读取中…' : '↻ 重新读取'}
-            </button>
-            <button
-              type="button"
-              className={locked ? 'btn-amber' : undefined}
-              onClick={() => void load(true)}
-              disabled={!online || loading || busy || (!dirty && !locked)}
-            >
-              采用远端设置（丢弃本地修改）
-            </button>
-          </div>
-        </div>
-
-        {!online ? <div className="status">离线：显示最后读取的设置，保存已禁用。</div> : null}
-        {loading && !soul ? <div className="status">加载中…</div> : null}
-        {error ? (
-          <div className="error-banner" role="alert">
-            {error}
-            <button onClick={() => setError(null)}>关闭</button>
-          </div>
-        ) : null}
-        {notice ? <div className="status online">{notice}</div> : null}
-        {locked ? (
-          <div className="studio-lock-banner" role="status">
-            <strong>🔒 保存保持锁定：</strong>
-            请用“采用远端设置（丢弃本地修改）”核对远端；普通“重新读取”不会给未保存草稿换 revision。
-          </div>
-        ) : null}
-
-        <div className={`form-grid soul-studio-grid ${studioTab !== 'all' ? 'single-col' : ''}`}>
-          {showSoulPanel ? (
-            <div className="field studio-card">
-              <div className="studio-card-header">
-                <label>🎭 SOUL.md（Bot 独立灵魂文档）</label>
-                {soul ? (
-                  <span className={`studio-pill mono ${byteOverLimit ? 'coral' : byteWarn ? 'amber' : 'emerald'}`}>
-                    {`UTF-8: ${currentBytes} / ${SOUL_MAX_BYTES} B (${bytePct}%)`}
-                  </span>
-                ) : null}
-              </div>
-              {soul ? (
-                <>
-                  <div className="metadata">
-                    {`${soul.path} · revision ${soul.revision.slice(0, 12)}…${soulDirty ? '（本地草稿基线）' : ''} · ${currentBytes} / ${SOUL_MAX_BYTES} 字节`}
-                  </div>
-                  <div className="soul-byte-progress" aria-hidden="true">
-                    <div
-                      className={`soul-byte-fill ${byteOverLimit ? 'danger' : byteWarn ? 'warn' : ''}`}
-                      style={{ width: `${bytePct}%` }}
-                    />
-                  </div>
-                  <div className="soul-snippet-bar">
-                    <span className="hint">快速插入片段：</span>
-                    {SOUL_SNIPPETS.map((s) => (
-                      <button
-                        key={s.label}
-                        type="button"
-                        className="snippet-chip"
-                        disabled={busy}
-                        onClick={() => insertSoulSnippet(s.content)}
-                      >
-                        {s.label}
-                      </button>
-                    ))}
-                    <button
-                      type="button"
-                      className="snippet-chip danger-chip"
-                      disabled={busy || soulValue === ''}
-                      onClick={() => updateSoul('')}
-                    >
-                      清空为空灵魂 ("")
-                    </button>
-                  </div>
-                  <textarea
-                    className="raw-history soul-editor-textarea"
-                    value={soulValue}
-                    rows={10}
-                    spellCheck={false}
-                    placeholder="在此编写该 Bot 的独立系统灵魂（SOUL.md）。留空保存代表显式使用空灵魂 (intentionally empty)…"
-                    disabled={busy}
-                    onChange={(e) => updateSoul(e.target.value)}
-                  />
-                  <p className="hint">
-                    该 Bot 独立的系统人设（主会话 Primary 与群聊/私聊 Room/DM 工作上下文共享同一份 SOUL.md）；保存后在下一个请求生效，不重置会话与历史。允许为空。
-                  </p>
-                  <div className="form-actions">
-                    <button onClick={() => void saveSoul()} disabled={!canSaveSoul || byteOverLimit}>
-                      {saving === 'soul' ? '保存中…' : '保存 SOUL（CAS）'}
-                    </button>
-                    <button onClick={() => updateSoul(null)} disabled={!soulDirty || busy}>
-                      放弃 SOUL 修改
-                    </button>
-                  </div>
-                </>
-              ) : (
-                <div className="metadata">{loading ? '读取中…' : '尚未读取'}</div>
-              )}
-            </div>
-          ) : null}
-
-          {showModelPanel ? (
-            <div className="field studio-card">
-              <div className="studio-card-header">
-                <label>🤖 Bot 模型选择（CPA 中心下发）</label>
-                {modelConfig ? (
-                  <span className="studio-pill emerald">
-                    {`有效模型: ${describeVal(modelConfig.effective.modelRef)}`}
-                  </span>
-                ) : null}
-              </div>
-              {modelConfig ? (
-                <>
-                  <div className="metadata">
-                    {`当前生效: ${describeVal(modelConfig.effective.modelRef)} · ${describeCodemode(modelConfig.effective)}`}
-                  </div>
-                  <label>
-                    搜索过滤模型
-                    <input
-                      type="search"
-                      value={modelQuery}
-                      placeholder="输入模型名称或 provider/modelId 过滤…"
-                      disabled={busy}
-                      onChange={(e) => setModelQuery(e.target.value)}
-                    />
-                  </label>
-                  <label>
-                    选择模型（共 {modelCatalog?.models.length ?? 0} 个可用模型）
-                    <select
-                      disabled={busy || !online}
-                      value={
-                        modelDraft.modelRef === undefined || modelDraft.modelRef === null
-                          ? '__inherit'
-                          : modelDraft.modelRef
-                      }
-                      onChange={(e) =>
-                        updateModelDraft(
-                          'modelRef',
-                          e.target.value === '__inherit' ? undefined : e.target.value,
-                        )
-                      }
-                    >
-                      <option value="__inherit">继承中心全局 ({describeVal(modelConfig.global.modelRef)})</option>
-                      {modelDraft.modelRef &&
-                      !modelCatalog?.models.some((m) => m.modelRef === modelDraft.modelRef) ? (
-                        <option value={modelDraft.modelRef}>{modelDraft.modelRef}（当前配置）</option>
-                      ) : null}
-                      {(modelCatalog?.models ?? [])
-                        .filter(
-                          (m) =>
-                            !q || `${m.name} ${m.modelRef}`.toLowerCase().includes(q),
-                        )
-                        .map((m) => (
-                          <option key={m.modelRef} value={m.modelRef}>
-                            {m.name} · {m.modelRef}
-                          </option>
-                        ))}
-                    </select>
-                  </label>
-                  <div className="form-actions">
-                    <button
-                      type="button"
-                      disabled={busy || !online}
-                      onClick={() => void saveModelConfig()}
-                    >
-                      {modelSaving ? '保存模型中…' : '保存模型配置'}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setStudioTab('advanced')}
-                    >
-                      ⚙️ 前往高级设置（Code Mode / 思考档位）
-                    </button>
-                  </div>
-                </>
-              ) : (
-                <div className="metadata">{loading ? '读取模型配置中…' : '尚未加载模型配置'}</div>
-              )}
-            </div>
-          ) : null}
-
-          {showAdvancedPanel ? (
-            <div className="field studio-card">
-              <div className="studio-card-header">
-                <label>⚙️ 高级设置（Code Mode · 渐进式工具加载 · 思考档位）</label>
-                {modelConfig ? (
-                  <span className="studio-pill purple">
-                    {describeCodemode(modelConfig.effective)}
-                  </span>
-                ) : null}
-              </div>
-              {modelConfig ? (
-                <>
-                  <div className="metadata">
-                    {`中心全局: ${describeVal(modelConfig.global.modelRef)} (${describeVal(modelConfig.global.thinkingLevel)}, ${describeCodemode(modelConfig.global)}) · 当前覆盖: ${describeVal(modelConfig.overrides.modelRef)} (${describeVal(modelConfig.overrides.thinkingLevel)}, ${describeCodemode(modelConfig.overrides)}) · revision ${modelConfig.revision}`}
-                  </div>
-                  <p className="hint">
-                    启用 Code Mode 后模型可在受控 QuickJS 沙盒中编写 JS 脚本批量编排工具调用；启用“仅 Code Mode 模式”后，仅向模型暴露 codemode 工具，所有内置工具、插件与 MCP 转为沙盒内渐进式按需搜索与加载，大幅降低上下文开销。
-                  </p>
-                  <label>
-                    启用 Code Mode (codemode)
-                    <select
-                      disabled={busy || !online}
-                      value={
-                        modelDraft.codemode === undefined
-                          ? '__inherit'
-                          : modelDraft.codemode === null
-                            ? '__null'
-                            : modelDraft.codemode
-                              ? 'true'
-                              : 'false'
-                      }
-                      onChange={(e) => updateCodemodeDraft('codemode', e.target.value)}
-                    >
-                      <option value="__inherit">
-                        继承中心全局（{modelConfig.global.codemode ? '开启' : '关闭'}）
-                      </option>
-                      <option value="true">开启 — 提供 codemode 沙盒工具</option>
-                      <option value="false">关闭 — 仅使用常规工具调用</option>
-                    </select>
-                  </label>
-                  <label>
-                    仅 Code Mode 模式 (codemodeOnly — 全量工具与 MCP 渐进式按需加载)
-                    <select
-                      disabled={busy || !online}
-                      value={
-                        modelDraft.codemodeOnly === undefined
-                          ? '__inherit'
-                          : modelDraft.codemodeOnly === null
-                            ? '__null'
-                            : modelDraft.codemodeOnly
-                              ? 'true'
-                              : 'false'
-                      }
-                      onChange={(e) => updateCodemodeDraft('codemodeOnly', e.target.value)}
-                    >
-                      <option value="__inherit">
-                        继承中心全局（{modelConfig.global.codemodeOnly ? '开启' : '关闭'}）
-                      </option>
-                      <option value="true">开启 — 仅向模型暴露 codemode（全工具渐进式加载）</option>
-                      <option value="false">关闭 — 保留常规工具直接调用</option>
-                    </select>
-                  </label>
-                  <label>
-                    思考档位 (Thinking Level)
-                    <select
-                      disabled={busy || !online}
-                      value={
-                        modelDraft.thinkingLevel === undefined
-                          ? '__inherit'
-                          : modelDraft.thinkingLevel === null
-                            ? '__null'
-                            : modelDraft.thinkingLevel
-                      }
-                      onChange={(e) =>
-                        updateModelDraft(
-                          'thinkingLevel',
-                          e.target.value === '__inherit'
-                            ? undefined
-                            : e.target.value === '__null'
-                              ? null
-                              : e.target.value,
-                        )
-                      }
-                    >
-                      <option value="__inherit">继承中心全局 ({describeVal(modelConfig.global.thinkingLevel)})</option>
-                      <option value="__null">显式清空（SDK 默认）</option>
-                      {THINKING_LEVELS.map((lv) => (
-                        <option key={lv} value={lv}>
-                          {lv}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <label>
-                    模型覆盖策略
-                    <select
-                      disabled={busy || !online}
-                      value={modelDraft.modelRef === null ? '__null' : '__normal'}
-                      onChange={(e) => {
-                        if (e.target.value === '__null') updateModelDraft('modelRef', null);
-                        else if (modelDraft.modelRef === null) updateModelDraft('modelRef', undefined);
-                      }}
-                    >
-                      <option value="__normal">正常（继承全局或使用所选模型）</option>
-                      <option value="__null">显式清空（强制阻断继承全局模型）</option>
-                    </select>
-                  </label>
-                  <div className="form-actions">
-                    <button
-                      type="button"
-                      disabled={busy || !online}
-                      onClick={() => void saveModelConfig()}
-                    >
-                      {modelSaving ? '保存中…' : '保存高级设置'}
-                    </button>
-                  </div>
-                </>
-              ) : (
-                <div className="metadata">{loading ? '读取配置中…' : '尚未加载配置'}</div>
-              )}
-            </div>
-          ) : null}
-
-          {showCapabilityPanel && identity ? (
-            <div className="field studio-card">
-              <div className="studio-card-header">
-                <label>🔌 Bot 能力（插件 / MCP / 技能）</label>
-              </div>
-              <BotCapabilities key={`${identity.targetDeviceId}\u0000${botId}`} api={api} identity={identity} deviceId={identity.targetDeviceId} botId={botId} />
-            </div>
-          ) : null}
-
-          {showSchedulesPanel && identity ? (
-            <div className="field studio-card">
-              <div className="studio-card-header">
-                <label>⏰ 定时任务（主私聊自动触发）</label>
-              </div>
-              <BotSchedules key={`${identity.targetDeviceId}\u0000${botId}`} api={api} identity={identity} botId={botId} />
-            </div>
-          ) : null}
+        <div className="bot-studio-actions">
+          <button
+            type="button"
+            className="secondary-button"
+            onClick={() => void load(false)}
+            disabled={!online || loading || busy}
+          >
+            {loading ? '读取中…' : '↻ 重新读取'}
+          </button>
+          <button
+            type="button"
+            className={`secondary-button ${locked ? 'warn' : ''}`}
+            onClick={() => void load(true)}
+            disabled={!online || loading || busy || (!dirty && !locked)}
+          >
+            采用远端设置（丢弃本地修改）
+          </button>
+          <button
+            type="button"
+            className="secondary-button"
+            onClick={() => void openCenterManagement()}
+          >
+            插件与中心管理
+          </button>
         </div>
       </div>
-    </details>
+
+      <div className="bot-studio-badges">
+        {soul ? (
+          <span className={`studio-pill ${soulDirty ? 'is-warn' : 'is-ok'}`}>
+            {`SOUL.md · ${currentBytes} B${soulDirty ? ' · 已修改' : ''}`}
+          </span>
+        ) : null}
+        {modelConfig ? (
+          <span className="studio-pill is-ok">
+            {`模型: ${describeVal(modelConfig.effective.modelRef)}`}
+          </span>
+        ) : null}
+        {locked ? <span className="studio-pill is-lock">🔒 冲突锁定</span> : null}
+      </div>
+
+      {!online ? <div className="status">离线：显示最后读取的设置，保存已禁用。</div> : null}
+      {loading && !soul ? <div className="status">加载中…</div> : null}
+      {error ? (
+        <div className="error-banner" role="alert">
+          {error}
+          <button onClick={() => setError(null)}>关闭</button>
+        </div>
+      ) : null}
+      {notice ? <div className="status online">{notice}</div> : null}
+      {locked ? (
+        <div className="bot-studio-lock" role="status">
+          <strong>🔒 保存保持锁定：</strong>
+          请用“采用远端设置（丢弃本地修改）”核对远端；普通“重新读取”不会给未保存草稿换 revision。
+        </div>
+      ) : null}
+
+      {studioTab === 'soul' ? (
+        <div className="studio-card bot-studio-card" role="tabpanel" aria-label="灵魂人设">
+          <div className="studio-card-header">
+            <label>🎭 SOUL.md（Bot 独立灵魂文档）</label>
+            {soul ? (
+              <span className={`studio-pill mono ${byteOverLimit ? 'is-lock' : byteWarn ? 'is-warn' : 'is-ok'}`}>
+                {`UTF-8: ${currentBytes} / ${SOUL_MAX_BYTES} B (${bytePct}%)`}
+              </span>
+            ) : null}
+          </div>
+          {soul ? (
+            <>
+              <div className="metadata">
+                {`${soul.path} · revision ${soul.revision.slice(0, 12)}…${soulDirty ? '（本地草稿基线）' : ''}`}
+              </div>
+              <div className="soul-byte-progress" aria-hidden="true">
+                <div
+                  className={`soul-byte-fill ${byteOverLimit ? 'danger' : byteWarn ? 'warn' : ''}`}
+                  style={{ width: `${bytePct}%` }}
+                />
+              </div>
+              <div className="soul-snippet-bar">
+                {SOUL_SNIPPETS.map((s) => (
+                  <button
+                    key={s.label}
+                    type="button"
+                    className="snippet-chip"
+                    disabled={busy}
+                    onClick={() => insertSoulSnippet(s.content)}
+                  >
+                    {s.label}
+                  </button>
+                ))}
+                <button
+                  type="button"
+                  className="snippet-chip danger"
+                  disabled={busy || soulValue === ''}
+                  onClick={() => updateSoul('')}
+                >
+                  清空为空灵魂 (&quot;&quot;)
+                </button>
+              </div>
+              <textarea
+                className="soul-textarea"
+                value={soulValue}
+                rows={12}
+                spellCheck={false}
+                placeholder="在此编写该 Bot 的独立系统灵魂（SOUL.md）。留空保存代表显式使用空灵魂 (intentionally empty)…"
+                disabled={busy}
+                onChange={(e) => updateSoul(e.target.value)}
+              />
+              <p className="hint">
+                该 Bot 独立的系统人设（主会话 Primary 与群聊/私聊 Room/DM 工作上下文共享同一份 SOUL.md）；保存后在下一个请求生效，不重置会话与历史。允许为空。
+              </p>
+              <div className="form-actions">
+                <button
+                  type="button"
+                  className="primary-button"
+                  onClick={() => void saveSoul()}
+                  disabled={!canSaveSoul || byteOverLimit}
+                >
+                  {saving === 'soul' ? '保存中…' : '保存灵魂文档（CAS）'}
+                </button>
+                <button
+                  type="button"
+                  className="secondary-button"
+                  onClick={() => updateSoul(null)}
+                  disabled={!soulDirty || busy}
+                >
+                  放弃修改
+                </button>
+              </div>
+            </>
+          ) : (
+            <div className="metadata">{loading ? '读取中…' : '尚未读取'}</div>
+          )}
+        </div>
+      ) : null}
+
+      {studioTab === 'model' ? (
+        <div className="studio-card bot-studio-card" role="tabpanel" aria-label="模型与推理">
+          <div className="studio-card-header">
+            <label>🤖 模型与推理（CPA 中心下发）</label>
+            {modelConfig ? (
+              <span className="studio-pill is-ok">
+                {`有效模型: ${describeVal(modelConfig.effective.modelRef)}`}
+              </span>
+            ) : null}
+          </div>
+          {modelConfig ? (
+            <>
+              <div className="bot-studio-effective">
+                <span>{`生效模型 ${describeVal(modelConfig.effective.modelRef)}`}</span>
+                <span>{`思考 ${describeVal(modelConfig.effective.thinkingLevel)}`}</span>
+                <span>{describeCodemode(modelConfig.effective)}</span>
+              </div>
+              <label className="bot-studio-field">
+                搜索过滤模型
+                <input
+                  type="search"
+                  value={modelQuery}
+                  placeholder="输入模型名称或 provider/modelId 过滤…"
+                  disabled={busy}
+                  onChange={(e) => setModelQuery(e.target.value)}
+                />
+              </label>
+              <div className="bot-studio-field">
+                <span className="bot-studio-field-label">
+                  {`选择模型（${filteredModels.length} / ${modelCatalog?.models.length ?? 0} 个可用）`}
+                </span>
+                <div className="bot-studio-model-list" role="radiogroup" aria-label="选择模型">
+                  <button
+                    type="button"
+                    role="radio"
+                    aria-checked={modelDraft.modelRef === undefined}
+                    className={`bot-studio-model-row ${modelDraft.modelRef === undefined ? 'active' : ''}`}
+                    disabled={busy || !online}
+                    onClick={() => updateModelDraft('modelRef', undefined)}
+                  >
+                    <span className="bot-studio-model-name">继承中心全局</span>
+                    <span className="bot-studio-model-ref">{describeVal(modelConfig.global.modelRef)}</span>
+                  </button>
+                  {draftModelMissing ? (
+                    <button
+                      type="button"
+                      role="radio"
+                      aria-checked="true"
+                      className="bot-studio-model-row active"
+                      disabled={busy || !online}
+                      onClick={() => updateModelDraft('modelRef', modelDraft.modelRef)}
+                    >
+                      <span className="bot-studio-model-name">{`${modelDraft.modelRef}（当前配置）`}</span>
+                      <span className="bot-studio-model-ref">不在中心目录中</span>
+                    </button>
+                  ) : null}
+                  {filteredModels.map((m) => (
+                    <button
+                      key={m.modelRef}
+                      type="button"
+                      role="radio"
+                      aria-checked={modelDraft.modelRef === m.modelRef}
+                      className={`bot-studio-model-row ${modelDraft.modelRef === m.modelRef ? 'active' : ''}`}
+                      disabled={busy || !online}
+                      onClick={() => updateModelDraft('modelRef', m.modelRef)}
+                    >
+                      <span className="bot-studio-model-name">{m.name}</span>
+                      <span className="bot-studio-model-ref">{m.modelRef}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div className="bot-studio-field">
+                <span className="bot-studio-field-label">模型覆盖策略</span>
+                <select
+                  disabled={busy || !online}
+                  value={modelDraft.modelRef === null ? '__null' : '__normal'}
+                  onChange={(e) => {
+                    if (e.target.value === '__null') updateModelDraft('modelRef', null);
+                    else if (modelDraft.modelRef === null) updateModelDraft('modelRef', undefined);
+                  }}
+                >
+                  <option value="__normal">正常（继承全局或使用所选模型）</option>
+                  <option value="__null">显式清空（强制阻断继承全局模型）</option>
+                </select>
+              </div>
+              <div className="bot-studio-field">
+                <span className="bot-studio-field-label">
+                  {`思考档位 (Thinking Level) · 全局 ${describeVal(modelConfig.global.thinkingLevel)}`}
+                </span>
+                <div className="bot-studio-choices" role="radiogroup" aria-label="思考档位">
+                  {['__inherit', '__null', ...THINKING_LEVELS].map((lv) => (
+                    <button
+                      key={lv}
+                      type="button"
+                      role="radio"
+                      aria-checked={thinkingValue === lv}
+                      className={`bot-studio-choice ${thinkingValue === lv ? 'active' : ''}`}
+                      disabled={busy || !online}
+                      onClick={() =>
+                        updateModelDraft(
+                          'thinkingLevel',
+                          lv === '__inherit' ? undefined : lv === '__null' ? null : lv,
+                        )
+                      }
+                    >
+                      {lv === '__inherit' ? '继承' : lv === '__null' ? '显式清空' : lv}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div className="bot-studio-field">
+                <span className="bot-studio-field-label">
+                  {`启用 Code Mode (codemode) · 全局 ${modelConfig.global.codemode ? '开启' : '关闭'}`}
+                </span>
+                <div className="bot-studio-choices">
+                  {codemodePill('codemode', '__inherit', '继承')}
+                  {codemodePill('codemode', 'true', '开启')}
+                  {codemodePill('codemode', 'false', '关闭')}
+                </div>
+                {modelDraft.codemode === null ? <span className="hint">当前为显式清空。</span> : null}
+              </div>
+              <div className="bot-studio-field">
+                <span className="bot-studio-field-label">
+                  {`仅 Code Mode 模式 (codemodeOnly — 全量工具与 MCP 渐进式按需加载) · 全局 ${modelConfig.global.codemodeOnly ? '开启' : '关闭'}`}
+                </span>
+                <div className="bot-studio-choices">
+                  {codemodePill('codemodeOnly', '__inherit', '继承')}
+                  {codemodePill('codemodeOnly', 'true', '开启')}
+                  {codemodePill('codemodeOnly', 'false', '关闭')}
+                </div>
+                {modelDraft.codemodeOnly === null ? <span className="hint">当前为显式清空。</span> : null}
+              </div>
+              <p className="hint">
+                启用 Code Mode 后模型可在受控 QuickJS 沙盒中编写 JS 脚本批量编排工具调用；启用“仅 Code Mode 模式”后，仅向模型暴露 codemode 工具，所有内置工具、插件与 MCP 转为沙盒内渐进式按需搜索与加载，大幅降低上下文开销。
+              </p>
+              <div className="metadata">
+                {`当前覆盖: ${describeVal(modelConfig.overrides.modelRef)} (${describeVal(modelConfig.overrides.thinkingLevel)}, ${describeCodemode(modelConfig.overrides)}) · revision ${modelConfig.revision}`}
+              </div>
+              <div className="form-actions">
+                <button
+                  type="button"
+                  className="primary-button"
+                  disabled={busy || !online}
+                  onClick={() => void saveModelConfig()}
+                >
+                  {modelSaving ? '保存中…' : '保存模型与推理配置'}
+                </button>
+              </div>
+            </>
+          ) : (
+            <div className="metadata">{loading ? '读取模型配置中…' : '尚未加载模型配置'}</div>
+          )}
+        </div>
+      ) : null}
+
+      {showCapabilityPanel && identity ? (
+        <div className="studio-card bot-studio-card" role="tabpanel" aria-label="插件与能力">
+          <div className="studio-card-header">
+            <label>🔌 Bot 能力（插件 / MCP / 技能）</label>
+          </div>
+          <BotCapabilities key={`${identity.targetDeviceId}\u0000${botId}`} api={api} identity={identity} deviceId={identity.targetDeviceId} botId={botId} />
+        </div>
+      ) : null}
+
+      {showSchedulesPanel && identity ? (
+        <div className="studio-card bot-studio-card" role="tabpanel" aria-label="定时任务">
+          <div className="studio-card-header">
+            <label>⏰ 定时任务（主私聊自动触发）</label>
+          </div>
+          <BotSchedules key={`${identity.targetDeviceId}\u0000${botId}`} api={api} identity={identity} botId={botId} />
+        </div>
+      ) : null}
+    </section>
   );
 }

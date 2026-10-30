@@ -1,4 +1,21 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { ReactNode } from 'react';
+import {
+  Check,
+  Eye,
+  EyeOff,
+  History,
+  MessageSquare,
+  Monitor,
+  Play,
+  Plus,
+  RefreshCw,
+  Reply,
+  SendHorizontal,
+  Square,
+  Users,
+  X,
+} from 'lucide-react';
 import type { DesktopIdentity, DesktopViewApi } from './types';
 import type {
   BotLiveState,
@@ -15,8 +32,10 @@ import type {
   WorkHistoryCursor,
   WorkLiveSnapshot,
 } from '../../../host-core/index.js';
+import { GrokBotAvatar, resolveBotAvatarPreset } from '../../../web/src/GrokBotAvatar';
 import { useDrafts } from './drafts';
 import { ShowerPreview } from './ShowerPreview';
+import './Scopes.css';
 
 type AnyRawEntry = { id: unknown; kind: string; model?: unknown; data?: unknown };
 
@@ -85,6 +104,27 @@ function entryTextLines(entry: AnyRawEntry): string[] {
   return lines.filter(Boolean);
 }
 
+/** 成员/消息作者与列表 Bot 匹配时复用其定制头像；否则按 deviceId:botId 种子给出稳定预设。 */
+function memberAvatar(member: { deviceId: string; botId: string }, bots: BotRecord[], size: number): ReactNode {
+  const known = bots.find((b) => b.deviceId === member.deviceId && b.botId === member.botId);
+  if (known) {
+    // 与本机 Hub 同一 botKey 约定（deviceId:botId），命中用户定制头像与主 Bot 预设。
+    return (
+      <GrokBotAvatar
+        preset={resolveBotAvatarPreset(`${known.deviceId}:${known.botId}`, known.role, known.isPrimary)}
+        size={size}
+      />
+    );
+  }
+  // 远端成员无本地 BotRecord：用稳定种子生成确定预设，不读定制映射。
+  return (
+    <GrokBotAvatar
+      preset={resolveBotAvatarPreset(`${member.deviceId}:${member.botId}`, member.botId, false)}
+      size={size}
+    />
+  );
+}
+
 function RawEntryRow({ entry }: { entry: AnyRawEntry }) {
   const summary = entryTextLines(entry).join('\n');
   return (
@@ -102,40 +142,78 @@ function RawEntryRow({ entry }: { entry: AnyRawEntry }) {
   );
 }
 
-function authorLabel(m: StoredMessage): string {
+function authorLabel(m: StoredMessage, bots: BotRecord[]): string {
   const author = m.message.author;
   // 只描述协议角色，不从 author.kind=user 认证真实人类身份，也不编造身份。
-  return author.kind === 'bot' ? `Bot ${author.botId}` : '用户角色';
+  if (author.kind !== 'bot') return '用户角色';
+  const member = m.message.targets.find((t) => t.botId === author.botId);
+  const known = member ? bots.find((b) => b.deviceId === member.deviceId && b.botId === author.botId) : undefined;
+  return known?.role ?? `Bot ${author.botId}`;
 }
 
-function MessageRow({ msg }: { msg: StoredMessage }) {
+/** 成员可读名称摘要：优先 BotRecord.role，未知成员回退 botId。 */
+function memberNames(members: MessageMember[], bots: BotRecord[]): string {
+  return members
+    .map((m) => {
+      const b = bots.find((x) => x.deviceId === m.deviceId && x.botId === m.botId);
+      return b?.role ?? m.botId;
+    })
+    .join('、');
+}
+
+function MessageRow({ msg, bots }: { msg: StoredMessage; bots: BotRecord[] }) {
   const e = msg.message;
+  const author = e.author;
+  const isUser = author.kind === 'user';
+  const authorMember = !isUser && author.kind === 'bot'
+    ? scopeMemberGuess(msg, author.botId)
+    : null;
   return (
-    <div className="message scope-message">
-      <div className="message-head">
-        <span className="message-role">{authorLabel(msg)}</span>
-        <span className="message-category">{e.category}</span>
-        <span className="message-time">{formatTime(e.createdAt)}</span>
+    <div className={`message scope-message${isUser ? ' scope-message-user' : ' scope-message-bot'}`}>
+      <div className="scope-message-avatar">
+        {authorMember ? (
+          memberAvatar(authorMember, bots, 34)
+        ) : (
+          // 中性徽标：kind=user 仅协议角色，不代表已认证的人类身份。
+          <span className="scope-user-badge" title="用户角色（协议角色，非身份认证）" aria-label="用户角色">U</span>
+        )}
       </div>
-      {e.replyTo ? <div className="message-replyto">回复 {e.replyTo}</div> : null}
-      <div className="message-text">{e.text}</div>
-      {msg.missingRefs.length > 0 ? (
-        <div className="metadata">
-          <span>缺失引用:</span>
-          {msg.missingRefs.map((r) => <span key={r} className="missing-ref">{r}</span>)}
+      <div className="scope-message-body">
+        <div className="message-head">
+          <span className="message-role">{authorLabel(msg, bots)}</span>
+          <span className="message-category">{e.category}</span>
+          <span className="message-time">{formatTime(e.createdAt)}</span>
         </div>
-      ) : null}
-      <div className="message-meta">{e.messageId} · localId {msg.localId}</div>
+        {e.replyTo ? <div className="message-replyto">回复 {e.replyTo}</div> : null}
+        <div className="scope-message-bubble">
+          <div className="message-text">{e.text}</div>
+        </div>
+        {msg.missingRefs.length > 0 ? (
+          <div className="metadata">
+            <span>缺失引用:</span>
+            {msg.missingRefs.map((r) => <span key={r} className="missing-ref">{r}</span>)}
+          </div>
+        ) : null}
+        <div className="message-meta">{e.messageId} · localId {msg.localId}</div>
+      </div>
     </div>
   );
 }
 
-function MemberWorkPane({ api, scopeId, member, active, pageActive = true }: {
+/** author 只携带 botId；从消息冻结的 targets 推导其 deviceId 以匹配头像。 */
+function scopeMemberGuess(msg: StoredMessage, botId: string): MessageMember | null {
+  const targets = msg.message.targets;
+  return targets.find((t) => t.botId === botId) ?? null;
+}
+
+function MemberWorkPane({ api, scopeId, member, active, pageActive = true, bots, onClose }: {
   api: DesktopViewApi;
   scopeId: string;
   member: MessageMember;
   active: boolean;
   pageActive?: boolean;
+  bots: BotRecord[];
+  onClose?: () => void;
 }) {
   const identity = api.identity;
   const sess = sessionKey(identity);
@@ -362,7 +440,7 @@ function MemberWorkPane({ api, scopeId, member, active, pageActive = true }: {
 
   if (!isLocalMember) {
     return (
-      <div className="member-work-pane">
+      <div className={`member-work-pane${active ? ' member-work-pane-active' : ''}`}>
         <div className="member-work-head">
           <span className="entity-title">{member.botId}</span>
           <span className="entity-sub">device {member.deviceId}（远端成员，仅显示归属，不对其发起请求）</span>
@@ -384,17 +462,33 @@ function MemberWorkPane({ api, scopeId, member, active, pageActive = true }: {
   }
 
   return (
-    <div className="member-work-pane">
+    <div className="member-work-pane member-work-pane-active">
       <div className="member-work-head">
-        <span className="entity-title">{member.botId}</span>
-        <span className="entity-sub">device {member.deviceId}</span>
+        <span className="member-work-avatar">{memberAvatar(member, bots, 30)}</span>
+        <div className="member-work-title">
+          <span className="entity-title">{member.botId}</span>
+          <span className="entity-sub">device {member.deviceId}</span>
+        </div>
         <button
           type="button"
           className={`toolbar-btn ${showerOpen ? 'active' : ''}`}
           onClick={() => setShowerOpen((v) => !v)}
+          title={showerOpen ? '收起桌面环境' : '查看桌面环境'}
         >
-          {showerOpen ? '收起桌面环境' : '桌面环境'}
+          <Monitor size={14} />
+          {showerOpen ? '收起桌面' : '桌面'}
         </button>
+        {onClose ? (
+          <button
+            type="button"
+            className="icon-button member-work-close"
+            onClick={onClose}
+            title="关闭成员观察"
+            aria-label="关闭成员观察"
+          >
+            <X size={15} />
+          </button>
+        ) : null}
       </div>
       {/* 页面不可见时等同断开：停止轮询与输入，避免后台轮询（面板只有 4 个契约 props）。 */}
       {showerOpen ? (
@@ -425,15 +519,17 @@ function MemberWorkPane({ api, scopeId, member, active, pageActive = true }: {
         </div>
       ) : null}
       {activityError ? <div className="error-banner" role="alert">{activityError}</div> : null}
-      <div className="toolbar">
-        <button disabled={workBusy || !online} onClick={() => void runWorkOp('stopWork')}>
+      <div className="toolbar member-work-actions">
+        <button className="secondary-button" disabled={workBusy || !online} onClick={() => void runWorkOp('stopWork')}>
+          <Square size={13} />
           {workBusy ? '操作中…' : '停止工作'}
         </button>
-        <button disabled={workBusy || !online} onClick={() => void runWorkOp('resumeWork')}>
+        <button className="secondary-button" disabled={workBusy || !online} onClick={() => void runWorkOp('resumeWork')}>
+          <Play size={13} />
           {workBusy ? '操作中…' : '恢复工作'}
         </button>
-        <button disabled={!online || activityLoading || workBusy} onClick={() => void refreshActivity()}>
-          {activityLoading ? '刷新中…' : '刷新工作状态'}
+        <button className="icon-button" disabled={!online || activityLoading || workBusy} onClick={() => void refreshActivity()} title="刷新工作状态" aria-label="刷新工作状态">
+          <RefreshCw size={14} className={activityLoading ? 'scope-spin' : undefined} />
         </button>
       </div>
       <div className="live-pane">
@@ -449,7 +545,7 @@ function MemberWorkPane({ api, scopeId, member, active, pageActive = true }: {
         ) : null}
       </div>
       <details className="raw-history">
-        <summary><h4>work 原始历史</h4></summary>
+        <summary><History size={13} /> work 原始历史</summary>
         <div className="raw-history-content">
           {!online ? <div className="status">离线：显示最后读取的 work 历史，不自动请求。</div> : null}
           <div className="toolbar">
@@ -660,9 +756,10 @@ function RoomComposer({ api, scopeId, replyTo, onReplyTo, onAccepted }: {
   }
 
   const disabled = sendState === 'sending' || lockedRef.current || drafts.busy || !!drafts.attempt;
+  const canSend = !disabled && !!identity && !!drafts.key && !!drafts.text.trim() && !drafts.savePaused;
 
   return (
-    <div className="composer">
+    <div className="composer scope-composer">
       {drafts.error ? (
         <div className="error-banner" role="alert">
           {drafts.error}
@@ -699,18 +796,38 @@ function RoomComposer({ api, scopeId, replyTo, onReplyTo, onAccepted }: {
         </div>
       ) : null}
       {replyTo ? (
-        <div className="message-replyto">正在回复 {replyTo} <button onClick={() => setReply(null)} disabled={disabled}>取消回复</button></div>
+        <div className="message-replyto scope-reply-bar">
+          <Reply size={13} />
+          正在回复 {replyTo}
+          <button type="button" className="icon-button" onClick={() => setReply(null)} disabled={disabled} title="取消回复" aria-label="取消回复">
+            <X size={13} />
+          </button>
+        </div>
       ) : null}
-      <textarea
-        className="composer-input"
-        value={drafts.text}
-        onChange={(e) => onChangeText(e.target.value)}
-        placeholder="输入房间人类消息…"
-        rows={3}
-        disabled={disabled}
-      />
-      <div className="composer-bar">
-        <button type="button" className="composer-send" onClick={() => void handleSend()} disabled={disabled || !identity || !drafts.key || !drafts.text.trim() || drafts.savePaused}>
+      <div className="scope-composer-row">
+        <textarea
+          className="composer-input scope-composer-input"
+          value={drafts.text}
+          onChange={(e) => onChangeText(e.target.value)}
+          placeholder="给群聊发消息…（Enter 发送，Shift+Enter 换行）"
+          rows={2}
+          disabled={disabled}
+          onKeyDown={(e) => {
+            // 群聊 Enter 发送 / Shift+Enter 换行；IME 组合态安全放行。
+            if (e.key !== 'Enter' || e.shiftKey) return;
+            if (e.nativeEvent.isComposing) return;
+            e.preventDefault();
+            void handleSend();
+          }}
+        />
+        <button
+          type="button"
+          className="primary-button scope-send-btn"
+          onClick={() => void handleSend()}
+          disabled={!canSend}
+          title="发送（Enter）"
+        >
+          <SendHorizontal size={15} />
           {sendState === 'sending' ? '发送中…' : '发送'}
         </button>
       </div>
@@ -768,12 +885,15 @@ function MemberEditor({ current, bots, onChange }: {
             onChange={(e) => setPairs({ ...pairs, botId: e.target.value })}
             placeholder="botId"
           />
-          <button type="button" onClick={addPair}>添加</button>
+          <button type="button" className="secondary-button" onClick={addPair}>
+            <Plus size={13} />
+            添加
+          </button>
         </div>
       </div>
       {bots.length > 0 ? (
         <div className="field">
-          <label>本地 Host 成员便捷选择</label>
+          <label>本目标 Host 成员便捷选择</label>
           <div className="member-quick-row">
             {bots.map((b) => {
               const present = current.some((m) => m.deviceId === b.deviceId && m.botId === b.botId);
@@ -781,10 +901,14 @@ function MemberEditor({ current, bots, onChange }: {
                 <button
                   key={`${b.deviceId}:${b.botId}`}
                   type="button"
+                  className={`member-chip${present ? ' member-chip-added' : ''}`}
                   onClick={() => fromLocalBot(b)}
                   disabled={present}
+                  title={`${b.role} · ${b.deviceId}:${b.botId}`}
                 >
-                  {present ? '✓ ' : ''}{b.role} — {b.botId}
+                  {memberAvatar(b, bots, 22)}
+                  <span className="member-chip-name">{b.role}</span>
+                  {present ? <Check size={12} /> : null}
                 </button>
               );
             })}
@@ -795,10 +919,19 @@ function MemberEditor({ current, bots, onChange }: {
       <ul className="member-list">
         {current.map((m) => (
           <li key={`${m.deviceId}:${m.botId}`} className="member-row">
-            <span className="entity-title">{m.botId}</span>
-            <span className="entity-sub">device {m.deviceId}</span>
-            <button type="button" onClick={() => onChange(current.filter((x) => !(x.deviceId === m.deviceId && x.botId === m.botId)))}>
-              移除
+            <span className="member-row-avatar">{memberAvatar(m, bots, 26)}</span>
+            <span className="member-row-text">
+              <span className="entity-title">{m.botId}</span>
+              <span className="entity-sub">device {m.deviceId}</span>
+            </span>
+            <button
+              type="button"
+              className="icon-button"
+              title="移除成员"
+              aria-label={`移除成员 ${m.botId}`}
+              onClick={() => onChange(current.filter((x) => !(x.deviceId === m.deviceId && x.botId === m.botId)))}
+            >
+              <X size={13} />
             </button>
           </li>
         ))}
@@ -807,12 +940,14 @@ function MemberEditor({ current, bots, onChange }: {
   );
 }
 
-function ScopeDetail({ api, scope, bots, onChanged, pageActive = true }: {
+function ScopeDetail({ api, scope, bots, onChanged, pageActive = true, inspectorOpen, onToggleInspector }: {
   api: DesktopViewApi;
   scope: ScopeInfo;
   bots: BotRecord[];
   onChanged: (s: ScopeInfo) => void;
   pageActive?: boolean;
+  inspectorOpen: boolean;
+  onToggleInspector: () => void;
 }) {
   const identity = api.identity;
   const sess = sessionKey(identity);
@@ -922,7 +1057,7 @@ function ScopeDetail({ api, scope, bots, onChanged, pageActive = true }: {
     if (!identity || saving || !api.transportConnected) return;
     if (editMembers.length < 2) {
       // 后端已拒绝单成员房间，前端提前按事实纠正。
-      setSaveError(isRoom ? '房间至少保留 2 个成员 Bot' : 'DM 固定两个 Bot');
+      setSaveError(isRoom ? '群聊至少保留 2 个成员 Bot' : '智能体私聊固定两个 Bot');
       return;
     }
     const baseline = editBaselineRef.current;
@@ -962,57 +1097,79 @@ function ScopeDetail({ api, scope, bots, onChanged, pageActive = true }: {
   return (
     <div className="scope-detail">
       <div className="scope-detail-scroll">
-        <header className="chat-pane-header">
-          <div className="chat-title">{isRoom ? '房间' : 'DM'} {scope.scope.scopeId}</div>
-          <div className="metadata">
-            <span>revision {scope.scope.revision}</span>
-            {scope.authorityDeviceId ? <span> · authority {scope.authorityDeviceId}</span> : null}
-            {scope.isAuthority ? <span> · 目标 Host 为 authority</span> : null}
-            {scope.delivery ? (
-              <span> · ack {scope.delivery.fullyAcknowledged ? '全部' : '部分'}</span>
+        <header className="chat-pane-header scope-detail-header">
+          <div className="scope-header-main">
+            <span className="scope-kind-badge">{isRoom ? <Users size={14} /> : <MessageSquare size={14} />}</span>
+            <div className="scope-header-text">
+              <div className="chat-title" title={`scopeId: ${scope.scope.scopeId}`}>
+                {isRoom ? '群聊' : '私聊'} · {memberNames(scope.scope.members, bots)}
+              </div>
+              <div className="metadata">
+                <span>revision {scope.scope.revision}</span>
+                {scope.authorityDeviceId ? <span> · authority {scope.authorityDeviceId}</span> : null}
+                {scope.isAuthority ? <span> · 目标 Host 为 authority</span> : null}
+                {scope.delivery ? (
+                  <span> · ack {scope.delivery.fullyAcknowledged ? '全部' : '部分'}</span>
+                ) : null}
+              </div>
+            </div>
+          </div>
+          <div className="scope-member-chips" role="group" aria-label="成员 work 观察选择">
+            {scope.scope.members.map((m) => {
+              const key = `${m.deviceId}:${m.botId}`;
+              const local = identity ? m.deviceId === identity.targetDeviceId : false;
+              const selected = workSelection === key;
+              return (
+                <button
+                  key={key}
+                  type="button"
+                  className={`member-chip scope-member-chip${selected ? ' member-chip-active' : ''}`}
+                  onClick={() => setWorkSelection(selected ? null : key)}
+                  title={`${m.botId} · ${m.deviceId}${local ? '（本目标 Host）' : '（远端）'}`}
+                >
+                  {memberAvatar(m, bots, 24)}
+                  <span className="member-chip-name">{m.botId}</span>
+                  {!local ? <span className="member-chip-remote">远端</span> : null}
+                </button>
+              );
+            })}
+            {isRoom && !editMode ? (
+              <button type="button" className="member-chip member-chip-edit" onClick={enterEdit} title="编辑成员（expectedRevision CAS）">
+                <Plus size={12} /> 编辑成员
+              </button>
             ) : null}
           </div>
         </header>
 
-        <div className="data-list">
-          <div className="data-list-head"><h3>成员（均为 Bot）</h3></div>
-          {!editMode ? (
-            <>
-              <ul className="member-list">
-                {scope.scope.members.map((m) => (
-                  <li key={`${m.deviceId}:${m.botId}`} className="member-row">
-                    <span className="entity-title">{m.botId}</span>
-                    <span className="entity-sub">device {m.deviceId}</span>
-                  </li>
-                ))}
-              </ul>
-              {isRoom ? (
-                <button onClick={() => enterEdit()}>编辑成员</button>
-              ) : (
-                <p className="hint">DM 固定两个 Bot，不提供成员更换或用户消息发送。</p>
-              )}
-            </>
-          ) : (
+        {!isRoom ? (
+          <p className="hint scope-dm-hint">智能体私聊固定两个 Bot，不提供成员更换或用户消息发送（只读）。</p>
+        ) : null}
+
+        {editMode ? (
+          <div className="data-list scope-edit-panel">
+            <div className="data-list-head"><h3>编辑成员</h3></div>
             <div className="form-grid">
               <MemberEditor current={editMembers} bots={bots} onChange={setEditMembers} />
               {saveError ? <div className="error-banner" role="alert">{saveError}</div> : null}
               <div className="form-actions">
-                <button disabled={saving || !online} onClick={() => void saveMembers()}>
+                <button className="primary-button" disabled={saving || !online} onClick={() => void saveMembers()}>
                   {saving ? '保存中…' : '保存成员（expectedRevision CAS）'}
                 </button>
-                <button onClick={() => cancelEdit()}>
+                <button className="secondary-button" onClick={() => cancelEdit()}>
                   取消
                 </button>
               </div>
             </div>
-          )}
-        </div>
+          </div>
+        ) : null}
 
         {/* room/DM 均可被动查看 scopeHistory 与分页；仅 room 允许用户消息输入。 */}
-        <div className="message-list">
+        <div className="message-list scope-message-list">
           <div className="message-list-head">
-            <h3>{isRoom ? '房间消息' : 'DM 消息（只读）'}</h3>
-            <button onClick={() => void loadHistory(true)} disabled={!online || histLoading}>刷新消息</button>
+            <h3>{isRoom ? '群聊消息' : '私聊消息（只读）'}</h3>
+            <button className="icon-button" onClick={() => void loadHistory(true)} disabled={!online || histLoading} title="刷新消息" aria-label="刷新消息">
+              <RefreshCw size={14} className={histLoading ? 'scope-spin' : undefined} />
+            </button>
           </div>
           {!online ? <div className="status">离线：显示最后读取的消息，不自动请求。</div> : null}
           {histError ? (
@@ -1023,10 +1180,12 @@ function ScopeDetail({ api, scope, bots, onChanged, pageActive = true }: {
           ) : null}
           {history.length === 0 && !histLoading && !histError ? <div className="empty-state">暂无消息。</div> : null}
           {history.map((msg) => (
-            <div key={msg.message.messageId}>
-              <MessageRow msg={msg} />
+            <div key={msg.message.messageId} className="scope-message-wrap">
+              <MessageRow msg={msg} bots={bots} />
               {isRoom ? (
-                <button className="reply-btn" onClick={() => { setRoomReply(msg.message.messageId); cancelEdit(); }}>直接回复</button>
+                <button className="reply-btn" onClick={() => { setRoomReply(msg.message.messageId); cancelEdit(); }}>
+                  <Reply size={12} /> 回复
+                </button>
               ) : null}
             </div>
           ))}
@@ -1035,36 +1194,16 @@ function ScopeDetail({ api, scope, bots, onChanged, pageActive = true }: {
             <button onClick={() => void loadHistory(false)} disabled={!online}>加载更多</button>
           ) : null}
         </div>
-
-        <div className="data-list">
-          <div className="data-list-head"><h3>成员 work 观察（一次一个）</h3></div>
-          <div className="member-select-row">
-            {scope.scope.members.map((m) => {
-              const key = `${m.deviceId}:${m.botId}`;
-              const local = identity ? m.deviceId === identity.targetDeviceId : false;
-              return (
-                <button
-                  key={key}
-                  className={`entity-row ${workSelection === key ? 'selected' : ''}`}
-                  onClick={() => setWorkSelection(workSelection === key ? null : key)}
-                >
-                  {m.botId} · {m.deviceId}{local ? '（本目标 Host）' : '（远端）'}
-                </button>
-              );
-            })}
-          </div>
-        </div>
-
-        {scope.scope.members.map((m) => (
-          <MemberWorkPane
-            key={`${m.deviceId}:${m.botId}`}
-            api={api}
-            scopeId={scope.scope.scopeId}
-            member={m}
-            active={workSelection === `${m.deviceId}:${m.botId}`}
-            pageActive={pageActive}
-          />
-        ))}
+        <button
+          type="button"
+          className="icon-button scope-inspector-toggle"
+          onClick={onToggleInspector}
+          title={inspectorOpen ? '收起成员观察面板' : '展开成员观察面板'}
+          aria-label={inspectorOpen ? '收起成员观察面板' : '展开成员观察面板'}
+          aria-pressed={inspectorOpen}
+        >
+          {inspectorOpen ? <EyeOff size={14} /> : <Eye size={14} />}
+        </button>
       </div>
 
       {isRoom ? (
@@ -1076,6 +1215,24 @@ function ScopeDetail({ api, scope, bots, onChanged, pageActive = true }: {
           onAccepted={() => void loadHistory(true)}
         />
       ) : null}
+
+      <div className="scope-inspector" hidden={!inspectorOpen}>
+        {!workSelection ? (
+          <div className="empty-state scope-inspector-empty">点击成员胶囊观察其工作状态。</div>
+        ) : null}
+        {scope.scope.members.map((m) => (
+          <MemberWorkPane
+            key={`${m.deviceId}:${m.botId}`}
+            api={api}
+            scopeId={scope.scope.scopeId}
+            member={m}
+            active={workSelection === `${m.deviceId}:${m.botId}`}
+            pageActive={pageActive}
+            bots={bots}
+            onClose={() => setWorkSelection(null)}
+          />
+        ))}
+      </div>
     </div>
   );
 }
@@ -1100,11 +1257,11 @@ function ScopeCreateForm({ api, bots, onCreated }: {
     if (!identity || busy) return;
     // room 最少 2 个成员（后端已拒绝单成员房间）；DM 固定 2 个。
     if (kind === 'room' && members.length < 2) {
-      setError('房间至少需要 2 个成员 Bot');
+      setError('群聊至少需要 2 个成员 Bot');
       return;
     }
     if (kind === 'dm' && members.length !== 2) {
-      setError('DM 固定两个 Bot');
+      setError('智能体私聊固定两个 Bot');
       return;
     }
     setBusy(true);
@@ -1128,18 +1285,24 @@ function ScopeCreateForm({ api, bots, onCreated }: {
   }
 
   return (
-    <form className="form-grid" onSubmit={(ev) => { ev.preventDefault(); void submit(); }}>
+    <form className="form-grid scope-create-form" onSubmit={(ev) => { ev.preventDefault(); void submit(); }}>
       <div className="field">
         <label>类型</label>
-        <div className="kind-row">
-          <label><input type="radio" checked={kind === 'room'} onChange={() => setKind('room')} disabled={busy} /> room</label>
-          <label><input type="radio" checked={kind === 'dm'} onChange={() => setKind('dm')} disabled={busy} /> dm（固定两个 Bot）</label>
+        <div className="kind-row pill-tabs scope-kind-tabs" role="radiogroup" aria-label="会话类型">
+          <button type="button" className={kind === 'room' ? 'active' : ''} onClick={() => setKind('room')} disabled={busy}>
+            <Users size={13} /> 群聊房间
+          </button>
+          <button type="button" className={kind === 'dm' ? 'active' : ''} onClick={() => setKind('dm')} disabled={busy}>
+            <MessageSquare size={13} /> 智能体私聊
+          </button>
         </div>
       </div>
       <MemberEditor current={members} bots={bots} onChange={setMembers} />
       {error ? <div className="error-banner" role="alert">{error}</div> : null}
       <div className="form-actions">
-        <button type="submit" disabled={busy || !identity || !api.transportConnected}>{busy ? '创建中…' : '创建 scope'}</button>
+        <button type="submit" className="primary-button" disabled={busy || !identity || !api.transportConnected}>
+          {busy ? '创建中…' : '创建会话'}
+        </button>
       </div>
     </form>
   );
@@ -1158,6 +1321,7 @@ export function Scopes({ api, pageActive = true }: { api: DesktopViewApi; pageAc
   const [detailError, setDetailError] = useState<string | null>(null);
   const [showCreate, setShowCreate] = useState(false);
   const [bots, setBots] = useState<BotRecord[]>([]);
+  const [inspectorOpen, setInspectorOpen] = useState(true);
   const cursorRef = useRef<ScopeListCursor | null>(null);
   const scopesSeqRef = useRef(0);
   const botsSessRef = useRef('');
@@ -1264,12 +1428,22 @@ export function Scopes({ api, pageActive = true }: { api: DesktopViewApi; pageAc
   }
 
   return (
-    <div className="conversation-layout">
-      <aside className="entity-list">
+    <div className="conversation-layout scope-shell">
+      <aside className="entity-list scope-list">
         <div className="entity-list-head">
-          <h2>群聊 / 房间与DM</h2>
+          <h2>群聊 / 智能体私聊</h2>
+          <button
+            className="icon-button"
+            onClick={() => void loadScopes(true)}
+            disabled={!online || loading}
+            title="刷新列表"
+            aria-label="刷新列表"
+          >
+            <RefreshCw size={14} className={loading ? 'scope-spin' : undefined} />
+          </button>
           <button className="toolbar-btn" onClick={() => setShowCreate((v) => !v)} disabled={!identity}>
-            {showCreate ? '取消' : '新建 scope'}
+            <Plus size={13} />
+            {showCreate ? '取消' : '新建会话'}
           </button>
         </div>
         {error ? (
@@ -1278,7 +1452,7 @@ export function Scopes({ api, pageActive = true }: { api: DesktopViewApi; pageAc
             <button onClick={() => void loadScopes(true)}>重试</button>
           </div>
         ) : null}
-        {!online ? <div className="status">离线：显示最后读取的 scope 列表，不自动请求。</div> : null}
+        {!online ? <div className="status">离线：显示最后读取的会话列表，不自动请求。</div> : null}
         {showCreate && identity ? (
           <ScopeCreateForm
             api={api}
@@ -1291,17 +1465,28 @@ export function Scopes({ api, pageActive = true }: { api: DesktopViewApi; pageAc
           />
         ) : null}
         {items.length === 0 && !loading && !error ? (
-          <div className="empty-state">暂无 scope。{identity ? '点击“新建 scope”创建。' : '请先连接。'}</div>
+          <div className="empty-state">暂无会话。{identity ? '点击“新建会话”创建。' : '请先连接。'}</div>
         ) : (
           <ul className="entity-list-items">
             {items.map((s) => (
               <li key={s.scope.scopeId}>
                 <button
-                  className={`entity-row ${selectedId === s.scope.scopeId ? 'selected' : ''}`}
+                  className={`entity-row scope-row ${selectedId === s.scope.scopeId ? 'selected' : ''}`}
                   onClick={() => selectScope(s.scope.scopeId)}
                 >
-                  <span className="entity-title">{s.scope.kind === 'room' ? '房间' : 'DM'}</span>
-                  <span className="entity-sub">{s.scope.scopeId} · rev {s.scope.revision} · {s.scope.members.length} 成员</span>
+                  <span className="scope-row-icon">
+                    {s.scope.kind === 'room' ? <Users size={15} /> : <MessageSquare size={15} />}
+                  </span>
+                  <span className="entity-main">
+                    <span className="entity-title" title={s.scope.scopeId}>
+                      {s.scope.kind === 'room' ? '群聊' : '私聊'} · {memberNames(s.scope.members, bots)}
+                    </span>
+                    <span className="entity-sub">
+                      <span className="scope-chip" title={`scopeId: ${s.scope.scopeId} · revision ${s.scope.revision}`}>
+                        {s.scope.members.length} 成员
+                      </span>
+                    </span>
+                  </span>
                 </button>
               </li>
             ))}
@@ -1324,11 +1509,13 @@ export function Scopes({ api, pageActive = true }: { api: DesktopViewApi; pageAc
               setSelected(s);
             }}
             pageActive={pageActive}
+            inspectorOpen={inspectorOpen}
+            onToggleInspector={() => setInspectorOpen((v) => !v)}
           />
         ) : detailError ? (
           <div className="error-banner" role="alert">{detailError}</div>
         ) : (
-          <div className="empty-state">选择左侧 scope 查看详情。</div>
+          <div className="empty-state">在左侧选择一个群聊或私聊查看详情。</div>
         )}
       </section>
     </div>

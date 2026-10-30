@@ -1,12 +1,36 @@
+// Bot 私聊 lane（desktop/web）：Hub 列表栏 + 主对话舞台 + 右侧工作台抽屉。
+// 设计依据 desktop-gui-fresh-argon-design §5.2/§5.3/§5.4；
+// 全部请求仍走既有 useDrafts / pending_enqueue / pending_send / observe 路径，
+// 保留 CAS、显式发送、结果未确认锁与离线只读语义。
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import * as Dialog from '@radix-ui/react-dialog';
+import {
+  Archive,
+  ArrowUp,
+  Eraser,
+  FileText,
+  History,
+  Monitor,
+  MoreHorizontal,
+  Plus,
+  RefreshCw,
+  Search,
+  Shrink,
+  Square,
+  Star,
+  Trash2,
+  X,
+} from 'lucide-react';
 import type { DesktopIdentity, DesktopPanelApi, DesktopViewApi } from './types';
 import type { DesktopObservationEvent } from './types';
+import { useText } from '../../../web/src/ui';
 import type {
   BotLiveState,
-  BotRecord,
   BotDirectoryEntry,
+  BotRecord,
+  ClearHistoryResult,
+  CompactResult,
   DevicesDirectoryItem,
-  LiveMessage,
   PendingCursor,
   PendingEnqueueInput,
   PendingListPage,
@@ -14,19 +38,36 @@ import type {
 } from '../../../host-core/index.js';
 import { useDrafts } from './drafts';
 import type { DraftSnapshot } from './drafts';
-import {
-  readToolPresentation,
-  ToolPresentationCard,
-  type QuestionnaireSubmitPayload,
-} from '../../../web/src/ToolPresentation';
+import { type QuestionnaireSubmitPayload } from '../../../web/src/ToolPresentation';
+import { GrokBotAvatar } from '../../../web/src/GrokBotAvatar';
 import { BotSettings } from './BotSettings';
 import { ShowerPreview } from './ShowerPreview';
+import { ChatTranscript } from './ChatTranscript';
+import { BotAvatarStudio } from './BotAvatarStudio';
 import { targetApi } from './targetApi';
 import { readHistoryPage } from './history';
+import './BotChats.css';
 
 type AnyRawEntry = { id: unknown; kind: string; model?: unknown; data?: unknown };
 
 const ARCHIVE_RETENTION_DAYS = 14;
+/** 与 BotChats.css 并排断点一致：≥1280px 抽屉并排非模态，<1280px 浮层模态。 */
+const INSPECTOR_COMPACT_QUERY = '(max-width: 1279px)';
+
+/** 与 BotChats.css 断点同一媒体查询；判定紧凑浮层态以决定是否启用模态焦点约束。 */
+function useInspectorCompact(): boolean {
+  const [compact, setCompact] = useState(
+    () => typeof window !== 'undefined' && window.matchMedia(INSPECTOR_COMPACT_QUERY).matches,
+  );
+  useEffect(() => {
+    const mql = window.matchMedia(INSPECTOR_COMPACT_QUERY);
+    const onChange = () => setCompact(mql.matches);
+    mql.addEventListener('change', onChange);
+    onChange();
+    return () => mql.removeEventListener('change', onChange);
+  }, []);
+  return compact;
+}
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 const DIRECTORY_POLL_INTERVAL_MS = 2000;
 
@@ -167,12 +208,32 @@ function formatTime(iso: string | null | undefined): string {
   return Number.isNaN(d.getTime()) ? iso : d.toLocaleString();
 }
 
+function formatRelativeTime(iso: string | null | undefined): string {
+  if (!iso) return '';
+  const d = new Date(iso);
+  const ms = d.getTime();
+  if (Number.isNaN(ms)) return '';
+  const now = new Date();
+  const diff = now.getTime() - ms;
+  const sameDay = d.toDateString() === now.toDateString();
+  if (sameDay) {
+    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  }
+  if (diff < 2 * MS_PER_DAY) return '昨天';
+  if (diff < 7 * MS_PER_DAY) return `${Math.floor(diff / MS_PER_DAY)}天前`;
+  return d.toLocaleDateString();
+}
+
 function truncate(s: string, n: number): string {
   return s.length > n ? `${s.slice(0, n)}…` : s;
 }
 
-function renderLiveMessage(m: LiveMessage): string {
-  return m.role === 'toolResult' ? `[工具结果]${m.text}` : m.text;
+/** 与手机端 avatar 持久化键约定一致。 */
+function botAvatarKey(identity: DesktopIdentity | null, bot: Pick<BotRecord, 'deviceId' | 'botId'>): string {
+  if (!identity) return `unknown:unknown:${bot.botId}`;
+  return identity.kind === 'local'
+    ? `local:local:${bot.botId}`
+    : `remote:${identity.profileId}:${bot.deviceId}:${bot.botId}`;
 }
 
 /** 按 pi-ai Message（pi-durable EntryRecord.model）真实结构提取安全文本行。 */
@@ -227,6 +288,7 @@ function RawEntryRow({ entry }: { entry: AnyRawEntry }) {
   );
 }
 
+/** 原始历史工作台页签内容（非折叠容器，外层是 inspector 页签）。 */
 function RawHistoryPane({ items, loading, error, onLoadMore, hasMore, onRetry, offline }: {
   items: AnyRawEntry[];
   loading: boolean;
@@ -237,24 +299,25 @@ function RawHistoryPane({ items, loading, error, onLoadMore, hasMore, onRetry, o
   offline: boolean;
 }) {
   return (
-    <details className="raw-history">
-      <summary><h3>原始历史（与 live 分开）</h3></summary>
-      <div className="raw-history-content">
-        {offline ? <div className="status">离线：显示最后读取的原始历史，不自动请求。</div> : null}
-        {error ? (
-          <div className="error-banner" role="alert">
-            {error}
-            <button onClick={onRetry} disabled={offline}>重试</button>
-          </div>
-        ) : null}
-        {items.length === 0 && !loading && !error ? (
-          <div className="empty-state">暂无历史条目。</div>
-        ) : null}
-        {items.map((it) => <RawEntryRow key={String(it.id)} entry={it} />)}
-        {loading ? <div className="status">加载中…</div> : null}
-        {hasMore && !loading ? <button onClick={onLoadMore} disabled={offline}>加载更多</button> : null}
-      </div>
-    </details>
+    <div className="inspector-raw-history">
+      {offline ? <div className="status">离线：显示最后读取的原始历史，不自动请求。</div> : null}
+      {error ? (
+        <div className="error-banner" role="alert">
+          {error}
+          <button type="button" onClick={onRetry} disabled={offline}>重试</button>
+        </div>
+      ) : null}
+      {items.length === 0 && !loading && !error ? (
+        <div className="empty-state">暂无历史条目。</div>
+      ) : null}
+      {items.map((it) => <RawEntryRow key={String(it.id)} entry={it} />)}
+      {loading ? <div className="status">加载中…</div> : null}
+      {hasMore && !loading ? (
+        <button type="button" className="secondary-button" onClick={onLoadMore} disabled={offline}>
+          加载更多消息
+        </button>
+      ) : null}
+    </div>
   );
 }
 
@@ -426,14 +489,14 @@ function CreateBotForm({
       {forcePrimary ? (
         <p className="hint">该设备当前尚无未归档的主 Bot，已强制勾选并锁定设为主 Bot。</p>
       ) : null}
-      <p>模型由中心管理，新 Bot 使用中心默认配置。</p>
+      <p className="hint">模型由中心管理，新 Bot 使用中心默认配置。</p>
       {error ? (
         <div className="error-banner" role="alert">
           {error}
         </div>
       ) : null}
       <div className="form-actions">
-        <button type="submit" disabled={busy || locked || !api.transportConnected}>
+        <button type="submit" className="primary-button" disabled={busy || locked || !api.transportConnected}>
           {busy ? '创建中…' : effectiveMakePrimary ? '创建主 Bot' : '创建 Bot'}
         </button>
       </div>
@@ -441,7 +504,18 @@ function CreateBotForm({
   );
 }
 
-function Composer({ text, onChangeText, files, onAddFile, onRemoveFile, canPick, onPick, draftError, draftHint, draftConflict, sendState, sendError, onSend, canSend, disabled, onRetryDraft, attempt, recOutcome, onReconcile, onReleaseNotSent, onRetryClearVerified, onAdoptNewerDraft, turnAdmission, onRetryTurnAdmission }: {
+const SLASH_COMMANDS: ReadonlyArray<{ command: SlashCommandName; label: string; desc: string }> = [
+  { command: '/clear', label: '/clear', desc: '清空当前对话历史' },
+  { command: '/compact', label: '/compact', desc: '压缩上下文记忆' },
+];
+type SlashCommandName = '/clear' | '/compact';
+/** 与手机端 Host.tsx parseSlashCommand 一致：整段输入精确匹配命令才走控制方法，否则是普通文本。 */
+function parseSlashCommand(text: string): SlashCommandName | null {
+  const trimmed = text.trim();
+  return SLASH_COMMANDS.find((c) => c.command === trimmed)?.command ?? null;
+}
+
+function Composer({ text, onChangeText, files, onAddFile, onRemoveFile, canPick, onPick, draftError, draftHint, draftConflict, sendState, sendError, sendNotice, onSend, canSend, disabled, onRetryDraft, attempt, recOutcome, onReconcile, onReleaseNotSent, onRetryClearVerified, onAdoptNewerDraft, turnAdmission, onRetryTurnAdmission, onInsertSlash }: {
   text: string;
   onChangeText: (v: string) => void;
   files: { name: string; path: string; size: number }[];
@@ -454,6 +528,8 @@ function Composer({ text, onChangeText, files, onAddFile, onRemoveFile, canPick,
   draftConflict: DraftSnapshot | null;
   sendState: 'idle' | 'sending';
   sendError: string | null;
+  /** 发送路径的短时可见提示（slash 进度/结果）；与 sendError 只保留其一。 */
+  sendNotice: string | null;
   onSend: () => void;
   canSend: boolean;
   disabled: boolean;
@@ -468,13 +544,94 @@ function Composer({ text, onChangeText, files, onAddFile, onRemoveFile, canPick,
   turnAdmission: TurnAdmissionView | null;
   /** Host 准入失败后的显式重试：沿用冻结的同一 requestId/文本重新入队，不自动重发。 */
   onRetryTurnAdmission: () => void;
+  /** 斜杠命令先填回输入框；用户显式发送后由发送路径调用 clearHistory/compact，不当作模型 prompt。 */
+  onInsertSlash: (command: string) => void;
 }) {
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const [slashIndex, setSlashIndex] = useState(0);
+  const [dismissedSlash, setDismissedSlash] = useState<string | null>(null);
+  const [moreOpen, setMoreOpen] = useState(false);
+  const moreRef = useRef<HTMLDivElement | null>(null);
+  const composingRef = useRef(false);
+
+  /** 自适应高度：36px ~ 160px（设计 §5.3 胶囊输入区）。 */
+  const autosize = useCallback(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = `${Math.min(160, Math.max(36, el.scrollHeight))}px`;
+  }, []);
+
+  useEffect(() => {
+    autosize();
+  }, [text, autosize]);
+
+  useEffect(() => {
+    function onDocDown(e: MouseEvent) {
+      if (moreRef.current && e.target instanceof Node && !moreRef.current.contains(e.target)) {
+        setMoreOpen(false);
+      }
+    }
+    document.addEventListener('mousedown', onDocDown);
+    return () => document.removeEventListener('mousedown', onDocDown);
+  }, []);
+
+  const slashMatches = useMemo(() => {
+    const firstLine = text.split('\n', 1)[0] ?? '';
+    if (!firstLine.startsWith('/')) return [];
+    const q = firstLine.slice(1).toLowerCase();
+    if (firstLine.includes(' ')) return [];
+    return SLASH_COMMANDS.filter((c) => c.label.slice(1).startsWith(q));
+  }, [text]);
+
+  const slashOpen = slashMatches.length > 0 && !disabled && dismissedSlash !== text;
+
+  useEffect(() => {
+    setSlashIndex(0);
+  }, [text]);
+
+  function pickSlash(command: string) {
+    setDismissedSlash(command);
+    onInsertSlash(command);
+    textareaRef.current?.focus();
+  }
+
+  function onKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
+    if (composingRef.current || e.nativeEvent.isComposing) return;
+    if (slashOpen) {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        setSlashIndex((i) => Math.min(slashMatches.length - 1, i + 1));
+        return;
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        setSlashIndex((i) => Math.max(0, i - 1));
+        return;
+      }
+      if (e.key === 'Enter' || e.key === 'Tab') {
+        e.preventDefault();
+        pickSlash(slashMatches[Math.min(slashIndex, slashMatches.length - 1)].command);
+        return;
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        setDismissedSlash(text);
+        return;
+      }
+    }
+    if (e.key === 'Enter' && !e.shiftKey && !composingRef.current && !e.nativeEvent.isComposing) {
+      e.preventDefault();
+      if (canSend && !disabled) onSend();
+    }
+  }
+
   return (
     <div className="composer">
       {draftError ? (
         <div className="error-banner" role="alert">
           {draftError}
-          <button onClick={onRetryDraft}>重试保存</button>
+          <button type="button" onClick={onRetryDraft}>重试保存</button>
         </div>
       ) : null}
       {draftConflict ? (
@@ -488,19 +645,19 @@ function Composer({ text, onChangeText, files, onAddFile, onRemoveFile, canPick,
           {attempt.phase === 'not-sent' ? (
             <>
               发送未入队（not-sent）：{attempt.error}
-              <button onClick={() => onReleaseNotSent()}>恢复编辑</button>
+              <button type="button" onClick={() => onReleaseNotSent()}>恢复编辑</button>
             </>
           ) : (
             <>
               发送冻结中 · 业务ID {attempt.businessId}{attempt.pendingId ? ` · pending ${attempt.pendingId}` : ''}（{attempt.phase}）。
               {attempt.phase === 'cleared' || attempt.phase === 'failed' || attempt.phase === 'unconfirmed' ? (
-                <button onClick={() => onReconcile()}>查询原记录</button>
+                <button type="button" onClick={() => onReconcile()}>查询原记录</button>
               ) : null}
               {draftConflict && recOutcome?.found ? (
-                <button onClick={() => onAdoptNewerDraft()}>保留新版草稿，结束旧尝试</button>
+                <button type="button" onClick={() => onAdoptNewerDraft()}>保留新版草稿，结束旧尝试</button>
               ) : null}
               {recOutcome?.action === 'ready-clear-retry' ? (
-                <button onClick={() => onRetryClearVerified()}>重试本地清空</button>
+                <button type="button" onClick={() => onRetryClearVerified()}>重试本地清空</button>
               ) : null}
             </>
           )}
@@ -519,35 +676,121 @@ function Composer({ text, onChangeText, files, onAddFile, onRemoveFile, canPick,
         </div>
       ) : null}
       {files.length > 0 ? (
+        <p className="hint">已引用 {files.length} 个路径，发送时按原文引用，不会上传文件。</p>
+      ) : null}
+      {files.length > 0 ? (
         <div className="file-refs">
           {files.map((f, i) => (
-            <span key={`${f.path}#${i}`} className="file-ref">
-              {f.name} · {f.path} · {f.size} B
-              <button type="button" onClick={() => onRemoveFile(i)} disabled={disabled}>移除</button>
+            <span key={`${f.path}#${i}`} className="file-ref" title={f.path}>
+              <FileText size={12} aria-hidden="true" />
+              {f.name} · {f.size} B
+              <button type="button" onClick={() => onRemoveFile(i)} disabled={disabled} aria-label={`移除 ${f.name}`}>
+                <X size={12} />
+              </button>
             </span>
           ))}
         </div>
       ) : null}
-      <textarea
-        className="composer-input"
-        value={text}
-        onChange={(e) => onChangeText(e.target.value)}
-        placeholder="输入消息…"
-        rows={3}
-        disabled={disabled}
-      />
-      <div className="composer-bar">
-        {canPick ? (
-          <button type="button" onClick={() => onPick()} disabled={disabled}>添加本地文件引用</button>
-        ) : draftHint ? (
-          <span className="hint">{draftHint}</span>
+      <div className="composer-input-wrap">
+        {slashOpen ? (
+          <div className="slash-popover" role="listbox" aria-label="斜杠命令">
+            {slashMatches.map((c, i) => (
+              <button
+                key={c.command}
+                type="button"
+                role="option"
+                aria-selected={i === slashIndex}
+                className={`slash-option${i === slashIndex ? ' active' : ''}`}
+                onMouseDown={(e) => {
+                  e.preventDefault();
+                  pickSlash(c.command);
+                }}
+              >
+                <span className="slash-cmd">{c.label}</span>
+                <span className="slash-desc">{c.desc}</span>
+              </button>
+            ))}
+          </div>
         ) : null}
-        <button type="button" className="composer-send" onClick={() => onSend()} disabled={disabled || !canSend}>
-          {sendState === 'sending' ? '发送中…' : '发送'}
-        </button>
+        <div className="composer-row">
+          <div className="composer-plus-wrap" ref={moreRef}>
+            <button
+              type="button"
+              className="icon-button composer-plus"
+              disabled={disabled}
+              aria-label="更多操作"
+              title="添加文件引用 / 斜杠命令"
+              onClick={() => setMoreOpen((v) => !v)}
+            >
+              <Plus size={18} />
+            </button>
+            {moreOpen ? (
+              <div className="composer-plus-menu" role="menu">
+                {canPick ? (
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      setMoreOpen(false);
+                      onPick();
+                    }}
+                  >
+                    <FileText size={14} /> 添加本地路径引用
+                  </button>
+                ) : (
+                  <p className="composer-plus-note" role="note">
+                    Relay 模式不可选本机文件；可将目标 Host 上已存在的路径作为普通文本引用。
+                  </p>
+                )}
+                {SLASH_COMMANDS.map((c) => (
+                  <button
+                    key={c.command}
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      setMoreOpen(false);
+                      pickSlash(c.command);
+                    }}
+                  >
+                    {c.command === '/clear' ? <Eraser size={14} /> : <Shrink size={14} />} {c.label} · {c.desc}
+                  </button>
+                ))}
+              </div>
+            ) : null}
+          </div>
+          <textarea
+            ref={textareaRef}
+            className="composer-input"
+            value={text}
+            onChange={(e) => onChangeText(e.target.value)}
+            onKeyDown={onKeyDown}
+            onCompositionStart={() => { composingRef.current = true; }}
+            onCompositionEnd={() => { composingRef.current = false; }}
+            placeholder="输入消息，/ 呼出命令…"
+            rows={1}
+            disabled={disabled}
+          />
+          <button
+            type="button"
+            className="composer-send primary-button"
+            onClick={() => onSend()}
+            disabled={disabled || !canSend}
+            aria-label="发送"
+            title="Enter 发送 · Shift+Enter 换行"
+          >
+            {sendState === 'sending' ? '…' : <ArrowUp size={16} />}
+          </button>
+        </div>
       </div>
       {sendError ? <div className="error-banner" role="alert">{sendError}</div> : null}
-      <p className="hint">发送：冻结 ID → 入队 → 清空草稿 → 显式发送；结果以回执/live 为准。</p>
+      {sendNotice ? <div className="status" role="status">{sendNotice}</div> : null}
+      <div className="composer-footer">
+        <p className="hint">Enter 发送 · Shift+Enter 换行 · / 呼出命令</p>
+        <details className="composer-details">
+          <summary>发送链路说明</summary>
+          <p className="hint">发送：冻结 ID → 入队 → 清空草稿 → 显式发送；结果以回执/live 为准。{draftHint ? ' ' + draftHint : ''}</p>
+        </details>
+      </div>
     </div>
   );
 }
@@ -613,21 +856,28 @@ function BotProfile({ api, bot, onSaved }: { api: DesktopViewApi; bot: BotRecord
     }
   }
 
-  return <details className="raw-history">
-    <summary>Bot 名称与职责</summary>
-    <div className="form-grid raw-history-content">
-      <label>名称<input value={name} maxLength={120} disabled={busy || locked || isArchived} onChange={(e) => { dirty.current = true; setName(e.target.value); }} /></label>
-      <label>职责<textarea value={description} maxLength={2000} disabled={busy || locked || isArchived} onChange={(e) => { dirty.current = true; setDescription(e.target.value); }} /></label>
+  return (
+    <div className="form-grid inspector-profile-form">
+      <label className="field">名称<input value={name} maxLength={120} disabled={busy || locked || isArchived} onChange={(e) => { dirty.current = true; setName(e.target.value); }} /></label>
+      <label className="field">职责<textarea value={description} maxLength={2000} disabled={busy || locked || isArchived} onChange={(e) => { dirty.current = true; setDescription(e.target.value); }} /></label>
       {error ? <div className="error-banner" role="alert">{error}</div> : null}
-      {locked ? <button type="button" disabled={busy || !api.transportConnected} onClick={() => void adoptRemote()}>读取并采用远端资料（丢弃草稿）</button> : null}
-      <button onClick={() => void save()} disabled={busy || locked || isArchived || !api.transportConnected}>保存资料</button>
+      <div className="form-actions">
+        {locked ? (
+          <button type="button" className="secondary-button" disabled={busy || !api.transportConnected} onClick={() => void adoptRemote()}>读取并采用远端资料（丢弃草稿）</button>
+        ) : null}
+        <button type="button" className="primary-button" onClick={() => void save()} disabled={busy || locked || isArchived || !api.transportConnected}>保存资料</button>
+      </div>
     </div>
-  </details>;
+  );
 }
+
+type InspectorTab = 'profile' | 'settings' | 'raw' | 'shower';
 
 function PrimaryChatPane({
   api,
   bot,
+  deviceName,
+  devicePlatform,
   onProfileSaved,
   onBotUpdated,
   onBotDeleted,
@@ -636,31 +886,47 @@ function PrimaryChatPane({
 }: {
   api: DesktopPanelApi;
   bot: BotRecord;
+  /** 目录侧设备显示名（仅展示）。 */
+  deviceName: string;
+  /** 目录侧设备平台徽标（DevicesDirectoryItem.platform）；BotRecord 无此字段，缺省回退 host。 */
+  devicePlatform?: string;
   onProfileSaved: (bot: BotRecord) => void;
   onBotUpdated: (patch: Partial<BotRecord> & { botId: string }) => void;
   onBotDeleted: (botId: string) => void;
   onLiveActivity?: () => void;
   pageActive?: boolean;
 }) {
+  const t = useText();
   const identity = api.identity;
   const sess = sessionKey(identity);
   const online = api.transportConnected;
   const isArchived = Boolean(bot.archivedAt);
   const isPrimary = Boolean(bot.isPrimary);
+  const compactOverlay = useInspectorCompact();
   const draftTarget = useMemo(() => ({ kind: 'primary' as const, id: bot.botId }), [bot.botId]);
   const drafts = useDrafts({ api, identity, target: draftTarget });
 
   const [sendState, setSendState] = useState<'idle' | 'sending'>('idle');
   const [sendError, setSendError] = useState<string | null>(null);
+  const [sendNotice, setSendNotice] = useState<string | null>(null);
+  const [slashBusy, setSlashBusy] = useState<SlashCommandName | null>(null);
   const [recOutcome, setRecOutcome] = useState<{ action: string; found: boolean; recordId: string | null; recordState: string | null } | null>(null);
   const lockedRef = useRef(false);
-  const [showerOpen, setShowerOpen] = useState(false);
+  const [inspectorTab, setInspectorTab] = useState<InspectorTab | null>(null);
+  const [chatSearch, setChatSearch] = useState('');
+  const [searchOpen, setSearchOpen] = useState(false);
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
   /** 本聊天最新的 Host 准入状态（Host-queued 回执中的 admission）；null 表示无等待项。 */
   const [turnAdmission, setTurnAdmission] = useState<TurnAdmissionView | null>(null);
+  /** 抽屉 Portal 容器：紧凑模态只锁本聊天气泡层，不影响左栏名录与导航。 */
+  const stageRef = useRef<HTMLDivElement | null>(null);
+  const inspectorContentRef = useRef<HTMLDivElement | null>(null);
 
   const [manageAction, setManageAction] = useState<'setPrimary' | 'archive' | 'unarchive' | 'delete' | null>(null);
   const [manageError, setManageError] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [moreMenuOpen, setMoreMenuOpen] = useState(false);
+  const moreMenuRef = useRef<HTMLDivElement | null>(null);
   const manageInFlightRef = useRef(false);
   const manageBusy = manageAction !== null;
 
@@ -838,10 +1104,80 @@ function PrimaryChatPane({
     }
   }
 
+  /**
+   * 显式发送 /clear 与 /compact：只走 Host 控制方法（clearHistory/compact），不经模型 submit。
+   * 离线/忙碌/归档/发送中由入口 disabled 与这里守卫；成功后清理本地命令草稿并立即重读完整
+   * 可见历史；失败保留草稿与旧历史、不自动重放，也绝不降级当普通模型任务发送。
+   */
+  async function runSlash(command: SlashCommandName) {
+    const current = api.identity;
+    const draftKey = drafts.key;
+    const draftText = drafts.text;
+    if (!current || !draftKey) return;
+    lockedRef.current = true;
+    setSlashBusy(command);
+    setSendState('sending');
+    setSendError(null);
+    setSendNotice(command === '/clear' ? '正在清空对话…' : '正在压缩上下文…');
+    try {
+      const result = await api.call(current, command === '/clear' ? 'clearHistory' : 'compact', { botId: bot.botId });
+      if (!mountedRef.current || sessionKey(api.identity) !== sess) return;
+      // 服务端已成功后才清命令草稿：沿用 clearDraft CAS，仅当持久草稿仍是该命令文本且无文件
+      // 引用时清空；等待期间写入的新文本保留（与手机端 runSlashCommand 同约定）。
+      const persisted = api.snapshot?.state.drafts[draftKey];
+      if (persisted && persisted.text === draftText && persisted.files.length === 0) {
+        try {
+          await api.clearDraft(draftKey, [{ text: draftText, files: [] }]);
+          if (drafts.text === draftText) drafts.editText('');
+        } catch {
+          // CAS 冲突/写失败：持久草稿保留，不掩盖服务端已成功的事实。
+        }
+      } else if (drafts.text === draftText) {
+        drafts.editText('');
+      }
+      // 服务端成功后立即重读完整可见历史（busy 下降沿兜底也会补跑）。
+      void loadRawLatest();
+      setSendNotice(
+        command === '/clear'
+          ? '已清空当前对话并重置上下文'
+          : (result as CompactResult | undefined)?.compacted
+            ? '已压缩较早的上下文'
+            : '没有可压缩的历史',
+      );
+      window.setTimeout(() => {
+        if (mountedRef.current) setSendNotice(null);
+      }, 2500);
+    } catch (e) {
+      if (!mountedRef.current || sessionKey(api.identity) !== sess) return;
+      setSendNotice(null);
+      setSendError(command + ' 失败：' + errText(e) + '；草稿与历史保留，不会当普通消息发送。');
+      api.reportError(e);
+    } finally {
+      lockedRef.current = false;
+      if (mountedRef.current) {
+        setSlashBusy(null);
+        setSendState('idle');
+      }
+    }
+  }
+
   async function handleSend() {
     if (!identity || sendState !== 'idle' || lockedRef.current || isArchived) return;
     const msg = drafts.text.trim();
     if (!msg) return;
+    const command = parseSlashCommand(msg);
+    if (command) {
+      if (live?.busy || drafts.attempt || drafts.savePaused || drafts.files.length > 0) {
+        setSendError('请等待当前任务结束、处理未确认的发送，并移除路径引用后再执行命令。');
+        return;
+      }
+      if (!online) {
+        setSendError('离线：' + command + ' 未执行，草稿保留，连接后请重试。');
+        return;
+      }
+      void runSlash(command);
+      return;
+    }
     const filesNow = drafts.files;
     const composed = filesNow.length
       ? msg + '\n' + filesNow.map((f) => `[文件路径引用，未上传] ${f.path}`).join('\n')
@@ -1066,7 +1402,89 @@ function PrimaryChatPane({
   const [liveEnded, setLiveEnded] = useState(false);
   const [watchTick, setWatchTick] = useState(0);
   const [stopping, setStopping] = useState(false);
-  const [soulStudioOpen, setSoulStudioOpen] = useState(false);
+  const [avatarVersion, setAvatarVersion] = useState(0);
+
+  const [rawItems, setRawItems] = useState<AnyRawEntry[]>([]);
+  const [rawLoading, setRawLoading] = useState(false);
+  const [rawError, setRawError] = useState<string | null>(null);
+  const rawCursorRef = useRef<Record<string, unknown> | null>(null);
+  const rawSessRef = useRef(sess);
+  rawSessRef.current = sess;
+
+  /**
+   * 每轮任务完结（busy true→false）或观察结束时，沿升序游标逐页读完整可见历史
+   * （与手机端 Host.tsx fetchBotHistoryPages 一致：首帧=最早页，继续翻页到尽头才包含最新条目），
+   * 成功后整体替换本地可见历史——/clear 之后服务端已按 reset 裁剪，旧条目随之消失。
+   * 单飞：busy 期间 token 级 update 不触发；turns 之间间隔靠飞行中标记+补跑标志合并。
+   * 失败保留旧数据并置可见错误（聊天流顶部重试条），不静默丢弃。
+   */
+  const latestFlightRef = useRef<{ inFlight: boolean; dirty: boolean }>({ inFlight: false, dirty: false });
+  const prevBusyRef = useRef(false);
+
+  const loadRawLatest = useCallback(async () => {
+    if (!identity || !api.transportConnected) return;
+    if (latestFlightRef.current.inFlight) {
+      latestFlightRef.current.dirty = true;
+      return;
+    }
+    latestFlightRef.current.inFlight = true;
+    const localSess = rawSessRef.current;
+    try {
+      const all: AnyRawEntry[] = [];
+      let cursor: Record<string, unknown> | null = null;
+      for (;;) {
+        const page: Awaited<ReturnType<typeof readHistoryPage<AnyRawEntry>>> = await readHistoryPage<AnyRawEntry>(async (c, limit, chunked) => {
+          if (rawSessRef.current !== localSess) return null;
+          return api.call(identity, 'history', { botId: bot.botId, limit, cursor: c, ...(chunked ? { chunked: true } : {}) });
+        }, cursor, 200);
+        if (!page || rawSessRef.current !== localSess) return;
+        const items = page.items;
+        if (items.length === 0) break;
+        all.push(...items);
+        if (!page.nextCursor || typeof page.nextCursor !== 'object' || Array.isArray(page.nextCursor)) break;
+        cursor = page.nextCursor;
+      }
+      if (rawSessRef.current !== localSess) return;
+      // 完整可见历史整体替换：/clear 后 reset 之前的条目不再回归，不再依赖截断的 live 窗口。
+      setRawItems(all);
+      rawCursorRef.current = null;
+      setRawError(null);
+    } catch (e) {
+      // 失败保留旧数据：重试按钮在聊天流顶部可见，下一次完结/重连也会再补跑。
+      if (rawSessRef.current === localSess) {
+        setRawError(errText(e));
+        api.reportError(e);
+      }
+    } finally {
+      latestFlightRef.current.inFlight = false;
+      if (latestFlightRef.current.dirty && rawSessRef.current === localSess) {
+        latestFlightRef.current.dirty = false;
+        void loadRawLatest();
+      }
+    }
+  }, [api, bot.botId, identity]);
+
+  /**
+   * 历史只读路径只有一条：无论首次进入、重连、重试或 busy 下降沿，都复用 loadRawLatest
+   * 的完整分页单飞读取；这里只保留 loading 标记，失败错误由 loadRawLatest 自身置位。
+   */
+  const loadRaw = useCallback(async () => {
+    if (!identity || !api.transportConnected) return;
+    setRawLoading(true);
+    try {
+      await loadRawLatest();
+    } finally {
+      setRawLoading(false);
+    }
+  }, [api, identity, loadRawLatest]);
+
+  // busy true→false 下降沿触发合并刷新；live.busy 首帧为 true 也等下一轮完结。
+  useEffect(() => {
+    const wasBusy = prevBusyRef.current;
+    const busy = Boolean(live?.busy);
+    prevBusyRef.current = busy;
+    if (wasBusy && !busy) void loadRawLatest();
+  }, [live?.busy, loadRawLatest]);
 
   useEffect(() => {
     // 离线/页面不可见（远端页切回本机）不发 observe：保留最后读取的 live 数据，重连后被动重建。
@@ -1095,6 +1513,8 @@ function PrimaryChatPane({
           if (f.type === 'end') {
             setLiveEnded(true);
             setLiveLast(new Date().toISOString());
+            // 观察订阅结束兜底重读最新页；常规轮次完结由 busy 下降沿触发（见下）。
+            void loadRawLatest();
             onLiveActivityRef.current?.();
             return;
           }
@@ -1136,7 +1556,7 @@ function PrimaryChatPane({
       disposed = true;
       if (handle) void handle.close().catch(() => {});
     };
-  }, [api, sess, bot.botId, watchTick, online, pageActive]);
+  }, [api, sess, bot.botId, watchTick, online, pageActive, loadRawLatest]);
 
   async function stopTask() {
     if (!identity || stopping || !api.transportConnected) return;
@@ -1151,36 +1571,6 @@ function PrimaryChatPane({
     }
   }
 
-  const [rawItems, setRawItems] = useState<AnyRawEntry[]>([]);
-  const [rawLoading, setRawLoading] = useState(false);
-  const [rawError, setRawError] = useState<string | null>(null);
-  const rawCursorRef = useRef<Record<string, unknown> | null>(null);
-  const rawSessRef = useRef(sess);
-  rawSessRef.current = sess;
-
-  const loadRaw = useCallback(async (reset: boolean) => {
-    if (!identity || !api.transportConnected) return;
-    const localSess = rawSessRef.current;
-    setRawLoading(true);
-    try {
-      const page = await readHistoryPage(async (cursor, limit, chunked) => {
-        if (rawSessRef.current !== localSess) return null;
-        return api.call(identity, 'history', { botId: bot.botId, limit, cursor, ...(chunked ? { chunked: true } : {}) });
-      }, reset ? null : rawCursorRef.current, 30);
-      if (rawSessRef.current !== localSess || !page) return;
-      setRawItems((prev) => (reset ? [...page.items] : [...prev, ...page.items]) as AnyRawEntry[]);
-      rawCursorRef.current = page.nextCursor;
-      setRawError(null);
-    } catch (e) {
-      if (rawSessRef.current === localSess) {
-        setRawError(errText(e));
-        api.reportError(e);
-      }
-    } finally {
-      if (rawSessRef.current === localSess) setRawLoading(false);
-    }
-  }, [api, bot.botId, identity]);
-
   // 只换 Bot 才清旧显示；断开保留最后读取的数据。
   useEffect(() => {
     rawCursorRef.current = null;
@@ -1190,7 +1580,7 @@ function PrimaryChatPane({
 
   // 被动读取：离线不自动 call，重连后刷新。
   useEffect(() => {
-    if (identity && api.transportConnected) void loadRaw(true);
+    if (identity && api.transportConnected) void loadRaw();
   }, [loadRaw, identity, online]);
 
   // 重连/切换后被动刷新 Host 准入状态；离线保留最后显示，不自动请求。
@@ -1199,99 +1589,255 @@ function PrimaryChatPane({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [api, identity, online, bot.botId]);
 
+  // Ctrl+F 会话内搜索 / Ctrl+. 工作台 由 BotChats 顶层 window 快捷键转发到此。
+  useEffect(() => {
+    function onSearch() {
+      setSearchOpen(true);
+      window.setTimeout(() => searchInputRef.current?.focus(), 0);
+    }
+    function onInspector() {
+      setInspectorTab((cur) => (cur ? null : 'profile'));
+    }
+    window.addEventListener('botchats:chat-search', onSearch);
+    window.addEventListener('botchats:toggle-inspector', onInspector);
+    return () => {
+      window.removeEventListener('botchats:chat-search', onSearch);
+      window.removeEventListener('botchats:toggle-inspector', onInspector);
+    };
+  }, []);
+
+  /**
+   * 浮层工作台 Esc 关闭（bubble 阶段，不在 document capture 拦截）：
+   * - Shower 全窗口剧场/接管中的 Esc 必须发往远端，其 Content 自行处理，这里按 Esc 事件源跳过；
+   * - Radix 模态对话框（新建 Bot、设置弹窗等 portal 层）先消费自己的 Esc，这里不截获子控件；
+   * - 其余落在抽屉外（遮罩/聊天区）的 Esc 才关闭紧凑浮层；普通宽屏并排不拦截。
+   */
+  useEffect(() => {
+    if (!inspectorTab || !compactOverlay) return;
+    function onEsc(e: KeyboardEvent) {
+      if (e.key !== 'Escape' || e.defaultPrevented) return;
+      const target = e.target as HTMLElement | null;
+      if (target && target.closest('[data-shower-overlay]')) return;
+      setInspectorTab(null);
+    }
+    document.addEventListener('keydown', onEsc);
+    return () => document.removeEventListener('keydown', onEsc);
+  }, [inspectorTab, compactOverlay]);
+
+  // 点击其它区域关闭「更多」菜单
+  useEffect(() => {
+    if (!moreMenuOpen) return;
+    function onDocDown(e: MouseEvent) {
+      if (moreMenuRef.current && e.target instanceof Node && !moreMenuRef.current.contains(e.target)) {
+        setMoreMenuOpen(false);
+      }
+    }
+    document.addEventListener('mousedown', onDocDown);
+    return () => document.removeEventListener('mousedown', onDocDown);
+  }, [moreMenuOpen]);
+
   const disabled =
-    isArchived || sendState === 'sending' || lockedRef.current || drafts.busy || !!drafts.attempt;
+    isArchived || sendState === 'sending' || slashBusy !== null || lockedRef.current || drafts.busy || !!drafts.attempt;
+
+  const liveBusy = Boolean(live && (live.busy || live.queuedCount > 0));
+  void avatarVersion; // 头像保存后 bump：重新计算 key 下各 GrokBotAvatar preset
+
+  const statusText = !online
+    ? '离线：显示最后读取的数据'
+    : liveError
+      ? liveError
+      : liveEnded
+        ? '观察已结束（不断连 Agent）'
+        : live
+          ? live.busy
+            ? '思考与工具调用中'
+            : live.queuedCount > 0
+              ? `队列等待 · ${live.queuedCount}`
+              : '空闲'
+          : '正在建立观察…';
+
+  function openInspector(tab: InspectorTab) {
+    setInspectorTab((cur) => (cur === tab ? null : tab));
+  }
 
   return (
-    <div className="chat-pane-inner">
-      <header className="chat-pane-header chat-pane-header-row">
-        <div>
-          <div className="chat-title-row">
-            <span className="chat-title">{bot.role}</span>
-            {isPrimary && !isArchived ? (
-              <span className="primary-star-pill" title="当前设备主 Bot">★ 主 Bot</span>
-            ) : null}
-            {isArchived ? (
-              <span className="archived-pill">已归档</span>
-            ) : null}
-          </div>
-          <div className="metadata">
-            <span>{bot.botId}</span> · <span>cwd: {bot.cwd}</span> · <span>模型: {bot.modelRef ?? '默认'}</span>
-          </div>
-          {isPrimary && !isArchived ? (
-            <div className="primary-guard-hint">
-              主 Bot 不可归档，请先切换主 Bot · 主 Bot 不可删除，请先切换主 Bot
+    <div className="chat-stage" ref={stageRef}>
+      <div className="chat-column">
+      <header className="chat-header">
+        <button
+          type="button"
+          className="chat-header-pill"
+          onClick={() => openInspector('profile')}
+          title="打开 Bot 工作台（Ctrl+.）"
+        >
+          <GrokBotAvatar
+            botKey={botAvatarKey(identity, bot)}
+            roleName={bot.role}
+            isPrimary={isPrimary && !isArchived}
+            starBadge={isPrimary && !isArchived}
+            platformBadge={devicePlatform}
+            busy={liveBusy}
+            size={30}
+          />
+          <span className="chat-header-pill-text">
+            <span className="chat-header-pill-name">
+              {isPrimary && !isArchived ? '★ ' : ''}{bot.role}
+              {isArchived ? <span className="archived-pill">已归档</span> : null}
+            </span>
+            <span className="chat-header-pill-sub">
+              {deviceName} · 模型 {bot.modelRef ?? '默认'}
+            </span>
+          </span>
+          <span
+            className={`live-dot${liveBusy ? ' busy' : online && !liveError ? ' online' : ''}`}
+            title={statusText}
+            aria-label={statusText}
+          />
+        </button>
+
+        <div className="chat-header-actions">
+          {searchOpen ? (
+            <div className="chat-search-bar">
+              <Search size={14} aria-hidden="true" />
+              <input
+                ref={searchInputRef}
+                value={chatSearch}
+                onChange={(e) => setChatSearch(e.target.value)}
+                placeholder="搜索本会话…"
+                aria-label="会话内搜索"
+              />
+              <button
+                type="button"
+                className="icon-button"
+                onClick={() => {
+                  setSearchOpen(false);
+                  setChatSearch('');
+                }}
+                aria-label="关闭搜索"
+              >
+                <X size={14} />
+              </button>
             </div>
           ) : null}
-        </div>
-        <div className="chat-header-actions">
-          {!isPrimary && !isArchived ? (
+          <button
+            type="button"
+            className={`icon-button${searchOpen ? ' active' : ''}`}
+            onClick={() => {
+              setSearchOpen((v) => {
+                if (v) setChatSearch('');
+                return !v;
+              });
+              window.setTimeout(() => searchInputRef.current?.focus(), 0);
+            }}
+            title="会话内搜索（Ctrl+F）"
+            aria-label="会话内搜索"
+          >
+            <Search size={17} />
+          </button>
+          <button
+            type="button"
+            className={`secondary-button chat-action-pill${inspectorTab === 'shower' ? ' active' : ''}`}
+            onClick={() => openInspector('shower')}
+            title="虚拟桌面（右侧工作台 / 全窗口模式在面板内切换）"
+          >
+            <Monitor size={15} /> 桌面
+          </button>
+          <button
+            type="button"
+            className={`secondary-button chat-action-pill${inspectorTab === 'settings' ? ' active' : ''}`}
+            onClick={() => openInspector('settings')}
+            title="人设与能力（SOUL / 模型 / 插件）"
+          >
+            人设与能力
+          </button>
+          {live && live.busy ? (
             <button
               type="button"
-              className="toolbar-btn"
-              disabled={!online || manageBusy}
-              onClick={() => void handleSetPrimary()}
-              title={!online ? '设备离线，不可切换主 Bot' : '将此 Bot 设为所属设备的主 Bot'}
+              className="icon-button stop-button"
+              onClick={() => void stopTask()}
+              disabled={!online || stopping || disabled}
+              title="停止当前任务"
+              aria-label="停止当前任务"
             >
-              {manageAction === 'setPrimary' ? '设置中…' : '★ 设为主 Bot'}
+              <Square size={15} />
             </button>
           ) : null}
-          {!isArchived ? (
+          <div className="chat-more-wrap" ref={moreMenuRef}>
             <button
               type="button"
-              className="toolbar-btn"
-              disabled={!online || manageBusy || isPrimary}
-              title={
-                isPrimary
-                  ? '主 Bot 不可归档，请先切换主 Bot'
-                  : !online
-                    ? '设备离线，不可归档'
-                    : '归档此 Bot（14 天后自动删除）'
-              }
-              onClick={() => void handleArchive()}
+              className="icon-button"
+              onClick={() => setMoreMenuOpen((v) => !v)}
+              aria-label="更多操作"
+              title="更多操作"
             >
-              {manageAction === 'archive' ? '归档中…' : '归档'}
+              <MoreHorizontal size={17} />
             </button>
-          ) : (
-            <button
-              type="button"
-              className="toolbar-btn"
-              disabled={!online || manageBusy}
-              title={!online ? '设备离线，不可恢复' : '恢复此 Bot'}
-              onClick={() => void handleUnarchive()}
-            >
-              {manageAction === 'unarchive' ? '恢复中…' : '恢复'}
-            </button>
-          )}
-          <button
-            type="button"
-            className="toolbar-btn danger-outline-btn"
-            disabled={!online || manageBusy || isPrimary}
-            title={
-              isPrimary
-                ? '主 Bot 不可删除，请先切换主 Bot'
-                : !online
-                  ? '设备离线，不可删除'
-                  : '删除此 Bot'
-            }
-            onClick={() => setConfirmDelete(true)}
-          >
-            {manageAction === 'delete' ? '删除中…' : '删除'}
-          </button>
-          <button
-            type="button"
-            className={`soul-studio-trigger ${showerOpen ? 'active' : ''}`}
-            onClick={() => setShowerOpen((v) => !v)}
-          >
-            {showerOpen ? '🖥 收起桌面环境' : '🖥 桌面环境'}
-          </button>
-          <button
-            type="button"
-            className={`soul-studio-trigger ${soulStudioOpen ? 'active' : ''}`}
-            onClick={() => setSoulStudioOpen((v) => !v)}
-          >
-            {soulStudioOpen ? '✨ 收起灵魂与插件' : '✨ 灵魂与插件 (SOUL & Ext)'}
-          </button>
+            {moreMenuOpen ? (
+              <div className="chat-more-menu" role="menu">
+                <button type="button" role="menuitem" onClick={() => { setMoreMenuOpen(false); openInspector('profile'); }}>
+                  查看完整资料
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  disabled={!online || manageBusy || isPrimary || isArchived}
+                  title={isPrimary ? '已是主 Bot' : isArchived ? '已归档 Bot 不可设为主 Bot' : '将此 Bot 设为所属设备的主 Bot'}
+                  onClick={() => { setMoreMenuOpen(false); void handleSetPrimary(); }}
+                >
+                  <Star size={14} /> {manageAction === 'setPrimary' ? '设置中…' : '设为主智能体'}
+                </button>
+                {!isArchived ? (
+                  <button
+                    type="button"
+                    role="menuitem"
+                    disabled={!online || manageBusy || isPrimary}
+                    title={isPrimary ? '主 Bot 不可归档，请先切换主 Bot' : '归档此 Bot（14 天后自动删除）'}
+                    onClick={() => { setMoreMenuOpen(false); void handleArchive(); }}
+                  >
+                    <Archive size={14} /> {manageAction === 'archive' ? '归档中…' : '归档智能体'}
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    role="menuitem"
+                    disabled={!online || manageBusy}
+                    onClick={() => { setMoreMenuOpen(false); void handleUnarchive(); }}
+                  >
+                    <Archive size={14} /> {manageAction === 'unarchive' ? '恢复中…' : '恢复智能体'}
+                  </button>
+                )}
+                <button type="button" role="menuitem" onClick={() => { setMoreMenuOpen(false); openInspector('raw'); }}>
+                  <History size={14} /> 原始历史与对账
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  disabled={disabled}
+                  onClick={() => { setMoreMenuOpen(false); drafts.editText('/clear'); }}
+                >
+                  <Eraser size={14} /> /clear 清空当前对话
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  disabled={disabled}
+                  onClick={() => { setMoreMenuOpen(false); drafts.editText('/compact'); }}
+                >
+                  <Shrink size={14} /> /compact 压缩上下文
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="danger-item"
+                  disabled={!online || manageBusy || isPrimary}
+                  title={isPrimary ? '主 Bot 不可删除，请先切换主 Bot' : '删除此 Bot'}
+                  onClick={() => { setMoreMenuOpen(false); setConfirmDelete(true); }}
+                >
+                  <Trash2 size={14} /> 永久删除智能体
+                </button>
+              </div>
+            ) : null}
+          </div>
         </div>
       </header>
 
@@ -1301,7 +1847,7 @@ function PrimaryChatPane({
           <div className="confirm-delete-actions">
             <button
               type="button"
-              className="toolbar-btn danger-btn"
+              className="primary-button danger-button"
               disabled={!online || manageBusy}
               onClick={() => void handleDelete()}
             >
@@ -1309,7 +1855,7 @@ function PrimaryChatPane({
             </button>
             <button
               type="button"
-              className="toolbar-btn"
+              className="secondary-button"
               disabled={manageBusy}
               onClick={() => setConfirmDelete(false)}
             >
@@ -1334,7 +1880,7 @@ function PrimaryChatPane({
           </span>
           <button
             type="button"
-            className="toolbar-btn"
+            className="secondary-button"
             disabled={!online || manageBusy}
             onClick={() => void handleUnarchive()}
           >
@@ -1343,112 +1889,44 @@ function PrimaryChatPane({
         </div>
       ) : null}
 
-      <div className="live-status status" aria-live="polite">
-        {!online ? <span>离线：显示最后读取的数据，不自动请求。</span>
-          : liveError ? <span className="error-text">{liveError}</span>
-          : liveEnded ? (
-            <span>观察已结束（不断连 Agent）。<button onClick={() => setWatchTick((t) => t + 1)}>重新观察</button></span>
-          ) : live ? (
-            <span>
-              {live.busy ? '● 忙碌中' : live.queuedCount > 0 ? `◐ 队列: ${live.queuedCount}` : '○ 空闲'}
-              {' '}·{' '}最后观测 {liveLast ? formatTime(liveLast) : '等待初始帧'}
-            </span>
-          ) : <span>正在建立观察…</span>}
-      </div>
-
-      <BotProfile key={bot.botId} api={api} bot={bot} onSaved={onProfileSaved} />
-      <BotSettings
-        api={api}
-        botId={bot.botId}
-        open={soulStudioOpen}
-        onOpenChange={setSoulStudioOpen}
-      />
-
-      {/* 页面不可见时等同断开：停止轮询与输入，避免后台轮询（面板只有 4 个契约 props）。 */}
-      {showerOpen ? (
-        <ShowerPreview
-          call={callShower}
-          target={{ botId: bot.botId }}
-          connected={api.transportConnected && pageActive}
-          onClose={() => setShowerOpen(false)}
-        />
+      {liveEnded && online ? (
+        <div className="status live-ended-banner" role="status">
+          观察已结束（不断连 Agent）。
+          <button type="button" onClick={() => setWatchTick((t) => t + 1)}>重新观察</button>
+        </div>
+      ) : null}
+      {liveError && online ? (
+        <div className="error-banner" role="alert">{liveError}</div>
       ) : null}
 
-      <div className="live-pane">
-        {live ? (
-          <>
-            {live.generation?.text ? (
-              <div className="message assistant">
-                <div className="message-text">{live.generation.text}</div>
-              </div>
-            ) : null}
-            {live.tools.length > 0 ? (
-              <div className="toolbar-summary">
-                {live.tools.map((t) => {
-                  const presentation = readToolPresentation(
-                    (t as { presentation?: unknown }).presentation,
-                  );
-                  return (
-                    <span key={t.callId} className="tool-chip-wrap">
-                      <span className={`tool-chip ${t.status}`}>
-                        {t.name} · {t.status}{t.output ? ` · ${truncate(t.output, 60)}` : ''}
-                      </span>
-                      {presentation ? (
-                        <ToolPresentationCard
-                          key={`${bot.deviceId}:${bot.botId}:${presentation.kind === 'questionnaire' ? presentation.requestId : t.callId}`}
-                          presentation={presentation}
-                          active={t.status !== 'done' && live.busy === true && !isArchived}
-                          onSubmit={
-                            presentation.kind === 'questionnaire'
-                              ? input => submitQuestionnaire(presentation.installationId, input)
-                              : undefined
-                          }
-                        />
-                      ) : null}
-                    </span>
-                  );
-                })}
-              </div>
-            ) : null}
-            {live.history.slice(-6).map((h) => (
-              <div key={h.id} className="message history-item">
-                <span className="message-role">{h.kind}</span>
-                {h.messages.map((m, i) => {
-                  const presentation = m.presentation ? readToolPresentation(m.presentation) : null;
-                  return (
-                    <div key={i} className="message-text">
-                      {renderLiveMessage(m)}
-                      {presentation ? (
-                        <ToolPresentationCard
-                          presentation={presentation}
-                          active={false}
-                        />
-                      ) : null}
-                    </div>
-                  );
-                })}
-              </div>
-            ))}
-          </>
-        ) : null}
-      </div>
-
-      <RawHistoryPane
-        items={rawItems}
+      <ChatTranscript
+        entries={rawItems}
+        live={live}
+        bot={bot}
+        avatarKey={botAvatarKey(identity, bot)}
+        devicePlatform={devicePlatform}
+        search={chatSearch}
+        archived={isArchived}
+        onSubmitQuestionnaire={submitQuestionnaire}
         loading={rawLoading}
         error={rawError}
-        onLoadMore={() => void loadRaw(false)}
-        hasMore={!!rawCursorRef.current}
-        onRetry={() => void loadRaw(true)}
-        offline={!online}
+        hasMore={false}
+        onLoadMore={() => void loadRaw()}
+        onRetry={() => void loadRaw()}
+        emptyActions={
+          <>
+            <button type="button" className="secondary-button" onClick={() => openInspector('profile')}>
+              🎨 定制形象与资料
+            </button>
+            <button type="button" className="secondary-button" onClick={() => openInspector('settings')}>
+              🎭 配置灵魂与模型
+            </button>
+            <button type="button" className="secondary-button" onClick={() => openInspector('shower')}>
+              🖥 打开虚拟桌面
+            </button>
+          </>
+        }
       />
-
-      <div className="toolbar">
-        <button disabled={!online || !live || stopping || disabled} onClick={() => void stopTask()}>
-          {stopping ? '停止中…' : '停止当前任务'}
-        </button>
-        <button onClick={() => void loadRaw(true)} disabled={!online || rawLoading || disabled}>刷新历史</button>
-      </div>
 
       <Composer
         text={drafts.text}
@@ -1459,16 +1937,11 @@ function PrimaryChatPane({
         canPick={!isArchived && identity?.kind === 'local'}
         onPick={pickFile}
         draftError={drafts.error}
-        draftHint={
-          isArchived
-            ? '此 Bot 已归档，当前为只读模式，恢复后可继续发送消息。'
-            : identity?.kind !== 'local'
-              ? 'Relay 模式不可选本机文件；可将目标 Host 上已存在的路径作为普通文本引用。'
-              : null
-        }
+        draftHint={isArchived ? '此 Bot 已归档，当前为只读模式，恢复后可继续发送消息。' : null}
         draftConflict={drafts.conflict}
         sendState={sendState}
         sendError={sendError}
+        sendNotice={sendNotice}
         onSend={handleSend}
         canSend={
           !isArchived &&
@@ -1491,7 +1964,154 @@ function PrimaryChatPane({
         onAdoptNewerDraft={adoptNewerDraft}
         turnAdmission={turnAdmission}
         onRetryTurnAdmission={() => void retryTurnAdmission()}
+        onInsertSlash={(cmd) => drafts.editText(cmd)}
       />
+      </div>
+
+      <Dialog.Root
+        open={inspectorTab !== null}
+        modal={compactOverlay}
+        onOpenChange={(open) => {
+          if (!open) setInspectorTab(null);
+        }}
+      >
+        <Dialog.Portal container={stageRef.current}>
+          <Dialog.Overlay className="inspector-scrim" />
+          <Dialog.Content
+            ref={inspectorContentRef}
+            className="inspector-drawer"
+            aria-describedby={undefined}
+            onOpenAutoFocus={(e) => {
+              e.preventDefault();
+              inspectorContentRef.current?.focus();
+            }}
+            onCloseAutoFocus={(e) => {
+              e.preventDefault();
+              stageRef.current?.querySelector<HTMLButtonElement>('.chat-header-pill')?.focus();
+            }}
+          >
+            <Dialog.Title className="sr-only">Bot 工作台</Dialog.Title>
+            <div className="inspector-head">
+              <div className="pill-tabs" role="tablist" aria-label="工作台页签">
+                {(
+                  [
+                    { key: 'profile', label: '资料' },
+                    { key: 'settings', label: '设置' },
+                    { key: 'raw', label: '原始历史' },
+                    { key: 'shower', label: '桌面' },
+                  ] as const
+                ).map((t) => (
+                  <button
+                    key={t.key}
+                    type="button"
+                    role="tab"
+                    aria-selected={inspectorTab === t.key}
+                    className={inspectorTab === t.key ? 'active' : ''}
+                    onClick={() => setInspectorTab(t.key)}
+                  >
+                    {t.label}
+                  </button>
+                ))}
+              </div>
+              <button
+                type="button"
+                className="icon-button"
+                onClick={() => setInspectorTab(null)}
+                aria-label="关闭工作台"
+                title="关闭工作台（Ctrl+.）"
+              >
+                <X size={16} />
+              </button>
+            </div>
+            <div className="inspector-body">
+              {inspectorTab === 'profile' ? (
+                <div className="inspector-section">
+                  <BotAvatarStudio
+                    key={botAvatarKey(identity, bot)}
+                    botKey={botAvatarKey(identity, bot)}
+                    roleName={bot.role}
+                    isPrimary={isPrimary && !isArchived}
+                    onChanged={() => setAvatarVersion((v) => v + 1)}
+                  />
+                  <BotProfile api={api} bot={bot} onSaved={onProfileSaved} />
+                  <div className="inspector-meta-card">
+                    <div className="metadata">设备：{deviceName}（{bot.deviceId}）</div>
+                    <div className="metadata">botId：{bot.botId}</div>
+                    <div className="metadata">cwd：{bot.cwd}</div>
+                  </div>
+                  <div className="inspector-lifecycle">
+                    <div className="inspector-section-title">生命周期</div>
+                    {isPrimary && !isArchived ? (
+                      <p className="hint">主 Bot 不可归档/删除，请先切换主 Bot。</p>
+                    ) : null}
+                    <div className="form-actions">
+                      {!isPrimary && !isArchived ? (
+                        <button
+                          type="button"
+                          className="secondary-button"
+                          disabled={!online || manageBusy}
+                          onClick={() => void handleSetPrimary()}
+                        >
+                          {manageAction === 'setPrimary' ? '设置中…' : '★ 设为主 Bot'}
+                        </button>
+                      ) : null}
+                      {!isArchived ? (
+                        <button
+                          type="button"
+                          className="secondary-button"
+                          disabled={!online || manageBusy || isPrimary}
+                          onClick={() => void handleArchive()}
+                        >
+                          {manageAction === 'archive' ? '归档中…' : '归档智能体'}
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          className="secondary-button"
+                          disabled={!online || manageBusy}
+                          onClick={() => void handleUnarchive()}
+                        >
+                          {manageAction === 'unarchive' ? '恢复中…' : '恢复智能体'}
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        className="secondary-button danger-outline"
+                        disabled={!online || manageBusy || isPrimary}
+                        onClick={() => setConfirmDelete(true)}
+                      >
+                        永久删除
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              ) : null}
+              {inspectorTab === 'settings' ? (
+                <BotSettings api={api} botId={bot.botId} open onOpenChange={() => { /* 页签由外层管理，内部不再渲染关闭 UI */ }} />
+              ) : null}
+              {inspectorTab === 'raw' ? (
+                <RawHistoryPane
+                  items={rawItems}
+                  loading={rawLoading}
+                  error={rawError}
+                  onLoadMore={() => void loadRaw()}
+                  hasMore={false}
+                  onRetry={() => void loadRaw()}
+                  offline={!online}
+                />
+              ) : null}
+              {inspectorTab === 'shower' ? (
+                <ShowerPreview
+                  call={callShower}
+                  target={{ botId: bot.botId }}
+                  connected={api.transportConnected && pageActive}
+                  onClose={() => setInspectorTab(null)}
+                />
+              ) : null}
+            </div>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
     </div>
   );
 }
@@ -1514,6 +2134,10 @@ export function BotChats({ api, pageActive = true }: { api: DesktopPanelApi; pag
   const [loading, setLoading] = useState(false);
   const [visible, setVisible] = useState(!document.hidden);
   const [refreshVersion, setRefreshVersion] = useState(0);
+  const [listCollapsed, setListCollapsed] = useState(false);
+  const [query, setQuery] = useState('');
+  const [deviceFilter, setDeviceFilter] = useState<string>('all');
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
   const refreshQueued = useRef(false);
   const inFlight = useRef(false);
   const seq = useRef(0);
@@ -1639,6 +2263,30 @@ export function BotChats({ api, pageActive = true }: { api: DesktopPanelApi; pag
     };
   }, [loadBots, profileKey, online, pageActive, visible, refreshVersion]);
 
+  // Ctrl/Cmd+K 聚焦搜索 · Ctrl/Cmd+B 折叠列表 · Ctrl/Cmd+F 会话内搜索 · Ctrl/Cmd+. 工作台
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (!(e.ctrlKey || e.metaKey)) return;
+      const k = e.key.toLowerCase();
+      if (k === 'k') {
+        e.preventDefault();
+        setListCollapsed(false);
+        window.setTimeout(() => searchInputRef.current?.focus(), 0);
+      } else if (k === 'b') {
+        e.preventDefault();
+        setListCollapsed((v) => !v);
+      } else if (k === 'f') {
+        e.preventDefault();
+        window.dispatchEvent(new CustomEvent('botchats:chat-search'));
+      } else if (e.key === '.') {
+        e.preventDefault();
+        window.dispatchEvent(new CustomEvent('botchats:toggle-inspector'));
+      }
+    }
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
   const missingPrimaryDevices = useMemo(
     () =>
       devices.filter(
@@ -1649,23 +2297,33 @@ export function BotChats({ api, pageActive = true }: { api: DesktopPanelApi; pag
     [devices, bots],
   );
 
+  const filteredBots = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    return bots.filter((b) => {
+      if (deviceFilter !== 'all' && b.deviceId !== deviceFilter) return false;
+      if (!q) return true;
+      const hay = `${b.role} ${b.description} ${b.botId} ${b.deviceId} ${b.lastPreview ?? ''}`.toLowerCase();
+      return hay.includes(q);
+    });
+  }, [bots, query, deviceFilter]);
+
   const { primaryBots, regularBots, archivedBots } = useMemo(() => {
     const sortByRecent = (a: BotDirectoryEntry, b: BotDirectoryEntry) =>
       botSortTimestamp(b) - botSortTimestamp(a);
-    const primary = bots
+    const primary = filteredBots
       .filter((b) => !b.archivedAt && b.isPrimary)
       .slice()
       .sort(sortByRecent);
-    const regular = bots
+    const regular = filteredBots
       .filter((b) => !b.archivedAt && !b.isPrimary)
       .slice()
       .sort(sortByRecent);
-    const archived = bots
+    const archived = filteredBots
       .filter((b) => Boolean(b.archivedAt))
       .slice()
       .sort(sortByRecent);
     return { primaryBots: primary, regularBots: regular, archivedBots: archived };
-  }, [bots]);
+  }, [filteredBots]);
 
   const selectedBot = selected
     ? bots.find((b) => b.deviceId === selected.deviceId && b.botId === selected.botId) ?? null
@@ -1677,56 +2335,63 @@ export function BotChats({ api, pageActive = true }: { api: DesktopPanelApi; pag
         : null,
     [api, sess, selectedBot?.deviceId, selectedBot?.online],
   );
+  const selectedDeviceName = selectedBot
+    ? devices.find((d) => d.deviceId === selectedBot.deviceId)?.displayName ||
+      selectedBot.deviceName ||
+      selectedBot.deviceId
+    : '';
+  const selectedDevicePlatform = selectedBot
+    ? devices.find((d) => d.deviceId === selectedBot.deviceId)?.platform ?? selectedBot.platform
+    : undefined;
+
+  const onlineDevices = useMemo(() => devices.filter((d) => d.online), [devices]);
+
+  function deviceNameOf(deviceId: string): string {
+    return devices.find((d) => d.deviceId === deviceId)?.displayName || deviceId;
+  }
 
   function renderBotRow(b: BotDirectoryEntry, isArchivedSection = false) {
     const isSelected = selected?.deviceId === b.deviceId && selected.botId === b.botId;
     const isBotOnline = Boolean(b.online && online);
-    const platformLabel = b.platform || 'host';
-    const activityIso = b.lastActivityAt || b.createdAt;
     const isPrimaryActive = Boolean(b.isPrimary && !b.archivedAt);
+    const activityIso = b.lastActivityAt || b.createdAt;
     return (
       <li key={`${b.deviceId}:${b.botId}`}>
         <button
           type="button"
-          className={`entity-row bot-entity-row ${isSelected ? 'selected' : ''} ${!isBotOnline ? 'offline' : ''} ${isPrimaryActive ? 'is-primary' : ''} ${b.archivedAt ? 'is-archived' : ''}`}
+          className={`hub-bot-row${isSelected ? ' selected' : ''}${!isBotOnline ? ' offline' : ''}`}
           onClick={() => setSelected({ deviceId: b.deviceId, botId: b.botId })}
         >
-          <span className={`bot-avatar ${isPrimaryActive ? 'primary' : ''}`}>
-            <span className="bot-avatar-initial">
-              {(b.role || 'B').slice(0, 1).toUpperCase()}
-            </span>
-            {isPrimaryActive ? (
-              <>
-                <span className="bot-badge-platform" title={`平台: ${platformLabel}`}>
-                  {platformLabel}
-                </span>
-                <span className="bot-badge-star" title="主 Bot" aria-label="主 Bot">
-                  ★
-                </span>
-              </>
-            ) : null}
-          </span>
-          <span className="entity-main">
-            <span className="entity-title-row">
-              <span className="entity-title">
+          <GrokBotAvatar
+            botKey={botAvatarKey(identity, b)}
+            roleName={b.role}
+            isPrimary={isPrimaryActive}
+            starBadge={isPrimaryActive}
+            platformBadge={b.platform || 'host'}
+            busy={false}
+            size={46}
+          />
+          <span className="hub-bot-row-main">
+            <span className="hub-bot-row-title-line">
+              <span className="hub-bot-row-title">
                 {isPrimaryActive ? `★ ${b.role}` : b.role}
               </span>
               {activityIso ? (
-                <span className="entity-time" title={formatTime(activityIso)}>
-                  {formatTime(activityIso)}
+                <span className="hub-bot-row-time" title={formatTime(activityIso)}>
+                  {formatRelativeTime(activityIso)}
                 </span>
               ) : null}
             </span>
-            <span className="entity-sub">
-              {devices.find((d) => d.deviceId === b.deviceId)?.displayName || b.deviceName || b.deviceId} · {b.deviceId} · {isBotOnline ? '在线' : '离线或不可读取'}
+            <span className="hub-bot-row-sub">
+              {deviceNameOf(b.deviceId)} · {isBotOnline ? '在线' : '离线'}
             </span>
             {b.lastPreview ? (
-              <span className="entity-sub entity-preview">{truncate(b.lastPreview, 80)}</span>
+              <span className="hub-bot-row-preview">{truncate(b.lastPreview, 80)}</span>
             ) : b.description ? (
-              <span className="entity-sub">{b.description}</span>
+              <span className="hub-bot-row-preview">{truncate(b.description, 80)}</span>
             ) : null}
             {isArchivedSection && b.archivedAt ? (
-              <span className="entity-sub archive-countdown">
+              <span className="hub-bot-row-sub archive-countdown">
                 已归档 · 剩余 {remainingArchiveDays(b.archivedAt)} 天自动删除
               </span>
             ) : null}
@@ -1737,138 +2402,166 @@ export function BotChats({ api, pageActive = true }: { api: DesktopPanelApi; pag
   }
 
   return (
-    <div className="conversation-layout">
-      <aside className="entity-list">
-        <div className="entity-list-head">
-          <h2>Bot私聊</h2>
-          <button
-            className="toolbar-btn"
-            onClick={() => triggerLoadBots()}
-            disabled={!online || loading}
-          >
-            刷新
-          </button>
-          <button
-            className="toolbar-btn"
-            onClick={() => {
-              setShowCreate((v) => !v);
-              if (!showCreate && missingPrimaryDevices.length > 0) {
-                setCreateTargetDeviceId(missingPrimaryDevices[0].deviceId);
-              }
-            }}
-            disabled={!identity}
-          >
-            {showCreate ? '取消' : '新建 Bot'}
-          </button>
+    <div className={`bot-chats-layout${listCollapsed ? ' list-collapsed' : ''}`}>
+      <aside className="hub-sidebar" aria-label="智能体名录">
+        <div className="hub-hero-strip" role="list" aria-label="主智能体">
+          {primaryBots.map((b) => (
+            <button
+              key={`${b.deviceId}:${b.botId}`}
+              type="button"
+              role="listitem"
+              className={`hub-hero-card${selected?.deviceId === b.deviceId && selected.botId === b.botId ? ' selected' : ''}`}
+              onClick={() => setSelected({ deviceId: b.deviceId, botId: b.botId })}
+            >
+              <GrokBotAvatar
+                botKey={botAvatarKey(identity, b)}
+                roleName={b.role}
+                isPrimary
+                starBadge
+                platformBadge={b.platform || 'host'}
+                size={56}
+              />
+              <span className="hub-hero-name">{b.role}</span>
+              <span className={`hub-hero-node${b.online ? '' : ' offline'}`}>
+                {deviceNameOf(b.deviceId)}
+              </span>
+            </button>
+          ))}
+          {missingPrimaryDevices.map((d) => (
+            <button
+              key={d.deviceId}
+              type="button"
+              role="listitem"
+              className="hub-hero-card hub-hero-create"
+              title={`在 ${d.displayName || d.deviceId} 创建主智能体`}
+              onClick={() => {
+                setCreateTargetDeviceId(d.deviceId);
+                setShowCreate(true);
+              }}
+            >
+              <span className="hub-hero-plus">＋</span>
+              <span className="hub-hero-name">创建主智能体</span>
+              <span className="hub-hero-node">{d.displayName || d.deviceId}</span>
+            </button>
+          ))}
         </div>
 
-        {missingPrimaryDevices.length > 0 ? (
-          <div className="primary-onboarding-banner" role="region" aria-label="创建主 Bot 引导">
-            <div className="primary-onboarding-title">⚠️ 在线设备缺少主 Bot</div>
-            <div className="primary-onboarding-desc">
-              以下在线设备尚未拥有未归档的主 Bot：
-              {missingPrimaryDevices
-                .map((d) => `${d.displayName || d.deviceId} (${d.deviceId})`)
-                .join('、')}
-            </div>
-            <div className="primary-onboarding-actions">
-              {missingPrimaryDevices.map((d) => (
-                <button
-                  key={d.deviceId}
-                  type="button"
-                  className="toolbar-btn primary-cta-btn"
-                  onClick={() => {
-                    setCreateTargetDeviceId(d.deviceId);
-                    setShowCreate(true);
-                  }}
-                >
-                  创建主 Bot（{d.displayName || d.deviceId}）
-                </button>
-              ))}
-            </div>
+        <div className="hub-search-wrap">
+          <Search size={14} aria-hidden="true" />
+          <input
+            ref={searchInputRef}
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="搜索智能体…（Ctrl+K）"
+            aria-label="搜索智能体"
+          />
+          {query ? (
+            <button
+              type="button"
+              className="icon-button"
+              onClick={() => setQuery('')}
+              aria-label="清除搜索"
+            >
+              <X size={13} />
+            </button>
+          ) : null}
+        </div>
+
+        {devices.length > 1 ? (
+          <div className="hub-device-chips" role="tablist" aria-label="设备筛选">
+            <button
+              type="button"
+              className={deviceFilter === 'all' ? 'chip active' : 'chip'}
+              onClick={() => setDeviceFilter('all')}
+            >
+              全部
+            </button>
+            {devices.map((d) => (
+              <button
+                key={d.deviceId}
+                type="button"
+                className={deviceFilter === d.deviceId ? 'chip active' : 'chip'}
+                title={d.deviceId}
+                onClick={() => setDeviceFilter(d.deviceId)}
+              >
+                {d.displayName || d.deviceId}
+              </button>
+            ))}
           </div>
         ) : null}
 
         {botsError ? (
           <div className="error-banner" role="alert">
             {botsError}
-            <button onClick={() => triggerLoadBots()}>重试</button>
+            <button type="button" onClick={() => triggerLoadBots()}>重试</button>
           </div>
         ) : null}
         {!online ? <div className="status">离线：显示最后读取的 Bot 列表。</div> : null}
 
-        {showCreate && identity ? (
-          <CreateBotForm
-            api={api}
-            devices={devices}
-            bots={bots}
-            initialDeviceId={createTargetDeviceId}
-            onCreated={(deviceId, bot) => {
-              setSelected({ deviceId, botId: bot.botId });
-              const dev = devices.find((d) => d.deviceId === deviceId);
-              setBots((old) => {
-                const cleared = bot.isPrimary
-                  ? old.map((b) => (b.deviceId === deviceId ? { ...b, isPrimary: false } : b))
-                  : old;
-                return [
-                  ...cleared.filter((b) => b.deviceId !== deviceId || b.botId !== bot.botId),
-                  {
-                    ...bot,
-                    deviceName: dev?.displayName || deviceId,
-                    platform: dev?.platform,
-                    online: true,
-                  },
-                ];
-              });
-              triggerLoadBots();
-            }}
-          />
-        ) : null}
-
-        {loading && !loaded ? (
-          <div className="status">加载中…</div>
-        ) : !loaded ? (
-          <div className="status">目录尚未读取。</div>
-        ) : bots.length === 0 && !botsError ? (
-          <div className="empty-state">暂无 Bot，点击“新建 Bot”创建。</div>
-        ) : (
-          <div className="bot-sections-container">
-            {primaryBots.length > 0 ? (
-              <div className="bot-list-section primary-section">
-                <div className="bot-section-header">★ 置顶主 Bot ({primaryBots.length})</div>
-                <ul className="entity-list-items">
-                  {primaryBots.map((b) => renderBotRow(b, false))}
-                </ul>
-              </div>
-            ) : null}
-
-            {regularBots.length > 0 ? (
-              <div className="bot-list-section regular-section">
-                <div className="bot-section-header">普通 Bot ({regularBots.length})</div>
-                <ul className="entity-list-items">
+        <div className="hub-list-scroll">
+          {loading && !loaded ? (
+            <div className="status">加载中…</div>
+          ) : !loaded ? (
+            <div className="status">目录尚未读取。</div>
+          ) : filteredBots.length === 0 && !botsError ? (
+            <div className="empty-state">
+              {query || deviceFilter !== 'all' ? '没有匹配的智能体。' : '暂无 Bot，点击“新建 Bot”创建。'}
+            </div>
+          ) : (
+            <>
+              {regularBots.length > 0 ? (
+                <ul className="hub-bot-list">
                   {regularBots.map((b) => renderBotRow(b, false))}
                 </ul>
-              </div>
-            ) : null}
+              ) : null}
 
-            {archivedBots.length > 0 ? (
-              <details className="bot-archived-details">
-                <summary>已归档 ({archivedBots.length}) · 14 天倒计时</summary>
-                <ul className="entity-list-items">
-                  {archivedBots.map((b) => renderBotRow(b, true))}
-                </ul>
-              </details>
-            ) : null}
-          </div>
-        )}
+              {archivedBots.length > 0 ? (
+                <details className="hub-archived">
+                  <summary>📦 已归档智能体 ({archivedBots.length}) · 14 天后自动清理</summary>
+                  <ul className="hub-bot-list">
+                    {archivedBots.map((b) => renderBotRow(b, true))}
+                  </ul>
+                </details>
+              ) : null}
+            </>
+          )}
+        </div>
+
+        <div className="hub-bottom-bar">
+          <button
+            type="button"
+            className="primary-button hub-new-btn"
+            onClick={() => {
+              setShowCreate(true);
+              if (missingPrimaryDevices.length > 0) {
+                setCreateTargetDeviceId(missingPrimaryDevices[0].deviceId);
+              }
+            }}
+            disabled={!identity}
+          >
+            <Plus size={15} /> 新建智能体
+          </button>
+          <button
+            type="button"
+            className="icon-button"
+            onClick={() => triggerLoadBots()}
+            disabled={!online || loading}
+            aria-label="刷新列表"
+            title="刷新列表"
+          >
+            <RefreshCw size={15} />
+          </button>
+        </div>
       </aside>
 
-      <section className="chat-pane">
+      <section className="main-stage">
         {scopedApi && selectedBot ? (
           <PrimaryChatPane
             key={`${sess}:${selectedBot.deviceId}:${selectedBot.botId}`}
             api={scopedApi}
             bot={selectedBot}
+            deviceName={selectedDeviceName}
+            devicePlatform={selectedDevicePlatform}
             onProfileSaved={(updated) => {
               setBots((old) =>
                 old.map((b) =>
@@ -1905,9 +2598,56 @@ export function BotChats({ api, pageActive = true }: { api: DesktopPanelApi; pag
             pageActive={pageActive}
           />
         ) : (
-          <div className="empty-state">选择左侧 Bot 查看聊天。</div>
+          <div className="empty-state stage-empty">
+            <span className="title">选择左侧智能体开始对话</span>
+            {onlineDevices.length > 0 ? '或使用 Ctrl+K 快速搜索' : null}
+          </div>
         )}
       </section>
+
+      <Dialog.Root open={showCreate} onOpenChange={setShowCreate}>
+        <Dialog.Portal>
+          <Dialog.Overlay className="desktop-dialog-overlay" />
+          <Dialog.Content className="desktop-dialog create-bot-dialog" aria-describedby={undefined}>
+            <div className="desktop-dialog-head">
+              <Dialog.Title>新建智能体</Dialog.Title>
+              <Dialog.Close asChild>
+                <button type="button" className="icon-button" aria-label="关闭">
+                  <X size={16} />
+                </button>
+              </Dialog.Close>
+            </div>
+            {identity ? (
+              <CreateBotForm
+                api={api}
+                devices={devices}
+                bots={bots}
+                initialDeviceId={createTargetDeviceId}
+                onCreated={(deviceId, bot) => {
+                  setShowCreate(false);
+                  setSelected({ deviceId, botId: bot.botId });
+                  const dev = devices.find((d) => d.deviceId === deviceId);
+                  setBots((old) => {
+                    const cleared = bot.isPrimary
+                      ? old.map((b) => (b.deviceId === deviceId ? { ...b, isPrimary: false } : b))
+                      : old;
+                    return [
+                      ...cleared.filter((b) => b.deviceId !== deviceId || b.botId !== bot.botId),
+                      {
+                        ...bot,
+                        deviceName: dev?.displayName || deviceId,
+                        platform: dev?.platform,
+                        online: true,
+                      },
+                    ];
+                  });
+                  triggerLoadBots();
+                }}
+              />
+            ) : null}
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
     </div>
   );
 }

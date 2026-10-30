@@ -190,12 +190,35 @@ const UPSTREAM_LICENSE_ALLOWLIST = new Map([
   ['@earendil-works/pi-telemetry', { version: '1.4.0', declared: 'MIT', license: 'pi-v1.3.0-MIT.txt' }],
   ['@vectorize-io/hindsight-client', { version: '0.9.2', declared: 'MIT', license: 'hindsight-client-0.9.2-MIT.txt' }],
   ['standardwebhooks', { version: '1.1.1', declared: 'MIT', license: 'standardwebhooks-1.1.1-LICENSE.txt' }],
+  // Desktop UI packages (consumed through UI_NPM_PACKAGES, not the broker
+  // bundle): remark-math 6.0.0 and rehype-katex 7.0.1 publish no license file
+  // in their npm archives. Both live in the remarkjs/remark-math monorepo and
+  // share the same MIT text by Junyoung Choi, vendored verbatim in
+  // licenses/desktop/ (provenance recorded in licenses/desktop/README.md).
+  ['remark-math', { version: '6.0.0', declared: 'MIT', license: 'desktop/remark-math-6.0.0-MIT.txt' }],
+  ['rehype-katex', { version: '7.0.1', declared: 'MIT', license: 'desktop/rehype-katex-7.0.1-MIT.txt' }],
 ]);
 
 // UI packages explicitly used by the desktop frontend; their full licenses are
 // collected from the installed root node_modules (they are not part of the
-// Node broker bundle, so the bundle metafile does not cover them).
-const UI_NPM_PACKAGES = ['react', 'react-dom', 'scheduler', '@tauri-apps/api'];
+// Node broker bundle, so the bundle metafile does not cover them). The list
+// covers the shared Android-ported UI components (Markdown, ToolPresentation,
+// ui.tsx, GrokBotAvatar, dialog.tsx) that the desktop shell renders.
+// shortcut: remark-math@6.0.0 and rehype-katex@7.0.1 ship no license file in
+// their npm archives, so their license texts come from UPSTREAM_LICENSE_ALLOWLIST.
+const UI_NPM_PACKAGES = [
+  'react',
+  'react-dom',
+  'scheduler',
+  '@tauri-apps/api',
+  'lucide-react',
+  'react-markdown',
+  'remark-gfm',
+  'remark-math',
+  'rehype-katex',
+  'katex',
+  '@radix-ui/react-dialog',
+];
 
 const NODE_TARGETS = {
   'win32-x64': {
@@ -790,6 +813,15 @@ async function collectUiNpmLicenseSections() {
     }
     const licenseFiles = await findLicenseFiles(dir);
     if (licenseFiles.length === 0) {
+      const upstream = UPSTREAM_LICENSE_ALLOWLIST.get(name);
+      if (upstream && upstream.version === pkg.version && pkg.license === upstream.declared) {
+        const upstreamPath = path.join(ROOT, 'licenses', upstream.license);
+        const text = await readIfPresent(upstreamPath);
+        if (!text) throw fail(`in-repo upstream license missing: ${upstreamPath}`);
+        sections.push(`## web: ${pkg.name}@${pkg.version} (${pkg.license ?? 'unknown'})`);
+        sections.push(text.toString('utf8').trim());
+        continue;
+      }
       throw fail(`UI npm package ${name}@${pkg.version ?? 'unknown'} has no license file`);
     }
     sections.push(`## web: ${pkg.name}@${pkg.version} (${pkg.license ?? 'unknown'})`);
