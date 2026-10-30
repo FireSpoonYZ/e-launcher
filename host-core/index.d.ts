@@ -116,6 +116,16 @@ export interface SubmissionInput {
 export interface HistoryOptions {
   limit?: number;
   cursor?: Record<string, unknown> | null;
+  /** Wire-safe pages and lossless JSON fragments for entries larger than one frame. */
+  chunked?: boolean;
+}
+
+export interface HistoryEntryChunk {
+  entryId: number;
+  /** UTF-16 offset within the serialized entry, not a byte offset. */
+  offset: number;
+  json: string;
+  complete: boolean;
 }
 
 export interface HistoryPage {
@@ -123,6 +133,7 @@ export interface HistoryPage {
   conversationId: string;
   items: readonly EntryRecord[];
   nextCursor: Record<string, unknown> | null;
+  entryChunk?: HistoryEntryChunk;
 }
 
 /** /clear 结果：SDK 用 pi.reset 开新上下文，conversationId 不变。 */
@@ -1686,7 +1697,7 @@ export interface RemoteControlMethodMap {
   findByRequest: { params: { requestId: string }; result: BotRecord };
   submit: { params: { botId: string; requestId: string; text: string }; result: PrimarySubmission };
   getSubmission: { params: { botId: string; requestId: string }; result: PrimarySubmission };
-  history: { params: { botId: string; limit?: number; cursor?: Record<string, unknown> | null }; result: HistoryPage };
+  history: { params: HistoryOptions & { botId: string }; result: HistoryPage };
   clearHistory: { params: { botId: string }; result: ClearHistoryResult };
   compact: { params: { botId: string }; result: CompactResult };
   abort: { params: { botId: string }; result: { botId: string } };

@@ -4,6 +4,7 @@ import type {
   BotSoul,
   ExtensionCatalog,
   HindsightOptions as SharedHindsightOptions,
+  HistoryEntryChunk,
   RuntimeExtensionsConfig,
 } from '../../../host-core/index.js';
 import { createTauriBotHost, mobileLocalRequest } from './tauri-host';
@@ -60,7 +61,7 @@ export interface HostBot {
   archivedAt?: string | null;
 }
 export type HostSubmission = { botId: string; conversationId: string; requestId: string; submissionId: number; status: 'queued'|'placed'|'done'|'unanswered'; answerText: string|null; reason: string|null };
-export type HostHistoryPage = { botId: string; conversationId: string; items: Array<Record<string, unknown>>; nextCursor: Record<string, unknown>|null };
+export type HostHistoryPage = { botId: string; conversationId: string; items: Array<Record<string, unknown>>; nextCursor: Record<string, unknown>|null; entryChunk?: HistoryEntryChunk };
 export type HostCallResult = { type: 'result'; id: string; result: unknown };
 export type HostLiveFrame = {
   type: 'snapshot'|'update'|'end';

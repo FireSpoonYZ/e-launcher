@@ -398,8 +398,16 @@ async function getSubmission(host, runtime, params, body, req, res) {
 }
 
 async function history(host, runtime, params, body, req, res) {
-  const { limit, cursor } = parseHistoryQuery(new URL(req.url, 'http://' + BIND_HOST).searchParams);
-  const page = await runtime.history(params.botId, { limit, cursor });
+  const search = new URL(req.url, 'http://' + BIND_HOST).searchParams;
+  const options = parseHistoryQuery(search);
+  const chunked = search.get('chunked');
+  if (chunked !== null) {
+    if (chunked !== 'true' && chunked !== 'false') {
+      throw new ControlHttpError(400, 'INVALID_ARGUMENT', 'chunked must be a boolean');
+    }
+    options.chunked = chunked === 'true';
+  }
+  const page = await runtime.history(params.botId, options);
   writeControlJson(res, 200, page);
 }
 

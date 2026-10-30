@@ -194,7 +194,7 @@ node host-core/runtime-cli.js wait --data-root "$DATA_ROOT" --config "$CONFIG" -
 | `submit(botId, {requestId, text})` | 持久提交输入并返回受理状态 |
 | `wait(botId, requestId)` | 等待已有提交，进行中工作可恢复；已结束回执直接返回 |
 | `getSubmission(botId, requestId)` | 被动查询，无此提交返回 null |
-| `history(botId, {limit?, cursor?})` | 原始条目按时间顺序分页，默认 50，上限 200 |
+| `history(botId, {limit?, cursor?, chunked?})` | 原始条目按时间顺序分页，默认 50，上限 200；`chunked:true` 按字节分页并无损分片大条目 |
 | `abort(botId)` | 停止该主私聊的当前执行与待处理输入，等待确认 |
 | `resume()` | 恢复原生持久任务；模块 11 起还幂等激活群/DM 自动处理，可产生新的工作决策输入（见模块 11） |
 | `close()` | 幂等关闭资源，保留未完成工作供之后恢复 |
@@ -251,6 +251,10 @@ Runtime 保留 `contextStatus(botId)` 与 `workContextStatus(botId, scopeId)`，
 插件对该 Bot 启用时，该查询不创建会话或启动调度，返回块、refs 与已准备请求的元信息，不返回缓存模型消息全文；未开始的 Bot 返回空状态。插件禁用或卸载时返回 `EXTENSION_DISABLED`。
 
 模块 2 旧会话在显式提供 models 的主动打开路径中解除旧 tools:[] 限制，身份和历史保留；被动历史/状态读取不执行该升级。未知 kernel 版本被拒绝，不自动重置或套用当前格式，原始历史仍可读取。
+
+### 大历史传输
+
+手机和桌面聊天使用 `history(..., {chunked:true})`，完整条目按约 256 KiB 的字节预算分页。单条记录较大时返回 `entryChunk:{entryId,offset,json,complete}`，`offset` 以 UTF-16 单元计数，客户端沿不透明的 `nextCursor` 收齐 JSON 后还原完整记录。分片可出现空 `items`，须继续读取；只有完整记录才进入聊天状态。该预算不限制历史总量或单条记录大小，不截断或修改持久化原文。未传 `chunked` 的 Runtime/CLI 查询仍返回原始条目。旧 Host 不识别此模式时，客户端回退普通分页并在超限时减少每页条数；单条记录超出旧帧上限时仍需更新该 Host。现有 1 MiB 控制帧上限保持不变。
 
 ### 模块 3 历史验收（迁移前内嵌实现）
 
@@ -334,7 +338,7 @@ await control.close(); // 幂等：先关 listener/连接与进行中 handler，
 | GET `/v1/bot-requests/:requestId` | — | 200 `BotRecord`，否则 404 `BOT_REQUEST_NOT_FOUND` |
 | POST `/v1/bots/:botId/submissions` | `{requestId, text}` | 202 `PrimarySubmission`（只受理，决不等待回答） |
 | GET `/v1/bots/:botId/submissions/:requestId` | — | 200 `PrimarySubmission`，否则 404 `SUBMISSION_NOT_FOUND` |
-| GET `/v1/bots/:botId/history?limit=&cursor=` | — | 200 `HistoryPage`；limit 须为严格正整数十进制数，cursor 须为 JSON 对象 |
+| GET `/v1/bots/:botId/history?limit=&cursor=&chunked=true` | — | 200 `HistoryPage`；limit 须为严格正整数十进制数，cursor 须为 JSON 对象，chunked 为可选布尔值 |
 | POST `/v1/bots/:botId/abort` | — | 200 `{botId}`；显式停止，客户端断开不是 abort |
 | POST `/v1/bots/:botId/history/clear` | — | 200 `{botId, conversationId, clearedThroughEntryId}`；用 SDK `pi.reset` 开新上下文，不新建会话 |
 | POST `/v1/bots/:botId/compact` | — | 200 `{botId, conversationId, compacted}`；等手动压缩任务终态，无可压内容时 `compacted:false` |

@@ -363,9 +363,13 @@ function normalizeControlParams(method, params) {
       return { botId: params.botId, requestId: params.requestId };
     }
     case 'history': {
-      rejectUnknownFields(params, new Set(['botId', 'limit', 'cursor']), 'params');
+      rejectUnknownFields(params, new Set(['botId', 'limit', 'cursor', 'chunked']), 'params');
       assertId(params.botId, 'botId');
       const normalized = { botId: params.botId, cursor: null };
+      if (params.chunked !== undefined) {
+        if (typeof params.chunked !== 'boolean') throw invalid('chunked must be a boolean');
+        normalized.chunked = params.chunked;
+      }
       if (params.limit !== undefined) {
         if (!Number.isSafeInteger(params.limit) || params.limit < 1 || params.limit > 200) {
           throw invalid('limit must be a positive integer between 1 and 200');

@@ -198,6 +198,7 @@ export function createControlClient({ url, token, fetch: fetchImpl = globalThis.
     },
     history(botId, options) {
       const query = new URLSearchParams();
+      if (options?.chunked !== undefined) query.set('chunked', String(options.chunked));
       if (options && options.limit != null) query.set('limit', String(options.limit));
       if (options && options.cursor != null) query.set('cursor', JSON.stringify(options.cursor));
       return request('GET', ['v1', 'bots', botId, 'history'], { signal: options && options.signal, query });

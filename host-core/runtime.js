@@ -1437,12 +1437,12 @@ function createRuntime({ host, harness, models, defaultModel, releaseOwner, clea
       assertNonBlank(botId, 'botId');
       const bot = host.getBot(botId);
       if (!bot) throw errWithCode(`bot not found: ${botId}`, 'BOT_NOT_FOUND');
-      const { limit, cursor } = normalizeHistoryOptions(options);
+      const historyOptions = normalizeHistoryOptions(options);
       const conversation = await getPrimaryConversation(harness, bot, {}, CTX);
       if (!conversation) {
         return { botId, conversationId: bot.primaryConversationId, items: [], nextCursor: null };
       }
-      const page = await readPrimaryHistory(conversation, { limit, cursor }, CTX, { afterReset: true });
+      const page = await readPrimaryHistory(conversation, historyOptions, CTX, { afterReset: true });
       return { botId, conversationId: bot.primaryConversationId, ...page };
     },
 

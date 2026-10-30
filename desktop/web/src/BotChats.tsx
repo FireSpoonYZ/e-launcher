@@ -15,6 +15,7 @@ import type { DraftSnapshot } from './drafts';
 import { BotSettings } from './BotSettings';
 import { ShowerPreview } from './ShowerPreview';
 import { targetApi } from './targetApi';
+import { readHistoryPage } from './history';
 
 type AnyRawEntry = { id: unknown; kind: string; model?: unknown; data?: unknown };
 
@@ -988,12 +989,11 @@ function PrimaryChatPane({
     const localSess = rawSessRef.current;
     setRawLoading(true);
     try {
-      const page = await api.call(identity, 'history', {
-        botId: bot.botId,
-        limit: 30,
-        cursor: reset ? null : rawCursorRef.current,
-      });
-      if (rawSessRef.current !== localSess) return;
+      const page = await readHistoryPage(async (cursor, limit, chunked) => {
+        if (rawSessRef.current !== localSess) return null;
+        return api.call(identity, 'history', { botId: bot.botId, limit, cursor, ...(chunked ? { chunked: true } : {}) });
+      }, reset ? null : rawCursorRef.current, 30);
+      if (rawSessRef.current !== localSess || !page) return;
       setRawItems((prev) => (reset ? [...page.items] : [...prev, ...page.items]) as AnyRawEntry[]);
       rawCursorRef.current = page.nextCursor;
       setRawError(null);

@@ -55,6 +55,7 @@ import { mobileLocalRequest, onMobileStreamFailure } from './native/tauri-host';
 import { ActiveCenter, useCenterConnection } from './native/CenterGate';
 import { useDrafts } from '../../desktop/web/src/drafts';
 import { PendingPanel } from '../../desktop/web/src/PendingPanel';
+import { readHistoryPage } from '../../desktop/web/src/history';
 import { Scopes } from '../../desktop/web/src/Scopes';
 import type { DesktopDraftEntry, DesktopIdentity, DesktopPanelApi } from '../../desktop/web/src/types';
 import type { DesktopConnectionInput, DesktopUiProfile } from '../../host-core/desktop-client.js';
@@ -506,13 +507,12 @@ function formatBotListTime(
 }
 
 async function fetchBotHistoryPages(
-  fetchPage: (cursor: Record<string, unknown> | null, limit: number) => Promise<HostHistoryPage | null>,
+  fetchPage: (cursor: Record<string, unknown> | null, limit: number, chunked: boolean) => Promise<HostHistoryPage | null>,
 ): Promise<Array<Record<string, unknown>>> {
   const all: Array<Record<string, unknown>> = [];
   let cursor: Record<string, unknown> | null = null;
-  const maxPages = 10;
-  for (let pageIdx = 0; pageIdx < maxPages; pageIdx++) {
-    const page = await fetchPage(cursor, 200);
+  for (;;) {
+    const page = await readHistoryPage(fetchPage, cursor, 200);
     const items = array<Record<string, unknown>>(page?.items);
     if (items.length > 0) all.push(...items);
     const next = page?.nextCursor;
@@ -1390,6 +1390,9 @@ export function HostPage({
   const loadBotHistoryAndObserve = useCallback(
     async (bot: UnifiedBotItem) => {
       cancelActiveObservation();
+      // 等这次加载结束再安排重试，避免多片传输被 2 秒定时器反复作废。
+      setChatHistoryError('');
+      setChatObservationError('');
       const generation = ++chatLoadGeneration.current;
       const current = () => generation === chatLoadGeneration.current;
       // 同一聊天前台恢复/重连时保留现有 live，直到新快照到达；旧消息只来自实时快照时不会被清空。
@@ -1399,10 +1402,11 @@ export function HostPage({
         const snap = await ensureLocalHostRunning();
         if (!snap || snap.phase !== 'running') return;
         try {
-          const items = await fetchBotHistoryPages(async (cursor, limit) => {
+          const items = await fetchBotHistoryPages(async (cursor, limit, chunked) => {
+            if (!current()) return null;
             const histEnv = await BotHost.call({
               method: 'history',
-              params: { botId: bot.botId, limit, ...(cursor ? { cursor } : {}) },
+              params: { botId: bot.botId, limit, ...(chunked ? { chunked: true } : {}), ...(cursor ? { cursor } : {}) },
             });
             return (histEnv.result as HostHistoryPage) ?? null;
           });
@@ -1432,10 +1436,12 @@ export function HostPage({
         if (!api.transportConnected) return;
         const identity = bot.remoteIdentity;
         try {
-          const items = await fetchBotHistoryPages(async (cursor, limit) => {
+          const items = await fetchBotHistoryPages(async (cursor, limit, chunked) => {
+            if (!current()) return null;
             const page = await api.call(identity, 'history', {
               botId: bot.botId,
               limit,
+              ...(chunked ? { chunked: true } : {}),
               ...(cursor ? { cursor } : {}),
             });
             return (page as unknown as HostHistoryPage) ?? null;
@@ -1553,19 +1559,22 @@ export function HostPage({
     };
     const readHistory = async (): Promise<Array<Record<string, unknown>> | null> => {
       if (chatHostKind === 'local') {
-        return fetchBotHistoryPages(async (cursor, limit) => {
+        return fetchBotHistoryPages(async (cursor, limit, chunked) => {
+          if (!alive) return null;
           const env = await BotHost.call({
             method: 'history',
-            params: { botId: chatBotId, limit, ...(cursor ? { cursor } : {}) },
+            params: { botId: chatBotId, limit, ...(chunked ? { chunked: true } : {}), ...(cursor ? { cursor } : {}) },
           });
           return (env.result as HostHistoryPage) ?? null;
         });
       }
       if (!remoteTarget) return null;
-      return fetchBotHistoryPages(async (cursor, limit) => {
+      return fetchBotHistoryPages(async (cursor, limit, chunked) => {
+        if (!alive) return null;
         const page = await remoteTarget.api.call(remoteTarget.identity, 'history', {
           botId: chatBotId,
           limit,
+          ...(chunked ? { chunked: true } : {}),
           ...(cursor ? { cursor } : {}),
         });
         return (page as unknown as HostHistoryPage) ?? null;
@@ -1582,8 +1591,10 @@ export function HostPage({
         alive = false;
       };
     }
+    let polling = false;
     const timer = window.setInterval(async () => {
-      if (!alive || document.hidden || (chatHostKind === 'local' && localInFlight.current.has(requestId))) return;
+      if (!alive || polling || document.hidden || (chatHostKind === 'local' && localInFlight.current.has(requestId))) return;
+      polling = true;
       try {
         const next = await readSubmission();
         if (!alive || chatSubmissionRef.current !== submission || !next || next.requestId !== requestId) return;
@@ -1608,6 +1619,8 @@ export function HostPage({
         else void syncRemoteBots();
       } catch {
         // Ignore transient poll error
+      } finally {
+        polling = false;
       }
     }, 1000);
     return () => {
@@ -1922,10 +1935,11 @@ ${newer}` : draftSnapshot;
         }
         if (!stillOwned()) return;
         updatePending({ pending: { ...submission, phase: 'accepted' }, receipt });
-        const items = await fetchBotHistoryPages(async (cursor, limit) => {
+        const items = await fetchBotHistoryPages(async (cursor, limit, chunked) => {
+          if (currentChatScope.current !== scopeKey || !stillOwned()) return null;
           const env = await BotHost.call({
             method: 'history',
-            params: { botId: bot.botId, limit, ...(cursor ? { cursor } : {}) },
+            params: { botId: bot.botId, limit, ...(chunked ? { chunked: true } : {}), ...(cursor ? { cursor } : {}) },
           });
           return (env.result as HostHistoryPage) ?? null;
         }).catch(() => null);
