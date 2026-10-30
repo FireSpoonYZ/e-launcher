@@ -240,7 +240,13 @@ export function openPackageManager({ dataRoot, store, npmPath, withActivation, o
         try { lockfile = await readJson(lockPath); }
         catch (err) {
           if (err.code !== 'ENOENT') throw err;
-          await runNpm(npmPath, ['install', '--package-lock-only', '--ignore-scripts', '--no-audit', '--no-fund'], temp);
+          // plugin 用 --legacy-peer-deps：npm 11 解析 peer 时会把也是 direct
+          // dependency 的包误标 peer:true，host npm ci --omit=peer 会漏装它；
+          // mcp 沿用默认 peer 解析。
+          const args = kind === 'plugin'
+            ? ['install', '--package-lock-only', '--ignore-scripts', '--no-audit', '--no-fund', '--legacy-peer-deps']
+            : ['install', '--package-lock-only', '--ignore-scripts', '--no-audit', '--no-fund'];
+          await runNpm(npmPath, args, temp);
           lockfile = await readJson(lockPath);
         }
       }
@@ -588,6 +594,38 @@ export function openPackageManager({ dataRoot, store, npmPath, withActivation, o
     return store.listDeploymentPlans(deviceId);
   }
 
+  /**
+   * Read-only desired plan for turn admission: never mutates shared deployment_plans, never
+   * reconciles inline, and never rewrites an administrative disable/uninstall intent into install.
+   * Returns the persisted authoritative plan when it targets the installation's intended
+   * immutable content (cosmetic planId/operation/receipt identity does not matter for a pin).
+   * Throws TURN_SYNC_FAILED when no content-matching persisted plan exists — an honest sync
+   * failure the caller retries while background reconcile converges; never a fabricated identity.
+   */
+  async function turnPlan(deviceId, installationId) {
+    const installation = store.getInstallation(installationId);
+    if (!installation) throw error('NOT_FOUND', 'Installation not found');
+    if (installation.target !== 'host') throw error('INVALID_STATE', 'Capability does not run on Hosts');
+    const persisted = store.listDeploymentPlans(deviceId).find((plan) => plan.installationId === installationId);
+    const meta = await getMeta(installationId);
+    const op = store.getOperation(meta.operationId);
+    if (!op) throw error('TURN_SYNC_FAILED', 'Desired package metadata is incomplete');
+    const version = meta.versions[installation.targetVersion];
+    if (!version) throw error('TURN_SYNC_FAILED', 'Desired package version is not prepared');
+    const desired = planFor(installation, meta, op, deviceId, 'install');
+    // 管理面 disable/uninstall 计划代表明确的移除意图：绝不改写成 install，
+    // 视为目标集合尚未就绪，交给既有 reconcile/deployment 收敛后重试。
+    if (persisted && (persisted.action === 'disable' || persisted.action === 'uninstall')) {
+      throw error('TURN_SYNC_FAILED', 'Desired capability has a pending removal plan');
+    }
+    const sameContent = (plan) => plan &&
+      plan.targetVersion === desired.targetVersion && plan.artifactRef === desired.artifactRef &&
+      plan.digest === desired.digest && isDeepStrictEqual(plan.lockfile ?? null, desired.lockfile ?? null) &&
+      isDeepStrictEqual(plan.manifest ?? null, desired.manifest ?? null);
+    if (sameContent(persisted)) return persisted;
+    throw error('TURN_SYNC_FAILED', 'Desired capability has no persisted plan');
+  }
+
   async function checkUpdates(id) {
     const installation = existing(id);
     if (installation.source.type !== 'npm') return [];
@@ -629,7 +667,7 @@ export function openPackageManager({ dataRoot, store, npmPath, withActivation, o
   }
 
   return {
-    uploadArtifact, readArtifact, listDeploymentPlans, reconcileDevice, install, revalidate, setOperationPhase,
+    uploadArtifact, readArtifact, listDeploymentPlans, turnPlan, reconcileDevice, install, revalidate, setOperationPhase,
     update: (id, request) => change(id, request, 'update'),
     enable: (id, request) => change(id, request, 'enable'),
     disable: (id, request) => change(id, request, 'disable'),

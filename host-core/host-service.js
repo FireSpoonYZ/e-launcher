@@ -6,6 +6,7 @@ import { openHostSettings, normalizeHostSettings } from './host-settings.js';
 import { applyCenterModels, parseExecutionOptions } from './runtime-models.js';
 import { connectCenter } from './center-client.js';
 import { openManagedInstaller } from './managed-install/index.js';
+import { createTurnSynchronizer } from './turn-sync.js';
 import { openControlServer } from './control-server.js';
 import { openDeviceLink } from './device-link.js';
 import { assertDeviceToken, parseRelayUrl } from './relay-protocol.js';
@@ -66,6 +67,10 @@ export async function openHostService(options) {
   let configDirty = false;
   let bootstrapPending = false;
   let refreshQueued = null;
+  // null = 无待恢复；对象 = 冷启动/刷新中 pin 恢复失败的最近有界错误（恢复成功后置回 null）。
+  let pendingTurnRestore = null;
+  // 初次全局 resume 是否已发生：pin 恢复失败时保持 false，恢复成功的刷新中补一次。
+  let schedulerResumed = false;
   let serial = Promise.resolve();
   const RECONCILE_INTERVAL_MS = 30000;
   const RETRY_INTERVAL_MS = 1000;
@@ -195,6 +200,26 @@ export async function openHostService(options) {
   }
   async function apply(snapshot, current, gen, { plansApplied = false, resume = false, planning = null } = {}) {
     if (snapshot.deviceId !== deviceId || snapshot.protocol !== 1) throw invalidArgument('invalid center snapshot');
+    // 冷启动 pin 恢复未完成时，每次刷新先重试恢复：成功才继续普通应用。
+    // 恢复暂停期间绝不 revoke/plan/apply/setCenterOnline/resume——撤销与部署同样会
+    // 在未钉的旧 set 上写授权/关实例，且在线激活会重开准入并唤醒 SDK 隐式 resume。
+    // 保留恢复错误可见，安排重试后直接返回：HTTP 控制存活供查看/取消，
+    // 普通执行与应用维持关闭，旧 pin 不被新配置覆盖。
+    if (pendingTurnRestore) {
+      try {
+        await control.restoreTurns();
+        pendingTurnRestore = null;
+      } catch (err) {
+        pendingTurnRestore = {
+          code: typeof err?.code === 'string' && err.code ? err.code : 'TURN_RECOVERY_REQUIRED',
+          message: typeof err?.message === 'string' && err.message ? err.message.slice(0, 200) : 'turn restoration incomplete',
+        };
+        state = { ...state, error: pendingTurnRestore };
+        scheduleRetry(true);
+        return { revision: snapshot.revision, status: 'waiting', appliedRevision: state.appliedRevision,
+          error: pendingTurnRestore, bots: [], capabilityErrors: [] };
+      }
+    }
     // 新快照已校验：在此同步撤销该撤销的授权（同步删 policy，先于部署/空闲检查）。
     void control.revokeCenterCapabilities(snapshot);
     const plans = plansApplied ? (planning ?? { waiting: false, planned: [], failed: [] }) : await applyPlans(current);
@@ -212,7 +237,9 @@ export async function openHostService(options) {
     if (gen !== generation || current !== client) throw offlineError();
     const activation = await control.setCenterOnline(true);
     if (gen !== generation || current !== client) throw offlineError();
-    if (resume) control.resume();
+    // resume 只在恢复就绪时发生一次：恢复失败的轮次保持调度暂停，
+    // 之后刷新重试成功走到这里补一次 resume；绝不缺定义 resume。
+    if ((resume || !schedulerResumed) && !pendingTurnRestore) { schedulerResumed = true; control.resume(); }
     const receipt = mergeActivation(applied, activation);
     await reportRuntime(current, { revision: snapshot.revision, status: receipt.status,
       appliedRevision: receipt.appliedRevision, error: receipt.error,
@@ -336,7 +363,7 @@ export async function openHostService(options) {
     }
     installer = await openManagedInstaller({
       dataRoot, npmPath: installedNpmPath,
-      fetchArtifact: (ref) => { if (!client) throw offlineError(); return client.fetchArtifact(ref); },
+      fetchArtifact: (ref, context) => { if (!client) throw offlineError(); return client.fetchArtifact(ref, context); },
       report: (receipt) => { if (!client) throw offlineError(); return client.reportDeployment(receipt); },
       withActivation: async (id, publish) => {
         if (!control) {
@@ -358,7 +385,14 @@ export async function openHostService(options) {
       dataRoot, token, port, models, ...execution, nativeBridge,
       settings: { store: settingsStore, activeRevision }, getServiceStatus: () => getStatus(),
       deferResume: true,
-      centerRuntime: { snapshot, getClient: () => client ?? null, installer },
+      centerRuntime: {
+        snapshot,
+        getClient: () => client ?? null,
+        installer,
+        // 每轮准入协调：只经 center client + installer.prepare，不重入快照/生命周期通道。
+        // 平铺到 centerRuntime：runtime-turns 按 contract §3 直接调用 prepareTurn/confirmTurn/restoreTurn。
+        ...createTurnSynchronizer({ getClient: () => client ?? null, installer }),
+      },
       collaboration: { displayName, platform, relay: { url: snapshot.linkUrl, token: center.deviceToken, ...(center.ca ? { ca: center.ca } : {}) } },
       onBotsChanged: () => {
         if (!control) {
@@ -377,7 +411,23 @@ export async function openHostService(options) {
     });
     if (current !== client) throw offlineError();
     await ensureLinkOnline(snapshot.linkUrl);
+    // 冷启动恢复：先恢复上轮已准入的 turn 绑定/版本，再全局 resume。
+    // 恢复失败不终止 Host：control/基础服务保持存活、调度暂停、错误可见，
+    // 由 apply() 内 pendingTurnRestore 的重试链在后续刷新中恢复后再 resume。
+    pendingTurnRestore = null;
+    try {
+      await control.restoreTurns();
+    } catch (err) {
+      pendingTurnRestore = {
+        code: typeof err?.code === 'string' && err.code ? err.code : 'TURN_RECOVERY_REQUIRED',
+        message: typeof err?.message === 'string' && err.message ? err.message.slice(0, 200) : 'turn restoration incomplete',
+      };
+    }
     await apply(snapshot, current, initialGeneration, { plansApplied: true, resume: true, planning: bootPlans });
+    if (pendingTurnRestore) {
+      state = { ...state, error: pendingTurnRestore };
+      scheduleRetry(true);
+    }
     phase = 'running';
     startReconcile();
   } catch (err) {

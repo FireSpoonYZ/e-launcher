@@ -7,11 +7,18 @@ import type {
   BotDirectoryEntry,
   DevicesDirectoryItem,
   LiveMessage,
+  PendingCursor,
   PendingEnqueueInput,
+  PendingListPage,
   PendingRecord,
 } from '../../../host-core/index.js';
 import { useDrafts } from './drafts';
 import type { DraftSnapshot } from './drafts';
+import {
+  readToolPresentation,
+  ToolPresentationCard,
+  type QuestionnaireSubmitPayload,
+} from '../../../web/src/ToolPresentation';
 import { BotSettings } from './BotSettings';
 import { ShowerPreview } from './ShowerPreview';
 import { targetApi } from './targetApi';
@@ -98,6 +105,60 @@ function errText(e: unknown): string {
 /** 只有 error.outcome 明确 not-sent（未派发）才可判定未入队；其余一律视为结果未知。 */
 function isNotSent(e: unknown): boolean {
   return !!e && typeof e === 'object' && (e as { outcome?: unknown }).outcome === 'not-sent';
+}
+
+/**
+ * 按 contract §7 的 TurnAdmissionStatus 本地形状读取：字段缺失即视为无该信息。
+ * protocol lane 尚未在共享 d.ts 声明；这里读的是 PendingRecord.receipt（已入库的 Record）。
+ */
+interface TurnAdmissionView {
+  requestId: string;
+  phase: 'queued' | 'checking' | 'synchronizing' | 'failed';
+  error: { code: string; message: string } | null;
+}
+
+const TURN_ADMISSION_PHASES = new Set(['queued', 'checking', 'synchronizing', 'failed']);
+
+const TURN_ADMISSION_LABELS: Record<TurnAdmissionView['phase'], string> = {
+  queued: '排队等待准入',
+  checking: '正在核对 Center 版本集',
+  synchronizing: '正在同步插件版本',
+  failed: '准入失败',
+};
+
+/** Host-queued 回执：status queued 且 submissionId null，本地持久化后等待准入与原生提交。 */
+interface HostQueuedReceipt {
+  status: 'queued';
+  submissionId: null;
+  admission: TurnAdmissionView | null;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/** 宽容读取 admission：形状非法/字段缺失返回 null（状态不渲染），不读取文本/凭据。 */
+function readTurnAdmission(value: unknown): TurnAdmissionView | null {
+  if (!isRecord(value)) return null;
+  if (typeof value.requestId !== 'string') return null;
+  if (typeof value.phase !== 'string' || !TURN_ADMISSION_PHASES.has(value.phase)) return null;
+  let error: TurnAdmissionView['error'] = null;
+  if (isRecord(value.error)) {
+    error = {
+      code: typeof value.error.code === 'string' ? value.error.code : 'UNKNOWN',
+      message: typeof value.error.message === 'string' ? value.error.message : '',
+    };
+  }
+  return { requestId: value.requestId, phase: value.phase as TurnAdmissionView['phase'], error };
+}
+
+/** 从 PendingRecord.receipt 读取 queued/null-submission 与可选 admission；二者皆缺返回 null。 */
+function readHostQueuedReceipt(record: PendingRecord | null): HostQueuedReceipt | null {
+  if (!record || !isRecord(record.receipt)) return null;
+  const r = record.receipt;
+  const admission = readTurnAdmission(r.admission);
+  if (r.status === 'queued' && r.submissionId === null) return { status: 'queued', submissionId: null, admission };
+  return admission ? { status: 'queued', submissionId: null, admission } : null;
 }
 
 function formatTime(iso: string | null | undefined): string {
@@ -380,7 +441,7 @@ function CreateBotForm({
   );
 }
 
-function Composer({ text, onChangeText, files, onAddFile, onRemoveFile, canPick, onPick, draftError, draftHint, draftConflict, sendState, sendError, onSend, canSend, disabled, onRetryDraft, attempt, recOutcome, onReconcile, onReleaseNotSent, onRetryClearVerified, onAdoptNewerDraft }: {
+function Composer({ text, onChangeText, files, onAddFile, onRemoveFile, canPick, onPick, draftError, draftHint, draftConflict, sendState, sendError, onSend, canSend, disabled, onRetryDraft, attempt, recOutcome, onReconcile, onReleaseNotSent, onRetryClearVerified, onAdoptNewerDraft, turnAdmission, onRetryTurnAdmission }: {
   text: string;
   onChangeText: (v: string) => void;
   files: { name: string; path: string; size: number }[];
@@ -403,6 +464,10 @@ function Composer({ text, onChangeText, files, onAddFile, onRemoveFile, canPick,
   onReleaseNotSent: () => void;
   onRetryClearVerified: () => void;
   onAdoptNewerDraft: () => void;
+  /** 最新可见的 Host 准入状态（来自原 pending 记录 receipt.admission）；null 表示无等待项。 */
+  turnAdmission: TurnAdmissionView | null;
+  /** Host 准入失败后的显式重试：沿用冻结的同一 requestId/文本重新入队，不自动重发。 */
+  onRetryTurnAdmission: () => void;
 }) {
   return (
     <div className="composer">
@@ -439,6 +504,18 @@ function Composer({ text, onChangeText, files, onAddFile, onRemoveFile, canPick,
               ) : null}
             </>
           )}
+        </div>
+      ) : null}
+      {turnAdmission ? (
+        <div className={'status' + (turnAdmission.phase === 'failed' ? ' error' : ' busy')} role="status" aria-live="polite">
+          {TURN_ADMISSION_LABELS[turnAdmission.phase]}
+          {turnAdmission.error
+            ? '（' + turnAdmission.error.code + (turnAdmission.error.message ? '：' + truncate(turnAdmission.error.message, 120) : '') + '）'
+            : null}
+          {' · 同一 requestId 等待中心准入'}
+          {turnAdmission.phase === 'failed' && onRetryTurnAdmission ? (
+            <button type="button" onClick={() => onRetryTurnAdmission()}>重试准入</button>
+          ) : null}
         </div>
       ) : null}
       {files.length > 0 ? (
@@ -578,6 +655,8 @@ function PrimaryChatPane({
   const [recOutcome, setRecOutcome] = useState<{ action: string; found: boolean; recordId: string | null; recordState: string | null } | null>(null);
   const lockedRef = useRef(false);
   const [showerOpen, setShowerOpen] = useState(false);
+  /** 本聊天最新的 Host 准入状态（Host-queued 回执中的 admission）；null 表示无等待项。 */
+  const [turnAdmission, setTurnAdmission] = useState<TurnAdmissionView | null>(null);
 
   const [manageAction, setManageAction] = useState<'setPrimary' | 'archive' | 'unarchive' | 'delete' | null>(null);
   const [manageError, setManageError] = useState<string | null>(null);
@@ -587,6 +666,27 @@ function PrimaryChatPane({
 
   const onLiveActivityRef = useRef(onLiveActivity);
   onLiveActivityRef.current = onLiveActivity;
+
+  /** 问卷提交复用现有 callCapabilityAction；deviceId/botId 取自当前身份与 Bot。 */
+  const submitQuestionnaire = useCallback(
+    (installationId: string, input: QuestionnaireSubmitPayload): Promise<unknown> => {
+      const current = api.identity;
+      if (!current || !api.transportConnected) {
+        return Promise.reject(new Error('NOT_CONNECTED: 没有活动连接身份'));
+      }
+      return api.call(current, 'callCapabilityAction', {
+        installationId,
+        action: 'answerQuestionnaire',
+        request: {
+          requestId: crypto.randomUUID(),
+          deviceId: current.targetDeviceId,
+          botId: bot.botId,
+          input,
+        },
+      });
+    },
+    [api, bot.botId],
+  );
 
   useEffect(() => {
     setManageError(null);
@@ -815,10 +915,15 @@ function PrimaryChatPane({
   }
 
   function reportSendRecord(handle: { key: string; attemptId: string }, rec: PendingRecord, originalPendingId: string) {
+    const hostQueued = readHostQueuedReceipt(rec);
+    // Host-queued：本地已持久化并等待中心准入，submissionId 为 null 属正常，不视为缺失。
+    setTurnAdmission(hostQueued ? hostQueued.admission : null);
     if (rec.state === 'accepted') {
       drafts.finishSend(handle);
       // 受理只说明已受理；完成与否以 live/原回执为准，界面不断言。
-      setSendError(`已受理（accepted）。结果以 live 或原回执为准。`);
+      setSendError(hostQueued
+        ? '已受理（accepted）：提交已入 Host 队列等待准入（submissionId 未定）。结果以 live 或原回执为准。'
+        : '已受理（accepted）。结果以 live 或原回执为准。');
       onLiveActivityRef.current?.();
     } else if (rec.state === 'rejected') {
       // 确定终态：本地 attempt 结束，原记录保留在待发送面板
@@ -830,7 +935,9 @@ function PrimaryChatPane({
       setSendError(errMsg);
     } else {
       drafts.finishSend(handle);
-      setSendError(`消息状态：${rec.state}（${originalPendingId}）。`);
+      setSendError(hostQueued
+        ? `消息已入 Host 队列等待准入（${originalPendingId}）${hostQueued.admission ? '：' + TURN_ADMISSION_LABELS[hostQueued.admission.phase] : ''}；结果以 live 或原回执为准。`
+        : `消息状态：${rec.state}（${originalPendingId}）。`);
     }
   }
 
@@ -876,6 +983,68 @@ function PrimaryChatPane({
       setSendError('已保留新版草稿并结束旧尝试；原队列记录仍在待发送面板，未清磁盘也未发送。');
     } else {
       setSendError(r.error ?? '无法采用新版草稿');
+    }
+  }
+
+  /** 找到本 Bot 最近一条 Host-queued 记录（本地分页，只读；返回 null 表示无等待项）。 */
+  async function findHostAdmissionRecord(): Promise<PendingRecord | null> {
+    const current = api.identity;
+    if (!current) return null;
+    let cursor: PendingCursor | null = null;
+    for (let pageNo = 0; pageNo < 20; pageNo += 1) {
+      const page: PendingListPage = await api.pending(current, 'pending_list', { options: { limit: 50, cursor } });
+      const hit = page.items.find(
+        (item: PendingRecord) => item.kind === 'primary' && item.botId === bot.botId && readHostQueuedReceipt(item) !== null,
+      );
+      if (hit) return hit;
+      cursor = page.nextCursor;
+      if (!cursor) break;
+    }
+    return null;
+  }
+
+  /** 显式刷新 Host 准入状态；找不到等待记录即清空显示。 */
+  async function refreshTurnAdmission() {
+    const rec = await findHostAdmissionRecord();
+    if (!mountedRef.current) return;
+    setTurnAdmission(rec ? readHostQueuedReceipt(rec)?.admission ?? null : null);
+  }
+
+  /**
+   * Host 准入失败后的显式重试：用持久化记录里冻结的原 requestId/原文本直接调远端 submit。
+   * 不能走 pending_send：已 accepted 的本地 outbox 记录会被 store 短路，永远达不到 Host。
+   * Host 端按 requestId+摘要幂等受理同一队列条目，绝不产生第二条消息；返回回执直接刷新准入状态。
+   */
+  async function retryTurnAdmission() {
+    const current = api.identity;
+    if (!current || !api.transportConnected || sendState !== 'idle' || lockedRef.current || isArchived) return;
+    const rec = await findHostAdmissionRecord();
+    const admission = rec ? readHostQueuedReceipt(rec)?.admission ?? null : null;
+    if (!rec || rec.kind !== 'primary' || !admission || admission.phase !== 'failed') {
+      if (mountedRef.current) setTurnAdmission(admission);
+      return;
+    }
+    lockedRef.current = true;
+    setSendState('sending');
+    setSendError(null);
+    try {
+      const receipt = await api.call(current, 'submit', {
+        botId: rec.botId, requestId: rec.requestId, text: rec.text,
+      });
+      if (!mountedRef.current) return;
+      const nextAdmission = readTurnAdmission((receipt as { admission?: unknown }).admission);
+      setTurnAdmission(nextAdmission);
+      setSendError(nextAdmission && nextAdmission.phase !== 'failed'
+        ? '已重新受理：' + TURN_ADMISSION_LABELS[nextAdmission.phase]
+        : '已重新提交准入，等待 Host 受理状态更新。');
+      // 本地 outbox 记录 receipt 仍带旧 admission：显式对账刷新一次（只读，不改远端状态）。
+      try { await api.pending(current, 'pending_reconcile', { id: rec.id }); } catch { /* 对账失败不掩盖重试结果 */ }
+    } catch (e) {
+      api.reportError(e);
+      setSendError('准入重试未确认：' + errText(e) + '。原 requestId 与记录保留，可再次显式重试，不会自动补发。');
+    } finally {
+      lockedRef.current = false;
+      setSendState('idle');
     }
   }
 
@@ -933,9 +1102,14 @@ function PrimaryChatPane({
           setLiveLast(new Date().toISOString());
           if (f.type === 'snapshot') {
             setLive(f.state);
+            // 快照帧可能带整字段 turnAdmission；缺省/形状非法一律清空显示。
+            setTurnAdmission(readTurnAdmission((f.state as { turnAdmission?: unknown }).turnAdmission));
             onLiveActivityRef.current?.();
           } else {
             const changes = (f as { changes?: Partial<BotLiveState> }).changes;
+            if (changes && 'turnAdmission' in changes) {
+              setTurnAdmission(readTurnAdmission((changes as { turnAdmission?: unknown }).turnAdmission));
+            }
             if (changes) {
               setLive((prev) => (prev ? { ...prev, ...changes } : prev));
               if ('history' in changes || 'busy' in changes || 'generation' in changes) {
@@ -1018,6 +1192,12 @@ function PrimaryChatPane({
   useEffect(() => {
     if (identity && api.transportConnected) void loadRaw(true);
   }, [loadRaw, identity, online]);
+
+  // 重连/切换后被动刷新 Host 准入状态；离线保留最后显示，不自动请求。
+  useEffect(() => {
+    if (identity && api.transportConnected) void refreshTurnAdmission();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [api, identity, online, bot.botId]);
 
   const disabled =
     isArchived || sendState === 'sending' || lockedRef.current || drafts.busy || !!drafts.attempt;
@@ -1204,19 +1384,49 @@ function PrimaryChatPane({
             ) : null}
             {live.tools.length > 0 ? (
               <div className="toolbar-summary">
-                {live.tools.map((t) => (
-                  <span key={t.callId} className={`tool-chip ${t.status}`}>
-                    {t.name} · {t.status}{t.output ? ` · ${truncate(t.output, 60)}` : ''}
-                  </span>
-                ))}
+                {live.tools.map((t) => {
+                  const presentation = readToolPresentation(
+                    (t as { presentation?: unknown }).presentation,
+                  );
+                  return (
+                    <span key={t.callId} className="tool-chip-wrap">
+                      <span className={`tool-chip ${t.status}`}>
+                        {t.name} · {t.status}{t.output ? ` · ${truncate(t.output, 60)}` : ''}
+                      </span>
+                      {presentation ? (
+                        <ToolPresentationCard
+                          key={`${bot.deviceId}:${bot.botId}:${presentation.kind === 'questionnaire' ? presentation.requestId : t.callId}`}
+                          presentation={presentation}
+                          active={t.status !== 'done' && live.busy === true && !isArchived}
+                          onSubmit={
+                            presentation.kind === 'questionnaire'
+                              ? input => submitQuestionnaire(presentation.installationId, input)
+                              : undefined
+                          }
+                        />
+                      ) : null}
+                    </span>
+                  );
+                })}
               </div>
             ) : null}
             {live.history.slice(-6).map((h) => (
               <div key={h.id} className="message history-item">
                 <span className="message-role">{h.kind}</span>
-                {h.messages.map((m, i) => (
-                  <div key={i} className="message-text">{renderLiveMessage(m)}</div>
-                ))}
+                {h.messages.map((m, i) => {
+                  const presentation = m.presentation ? readToolPresentation(m.presentation) : null;
+                  return (
+                    <div key={i} className="message-text">
+                      {renderLiveMessage(m)}
+                      {presentation ? (
+                        <ToolPresentationCard
+                          presentation={presentation}
+                          active={false}
+                        />
+                      ) : null}
+                    </div>
+                  );
+                })}
               </div>
             ))}
           </>
@@ -1279,6 +1489,8 @@ function PrimaryChatPane({
         onReleaseNotSent={releaseNotSent}
         onRetryClearVerified={retryClearVerified}
         onAdoptNewerDraft={adoptNewerDraft}
+        turnAdmission={turnAdmission}
+        onRetryTurnAdmission={() => void retryTurnAdmission()}
       />
     </div>
   );

@@ -10,6 +10,8 @@ const ajv = new Ajv({ strict: false });
 ajv.addFormat('credential-ref', { type: 'string', validate: value => value.length > 0 });
 
 const string = { type: 'string', minLength: 1 };
+/** Wire-bound identifiers: request/scope/set/admission IDs stay inside existing ID limits. */
+const boundedId = { type: 'string', minLength: 1, maxLength: 128 };
 const revision = { type: 'integer', minimum: 0 };
 const providerSchema = {
   type: 'object', required: ['name', 'api', 'baseUrl', 'credentialRef', 'enabled'],
@@ -22,6 +24,21 @@ const modelSchema = {
   additionalProperties: false,
 };
 const selectionSchema = { type: 'object', properties: { modelRef: { anyOf: [string, { type: 'null' }] }, thinkingLevel: { anyOf: [string, { type: 'null' }] }, codemode: { anyOf: [{ type: 'boolean' }, { type: 'null' }] }, codemodeOnly: { anyOf: [{ type: 'boolean' }, { type: 'null' }] } }, additionalProperties: false };
+const prepareTurnSchema = {
+  type: 'object', required: ['botId', 'requestId', 'scopeKey', 'inputDigest'],
+  properties: { botId: boundedId, requestId: boundedId, scopeKey: boundedId, inputDigest: { type: 'string', minLength: 1, maxLength: 128 }, knownSetId: boundedId },
+  additionalProperties: false,
+};
+const confirmTurnSchema = {
+  type: 'object', required: ['botId', 'requestId', 'scopeKey', 'inputDigest', 'setId'],
+  properties: { botId: boundedId, requestId: boundedId, scopeKey: boundedId, inputDigest: { type: 'string', minLength: 1, maxLength: 128 }, setId: boundedId },
+  additionalProperties: false,
+};
+const restoreTurnSchema = {
+  type: 'object', required: ['botId', 'admissionId'],
+  properties: { botId: boundedId, admissionId: boundedId },
+  additionalProperties: false,
+};
 function validate(schema, value) { if (!ajv.validate(schema, value)) fail('VALIDATION_FAILED', 'Invalid input'); return value; }
 /** Hosts report these; 'pending' is derived by the center and never accepted. */
 const runtimeStatuses = ['applying', 'waiting-idle', 'applied', 'failed'];
@@ -48,7 +65,7 @@ function assertConfigCredentials(schema, value) {
 }
 
 
-export function registerRoutes(app, { store, packages, bridge, execution, oauth, linkUrl }) {
+export function registerRoutes(app, { store, packages, bridge, execution, oauth, linkUrl, turns }) {
   const streams = new Map();
   function notify(deviceId) {
     for (const stream of streams.get(deviceId) || []) {
@@ -391,7 +408,28 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
     }
     return reply.code(204).send();
   });
-  host('GET', '/api/host/artifacts/:artifactRef', async (req, reply) => { const plans = store.listDeploymentPlans(req.centerDevice.deviceId); if (!plans.some(plan => plan.artifactRef === req.params.artifactRef)) fail('FORBIDDEN', 'Artifact not assigned'); return reply.type('application/octet-stream').send(Buffer.from(await packages.readArtifact(req.params.artifactRef))); });
+  host('POST', '/api/host/turns/prepare', async req => {
+    const body = validate(prepareTurnSchema, object(req.body));
+    return turns.prepareTurn(req.centerDevice.deviceId, body);
+  });
+  host('POST', '/api/host/turns/confirm', async req => {
+    const body = validate(confirmTurnSchema, object(req.body));
+    return turns.confirmTurn(req.centerDevice.deviceId, body);
+  });
+  host('POST', '/api/host/turns/restore', async req => {
+    const body = validate(restoreTurnSchema, object(req.body));
+    return turns.restoreTurn(req.centerDevice.deviceId, body);
+  });
+  host('GET', '/api/host/artifacts/:artifactRef', async (req, reply) => {
+    const plans = store.listDeploymentPlans(req.centerDevice.deviceId);
+    const admissionId = req.query?.admissionId;
+    if (!plans.some(plan => plan.artifactRef === req.params.artifactRef)) {
+      if (typeof admissionId !== 'string' || !(await turns.isArtifactAuthorized(req.centerDevice.deviceId, req.params.artifactRef, admissionId))) {
+        fail('FORBIDDEN', 'Artifact not assigned');
+      }
+    }
+    return reply.type('application/octet-stream').send(Buffer.from(await packages.readArtifact(req.params.artifactRef)));
+  });
   host('POST', '/api/host/capabilities/:installationId/tools/list', req => execution.listTools(req.centerDevice.deviceId, req.params.installationId, object(req.body)));
   host('POST', '/api/host/capabilities/:installationId/tools/call', req => { const body = object(req.body); text(body.callId, 'callId'); text(body.name, 'name'); object(body.args); return execution.callTool(req.centerDevice.deviceId, req.params.installationId, body); });
   return { notifyInstallation, close() { for (const set of streams.values()) for (const stream of set) stream.reply.end(); streams.clear(); } };

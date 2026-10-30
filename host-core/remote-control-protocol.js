@@ -242,6 +242,10 @@ export const CONTROL_ERROR_CODES = new Set([
   'HINDSIGHT_BINDING_MISMATCH',
   'EXTENSION_DISABLED',
   'EXTENSION_READ_ONLY',
+  // Per-turn Center admission failures (contract §7 wire errors).
+  'TURN_SET_CHANGED',
+  'TURN_SYNC_FAILED',
+  'TURN_RECOVERY_REQUIRED',
   ...SHOWER_ERROR_CODES,
 ]);
 

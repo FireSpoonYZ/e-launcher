@@ -241,37 +241,68 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
     const models = Object.fromEntries(providers.map((provider) => [provider.id, store.listModels(provider.id)]));
     const installations = store.listInstallations();
     const refs = new Set();
-    const bots = store.listDeviceBots(deviceId).map((bot) => {
-      const model = store.getBotModelConfig(deviceId, bot.botId).effective;
-      if (typeof model.modelRef === 'string') {
-        const slash = model.modelRef.indexOf('/');
-        const provider = providers.find((item) => item.id === model.modelRef.slice(0, slash) && item.enabled);
-        const selected = provider && models[provider.id].find((item) => item.id === model.modelRef.slice(slash + 1) && item.enabled);
-        if (slash > 0 && selected && provider.credentialRef) refs.add(provider.credentialRef);
-      }
-      const capabilities = installations.map((installation) => {
-        const config = capabilityFor(deviceId, bot.botId, installation.installationId);
-        const enabled = activeInstallation(installation) && config.enabled;
-        const capabilityRefs = new Set();
-        collectCredentialRefs(config.configSchema, config.effectiveConfig, capabilityRefs);
-        if (enabled) {
-          validate(config.configSchema, config.effectiveConfig);
-          if (installation.target === 'host') for (const ref of capabilityRefs) refs.add(ref);
-        }
-        return {
-          installationId: installation.installationId, kind: installation.kind, target: installation.target,
-          targetVersion: installation.targetVersion, enabled, revision: config.revision, effectiveConfig: config.effectiveConfig,
-          credentialRefs: [...capabilityRefs],
-        };
-      });
-      return { botId: bot.botId, model, capabilities };
-    });
+    const bots = store.listDeviceBots(deviceId).map((bot) => botContent(deviceId, bot, installations, providers, models, refs));
     return { providers, models, bots, refs };
+  }
+  /** Per-Bot executable content: model selection plus the complete capability list for that Bot. */
+  function botContent(deviceId, bot, installations, providers, models, refs) {
+    const model = store.getBotModelConfig(deviceId, bot.botId).effective;
+    if (typeof model.modelRef === 'string') {
+      const slash = model.modelRef.indexOf('/');
+      const provider = providers.find((item) => item.id === model.modelRef.slice(0, slash) && item.enabled);
+      const selected = provider && models[provider.id].find((item) => item.id === model.modelRef.slice(slash + 1) && item.enabled);
+      if (slash > 0 && selected && provider.credentialRef) refs.add(provider.credentialRef);
+    }
+    const capabilities = installations.map((installation) => {
+      const config = capabilityFor(deviceId, bot.botId, installation.installationId);
+      const enabled = activeInstallation(installation) && config.enabled;
+      // Authorization is intended global enabled plus Bot binding, independent of transient rollout status.
+      const authorized = Boolean(installation.enabled && config.enabled);
+      const capabilityRefs = new Set();
+      collectCredentialRefs(config.configSchema, config.effectiveConfig, capabilityRefs);
+      if (enabled) {
+        validate(config.configSchema, config.effectiveConfig);
+        if (installation.target === 'host') for (const ref of capabilityRefs) refs.add(ref);
+      }
+      return {
+        installationId: installation.installationId, kind: installation.kind, target: installation.target,
+        targetVersion: installation.targetVersion, enabled, authorized, revision: config.revision, effectiveConfig: config.effectiveConfig,
+        credentialRefs: [...capabilityRefs],
+        credentialRevisions: Object.fromEntries([...capabilityRefs].sort().flatMap((ref) => {
+          const record = credential(ref);
+          return record ? [[ref, record.revision]] : [];
+        })),
+      };
+    });
+    return { botId: bot.botId, model, capabilities };
+  }
+  /** Single-Bot turn context: same content shape as a device snapshot, plus the secret-free set checksum. */
+  function turnContent(deviceId, bot) {
+    const providers = store.listProviders();
+    const models = Object.fromEntries(providers.map((provider) => [provider.id, store.listModels(provider.id)]));
+    const installations = store.listInstallations();
+    const refs = new Set();
+    const entry = botContent(deviceId, bot, installations, providers, models, refs);
+    const credentialRevisions = Object.fromEntries([...refs].sort().map((ref) => [ref, credential(ref)?.revision ?? null]));
+    const checksum = createHash('sha256').update(json({
+      providers: providers.map((provider) => pick(provider, providerFields)),
+      models: Object.entries(models).map(([id, list]) => [id, list.map((model) => pick(model, modelFields))]),
+      bot: {
+        botId: entry.botId, model: entry.model,
+        capabilities: entry.capabilities.filter((capability) => capability.enabled).map((capability) => pick(capability, capabilityFields)),
+      },
+      credentials: Object.entries(credentialRevisions),
+    })).digest('hex');
+    const credentials = Object.fromEntries([...refs].map((ref) => [ref, resolveCredential(ref)]));
+    return {
+      providers, models, bot: entry,
+      refs: [...refs].sort(), credentialRevisions, credentials, checksum,
+    };
   }
   // Display-only fields are excluded so renaming never invalidates a device; only execution content is compared.
   const providerFields = ['id', 'api', 'baseUrl', 'credentialRef', 'enabled'];
   const modelFields = ['id', 'contextWindow', 'maxTokens', 'input', 'reasoning', 'thinkingLevelMap', 'cost', 'compat', 'inputLimits', 'enabled'];
-  const capabilityFields = ['installationId', 'kind', 'target', 'targetVersion', 'enabled', 'effectiveConfig', 'credentialRefs'];
+  const capabilityFields = ['installationId', 'kind', 'target', 'targetVersion', 'enabled', 'authorized', 'effectiveConfig', 'credentialRefs', 'credentialRevisions'];
   /** Fingerprints secret-free execution content; CAS revisions, Bot ordering and disabled capabilities are ignored. */
   function deviceDesired(deviceId, content) {
     const fingerprint = createHash('sha256').update(json({
@@ -295,7 +326,7 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
     db.exec('PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON;');
     transaction(() => {
       let version = db.prepare('PRAGMA user_version').get().user_version;
-      if (![0, 1, 2, 3].includes(version)) throw error('UNSUPPORTED_SCHEMA', 'Unsupported center database schema');
+      if (![0, 1, 2, 3, 4].includes(version)) throw error('UNSUPPORTED_SCHEMA', 'Unsupported center database schema');
       if (version === 0) {
         db.exec(`
           CREATE TABLE metadata (id INTEGER PRIMARY KEY CHECK(id = 1), revision INTEGER NOT NULL, config_revision INTEGER NOT NULL);
@@ -344,6 +375,13 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
           UPDATE metadata SET config_revision = revision WHERE id = 1;
           CREATE TABLE device_configs (device_id TEXT PRIMARY KEY, json TEXT NOT NULL);
           PRAGMA user_version = 3;
+        `);
+      }
+      if (version === 3) {
+        db.exec(`
+          CREATE TABLE turn_sets (id TEXT PRIMARY KEY, device_id TEXT NOT NULL, bot_id TEXT NOT NULL, fingerprint TEXT NOT NULL, json TEXT NOT NULL);
+          CREATE TABLE turn_admissions (id TEXT PRIMARY KEY, device_id TEXT NOT NULL, bot_id TEXT NOT NULL, scope_key TEXT NOT NULL, request_id TEXT NOT NULL, set_id TEXT NOT NULL, fingerprint TEXT NOT NULL, json TEXT NOT NULL, UNIQUE(device_id, bot_id, scope_key, request_id));
+          PRAGMA user_version = 4;
         `);
       }
     });
@@ -847,6 +885,122 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
             error: current?.error ?? null, bots: current?.bots ?? [], capabilityErrors: current?.capabilityErrors ?? [],
           };
         }, 'DEFERRED');
+      },
+      /** One DB transaction for a per-Bot turn set comparison; unrelated Bots' changes cannot alter the checksum. */
+      getBotTurnContext(deviceId, botId) {
+        assertId(deviceId); assertId(botId);
+        // Revision bookkeeping writes device_configs; do it inside a write transaction, outside the read one.
+        // The revision is display-only: set identity comparisons use the secret-free checksum instead.
+        const revision = transaction(() => desiredFor(deviceId).revision);
+        return transaction(() => {
+          const bot = store.listDeviceBots(deviceId).find((item) => item.botId === botId);
+          if (!bot) throw error('NOT_FOUND', 'Bot not found');
+          if (bot.archivedAt) throw error('BOT_ARCHIVED', 'Bot is archived');
+          return { deviceId, revision, ...turnContent(deviceId, bot) };
+        }, 'DEFERRED');
+      },
+      /** Deduplicated nonsecret set: identical desired state reuses the stored snapshot/plans by setId. */
+      putTurnSet(set) {
+        assertObject(set); assertId(set.setId); assertId(set.deviceId); assertId(set.botId); assertId(set.fingerprint);
+        return transaction(() => {
+          const current = get('turn_sets', set.setId);
+          if (current) {
+            if (current.deviceId !== set.deviceId || current.botId !== set.botId || current.fingerprint !== set.fingerprint) {
+              throw error('REQUEST_CONFLICT', 'Turn set identity conflicts');
+            }
+            return current;
+          }
+          const value = {
+            setId: set.setId, deviceId: set.deviceId, botId: set.botId, fingerprint: set.fingerprint,
+            snapshot: set.snapshot, plans: set.plans, refs: set.refs, credentialRevisions: set.credentialRevisions,
+            createdAt: new Date().toISOString(),
+          };
+          // turn_sets 有 NOT NULL 业务列，不能用只写 (id,json) 的 generic save。
+          db.prepare('INSERT INTO turn_sets (id, device_id, bot_id, fingerprint, json) VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET device_id = excluded.device_id, bot_id = excluded.bot_id, fingerprint = excluded.fingerprint, json = excluded.json')
+            .run(set.setId, set.deviceId, set.botId, set.fingerprint, json(value));
+          return value;
+        });
+      },
+      getTurnSet(setId) {
+        assertId(setId);
+        return get('turn_sets', setId);
+      },
+      getTurnAdmission(admissionId) {
+        assertId(admissionId);
+        return get('turn_admissions', admissionId);
+      },
+      findTurnAdmission({ deviceId, botId, scopeKey, requestId }) {
+        assertId(deviceId); assertId(botId); assertId(scopeKey); assertId(requestId);
+        return parse(db.prepare('SELECT json FROM turn_admissions WHERE device_id = ? AND bot_id = ? AND scope_key = ? AND request_id = ?').get(deviceId, botId, scopeKey, requestId));
+      },
+      /** Idempotent admission: compares the authoritative set and records the grant in one transaction. */
+      confirmTurnAdmission({ deviceId, botId, scopeKey, requestId, setId, checksum, requestFingerprint, planFingerprint }) {
+        assertId(deviceId); assertId(botId); assertId(scopeKey); assertId(requestId); assertId(setId); assertId(requestFingerprint);
+        return transaction(() => {
+          const bot = store.listDeviceBots(deviceId).find((item) => item.botId === botId);
+          if (!bot) throw error('NOT_FOUND', 'Bot not found');
+          if (bot.archivedAt) throw error('BOT_ARCHIVED', 'Bot is archived');
+          const current = turnContent(deviceId, bot);
+          if (current.checksum !== checksum) throw error('TURN_SET_CHANGED', 'Desired set changed during admission');
+          // Post-await 校验持久化部署计划身份：checksum 不覆盖 plan 的 artifact/digest/lock 身份，
+          // 异步 prepare/confirm 间隙内 reconcile 若重建计划（新 planId/移除意图），事务内必须拒绝。
+          const set = get('turn_sets', setId);
+          const confirmedPlans = set?.plans ?? [];
+          if (planFingerprint) {
+            const storedFingerprint = createHash('sha256').update(JSON.stringify(confirmedPlans.map((plan) => ({
+              installationId: plan.installationId, packageId: plan.packageId, kind: plan.kind,
+              targetVersion: plan.targetVersion, artifactRef: plan.artifactRef ?? null,
+              digest: plan.digest ?? null, lockfile: plan.lockfile ?? null, manifest: plan.manifest ?? null,
+            })))).digest('hex');
+            if (storedFingerprint !== planFingerprint) throw error('TURN_SET_CHANGED', 'Desired plans changed during admission');
+          }
+          for (const plan of confirmedPlans) {
+            const persisted = parse(db.prepare('SELECT json FROM deployment_plans WHERE device_id = ? AND installation_id = ?').get(deviceId, plan.installationId));
+            if (!persisted) throw error('TURN_SET_CHANGED', 'Desired plan was removed during admission');
+            if (persisted.action === 'disable' || persisted.action === 'uninstall') {
+              throw error('TURN_SET_CHANGED', 'Desired capability gained a removal plan during admission');
+            }
+            // 执行内容逐项比对（与 planIdentity 同口径）：planId/desiredRevision 是收据身份，
+            // 同一禁用/启用周期可重建新计划而内容不变——不得据此拒绝；
+            // 真实内容漂移（version/artifact/digest/lockfile/manifest）仍拒绝。
+            if (persisted.targetVersion !== plan.targetVersion ||
+                persisted.artifactRef !== plan.artifactRef || persisted.digest !== plan.digest ||
+                !isDeepStrictEqual(persisted.lockfile ?? null, plan.lockfile ?? null) ||
+                !isDeepStrictEqual(persisted.manifest ?? null, plan.manifest ?? null)) {
+              throw error('TURN_SET_CHANGED', 'Desired plan content changed during admission');
+            }
+          }
+          const existing = store.findTurnAdmission({ deviceId, botId, scopeKey, requestId });
+          if (existing) {
+            if (existing.fingerprint !== requestFingerprint || existing.setId !== setId) throw error('REQUEST_CONFLICT', 'Turn request conflicts');
+            return existing;
+          }
+          const value = {
+            admissionId: randomUUID(), deviceId, botId, scopeKey, requestId,
+            setId, fingerprint: requestFingerprint, admittedAt: new Date().toISOString(),
+          };
+          db.prepare('INSERT INTO turn_admissions (id, device_id, bot_id, scope_key, request_id, set_id, fingerprint, json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+            .run(value.admissionId, deviceId, botId, scopeKey, requestId, setId, requestFingerprint, json(value));
+          return value;
+        });
+      },
+      /** Hard revocation check for a stored set: present authorization and referenced credential revisions. */
+      assertTurnAuthorization(deviceId, botId, set) {
+        assertId(deviceId); assertId(botId); assertObject(set);
+        const bots = executionContent(deviceId).bots;
+        const current = bots.find((item) => item.botId === botId);
+        if (!current) throw error('NOT_FOUND', 'Bot not found');
+        const pinned = new Map((set.snapshot?.bots?.find((item) => item.botId === botId)?.capabilities ?? []).map((capability) => [capability.installationId, capability]));
+        for (const [installationId, capability] of pinned) {
+          if (!capability.authorized) continue;
+          const now = current.capabilities.find((item) => item.installationId === installationId);
+          if (!(now?.authorized ?? now?.enabled)) throw error('FORBIDDEN', 'Capability authorization was revoked');
+        }
+        // Adding a capability is an ordinary update: old admitted work may coexist and must NOT
+        // invalidate stored pins. Only revoked authorization or rotated referenced credentials fail.
+        for (const [ref, revision] of Object.entries(set.credentialRevisions ?? {})) {
+          if ((credential(ref)?.revision ?? null) !== revision) throw error('FORBIDDEN', 'Referenced credential changed');
+        }
       },
       getDeviceSnapshot(deviceId, linkUrl) {
         assertId(deviceId);

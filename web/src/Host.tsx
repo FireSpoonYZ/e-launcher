@@ -84,6 +84,11 @@ import {
   parseHistoryEntries,
   resolveActiveTurnStartedAt,
 } from './chatTurnModel';
+import {
+  readToolPresentation,
+  ToolPresentationCard,
+  type QuestionnaireSubmitPayload,
+} from './ToolPresentation';
 import { ErrorNotice, FloatingPillToast, array, errorText, record, useAction, useText } from './ui';
 
 const uuid = () =>
@@ -347,6 +352,15 @@ function formatScheduleNextRun(
   }
 }
 
+/** Host 按轮同步受理状态；协议 lane 未补共享类型前本地只读可选字段。 */
+interface TurnAdmissionStatus {
+  requestId: string;
+  phase: 'queued' | 'checking' | 'synchronizing' | 'failed';
+  error?: { code: string; message: string };
+}
+type TurnAdmissionCarrier = { admission?: TurnAdmissionStatus | null };
+type TurnAdmissionLiveState = { turnAdmission?: TurnAdmissionStatus | null };
+
 interface ChatPending {
   botKey: string;
   scopeKey: string;
@@ -356,9 +370,10 @@ interface ChatPending {
   submittedAt?: number;
   pendingId?: string;
   draft?: DesktopDraftEntry;
+  admission?: TurnAdmissionStatus | null;
   phase: 'sending' | 'recovering' | 'accepted';
 }
-interface ChatPendingEntry { pending: ChatPending; receipt?: HostSubmission }
+interface ChatPendingEntry { pending: ChatPending; receipt?: HostSubmission & TurnAdmissionCarrier }
 
 function chatStorageKey(center: string, deviceId: string, botId: string): string {
   return `bot-chat-v1:${JSON.stringify([center, deviceId, botId])}`;
@@ -1599,8 +1614,9 @@ export function HostPage({
         const next = await readSubmission();
         if (!alive || chatSubmissionRef.current !== submission || !next || next.requestId !== requestId) return;
         const entry = chatPending && pendingByBot.current.get(chatPending.scopeKey);
+        const nextAdmission = (next as TurnAdmissionCarrier).admission ?? null;
         if (next.status !== 'done' && next.status !== 'unanswered') {
-          if (entry?.pending.requestId === requestId) updatePending({ pending: { ...entry.pending, phase: 'accepted' }, receipt: next });
+          if (entry?.pending.requestId === requestId) updatePending({ pending: { ...entry.pending, phase: 'accepted', admission: nextAdmission }, receipt: next });
           else setChatReceipt(next);
           return;
         }
@@ -1608,7 +1624,7 @@ export function HostPage({
         const items = await readHistory().catch(() => null);
         if (!alive || chatSubmissionRef.current !== submission) return;
         // 回读失败也要落终态 receipt，不能停在生成中；随后同步提交，无新的异步窗口。
-        if (entry?.pending.requestId === requestId) updatePending({ pending: { ...entry.pending, phase: 'accepted' }, receipt: next });
+        if (entry?.pending.requestId === requestId) updatePending({ pending: { ...entry.pending, phase: 'accepted', admission: nextAdmission }, receipt: next });
         else setChatReceipt(next);
         if (items) setChatHistory(previous => mergeHistory(previous, items));
         // 摘要只取真实答案；无答案（unanswered）保留 submit 时写入的用户消息摘要，不被历史旧文本覆盖。
@@ -1934,7 +1950,7 @@ ${newer}` : draftSnapshot;
           return;
         }
         if (!stillOwned()) return;
-        updatePending({ pending: { ...submission, phase: 'accepted' }, receipt });
+        updatePending({ pending: { ...submission, phase: 'accepted', admission: (receipt as TurnAdmissionCarrier).admission ?? null }, receipt });
         const items = await fetchBotHistoryPages(async (cursor, limit, chunked) => {
           if (currentChatScope.current !== scopeKey || !stillOwned()) return null;
           const env = await BotHost.call({
@@ -1948,6 +1964,60 @@ ${newer}` : draftSnapshot;
         }
       } finally {
         localInFlight.current.delete(submission.requestId);
+      }
+    });
+
+  // 受理失败的 Host 队列请求按同一 requestId/原文显式重试；submit 端按请求标识幂等，不新建消息。
+  const retryAdmission = () =>
+    action.run(async () => {
+      const bot = activeBot;
+      const entry = activeChatScope ? pendingByBot.current.get(activeChatScope) : undefined;
+      if (!bot || bot.hostKind !== 'local' || !entry?.pending.requestId || entry.pending.botKey !== bot.key) return;
+      const { requestId, text, scopeKey } = entry.pending;
+      const stillOwned = () => pendingByBot.current.get(scopeKey)?.pending.requestId === requestId;
+      if (!stillOwned()) return;
+      if (!centerConn.ready || centerConn.status?.state === 'disconnected') {
+        setOfflineNotice({ botKey: bot.key, text: t('中心离线，草稿已保留。', 'Center offline; draft retained.') });
+        return;
+      }
+      const snap = await ensureLocalHostRunning();
+      if (!snap || snap.phase !== 'running' || !stillOwned()) return;
+      try {
+        const result = await BotHost.call({ method: 'submit', params: { botId: bot.botId, requestId, text } });
+        const receipt = result.result as HostSubmission & TurnAdmissionCarrier;
+        if (!stillOwned()) return;
+        updatePending({ pending: { ...entry.pending, phase: 'accepted', admission: receipt.admission ?? null }, receipt });
+      } catch (error) {
+        if (!stillOwned()) return;
+        if ((error as { outcome?: string })?.outcome === 'not-sent') removePending(scopeKey, requestId);
+        else updatePending({ pending: { ...entry.pending, phase: 'recovering' } });
+        if (currentChatScope.current === scopeKey) throw error;
+      }
+    });
+
+  // remote Bot 的同 ID 准入重试：直接 remote submit（同 requestId/原文），Host 端幂等受理，
+  // 不走本地 pending_send——accepted 的 outbox 记录会被 store 短路而达不到 Host。
+  const retryRemoteAdmission = () =>
+    action.run(async () => {
+      const bot = activeBot;
+      const entry = activeChatScope ? pendingByBot.current.get(activeChatScope) : undefined;
+      if (!bot || bot.hostKind !== 'remote' || !bot.remoteIdentity || !remoteClientRef.current || !entry?.pending.requestId || entry.pending.botKey !== bot.key) return;
+      const { requestId, text, scopeKey } = entry.pending;
+      const stillOwned = () => pendingByBot.current.get(scopeKey)?.pending.requestId === requestId;
+      if (!stillOwned()) return;
+      if (!remoteConnected || bot.online === false) {
+        setOfflineNotice({ botKey: bot.key, text: t('目标离线，草稿已保留。', 'Target offline; draft retained.') });
+        return;
+      }
+      try {
+        const result = await remoteClientRef.current.api.call(bot.remoteIdentity, 'submit', { botId: bot.botId, requestId, text });
+        const receipt = result as HostSubmission & TurnAdmissionCarrier;
+        if (!stillOwned()) return;
+        updatePending({ pending: { ...entry.pending, phase: 'accepted', admission: receipt?.admission ?? null }, receipt });
+      } catch (error) {
+        if (!stillOwned()) return;
+        updatePending({ pending: { ...entry.pending, phase: 'recovering' } });
+        if (currentChatScope.current === scopeKey) throw error;
       }
     });
 
@@ -2421,12 +2491,68 @@ ${newer}` : draftSnapshot;
   const recoveringChat = chatPending?.botKey === activeBot?.key && chatPending?.phase === 'recovering';
   const liveGeneratingText = recoveringChat ? '' : chatLive?.state?.generation?.text ?? '';
 
+  // 当前会话的按轮受理状态：优先 live turnAdmission，其次提交回执/持久化 pending 上的 admission。
+  const liveTurnAdmission = (chatLive?.state as TurnAdmissionLiveState | undefined)?.turnAdmission ?? null;
+  const pendingAdmission = chatPending?.botKey === activeBot?.key
+    ? (chatPending?.admission ?? (chatReceipt as TurnAdmissionCarrier | undefined)?.admission ?? null)
+    : null;
+  const chatTurnAdmission =
+    liveTurnAdmission && (!chatPending?.requestId || liveTurnAdmission.requestId === chatPending.requestId)
+      ? liveTurnAdmission
+      : pendingAdmission;
+  const admissionStatusText = !chatTurnAdmission
+    ? ''
+    : chatTurnAdmission.phase === 'failed'
+      ? t(
+          '同步失败：' + (chatTurnAdmission.error?.message || chatTurnAdmission.error?.code || '') + '，消息已保留。',
+          'Sync failed: ' + (chatTurnAdmission.error?.message || chatTurnAdmission.error?.code || '') + '; message retained.',
+        )
+      : chatTurnAdmission.phase === 'checking'
+        ? t('正在检查插件版本…', 'Checking plugin versions…')
+        : chatTurnAdmission.phase === 'synchronizing'
+          ? t('正在同步插件…', 'Synchronizing plugins…')
+          : t('排队等待受理…', 'Queued for admission…');
+
   const isBotBusy = !recoveringChat && Boolean(
     (chatPending?.botKey === activeBot?.key && chatPending?.phase === 'sending') ||
     ((chatHostKind !== 'remote' || (chatRemoteConnected && activeBot?.online !== false)) &&
       (chatLive?.state?.busy || (chatLive?.state?.queuedCount ?? 0) > 0)) ||
       (submission?.botKey === activeBot?.key && chatPending?.phase !== 'recovering' && chatReceipt &&
-        (chatReceipt.status === 'queued' || chatReceipt.status === 'placed')),
+        (chatReceipt.status === 'queued' || chatReceipt.status === 'placed')) ||
+      (chatTurnAdmission && chatTurnAdmission.phase !== 'failed'),
+  );
+
+  /** 问卷提交走现有 callCapabilityAction；deviceId/botId 由宿主授权，不自建协议。 */
+  const submitQuestionnaire = useCallback(
+    async (presentation: { installationId: string }, input: QuestionnaireSubmitPayload) => {
+      if (!activeBot) throw new Error(t('目标不可用，未提交', 'Target unavailable; not submitted'));
+      if (activeBot.hostKind === 'local') {
+        const deviceId = localHost?.deviceId;
+        if (!deviceId) throw new Error(t('本机设备身份未就绪，未提交', 'Local device identity not ready; not submitted'));
+        const env = await BotHost.call({
+          method: 'callCapabilityAction',
+          params: {
+            installationId: presentation.installationId,
+            action: 'answerQuestionnaire',
+            request: { requestId: uuid(), deviceId, botId: activeBot.botId, input },
+          },
+        });
+        return env?.result;
+      }
+      const api = remoteClientRef.current?.api;
+      const identity = activeBot.remoteIdentity;
+      if (!api || !identity || !remoteConnected || activeBot.online === false) {
+        throw new Error(t('目标设备离线，未提交', 'Target device offline; not submitted'));
+      }
+      const res = await api.call(identity, 'callCapabilityAction', {
+        installationId: presentation.installationId,
+        action: 'answerQuestionnaire',
+        request: { requestId: uuid(), deviceId: identity.targetDeviceId, botId: activeBot.botId, input },
+      });
+      return (res as { result?: unknown })?.result;
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [activeBot?.key, localHost?.deviceId, remoteConnected, t],
   );
 
   const activeLiveToolName = useMemo(() => {
@@ -3376,10 +3502,12 @@ ${newer}` : draftSnapshot;
                     )}
                     {turn.tools && turn.tools.length > 0 && (
                       <div className="bot-chat-tools" role="list" aria-label={t('工具调用', 'Tool calls')}>
-                        {turn.tools.map(tool => (
+                        {turn.tools.map(tool => {
+                          const presentation = tool.presentation ? readToolPresentation(tool.presentation) : null;
+                          return (
+                          <span key={tool.id} role="listitem" className="bot-chat-tool-wrap">
                           <span
-                            key={tool.id}
-                            role="listitem"
+                            role="presentation"
                             className={`bot-chat-tool-chip is-${tool.status}`}
                           >
                             <span className="bot-tool-step-icon" aria-hidden="true">
@@ -3437,7 +3565,22 @@ ${newer}` : draftSnapshot;
                                   : t('已完成', 'Done')}
                             </span>
                           </span>
-                        ))}
+                          {presentation ? (
+                            <ToolPresentationCard
+                              key={`${activeBot?.key ?? 'chat'}:${presentation.kind === 'questionnaire' ? presentation.requestId : tool.id}`}
+                              presentation={presentation}
+                              active={tool.presentationLive === true && isBotBusy}
+                              disabled={Boolean(activeBot?.archivedAt)}
+                              onSubmit={
+                                presentation.kind === 'questionnaire'
+                                  ? input => submitQuestionnaire(presentation, input)
+                                  : undefined
+                              }
+                            />
+                          ) : null}
+                          </span>
+                          );
+                        })}
                       </div>
                     )}
                     {turn.text && <Markdown text={turn.text} />}
@@ -3490,6 +3633,15 @@ ${newer}` : draftSnapshot;
               <div className="bot-chat-system-notice" role="status">
                 {chatPending?.phase === 'recovering' ? t('发送结果待确认，保留原请求 ID；不会自动重发。', 'Send result unconfirmed; retaining the original request ID without resending.') : activeBot.online === false ? remoteConnected ? t('目标节点离线，上线后自动恢复。', 'Target offline; restoring when it returns.') : t('连接已中断，远端设备状态待确认。', 'Connection interrupted; remote device status is unknown.') : chatLoadError}
                 {chatPending?.phase === 'recovering' && activeBot.hostKind === 'local' && <button type="button" className="hub-outline-btn" onClick={() => setChatResumeEpoch(value => value + 1)}>{t('按原 ID 对账', 'Reconcile ID')}</button>}
+              </div>
+            )}
+            {chatTurnAdmission && chatPending?.botKey === activeBot.key && (chatReceipt?.status === undefined || chatReceipt.status === 'queued') && (
+              <div className="bot-chat-system-notice" role="status">
+                {admissionStatusText}
+                {chatTurnAdmission.phase === 'failed' && (activeBot.hostKind === 'local'
+                  ? <button type="button" className="hub-outline-btn" onClick={() => void retryAdmission()}>{t('按原 ID 重试', 'Retry same ID')}</button>
+                  : <button type="button" className="hub-outline-btn" onClick={() => void retryRemoteAdmission()}>{t('按原 ID 重试', 'Retry same ID')}</button>
+                )}
               </div>
             )}
             {clearNotice && (
@@ -3577,7 +3729,7 @@ ${newer}` : draftSnapshot;
                 }}
                 onAccepted={receipt => {
                   const entry = pendingByBot.current.get(activeChatScope);
-                  if (entry?.pending.requestId === receipt.requestId) updatePending({ pending: { ...entry.pending, phase: 'accepted' }, receipt });
+                  if (entry?.pending.requestId === receipt.requestId) updatePending({ pending: { ...entry.pending, phase: 'accepted', admission: (receipt as TurnAdmissionCarrier).admission ?? null }, receipt });
                 }}
                 onUnconfirmed={requestId => {
                   const entry = pendingByBot.current.get(activeChatScope);

@@ -3,6 +3,10 @@ export interface ChatToolCallItem {
   name: string;
   status: 'running' | 'done' | 'error';
   durationMs?: number;
+  /** host 投影的工具交互结构（todo/问卷）；来自 live slot 或历史 toolResult，未验证形状，渲染前需 readToolPresentation。 */
+  presentation?: Record<string, unknown>;
+  /** presentation 来自仍活跃 live slot 时为 true，历史结果替换后为 false。 */
+  presentationLive?: boolean;
 }
 
 export interface ChatTurn {
@@ -299,6 +303,18 @@ export function parseHistoryEntries(
         const toolCallId = typeof entry.toolCallId === 'string' ? entry.toolCallId : '';
         const toolName = typeof entry.toolName === 'string' ? entry.toolName.trim() : '';
         const isError = entry.isError === true;
+        // 历史结果上的白名单 presentation 投影（data/details 两种位置都认）。
+        const presentation = asRecord(entry.presentation);
+        const projectedPresentation = Object.keys(presentation).length > 0
+          ? presentation
+          : (() => {
+              const details = asRecord(entry.details);
+              const fromDetails = asRecord(details.presentation);
+              if (Object.keys(fromDetails).length > 0) return fromDetails;
+              const data = asRecord(entry.data);
+              const fromData = asRecord(data.presentation);
+              return Object.keys(fromData).length > 0 ? fromData : null;
+            })();
         if (!currentAssistant && !toolCallId && !toolName) continue;
 
         const fallbackStart =
@@ -315,6 +331,10 @@ export function parseHistoryEntries(
         if (matched) {
           matched.status = resolvedStatus;
           if (msgDurationMs !== undefined) matched.durationMs = msgDurationMs;
+          if (projectedPresentation) {
+            matched.presentation = projectedPresentation;
+            matched.presentationLive = false;
+          }
           acc.settledToolIds.add(matched.id);
         } else if (toolName) {
           const id = toolCallId || `${String(item.id ?? i)}-${mIdx}-result`;
@@ -323,6 +343,7 @@ export function parseHistoryEntries(
             name: toolName,
             status: resolvedStatus,
             durationMs: msgDurationMs,
+            ...(projectedPresentation ? { presentation: projectedPresentation, presentationLive: false } : {}),
           });
           acc.settledToolIds.add(id);
         }
@@ -360,6 +381,8 @@ export function parseHistoryEntries(
       const name = typeof slot.name === 'string' ? slot.name.trim() : '';
       if (!name) continue;
       const slotStatus: ChatToolCallItem['status'] = slot.status === 'done' ? 'done' : 'running';
+      const slotPresentation = asRecord(slot.presentation);
+      const hasPresentation = Object.keys(slotPresentation).length > 0;
       const existing = callId
         ? acc.tools.find((t) => t.id === callId)
         : acc.tools.find((t) => t.name === name && !acc.settledToolIds.has(t.id));
@@ -367,6 +390,10 @@ export function parseHistoryEntries(
         activeLiveIds.add(existing.id);
         if (!acc.settledToolIds.has(existing.id)) {
           existing.status = slotStatus;
+          if (hasPresentation) {
+            existing.presentation = slotPresentation;
+            existing.presentationLive = true;
+          }
         }
       } else {
         const id = callId || `live-tool-${sIdx}`;
@@ -375,6 +402,7 @@ export function parseHistoryEntries(
           id,
           name,
           status: slotStatus,
+          ...(hasPresentation ? { presentation: slotPresentation, presentationLive: true } : {}),
         });
       }
     }

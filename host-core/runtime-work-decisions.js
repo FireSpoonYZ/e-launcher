@@ -42,7 +42,9 @@ function generationError(reason) {
 }
 
 /** Inert until resume(); ledger import, policy consumption and the frozen model view have separate watermarks. */
-export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, models, defaultModel, context, getProfile, admitBot }) {
+export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, models, defaultModel, context, getProfile, admitBot, admitTurn }) {
+  // 共用准入门与空闲回调由 runtime 装配后注入（turn gate 需要在 harness/live 就位后创建）。
+  const turnGate = { fn: admitTurn ?? null, idle: null };
   let active = false;
   let closing = false;
   let timer = null;
@@ -301,15 +303,20 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
       return createWorkInput(toWorkContextRecord(meta), state.pending.requestId);
     }, context);
     if (!input) return;
-    const conversation = await conversationFor(binding);
     if (closing || fatalError || !member(getLog().getScope(input.entry.data.scopeId), bot.botId)) return;
+    // 新决策与已提交 pending 决策的重投都先过共用准入门：admitTurn 内部
+    // 对已有 admissionId 的 pending 走 restoreTurn，否则 prepare/apply/confirm。
+    // 返回 null 表示本 Bot 有旧 set 原生工作在跑或准入暂不可达，保 pending 下轮重试。
     let submission;
     try {
-      submission = await conversation.submit(input, context);
+      submission = turnGate.fn
+        ? await turnGate.fn(binding, bot, input)
+        : await (await conversationFor(binding)).submit(input, context);
     } catch (error) {
       if (error instanceof ConversationBusy) return;
       throw error;
     }
+    if (!submission) return;
     await harness.commit(async (tx) => {
       const state = await tx.doc(WorkDecisionState, binding.nativeId);
       if (state.pending?.requestId === input.requestId) state.pending.submissionId = submission.id;
@@ -360,6 +367,8 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
         finishDecision(state, 'failed');
       }
     }, context);
+    // 决策落定为安全切换边界：唤醒该 Bot 的 Host 排队轮泵。
+    try { turnGate.idle?.(bot.botId); } catch { /* 通知失败不影响结算 */ }
   }
 
   async function startDecision(binding, bot) {
@@ -587,5 +596,6 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
     return closePromise;
   }
 
-  return { resume, close, beforeRequest, checkBudget, publishWork, getWorkActivity, stopWork, resumeWork, takeoverShower };
+  return { resume, close, beforeRequest, checkBudget, publishWork, getWorkActivity, stopWork, resumeWork, takeoverShower,
+    setTurnGate: (fn, onIdle) => { turnGate.fn = fn; turnGate.idle = onIdle ?? null; } };
 }

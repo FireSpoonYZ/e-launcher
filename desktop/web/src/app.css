@@ -391,6 +391,7 @@ button:active:not(:disabled) { background: var(--accent-soft); }
 .tool-chip.error { border-color: var(--danger); color: var(--danger); background: var(--danger-soft); }
 .tool-chip.success, .tool-chip.completed, .tool-chip.done { border-color: var(--ok); color: var(--ok); background: var(--ok-soft); }
 .tool-chip.running, .tool-chip.pending { border-color: var(--accent); color: var(--accent-strong); background: var(--accent-soft); }
+.tool-chip-wrap { display: grid; gap: 4px; min-width: 0; max-width: 100%; }
 
 .message {
   max-width: min(760px, 100%);

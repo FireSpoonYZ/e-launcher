@@ -11,10 +11,11 @@ import { registerAuth } from './auth.js';
 import { registerRoutes } from './routes.js';
 import { openHostBridge } from './host-bridge.js';
 import { openCenterExecution } from './execution.js';
+import { openTurnAdmission } from './turns.js';
 import { openMcpOAuth } from './oauth/index.js';
 
 const require = createRequire(import.meta.url);
-const status = { INVALID_ARGUMENT: 400, INVALID_CWD: 400, UNSUPPORTED_TARGET: 400, VALIDATION_FAILED: 400, UNAUTHENTICATED: 401, FORBIDDEN: 403, CSRF_INVALID: 403, NOT_FOUND: 404, BOT_NOT_FOUND: 404, REVISION_CONFLICT: 409, REQUEST_CONFLICT: 409, INVALID_STATE: 409, PRIMARY_BOT_PROTECTED: 409, BOT_ARCHIVED: 409, PAYLOAD_TOO_LARGE: 413, RATE_LIMITED: 429, CENTER_OFFLINE: 503, DEVICE_OFFLINE: 503 };
+const status = { INVALID_ARGUMENT: 400, INVALID_CWD: 400, UNSUPPORTED_TARGET: 400, VALIDATION_FAILED: 400, UNAUTHENTICATED: 401, FORBIDDEN: 403, CSRF_INVALID: 403, NOT_FOUND: 404, BOT_NOT_FOUND: 404, REVISION_CONFLICT: 409, REQUEST_CONFLICT: 409, TURN_SET_CHANGED: 409, TURN_SYNC_FAILED: 409, TURN_RECOVERY_REQUIRED: 403, INVALID_STATE: 409, PRIMARY_BOT_PROTECTED: 409, BOT_ARCHIVED: 409, PAYLOAD_TOO_LARGE: 413, RATE_LIMITED: 429, CENTER_OFFLINE: 503, DEVICE_OFFLINE: 503 };
 
 export async function openCenterServer({ dataRoot, encryptionKey, sessionKey, ownerPasswordHash, https, listenHost = '127.0.0.1', port = 8443, relay: relayOptions, webRoot, npmPath, publicUrl }) {
   if (!relayOptions?.tls?.cert || !relayOptions?.tls?.key || !https?.cert || !https?.key || !publicUrl || new URL(publicUrl).protocol !== 'https:' || new URL(relayOptions.linkUrl).protocol !== 'wss:') throw new Error('HTTPS and TLS relay are required');
@@ -55,7 +56,8 @@ export async function openCenterServer({ dataRoot, encryptionKey, sessionKey, ow
     });
     await registerAuth(app, { sessionKey, ownerPasswordHash });
     await app.register(multipart, { limits: { files: 1, fileSize: 100 * 1024 * 1024, fields: 0 } });
-    routes = registerRoutes(app, { store, packages, bridge, execution, oauth, linkUrl: relayOptions.linkUrl });
+    const turns = openTurnAdmission({ store, packages });
+    routes = registerRoutes(app, { store, packages, bridge, execution, oauth, linkUrl: relayOptions.linkUrl, turns });
     if (webRoot) {
       await app.register(fastifyStatic, { root: webRoot, prefix: '/' });
       app.setNotFoundHandler((req, reply) => {

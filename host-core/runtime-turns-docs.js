@@ -1,0 +1,67 @@
+import { defineDocFamily } from '@earendil-works/pi-durable';
+
+// Host 每轮准入的持久化文档，均为 session 级 doc family，key = bot.primaryConversationId
+// （公开 UUID，不依赖 Durable 数字会话 ID，因此会话尚未创建时也能持久化队列/钉）。
+// TurnQueue：按序保存 Host 已受理、尚未原生提交的用户输入；原生提交成功后删除条目。
+// TurnPin：每个已接纳轮一条 admissionId -> pin 记录，保存原准予的 setId 与安全快照引用，
+// 供冷启动 restoreTurns 复用；绝不保存正文、凭据值或快照全文的敏感字段。
+export const TurnQueue = defineDocFamily({
+  kind: 'host.turn-queue',
+  version: 1,
+  scope: 'session',
+  family: true,
+  initial: () => ({ items: [] }),
+  checkpointWhen: () => false,
+});
+
+export const TurnPin = defineDocFamily({
+  kind: 'host.turn-pin',
+  version: 1,
+  scope: 'session',
+  family: true,
+  initial: () => ({ admissions: {} }),
+  checkpointWhen: () => false,
+});
+
+// 有界阶段值；错误另行 bounded（code <=64、message <=200，绝不带回正文/凭据）。
+// 'cancelled' 是本地终态（abort/Stop），不在对外 TurnAdmissionStatus 相集内，
+// 仅用于区分已取消受理：queuedReceipt/wait/findByRequest 读为 unanswered 回执。
+export const TURN_PHASES = new Set(['queued', 'checking', 'synchronizing', 'failed']);
+
+const MAX_ERROR_MESSAGE = 200;
+
+function safeError(error) {
+  const code = typeof error?.code === 'string' && error.code
+    ? error.code.slice(0, 64) : 'TURN_SYNC_FAILED';
+  const message = typeof error?.message === 'string' && error.message
+    ? error.message.slice(0, MAX_ERROR_MESSAGE) : 'turn synchronization failed';
+  return { code, message };
+}
+
+/** 对外可见的准入状态：只含 requestId/phase/error，绝不带正文、快照或凭据。 */
+export function toTurnAdmissionStatus(item) {
+  if (!item) return null;
+  return {
+    requestId: item.requestId,
+    phase: TURN_PHASES.has(item.phase) ? item.phase : 'queued',
+    ...(item.error ? { error: safeError(item.error) } : {}),
+  };
+}
+
+/** 队列条目的受理回执：status 恒为 'queued'；原生提交后由 submission 记录接管。
+    字段与 PrimarySubmission 对齐（answerText/reason 为 null），另附 admission。
+    phase 'cancelled' 的条目生成终态 unanswered 回执：受理被撤销，但记录仍存在、
+    getSubmission/wait/findByRequest 不因唯一的 Host 记录被删而误报不存在。 */
+export function toQueuedReceipt(item) {
+  const cancelled = item.phase === 'cancelled';
+  return {
+    botId: item.botId,
+    conversationId: item.primaryConversationId ?? null,
+    requestId: item.requestId,
+    submissionId: item.submissionId ?? null,
+    status: cancelled ? 'unanswered' : 'queued',
+    answerText: null,
+    reason: cancelled ? 'cancelled' : null,
+    admission: cancelled ? null : toTurnAdmissionStatus(item),
+  };
+}

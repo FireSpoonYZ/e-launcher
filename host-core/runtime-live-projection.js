@@ -2,7 +2,12 @@
 // 不调用 Session；由 runtime-live.js 与传输/客户端消费。无新依赖。
 //
 // 安全窗口：仅投影文本与当前工具安全字段，不透传 raw docs、task memory、参数或签名。
+// 工具 details 只经 tool-presentation.js 白名单投影 presentation；其他 details 字段
+// （diagnostics、参数、凭据等）永不跨越此边界。
 // 性能：历史/消息均从最新向前扫描，找到上限即停止，不遍历/暂存全部原文。
+
+import { projectToolPresentation, toolPresentationBytes } from './tool-presentation.js';
+import { MAX_LIVE_JSON_BYTES } from './remote-live-protocol.js';
 
 const MAX_HISTORY_ENTRIES = 50; // 最新可显示条目数
 const MAX_MESSAGES_PER_ENTRY = 8; // 每条目最多消息数（保留最新）
@@ -11,6 +16,10 @@ const MAX_TOTAL_TEXT_UNITS = 65536; // 历史窗口文本总上限，超限丢�
 const MAX_GENERATION_UNITS = 32768; // 当前生成文本上限
 const MAX_TOOLS = 32; // 工具槽总数上限（tools + nestedTools）
 const MAX_TOOL_OUTPUT_UNITS = 4096; // 工具运行输出保留尾部上限
+// 快照/更新帧整体不超过 MAX_LIVE_JSON_BYTES（1MiB UTF-8）。presentation 预算按
+// 帧余量计算：外层 envelope 与 id 上限合计 <8KiB，先按该常量扣减，再按 state
+// 实际 JSON 字节收紧，保证任何有界投影（含最坏转义）都装得进一帧。
+const FRAME_ENVELOPE_RESERVE_BYTES = 8192;
 
 /**
  * 从 UTF-16 单元边界安全截断前缀，不拆分代理对。只读 max 附近的单元，
@@ -76,7 +85,7 @@ function toolCallsFromBlocks(content) {
 }
 
 /** 投影一条消息；跳过 system/未知角色与无内容消息，只带文本和工具安全字段与时间戳。 */
-function projectMessage(message) {
+function projectMessage(message, budget) {
   const role = message?.role;
   if (role !== 'user' && role !== 'assistant' && role !== 'toolResult') return null;
   const { text, truncated } = textFromBlocks(message.content, MAX_MESSAGE_UNITS);
@@ -96,6 +105,18 @@ function projectMessage(message) {
     if (typeof message.toolName === 'string') projected.toolName = message.toolName;
     if (typeof message.toolCallId === 'string') projected.toolCallId = message.toolCallId;
     if (message.isError === true) projected.isError = true;
+    // Durable 1.4 把结果 details 存在 toolResult message 上（entry.data 只存 diagnostics）；
+    // abort/interrupt 由 fromSlot 复用 slot.details 合成结果，因此取消的工具结果同样可能
+    // 携带最后一次发布的 presentation。大小在加入前计算，超剩余预算省略并置 truncated。
+    const presentation = projectToolPresentation(message.details);
+    if (presentation && budget.canFit(toolPresentationBytes(presentation))) {
+      projected.presentation = presentation;
+      budget.take(presentation);
+    } else if (presentation !== null ||
+        (message.details != null && typeof message.details === 'object' && message.details.presentation != null)) {
+      // 存在 presentation 但超界/不合规/超总预算：省略结构，置 truncated 标示消息不完整。
+      projected.truncated = true;
+    }
   } else if (role === 'assistant') {
     if (toolCalls.length > 0) projected.toolCalls = toolCalls;
     if (isAssistantError) projected.isError = true;
@@ -114,13 +135,13 @@ function projectMessage(message) {
  * 不遍历/暂存更旧消息。messagesDropped 由调用方置 historyTruncated 标示窗口不完整。
  * 无可显示消息则整条不可显示，返回 null。
  */
-function projectEntry(entry) {
+function projectEntry(entry, budget) {
   const model = entry?.model ?? [];
   const messages = [];
   let seenMessages = 0;
   let messagesDropped = false;
   for (let i = model.length - 1; i >= 0; i--) {
-    const projected = projectMessage(model[i]);
+    const projected = projectMessage(model[i], budget);
     if (!projected) continue;
     seenMessages++;
     if (seenMessages > MAX_MESSAGES_PER_ENTRY) {
@@ -139,8 +160,8 @@ function entryTextUnits(entry) {
   return units;
 }
 
-/** 投影一个工具槽：只带安全字段，不带任务内存/details/参数/诊断。 */
-function projectTool(slot) {
+/** 投影一个工具槽：只带安全字段与白名单 presentation，不带任务内存/其他 details/参数/诊断。 */
+function projectTool(slot, budget) {
   const truncated = (slot.droppedBytes ?? 0) > 0 || (slot.droppedLines ?? 0) > 0;
   const tool = {
     callId: slot.callId,
@@ -157,6 +178,17 @@ function projectTool(slot) {
     const tail = truncateTail(slot.output, MAX_TOOL_OUTPUT_UNITS);
     tool.output = tail.text;
     if (tail.truncated) tool.truncated = true;
+  }
+  // 运行中工具经 api.details({presentation}) 发布到 pi.live slot.details；
+  // finishSlot 会在 settle 时清除 details，终态卡片由历史 toolResult 投影承担。
+  // 大小在加入前计算，超剩余预算省略并置 truncated，不静默丢结构。
+  const presentation = projectToolPresentation(slot.details);
+  if (presentation && budget.canFit(toolPresentationBytes(presentation))) {
+    tool.presentation = presentation;
+    budget.take(presentation);
+  } else if (presentation !== null ||
+      (slot.details != null && typeof slot.details === 'object' && slot.details.presentation != null)) {
+    tool.truncated = true;
   }
   return tool;
 }
@@ -199,9 +231,26 @@ export function projectLiveState(view) {
   let seenDisplayable = 0;
   let lastEntryId = null;
   let historyTruncated = false;
+  // 运行中工具优先占用 presentation 预算（pending 问卷优先但不豁免超限）；
+  // 历史按从新到旧补充。预算是帧级字节余量：先按 envelope 常量预留，history
+  // 按最坏情况计入实际字节后再收紧（见文件尾 fitPresentationBudget）。
+  const budget = {
+    limit: Math.max(0, MAX_LIVE_JSON_BYTES - FRAME_ENVELOPE_RESERVE_BYTES),
+    used: 0,
+    canFit(bytes) { return bytes <= this.limit - this.used; },
+    take(presentation) { this.used += toolPresentationBytes(presentation); },
+  };
+
+  const liveTools = live?.tools ?? [];
+  const nestedTools = live?.nestedTools ?? [];
+  const tools = [];
+  const toolCount = Math.min(liveTools.length, MAX_TOOLS);
+  for (let i = 0; i < toolCount; i++) tools.push(projectTool(liveTools[i], budget));
+  const nestedCount = Math.min(nestedTools.length, MAX_TOOLS - tools.length);
+  for (let i = 0; i < nestedCount; i++) tools.push(projectTool(nestedTools[i], budget));
 
   for (let i = entries.length - 1; i >= 0; i--) {
-    const projected = projectEntry(entries[i]);
+    const projected = projectEntry(entries[i], budget);
     if (!projected) continue;
     seenDisplayable++;
     if (seenDisplayable > MAX_HISTORY_ENTRIES) {
@@ -221,15 +270,7 @@ export function projectLiveState(view) {
 
   const generation = live?.generation?.message ? projectGeneration(live.generation.message) : null;
 
-  const liveTools = live?.tools ?? [];
-  const nestedTools = live?.nestedTools ?? [];
-  const tools = [];
-  const toolCount = Math.min(liveTools.length, MAX_TOOLS);
-  for (let i = 0; i < toolCount; i++) tools.push(projectTool(liveTools[i]));
-  const nestedCount = Math.min(nestedTools.length, MAX_TOOLS - tools.length);
-  for (let i = 0; i < nestedCount; i++) tools.push(projectTool(nestedTools[i]));
-
-  return {
+  const state = {
     history,
     historyTruncated,
     lastEntryId,
@@ -239,6 +280,102 @@ export function projectLiveState(view) {
     busy: Boolean(live?.run),
     queuedCount: Array.isArray(inbox?.items) ? inbox.items.length : 0,
   };
+  fitPresentationBudget(state);
+  return state;
+}
+
+/**
+ * 第二遍把整帧塞进预算：删 presentation 后仍可能超（文本 JSON 转义最坏 6 倍），
+ * 按 旧历史presentation→整条旧历史→工具输出尾部→生成文本→工具presentation 的
+ * 顺序逐级裁剪，每级后重算实际字节；新历史与待答问卷最后裁但不豁免上限。
+ */
+const FIT_FRAME_LIMIT = MAX_LIVE_JSON_BYTES - FRAME_ENVELOPE_RESERVE_BYTES;
+function fitPresentationBudget(state) {
+  if (utf8JsonBytes(state) <= FIT_FRAME_LIMIT) return;
+
+  // 1) 历史 presentation：最旧条目、条目内最旧消息优先删。
+  let deficit = utf8JsonBytes(state) - FIT_FRAME_LIMIT;
+  for (const item of state.history) {
+    for (const message of item.messages) {
+      if (deficit <= 0) break;
+      if (message.presentation === undefined) continue;
+      deficit -= utf8JsonBytes(message.presentation);
+      delete message.presentation;
+      message.truncated = true;
+      state.historyTruncated = true;
+    }
+    if (deficit <= 0) break;
+  }
+
+  // 2) 整条旧历史：从最旧向前删，保留连续最新窗口。
+  if (deficit > 0) {
+    let drop = 0;
+    while (drop < state.history.length && deficit > 0) {
+      deficit -= utf8JsonBytes(state.history[drop]);
+      drop++;
+    }
+    if (drop > 0) {
+      state.history = state.history.slice(drop);
+      state.lastEntryId = state.history.length === 0 ? null : state.history[state.history.length - 1].id;
+      state.historyTruncated = true;
+    }
+  }
+
+  // 3) 工具输出尾部：先压到 1024 单元再清空，逐步让出转义放大的字节。
+  if (utf8JsonBytes(state) > FIT_FRAME_LIMIT) {
+    for (const tool of state.tools) {
+      if (tool.output === '') continue;
+      if (tool.output.length > 1024) {
+        tool.output = truncateTail(tool.output, 1024).text;
+        tool.truncated = true;
+      }
+    }
+  }
+  if (utf8JsonBytes(state) > FIT_FRAME_LIMIT) {
+    let overflow = utf8JsonBytes(state) - FIT_FRAME_LIMIT;
+    for (const tool of state.tools) {
+      if (overflow <= 0) break;
+      if (tool.output === '') continue;
+      overflow -= utf8JsonBytes(tool.output);
+      tool.output = '';
+      tool.truncated = true;
+    }
+  }
+
+  // 4) 生成文本：压到 4096 单元再清空。
+  if (state.generation !== null && utf8JsonBytes(state) > FIT_FRAME_LIMIT) {
+    const gen = state.generation;
+    gen.text = truncateTail(gen.text, 4096).text;
+    gen.truncated = true;
+    if (utf8JsonBytes(state) > FIT_FRAME_LIMIT) {
+      gen.text = '';
+      gen.truncated = true;
+    }
+  }
+
+  // 5) 运行中工具 presentation 最后裁（pending 问卷优先保留）：投影顺序逐个删。
+  if (utf8JsonBytes(state) > FIT_FRAME_LIMIT) {
+    let overflow = utf8JsonBytes(state) - FIT_FRAME_LIMIT;
+    for (const tool of state.tools) {
+      if (overflow <= 0) break;
+      if (tool.presentation === undefined) continue;
+      overflow -= utf8JsonBytes(tool.presentation);
+      delete tool.presentation;
+      tool.truncated = true;
+    }
+    state.toolsTruncated = true;
+  }
+  // 全部裁剪后仍超限只剩有界骨架字段，实际不可能再超；不再做更多降级。
+}
+
+/** JSON.stringify 的 UTF-8 字节数；不可序列化返回 Infinity（视为超预算）。 */
+function utf8JsonBytes(value) {
+  try {
+    const json = JSON.stringify(value);
+    return json === undefined ? 0 : Buffer.byteLength(json, 'utf8');
+  } catch {
+    return Infinity;
+  }
 }
 
 const STATE_KEYS = [
@@ -250,6 +387,7 @@ const STATE_KEYS = [
   'toolsTruncated',
   'busy',
   'queuedCount',
+  'turnAdmission',
 ];
 
 /**

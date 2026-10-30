@@ -100,10 +100,14 @@ export function openHost(options: { dataRoot: string }): Host;
 
 export interface PrimarySubmission {
   botId: string;
-  conversationId: string;
+  /** null when the turn is queued Host-side and no conversation/submission exists yet. */
+  conversationId: string | null;
   requestId: string;
-  submissionId: number;
+  /** null while the turn waits on Center admission; the queued receipt is acceptance, not model execution. */
+  submissionId: number | null;
   status: 'queued' | 'placed' | 'done' | 'unanswered';
+  /** Present on a Host-queued receipt while the turn is being admitted; absent after native submission. */
+  admission?: TurnAdmissionStatus | null;
   answerText: string | null;
   reason: string | null;
 }
@@ -601,6 +605,19 @@ export interface Runtime {
   watch(botId: string, options?: { signal?: AbortSignal }): Promise<BotWatch>;
   /** Module 14: work-context live preview; same handle shape as primary watch, full snapshots only. */
   watchWork(botId: string, scopeId: string, options?: { signal?: AbortSignal }): Promise<WorkWatch>;
+  /**
+   * Publish the next waiting primary-turn admission on every live watch for the Bot.
+   * status null clears it (nothing Host-queued/waiting/failed). queuedCount counts only
+   * Host-side queued primary inputs not yet submitted to the SDK — pi.inbox items are
+   * added by the projection, so the two never double count.
+   */
+  setTurnAdmission(botId: string, status: TurnAdmissionStatus | null, queuedCount?: number): void;
+  /**
+   * Cold-start recovery: re-register pinned old bindings/profile for admitted turns
+   * before global resume. Missing or unrestorable pins leave the scheduler paused with
+   * a bounded error instead of resuming on undefined code.
+   */
+  restoreTurns(): Promise<void>;
   /** Passive, authorized scope history; strict paging with the shared message cursor. */
   scopeHistory(scopeId: string, options?: MessagePageOptions): Promise<MessageHistoryPage>;
   /** Exact stored message; foreign-scope IDs reject MESSAGE_NOT_FOUND. */
@@ -657,6 +674,68 @@ export type {
 } from './shower-protocol.js';
 
 /**
+ * Tool presentation contract shared by the tool-result UI lane: the only
+ * structure a tool may publish via result.details.presentation. Runtime and
+ * the remote wire normalize against these shapes (tool-presentation.js);
+ * LiveTool/LiveMessage carry them read-only for UI rendering.
+ */
+export interface TodoTaskPresentation {
+  id: number;
+  subject: string;
+  status: 'pending' | 'in_progress' | 'completed';
+}
+
+export interface TodoPresentation {
+  kind: 'todo';
+  version: 1;
+  installationId: string;
+  tasks: TodoTaskPresentation[];
+}
+
+export interface QuestionnaireOptionPresentation {
+  label: string;
+  description: string;
+  preview?: string;
+}
+
+export interface QuestionnaireQuestionPresentation {
+  question: string;
+  header: string;
+  multiSelect?: boolean;
+  options: QuestionnaireOptionPresentation[];
+}
+
+export interface QuestionnaireAnswerPresentation {
+  questionIndex: number;
+  question: string;
+  kind: 'option' | 'custom' | 'multi';
+  answer: string | null;
+  selected?: string[];
+  notes?: string;
+  preview?: string;
+}
+
+export interface QuestionnaireResultPresentation {
+  answers: QuestionnaireAnswerPresentation[];
+  cancelled: boolean;
+  globalNote?: string;
+  unanswered?: number[];
+}
+
+export interface QuestionnairePresentation {
+  kind: 'questionnaire';
+  version: 1;
+  installationId: string;
+  conversationId: number;
+  requestId: string;
+  status: 'pending' | 'answered' | 'cancelled';
+  questions: QuestionnaireQuestionPresentation[];
+  result?: QuestionnaireResultPresentation;
+}
+
+export type ToolPresentation = TodoPresentation | QuestionnairePresentation;
+
+/**
  * Live preview types (module 6): bounded, non-durable projection frames for a
  * Bot's primary conversation over authenticated local SSE. Previews are
  * transient progress; the raw history API remains the full source of truth.
@@ -677,6 +756,8 @@ export interface LiveMessage {
   timestamp?: number;
   durationMs?: number;
   toolCalls?: LiveMessageToolCall[];
+  /** Whitelist projection of the toolResult details.presentation; read-only. */
+  presentation?: ToolPresentation;
 }
 
 export interface LiveHistoryItem {
@@ -695,11 +776,23 @@ export interface LiveTool {
   droppedLines: number;
   entryId?: number;
   parentCallId?: string;
+  /** Whitelist projection of the running tool's slot.details.presentation; read-only. */
+  presentation?: ToolPresentation;
 }
 
 export interface LiveGeneration {
   text: string;
   truncated: boolean;
+}
+
+/**
+ * Admission phase of the next Host-queued primary turn awaiting Center sync.
+ * Carries no message text or credentials; null when nothing is queued/waiting/failed.
+ */
+export interface TurnAdmissionStatus {
+  requestId: string;
+  phase: 'queued' | 'checking' | 'synchronizing' | 'failed';
+  error?: { code: string; message: string };
 }
 
 export interface BotLiveState {
@@ -710,7 +803,10 @@ export interface BotLiveState {
   tools: LiveTool[];
   toolsTruncated: boolean;
   busy: boolean;
+  /** pi.inbox items plus Host-side queued primary inputs (disjoint sets, never double counted). */
   queuedCount: number;
+  /** Next waiting admission; optional — frames from older Hosts omit it. Never present on work watches. */
+  turnAdmission?: TurnAdmissionStatus | null;
 }
 
 /** Whole-field replacement of selected BotLiveState fields; never append/delta. */
@@ -829,6 +925,8 @@ export interface ControlServer {
   deviceId: string;
   url: string;
   close(): Promise<void>;
+  /** Forwards runtime.restoreTurns(): cold-start pinned-turn recovery before resume. */
+  restoreTurns(): Promise<void>;
 }
 
 export function openControlServer(options: OpenControlServerOptions): Promise<ControlServer>;

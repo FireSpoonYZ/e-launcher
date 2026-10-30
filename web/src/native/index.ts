@@ -60,7 +60,14 @@ export interface HostBot {
   lastPreview?: string | null;
   archivedAt?: string | null;
 }
-export type HostSubmission = { botId: string; conversationId: string; requestId: string; submissionId: number; status: 'queued'|'placed'|'done'|'unanswered'; answerText: string|null; reason: string|null };
+export type TurnAdmissionStatus = {
+  requestId: string;
+  phase: 'queued'|'checking'|'synchronizing'|'failed';
+  error?: { code: string; message: string };
+};
+// A queued receipt is acceptance, not execution: conversationId/submissionId are
+// null while the turn waits on Center admission.
+export type HostSubmission = { botId: string; conversationId: string|null; requestId: string; submissionId: number|null; status: 'queued'|'placed'|'done'|'unanswered'; admission?: TurnAdmissionStatus|null; answerText: string|null; reason: string|null };
 export type HostHistoryPage = { botId: string; conversationId: string; items: Array<Record<string, unknown>>; nextCursor: Record<string, unknown>|null; entryChunk?: HistoryEntryChunk };
 export type HostCallResult = { type: 'result'; id: string; result: unknown };
 export type HostLiveFrame = {
@@ -71,7 +78,7 @@ export type HostLiveFrame = {
   sequence: number;
   reason?: string;
   changes?: Record<string, unknown>;
-  state?: { history?: unknown[]; historyTruncated?: boolean; lastEntryId?: number|null; generation?: {text:string; truncated:boolean}|null; tools?: unknown[]; toolsTruncated?: boolean; busy?: boolean; queuedCount?: number };
+  state?: { history?: unknown[]; historyTruncated?: boolean; lastEntryId?: number|null; generation?: {text:string; truncated:boolean}|null; tools?: unknown[]; toolsTruncated?: boolean; busy?: boolean; queuedCount?: number; turnAdmission?: TurnAdmissionStatus|null };
 };
 export type HostFrameEvent = { observationId: string; frame?: HostLiveFrame; error?: {code:string; outcome:string; message:string} };
 export type HostVoiceEngine = 'system'|'remote';

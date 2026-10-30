@@ -31,6 +31,7 @@ const DEFINITIVE_CODES = new Set([
 ]);
 const MISSING_CODES = new Set(['SUBMISSION_NOT_FOUND', 'MESSAGE_NOT_FOUND']);
 const PRIMARY_STATUSES = new Set(['queued', 'placed', 'done', 'unanswered']);
+const TURN_ADMISSION_PHASES = new Set(['queued', 'checking', 'synchronizing', 'failed']);
 
 function isPlainObject(value) {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -84,16 +85,33 @@ function textValid(value) {
   return typeof value === 'string' && value.isWellFormed();
 }
 
+// Host-queued turn admission on the receipt: id/phase/可选 error 的严格形状，
+// 不带文本或凭据。缺失/形状坏使整条回执畸形（读路径保留 unconfirmed，不永久拒绝）。
+function admissionValid(value) {
+  if (!isPlainObject(value)) return false;
+  if (!idValid(value.requestId)) return false;
+  if (!TURN_ADMISSION_PHASES.has(value.phase)) return false;
+  if (value.error !== undefined) {
+    const error = value.error;
+    if (!isPlainObject(error) || !textValid(error.code) || !textValid(error.message)) return false;
+  }
+  return true;
+}
+
 function validatePrimaryReceipt(result, record) {
   if (!isPlainObject(result)) return { kind: 'malformed' };
   if (
     !idValid(result.botId) ||
     !idValid(result.requestId) ||
-    !idValid(result.conversationId) ||
-    typeof result.submissionId !== 'number' ||
-    !Number.isSafeInteger(result.submissionId) ||
-    result.submissionId < 1 ||
+    // Host 排队回执可无 conversationId/submissionId（会话/原生提交尚不存在）；
+    // 原生提交后两者恒为非空 id/正整数。
+    !(result.conversationId === null || idValid(result.conversationId)) ||
+    !(result.submissionId === null ||
+      (typeof result.submissionId === 'number' &&
+        Number.isSafeInteger(result.submissionId) &&
+        result.submissionId >= 1)) ||
     !PRIMARY_STATUSES.has(result.status) ||
+    (result.admission !== undefined && result.admission !== null && !admissionValid(result.admission)) ||
     !(result.answerText === null || textValid(result.answerText)) ||
     !(result.reason === null || textValid(result.reason))
   ) {
@@ -110,6 +128,7 @@ function validatePrimaryReceipt(result, record) {
       requestId: result.requestId,
       submissionId: result.submissionId,
       status: result.status,
+      ...(result.admission !== undefined && result.admission !== null ? { admission: result.admission } : {}),
       answerText: result.answerText,
       reason: result.reason,
     },

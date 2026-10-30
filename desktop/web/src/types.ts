@@ -30,11 +30,13 @@ import type {
   PendingListPage,
   PendingRecord,
   PendingState,
+  PrimarySubmission,
   RemoteControlMethodMap,
   RemoteControlOutcome,
   ScopeCreateInput,
   ScopeUpdateInput,
   SettingsUpdate,
+  TurnAdmissionStatus,
 } from '../../../host-core/index.js';
 
 export type {
@@ -54,6 +56,8 @@ export type {
 
 export type {
   LiveTarget,
+  PrimarySubmission,
+  TurnAdmissionStatus,
   RemoteControlMethodMap,
   RemoteControlOutcome,
   PendingRecord,

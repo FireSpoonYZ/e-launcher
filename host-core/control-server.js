@@ -262,6 +262,8 @@ export async function openControlServer(options) {
     revokeCenterCapabilities: (snapshot) => runtime.revokeCenterCapabilities(snapshot),
     setCenterOnline: (online) => runtime.setCenterOnline(online),
     withCapabilityActivation: (id, publish) => runtime.withCapabilityActivation(id, publish),
+    // 冷启动 pinned-turn 恢复；HostService 在 activation/resume 前调用一次。不注册 HTTP 路由。
+    restoreTurns: () => runtime.restoreTurns(),
   };
 }
 
@@ -289,8 +291,15 @@ async function dispatch(host, runtime, authorize, req, res, ctx) {
   }
 
   const centerStatus = ctx.getServiceStatus?.().center;
-  if (centerStatus && centerStatus.state !== 'ready' &&
-      !['/v1/host', '/v1/settings', '/v1/service'].includes(match.route.key)) {
+  // 离线/恢复暂停只放行本地已鉴权动作：持久 enqueue、被动回执/状态与取消。
+  // 这些路径走 Harness snapshot/commit/abortTask，不隐式 resume 调度器；
+  // 模型、工具、问卷等执行路由仍被拒绝（runtime 侧另有 online/recovery 门禁兜底）。
+  const OFFLINE_ALLOWED = new Set([
+    '/v1/host', '/v1/settings', '/v1/service',
+    '/v1/bots/:botId/submissions', '/v1/bots/:botId/submissions/:requestId', '/v1/bots/:botId/abort',
+    '/v1/bot-requests/:requestId', '/v1/bots/:botId/history', '/v1/bots/:botId/live',
+  ]);
+  if (centerStatus && centerStatus.state !== 'ready' && !OFFLINE_ALLOWED.has(match.route.key)) {
     throw new ControlHttpError(503, 'CENTER_OFFLINE', 'center is not ready');
   }
   const params = {};

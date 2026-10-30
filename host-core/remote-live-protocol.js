@@ -8,6 +8,7 @@
 import { messageError, assertId } from './message-protocol.js';
 import { normalizeDeviceName, normalizeDevicePlatform } from './device-metadata.js';
 import { CONTROL_ERROR_CODES } from './remote-control-protocol.js';
+import { normalizeToolPresentation } from './tool-presentation.js';
 
 const INVALID_ARGUMENT = 'INVALID_ARGUMENT';
 
@@ -40,6 +41,7 @@ const STATE_KEYS = new Set([
   'toolsTruncated',
   'busy',
   'queuedCount',
+  'turnAdmission',
 ]);
 const HISTORY_ITEM_KEYS = new Set(['id', 'kind', 'messages']);
 const MESSAGE_KEYS = new Set([
@@ -52,6 +54,7 @@ const MESSAGE_KEYS = new Set([
   'timestamp',
   'durationMs',
   'toolCalls',
+  'presentation',
 ]);
 const MESSAGE_TOOL_CALL_KEYS = new Set(['callId', 'name']);
 const TOOL_KEYS = new Set([
@@ -64,9 +67,41 @@ const TOOL_KEYS = new Set([
   'droppedLines',
   'parentCallId',
   'entryId',
+  'presentation',
 ]);
 // Roles emitted by the existing projection; no extra roles are invented here.
 const MESSAGE_ROLES = new Set(['user', 'assistant', 'toolResult']);
+
+// Turn admission status is metadata-only: bounded IDs/phases/error, never text.
+const TURN_ADMISSION_KEYS = new Set(['requestId', 'phase', 'error']);
+const TURN_ADMISSION_PHASES = new Set(['queued', 'checking', 'synchronizing', 'failed']);
+const TURN_ADMISSION_ERROR_KEYS = new Set(['code', 'message']);
+const MAX_TURN_ADMISSION_CHARS = 256;
+
+function normalizeTurnAdmissionStatus(value) {
+  if (!isPlainObject(value)) throw invalid('state.turnAdmission must be a plain object or null');
+  rejectUnknownFields(value, TURN_ADMISSION_KEYS, 'state.turnAdmission');
+  assertText(value.requestId, 'turnAdmission requestId');
+  if (value.requestId.length > MAX_TURN_ADMISSION_CHARS) {
+    throw invalid('turnAdmission requestId exceeds the bound');
+  }
+  if (!TURN_ADMISSION_PHASES.has(value.phase)) {
+    throw invalid('turnAdmission phase must be queued, checking, synchronizing or failed');
+  }
+  const status = { requestId: value.requestId, phase: value.phase };
+  if (value.error !== undefined) {
+    if (!isPlainObject(value.error)) throw invalid('turnAdmission error must be a plain object');
+    rejectUnknownFields(value.error, TURN_ADMISSION_ERROR_KEYS, 'turnAdmission error');
+    for (const key of TURN_ADMISSION_ERROR_KEYS) {
+      assertText(value.error[key], 'turnAdmission error ' + key);
+      if (value.error[key].length > MAX_TURN_ADMISSION_CHARS) {
+        throw invalid('turnAdmission error ' + key + ' exceeds the bound');
+      }
+    }
+    status.error = { code: value.error.code, message: value.error.message };
+  }
+  return status;
+}
 
 function invalid(message) {
   return messageError(INVALID_ARGUMENT, message);
@@ -141,6 +176,9 @@ function normalizeLiveState(state) {
       }
       if (message.timestamp !== undefined) assertNonNegativeSafeInteger(message.timestamp, 'message timestamp');
       if (message.durationMs !== undefined) assertNonNegativeSafeInteger(message.durationMs, 'message durationMs');
+      // Strict whitelist validation; replaces the value so any extra fields a
+      // forged host added inside a presentation cannot reach clients.
+      if (message.presentation !== undefined) message.presentation = normalizeToolPresentation(message.presentation);
       if (message.toolCalls !== undefined) {
         if (!Array.isArray(message.toolCalls)) throw invalid('message toolCalls must be an array');
         for (const call of message.toolCalls) {
@@ -176,8 +214,13 @@ function normalizeLiveState(state) {
     }
     if (tool.parentCallId !== undefined) assertText(tool.parentCallId, 'tool parentCallId');
     if (tool.entryId !== undefined) assertNonNegativeSafeInteger(tool.entryId, 'tool entryId');
+    if (tool.presentation !== undefined) tool.presentation = normalizeToolPresentation(tool.presentation);
   }
   assertNonNegativeSafeInteger(state.queuedCount, 'state.queuedCount');
+  // Optional on the wire: older Hosts omit it; null means nothing queued/waiting/failed.
+  if (state.turnAdmission !== undefined && state.turnAdmission !== null) {
+    state.turnAdmission = normalizeTurnAdmissionStatus(state.turnAdmission);
+  }
   return state;
 }
 

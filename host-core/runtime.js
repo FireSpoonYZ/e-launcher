@@ -31,6 +31,7 @@ import { createWorkContextRuntime } from './runtime-work-contexts.js';
 import { WorkIndex, WorkContextState, workInstructions } from './work-context-docs.js';
 import { WorkDecisionState } from './work-decision-state.js';
 import { createWorkDecisionRuntime } from './runtime-work-decisions.js';
+import { createTurnAdmission } from './runtime-turns.js';
 import { normalizeUserMessage } from './scope-protocol.js';
 import { createCommunicationTools } from './communication-tools.js';
 import { createCollaborationService } from './collaboration-service.js';
@@ -645,11 +646,14 @@ function createRuntime({ host, harness, models, defaultModel, releaseOwner, clea
                 if (bot) {
                   const formatted = await formatPrimarySubmission(harness, bot, statusRecord, CTX);
                   recordCompletedSubmission(info.botId, formatted);
+                  // 原生工作完结是安全切换边界：泵下一条 Host 排队输入。
+                  turns.pump(info.botId);
                 } else {
                   trackedSubmissions.delete(submissionId);
                 }
               } else if (statusRecord.status === 'unanswered') {
                 trackedSubmissions.delete(submissionId);
+                turns.pump(info.botId);
               }
             } catch {
               /* ignore transient/closing errors */
@@ -707,6 +711,7 @@ function createRuntime({ host, harness, models, defaultModel, releaseOwner, clea
       const botClose = botAdmissions.close();
       // 依次执行并收集每步错误：任何一步失败仍继续清理，最后显式抛出。
       const errors = [];
+      try { turns.close(); } catch (err) { errors.push(err); }
       try { await decisions.close(); } catch (err) { errors.push(err); }
       // 已接纳 Bot 操作在 harness/store 释放前排空。
       try { await botClose; } catch (err) { errors.push(err); }
@@ -744,6 +749,33 @@ function createRuntime({ host, harness, models, defaultModel, releaseOwner, clea
   };
 
   const profileFor = (botId, workMeta) => botProfile(host, plugins, getBotModels(), coreExtensions, codemodeExtension, finalBudgetExtension, botId, workMeta);
+
+  // 每轮准入：持久队列先于原生提交；泵在 Bot 准入 lane 内做
+  // prepare→原子切换→confirm→pin→submit(whenBusy:'reject')。
+  const turns = createTurnAdmission({
+    host,
+    getHarness: () => harness,
+    context: CTX,
+    centerRuntime,
+    plugins,
+    models,
+    getBotModels,
+    setBotModels,
+    profileFor,
+    botExecutionFingerprint,
+    setBotAppliedRevision: (botId, revision) => botAppliedRevision.set(botId, revision),
+    setBotFingerprint: (botId, fingerprint) => botFingerprints.set(botId, fingerprint),
+    live,
+    admitBot,
+    getEpoch: () => epoch,
+    trackSubmission: (submissionId, info) => {
+      trackedSubmissions.set(submissionId, info);
+      checkTrackedSubmissions();
+    },
+    recordCompletedSubmission,
+    initializeBot,
+  });
+  decisions.setTurnGate(turns.admitWorkDecision, turns.pump);
 
   // 统一图形环境的 Runtime 门面：Actor 只来自可信主会话或工作绑定，绝不采信调用方会话。
   const showerRuntime = createRuntimeShower({
@@ -784,7 +816,8 @@ function createRuntime({ host, harness, models, defaultModel, releaseOwner, clea
     }
   }
 
-  /** 幂等初始化：扩展默认值 + SOUL 一次，再刷新已存在会话的人格/工具。 */
+  /** 幂等初始化：SOUL 一次 + 刷新已存在会话人格/工具。中心配置未应用前只用
+   * ensureBotSoul，不用空模型/插件 profile 重写已持久化 AgentDoc（防恢复任务丢工具）。 */
   async function initializeBot(botId) {
     assertNonBlank(botId, 'botId');
     if (closing) throw errWithCode('host is closing', 'NOT_CONNECTED');
@@ -792,8 +825,8 @@ function createRuntime({ host, harness, models, defaultModel, releaseOwner, clea
     if (!bot) throw errWithCode(`bot not found: ${botId}`, 'BOT_NOT_FOUND');
     host.ensureBotSoul(botId);
     if (!initializedBots.has(botId)) {
-      await refreshBotProfiles(bot);
       initializedBots.add(botId);
+      if (centerConfigured) await refreshBotProfiles(bot);
     }
   }
 
@@ -1007,6 +1040,7 @@ function createRuntime({ host, harness, models, defaultModel, releaseOwner, clea
         centerOnline = true;
         botAdmissions.resume();
         schedules.notifyOnline();
+        await turns.nudgeAll();
         return activation;
       } catch (err) {
         centerOnline = false;
@@ -1074,7 +1108,21 @@ function createRuntime({ host, harness, models, defaultModel, releaseOwner, clea
       return { status: 'failed', error: toRuntimeError(err), capabilityErrors: [] };
     }
     // 3. 仍有未结束任务/提交/挂起决策 => 在当前版本继续服务，本次报 waiting-idle。
-    if (!(await botIsIdle(record))) return { status: 'waiting-idle', error: null, capabilityErrors: [] };
+    // 例外：调度仍 paused（resume 前的冷恢复窗口）没有在飞执行，磁盘遗留 pending
+    // 只是崩溃残留；此刻先恢复已授权模型/插件/profile，resume 后任务才有工具。
+    // 但被钉住的轮（pin/排队准入）不能用最新快照覆盖其绑定：保持 waiting-idle，
+    // 由准入泵/恢复流程负责该 Bot 的 set（撤权仍在上一步即时生效）。
+    try {
+      const scheduling = (await harness.inspect(CTX)).scheduling;
+      if (scheduling !== 'paused' && !(await botIsIdle(record))) {
+        return { status: 'waiting-idle', error: null, capabilityErrors: [] };
+      }
+      if (await turns.hasActivePin(botId)) {
+        return { status: 'waiting-idle', error: null, capabilityErrors: [] };
+      }
+    } catch {
+      return { status: 'waiting-idle', error: null, capabilityErrors: [] };
+    }
     try {
       if (selection?.modelRef != null) {
         const ref = parseModelRef(selection.modelRef);
@@ -1316,90 +1364,27 @@ function createRuntime({ host, harness, models, defaultModel, releaseOwner, clea
 
     setBotModel() { throw errWithCode('models are managed by the center', 'INVALID_STATE'); },
 
-    // 发送占位到原生接纳/回执为止（不等模型完成）；并发设置保存因此能看到已排队提交。
-    submit: (botId, input) => admitBot(botId, async () => {
+    // 每轮准入：先把用户输入持久化进 Host 队列并立即返回 queued 回执；
+    // 实际 prepare→原子切换→confirm→pin→原生提交由准入泵异步完成。
+    // 同 requestId 重复调用返回同一条受理（绝不产生第二条消息），不同正文冲突。
+    submit: async (botId, input) => {
       assertNonBlank(botId, 'botId');
-      const requestId = input?.requestId;
-      const text = input?.text;
-      assertNonBlank(requestId, 'requestId');
-      assertNonBlank(text, 'text');
-      const bot = host.getBot(botId);
-      if (!bot) throw errWithCode(`bot not found: ${botId}`, 'BOT_NOT_FOUND');
-      if (bot.archivedAt !== null && bot.archivedAt !== undefined) {
-        throw errWithCode('bot is archived and read-only', 'BOT_ARCHIVED');
+      // 离线或恢复未完成：准入 lane 挂起，泵不可能在飞——直接持久化受理（已鉴权本地动作）。
+      // nudge 由恢复后的 resume/nudgeAll 重新发起；绝不调用会隐式 resume 的路径。
+      if (!centerOnline || turns.isRecoveryPending()) {
+        return turns.enqueue(botId, input);
       }
-      // 遗留 Bot 在首次运行使用前完成 SOUL 回填。
-      await initializeBot(botId);
-      const profile = profileFor(botId, null);
-      if (!getBotModels()[botId]?.modelRef) throw errWithCode('center model is required', 'MODEL_REQUIRED');
-
-      let conversation = await getPrimaryConversation(harness, bot, {}, CTX);
-      if (!conversation) {
-        const modelRef = getBotModels()[botId]?.modelRef;
-        if (!modelRef) throw errWithCode('model is required', 'MODEL_REQUIRED');
-        const ref = parseModelRef(modelRef);
-        if (!models.getModel(ref.provider, ref.modelId)) {
-          throw errWithCode(`model not found: ${modelRef}`, 'MODEL_NOT_FOUND');
-        }
-        conversation = await getPrimaryConversation(harness, { ...bot, modelRef }, {
-          create: true,
-          defaultModel: modelRef,
-          thinkingLevel: profile.thinkingLevel,
-          instructions: profile.instructions,
-          removeTools: profile.removeTools,
-          codemodeOnly: profile.codemodeOnly,
-        }, CTX);
-      }
-      // 新提交前刷新人格/工具（含空闲编辑后的下一次请求）；无变化不提交。
-      await applyAgentProfile(harness, conversation.id, profile, CTX);
-
-      // 会话解析/创建后、输入提交前，绑定等待中的 live watch（不等待外部 listener）。
-      await live.bind(botId, conversation);
-
-      // 持久化正文摘要用于去重：同 requestId 不同正文冲突，相同/首次保存。
-      const digest = createHash('sha256').update(text).digest('hex');
-      const key = 'r:' + requestId;
-      await conversation.commit(async (tx) => {
-        const doc = await tx.doc(RequestKeys, conversation.id);
-        const existing = doc.digests[key];
-        if (existing !== undefined && existing !== digest) {
-          throw errWithCode(`requestId already used with different text: ${requestId}`, 'REQUEST_CONFLICT');
-        }
-        doc.digests[key] = digest;
-      }, CTX);
-
-      // 已有提交：比较摘要后直接返回原回执，不再次调用模型。
-      const record = await harness.commit((tx) => tx.submissionByRequest(conversation.id, requestId), CTX);
-      if (record !== undefined) {
-        if (record.status === 'queued' || record.status === 'placed') {
-          trackedSubmissions.set(record.id, { botId, nativeId: conversation.id });
-        }
-        const formatted = await formatPrimarySubmission(harness, bot, record, CTX);
-        if (formatted.status === 'done') recordCompletedSubmission(botId, formatted);
-        return formatted;
-      }
-
-      // 发新输入前验证会话实际（已持久化）模型仍在当前 models 中。
-      const agent = await conversation.agent(CTX);
-      const modelRef = agent.model;
-      if (!modelRef) throw errWithCode('model is required', 'MODEL_REQUIRED');
-      if (!models.getModel(modelRef.provider, modelRef.modelId)) {
-        throw errWithCode(`model not found: ${modelRef.provider}/${modelRef.modelId}`, 'MODEL_NOT_FOUND');
-      }
-
-      const submission = await conversation.submit({ type: 'input', content: text, requestId }, CTX);
-      const statusRecord = await submission.status(CTX);
-      trackedSubmissions.set(statusRecord.id, { botId, nativeId: conversation.id });
-      const formatted = await formatPrimarySubmission(harness, bot, statusRecord, CTX);
-      if (formatted.status === 'done') recordCompletedSubmission(botId, formatted);
-      return formatted;
-    }),
+      return admitBot(botId, () => turns.enqueue(botId, input));
+    },
 
     async wait(botId, requestId) {
       assertNonBlank(botId, 'botId');
       assertNonBlank(requestId, 'requestId');
       const bot = host.getBot(botId);
       if (!bot) throw errWithCode(`bot not found: ${botId}`, 'BOT_NOT_FOUND');
+      // Host 队列里尚未原生提交的条目先返回 queued 回执（受理存在，无原生记录可等）。
+      const queued = await turns.queuedReceipt(bot, requestId);
+      if (queued) return queued;
       const conversation = await getPrimaryConversation(harness, bot, {}, CTX);
       if (!conversation) throw errWithCode('submission not found', 'SUBMISSION_NOT_FOUND');
       const record = await harness.commit((tx) => tx.submissionByRequest(conversation.id, requestId), CTX);
@@ -1409,6 +1394,11 @@ function createRuntime({ host, harness, models, defaultModel, releaseOwner, clea
         const formatted = await formatPrimarySubmission(harness, bot, record, CTX);
         if (formatted.status === 'done') recordCompletedSubmission(botId, formatted);
         return formatted;
+      }
+      // 离线或恢复未完成：Submission.wait 会隐式 resume 调度器、唤醒未知旧任务——
+      // 只回被动状态（queued/placed 回执本身已是合法应答），不进入等待。
+      if (!centerOnline || turns.isRecoveryPending()) {
+        return formatPrimarySubmission(harness, bot, record, CTX);
       }
       const submission = await harness.submission(record.id, CTX);
       if (!submission) throw errWithCode('submission not found', 'SUBMISSION_NOT_FOUND');
@@ -1424,6 +1414,9 @@ function createRuntime({ host, harness, models, defaultModel, releaseOwner, clea
       assertNonBlank(requestId, 'requestId');
       const bot = host.getBot(botId);
       if (!bot) throw errWithCode(`bot not found: ${botId}`, 'BOT_NOT_FOUND');
+      // Host 队列里尚未原生提交的条目可见为 queued；否则落到原生记录。
+      const queued = await turns.queuedReceipt(bot, requestId);
+      if (queued) return queued;
       const conversation = await getPrimaryConversation(harness, bot, {}, CTX);
       if (!conversation) return null;
       const record = await harness.commit((tx) => tx.submissionByRequest(conversation.id, requestId), CTX);
@@ -1508,8 +1501,28 @@ function createRuntime({ host, harness, models, defaultModel, releaseOwner, clea
       assertNonBlank(botId, 'botId');
       const bot = host.getBot(botId);
       if (!bot) throw errWithCode(`bot not found: ${botId}`, 'BOT_NOT_FOUND');
+      // 先撤掉 Host 队列中尚未原生提交的条目：即使后续 HTTP/确认在飞，
+      // 泵在提交前的存活核对会发现条目已删，绝不把已取消的轮送进模型。
+      await turns.cancelQueued(bot);
       const conversation = await getPrimaryConversation(harness, bot, {}, CTX);
       if (!conversation) return;
+      // 离线或恢复未完成时不能用 Conversation.abort/Submission.wait：
+      // 二者会隐式 resume 调度器、唤醒未知旧任务。退化为非调度入口——
+      // inspect/abortSubmission/abortTask 只提交取消标记，调度恢复后才执行 abort invocation。
+      if (!centerOnline || turns.isRecoveryPending()) {
+        const inspection = await harness.inspect(CTX);
+        for (const submission of inspection.submissions) {
+          if (submission.conversationId === conversation.id) {
+            await harness.abortSubmission(submission.id, CTX, conversation.id).catch(() => {});
+          }
+        }
+        for (const task of inspection.tasks) {
+          if (task.record.conversationId === conversation.id) {
+            await harness.abortTask(task.record.id, CTX).catch(() => {});
+          }
+        }
+        return;
+      }
       await conversation.abort(CTX);
     },
 
@@ -1567,9 +1580,14 @@ function createRuntime({ host, harness, models, defaultModel, releaseOwner, clea
     takeoverShower: showerRuntime.takeoverShower,
     releaseShowerSession: showerRuntime.releaseShowerSession,
 
+    // 冷启动：service 在全局 resume 前调用一次，恢复被钉住的旧 set。
+    // 可恢复的准入无法恢复时保持调度暂停并抛错（绝不缺定义地 resume）。
+    restoreTurns: () => turns.restoreTurns(),
+
     resume() {
       harness.resume();
       decisions.resume();
+      turns.nudgeAll().catch(() => {});
     },
 
     watch(botId, options) {
@@ -1582,13 +1600,19 @@ function createRuntime({ host, harness, models, defaultModel, releaseOwner, clea
 
     close,
   };
-  const lifecycleMethods = new Set(['initializeBots', 'applyCenterSnapshot', 'setCenterOnline', 'withCapabilityActivation', 'revokeCenterCapabilities', 'close']);
+  const lifecycleMethods = new Set(['initializeBots', 'applyCenterSnapshot', 'setCenterOnline', 'withCapabilityActivation', 'revokeCenterCapabilities', 'restoreTurns', 'close']);
+  // 离线/恢复暂停只放行本地已鉴权动作：持久 enqueue、被动回执/状态与取消。
+  // 这些路径只用 Harness snapshot/commit/abortTask，不隐式 resume 调度器；
+  // 模型、工具、问卷等执行路径仍受 Center 门禁（运行时本就对 SDK 抛离线错）。
+  const offlineMethods = new Set(['submit', 'getSubmission', 'wait', 'abort', 'turns', 'inspect', 'history', 'watch']);
   return new Proxy(runtime, {
     get(target, key) {
       const value = target[key];
       if (typeof value !== 'function' || lifecycleMethods.has(key)) return value;
       return (...args) => {
-        if (!centerOnline) throw errWithCode('center is offline', 'CENTER_OFFLINE');
+        if (!centerOnline && !offlineMethods.has(key)) {
+          throw errWithCode('center is offline', 'CENTER_OFFLINE');
+        }
         return value(...args);
       };
     },

@@ -57,7 +57,25 @@ export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, sign
     req.setTimeout(30000, () => req.destroy(centerError('CENTER_OFFLINE', 'center request timed out')));
     const response = await new Promise((resolve, reject) => { req.once('response', resolve); req.once('error', reject); });
     if (response.statusCode < 200 || response.statusCode >= 300) {
-      response.resume();
+      // 仅 turn 准入端点透传服务端类型化错误码（TURN_SET_CHANGED/TURN_SYNC_FAILED 等），
+      // 其他路径保持既有 CENTER_REQUEST_FAILED 语义及 ownerRequest 回退。
+      const typedTurnError = path.startsWith('/api/host/turns/');
+      let errorCode = null;
+      let errorMessage = null;
+      if (typedTurnError) {
+        const chunks = [];
+        for await (const chunk of response) chunks.push(chunk);
+        try {
+          const parsed = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+          if (typeof parsed?.error?.code === 'string' && /^[A-Z][A-Z0-9_]{1,63}$/.test(parsed.error.code)) {
+            errorCode = parsed.error.code;
+            if (typeof parsed.error.message === 'string' && parsed.error.message.length <= 512) errorMessage = parsed.error.message;
+          }
+        } catch { /* 非 JSON 错误体按状态码兜底 */ }
+      } else {
+        response.resume();
+      }
+      if (errorCode) throw centerError(errorCode, errorMessage ?? 'center request failed');
       if (response.statusCode === 409) throw centerError('REQUEST_CONFLICT', 'center revision conflict; reload before saving');
       if (response.statusCode === 401 || (response.statusCode === 403 && !path.startsWith('/api/host/devices/'))) {
         const error = centerError('UNAUTHORIZED', 'center authentication failed');
@@ -244,7 +262,14 @@ export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, sign
     reportRuntime: (receipt) => request('/api/host/receipt', { method: 'POST', body: receipt }),
     getDeployments: () => request('/api/host/deployments'),
     reportDeployment: (receipt) => request('/api/host/deployments/receipt', { method: 'POST', body: receipt }),
-    fetchArtifact: (ref) => request('/api/host/artifacts/' + encodeURIComponent(ref), { binary: true }),
+    fetchArtifact: (ref, options = {}) => {
+      const query = typeof options.admissionId === 'string' && options.admissionId
+        ? '?admissionId=' + encodeURIComponent(options.admissionId) : '';
+      return request('/api/host/artifacts/' + encodeURIComponent(ref) + query, { binary: true, signal: options.signal });
+    },
+    prepareTurn: (input, options = {}) => request('/api/host/turns/prepare', { method: 'POST', body: input, signal: options.signal }),
+    confirmTurn: (input, options = {}) => request('/api/host/turns/confirm', { method: 'POST', body: input, signal: options.signal }),
+    restoreTurn: (input, options = {}) => request('/api/host/turns/restore', { method: 'POST', body: input, signal: options.signal }),
     listCapabilityTools: (id, botId, options = {}) => request('/api/host/capabilities/' + encodeURIComponent(id) + '/tools/list', { method: 'POST', body: { botId }, signal: options.signal }),
     callCapabilityTool: (id, botId, name, args, callId, options = {}) => request('/api/host/capabilities/' + encodeURIComponent(id) + '/tools/call', { method: 'POST', body: { botId, name, args, callId }, signal: options.signal }),
     async close() { closed = true; clearTimeout(watchdog); ownerCookie = ''; ownerCsrf = ''; for (const active of requests) active.destroy(); events.destroy(); },

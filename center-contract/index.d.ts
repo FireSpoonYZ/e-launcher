@@ -237,6 +237,14 @@ export interface EffectiveCapability {
   effectiveConfig: JsonObject;
   /** Credential IDs referenced by this Bot's effective capability config. */
   credentialRefs: string[];
+  /**
+   * Effective execution authorization: global intent enabled AND Bot binding on AND
+   * installation exists — derived independently of transient rollout readiness.
+   * Required on new snapshots; legacy readers fall back to `enabled` when absent.
+   */
+  authorized?: boolean;
+  /** Referenced credential IDs → revision for revocation comparison; values are never emitted. */
+  credentialRevisions?: Record<string, number>;
 }
 export interface RuntimeBot {
   botId: string;
@@ -296,6 +304,55 @@ export interface BotCapabilityEntry {
   installation: Installation;
   config: BotCapabilityConfig;
   uiSchema?: JsonObject;
+}
+
+/**
+ * Per-turn admission wire types: POST /api/host/turns/{prepare,confirm,restore}.
+ * Center is authoritative for the complete per-Bot executable set; no model/tool
+ * execution may start before confirm (or an atomic prepare grant) returns a grant.
+ */
+export interface TurnPrepareRequest {
+  botId: string;
+  /** Stable request identity; same ID with a different inputDigest is a conflict. */
+  requestId: string;
+  /** Stable trusted Host scope: 'primary' or an existing work binding/scope key. */
+  scopeKey: string;
+  inputDigest: string;
+  /** Set only when the Host knows the complete set is already locally loaded/ready. */
+  knownSetId?: string;
+}
+
+export interface TurnConfirmRequest {
+  botId: string;
+  requestId: string;
+  scopeKey: string;
+  inputDigest: string;
+  setId: string;
+}
+
+export interface TurnRestoreRequest {
+  botId: string;
+  admissionId: string;
+}
+
+/** Idempotent admission record; its setId pins the code/config the turn may run. */
+export interface TurnAdmissionGrant {
+  admissionId: string;
+  setId: string;
+  admittedAt: string;
+}
+
+export interface TurnPreparation {
+  protocol: 1;
+  botId: string;
+  /** Identity of the complete desired per-Bot executable set. */
+  setId: string;
+  /** Device snapshot with this Bot selected/configured for the set. */
+  snapshot: DeviceRuntimeSnapshot;
+  /** Exact installation plans this Bot still needs (existing plan shape). */
+  plans: DeploymentPlan[];
+  /** Present only when prepare could atomically grant because knownSetId was current. */
+  admission?: TurnAdmissionGrant;
 }
 export interface PutInstallationDisplayName { expectedRevision: number; displayName: string }
 export interface BootstrapRequest { deviceId: string; capabilityProtocol: 1; bots: BotRef[] }

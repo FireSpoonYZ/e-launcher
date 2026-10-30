@@ -21,6 +21,62 @@ function assertNonBlank(value, name) {
   }
 }
 
+// Turn admission statuses are Host-internal data crossing a wire boundary:
+// validate structure strictly and bound every string so a status can never
+// blow the per-frame budget or smuggle text/credentials into live frames.
+const TURN_ADMISSION_PHASES = new Set(['queued', 'checking', 'synchronizing', 'failed']);
+const MAX_TURN_REQUEST_ID_CHARS = 128;
+const MAX_TURN_ERROR_CHARS = 256;
+
+function boundText(value, max) {
+  return value.length > max ? value.slice(0, max) : value;
+}
+
+/**
+ * Validate/copy a TurnAdmissionStatus for the live wire. requestId and error
+ * strings are capped; no other fields pass through. status null clears.
+ */
+function normalizeTurnAdmission(status) {
+  if (status === null) return null;
+  if (typeof status !== 'object' || Array.isArray(status)) {
+    throw errWithCode('turn admission status must be an object or null', 'INVALID_ARGUMENT');
+  }
+  if (typeof status.requestId !== 'string' || status.requestId.trim() === '' ||
+      !status.requestId.isWellFormed()) {
+    throw errWithCode('turn admission requestId must be a non-empty well-formed string', 'INVALID_ARGUMENT');
+  }
+  if (!TURN_ADMISSION_PHASES.has(status.phase)) {
+    throw errWithCode('turn admission phase must be queued, checking, synchronizing or failed', 'INVALID_ARGUMENT');
+  }
+  const normalized = { requestId: boundText(status.requestId, MAX_TURN_REQUEST_ID_CHARS), phase: status.phase };
+  if (status.error !== undefined) {
+    const error = status.error;
+    if (typeof error !== 'object' || error === null || Array.isArray(error) ||
+        typeof error.code !== 'string' || typeof error.message !== 'string' ||
+        !error.code.isWellFormed() || !error.message.isWellFormed()) {
+      throw errWithCode('turn admission error must be {code, message} strings', 'INVALID_ARGUMENT');
+    }
+    normalized.error = { code: boundText(error.code, MAX_TURN_ERROR_CHARS), message: boundText(error.message, MAX_TURN_ERROR_CHARS) };
+  }
+  return normalized;
+}
+
+/**
+ * Merge the Host-side turn admission into a projected state for a primary
+ * watch. queuedCount = pi.inbox items (projected) + Host-queued inputs, which
+ * are disjoint sets — an input leaves the Host queue the moment it is
+ * submitted to the SDK, so the sum never double counts.
+ */
+function withTurnAdmission(projected, admission) {
+  // turnAdmission 恒写入（null 表示无等待项）：字段缺失时 diff 帧序列化会丢键，
+  // 已发布的 admission 无法被清除。
+  return {
+    ...projected,
+    turnAdmission: admission?.status ?? null,
+    queuedCount: projected.queuedCount + (admission?.hostQueued ?? 0),
+  };
+}
+
 // 投影 state 是纯 JSON 安全值：深冻结后对外暴露，防止任一消费者改写破坏后续 diff/帧。
 function deepFreeze(value) {
   if (value === null || typeof value !== 'object') return value;
@@ -47,6 +103,9 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext }) {
   const watches = new Set(); // 全部未结束 watch，供 close 统一停止
   let closedFlag = false; // close 后拒绝新订阅逃逸
   const inflight = new Set(); // 已受理 lookup/attach/bind 异步工作，close 需要 join
+  // botId -> {status, hostQueued}：最近一次的 Host 队列 admission 发布；
+  // primary watch 每次投影时并入，绝不进 work watch。
+  const admissionByBot = new Map();
 
   function track(task) {
     inflight.add(task);
@@ -64,7 +123,10 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext }) {
       kind: 'pending', // 'pending' | 'attaching' | 'attached' | 'ended'
       native: null,
       attachPromise: null,
-      current: deepFreeze(emptyLiveState()),
+      // 未并入 admission 的 pi.inbox 计数基线：admission 重算 queuedCount 时以此为底，
+      // 避免把已并入的 hostQueued 再累加一遍。
+      inboxQueued: 0,
+      current: deepFreeze(work ? emptyLiveState() : withTurnAdmission(emptyLiveState(), admissionByBot.get(botId) ?? null)),
       delivered: null, // null = 尚未投递首个快照
       seq: 0,
       dirty: false,
@@ -185,6 +247,8 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext }) {
       let next;
       try {
         next = projectLiveState(view);
+        state.inboxQueued = next.queuedCount;
+        if (!work) next = withTurnAdmission(next, admissionByBot.get(botId) ?? null);
       } catch (err) {
         end('listener_error', err);
         void stopNative().catch(() => {});
@@ -264,7 +328,27 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext }) {
       return state.attachPromise;
     }
 
+    // Host 侧 admission 发布到达：重投影当前态并入最新 admission。即使未绑
+    // 原生会话（pending watch），已连接前端也能收到下一帧变化。
+    function applyAdmission(targetBotId) {
+      if (work || targetBotId !== botId || state.endReason !== null) return;
+      const previous = state.current;
+      // 以 inboxQueued 为底重算：previous.queuedCount 已含上一次并入的 hostQueued。
+      const next = deepFreeze(
+        withTurnAdmission({ ...previous, queuedCount: state.inboxQueued }, admissionByBot.get(botId) ?? null),
+      );
+      if (diffLiveState(previous, next) !== null) {
+        state.current = next;
+        state.seq++;
+        if (state.started) {
+          state.dirty = true;
+          kick();
+        }
+      }
+    }
+
     const watch = {
+      _applyAdmission: applyAdmission,
       get value() {
         return {
           type: 'snapshot',
@@ -397,6 +481,28 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext }) {
     })());
   }
 
+  /**
+   * Publish the next waiting primary-turn admission for a Bot. status null clears
+   * it. hostQueued counts ONLY Host-side queued primary inputs not yet submitted
+   * to the SDK; projection adds pi.inbox items itself, so they never double count.
+   * The status applies to primary watches only — work watches never carry it.
+   */
+  function setTurnAdmission(botId, status, hostQueued = 0) {
+    assertNonBlank(botId, 'botId');
+    if (!Number.isSafeInteger(hostQueued) || hostQueued < 0) {
+      throw errWithCode('hostQueued must be a safe nonnegative integer', 'INVALID_ARGUMENT');
+    }
+    const normalized = normalizeTurnAdmission(status);
+    if (normalized === null && hostQueued === 0) {
+      admissionByBot.delete(botId);
+    } else {
+      admissionByBot.set(botId, { status: normalized, hostQueued });
+    }
+    for (const w of watches) {
+      w._applyAdmission(botId);
+    }
+  }
+
   async function close() {
     if (closedFlag) return;
     closedFlag = true;
@@ -412,5 +518,5 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext }) {
     pendingByWork.clear();
   }
 
-  return { watch, watchWork, bind, bindWork, close };
+  return { watch, watchWork, bind, bindWork, setTurnAdmission, close };
 }
