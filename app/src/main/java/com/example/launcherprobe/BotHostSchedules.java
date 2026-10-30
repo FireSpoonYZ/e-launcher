@@ -313,9 +313,17 @@ final class BotHostSchedules {
         String botId = actorContext.optString("botId");
         String conversationId = actorContext.optString("conversationId");
         if (botId.isEmpty() || conversationId.isEmpty()) throw new IllegalArgumentException("缺少主私聊身份");
-        if (!"primary".equals(actorContext.optString("kind"))) throw new IllegalArgumentException("仅支持 primary 主私聊任务");
+        String kind = actorContext.optString("kind");
         Object scope = actorContext.opt("scopeId");
-        if (!(scope == null || actorContext.isNull("scopeId"))) throw new IllegalArgumentException("primary 不应携带 scopeId");
+        if ("primary".equals(kind)) {
+            if (!(scope == null || actorContext.isNull("scopeId"))) throw new IllegalArgumentException("primary 不应携带 scopeId");
+        } else if ("room".equals(kind) || "dm".equals(kind)) {
+            if (scope == null || actorContext.isNull("scopeId") || actorContext.optString("scopeId").isEmpty()) {
+                throw new IllegalArgumentException("work 调用缺少 scopeId");
+            }
+        } else {
+            throw new IllegalArgumentException("kind 无效");
+        }
         Object taskIdObj = actorContext.opt("taskId");
         if (!(taskIdObj instanceof Number) || ((Number) taskIdObj).longValue() <= 0
                 || ((Number) taskIdObj).doubleValue() > MAX_SAFE_INTEGER
@@ -343,6 +351,12 @@ final class BotHostSchedules {
             case "list":
                 requireKeys(input, LIST_FIELDS);
                 return list(owner, input);
+            case "requestExactAlarm":
+                return requestExactAlarmFromBridge();
+            case "pauseBot":
+                return pauseOwner(owner);
+            case "deleteBot":
+                return deleteOwner(owner);
             default:
                 throw new IllegalArgumentException("未知操作");
         }
@@ -430,6 +444,76 @@ final class BotHostSchedules {
                 }
             }
             return result;
+        });
+    }
+
+    private JSONObject requestExactAlarmFromBridge() {
+        try {
+            if (Build.VERSION.SDK_INT >= 31 && !exactAlarmGranted()) {
+                context.startActivity(new Intent(android.provider.Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM,
+                        android.net.Uri.parse("package:" + context.getPackageName()))
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+            }
+            return new JSONObject()
+                    .put("requested", true)
+                    .put("exactAlarmGranted", exactAlarmGranted());
+        } catch (JSONException e) {
+            throw new IllegalStateException("定时任务操作失败");
+        }
+    }
+
+    private JSONObject pauseOwner(Owner owner) {
+        return inTx(db -> {
+            State st = load(db);
+            long now = System.currentTimeMillis();
+            boolean changed = false;
+            for (int i = 0; i < st.tasks.length(); i++) {
+                JSONObject task = st.tasks.getJSONObject(i);
+                if (ownerMatches(task, owner) && task.optBoolean("enabled", true)) {
+                    task.put("enabled", false);
+                    task.put("nextRunAt", 0L);
+                    task.put("revision", task.optLong("revision", 1L) + 1L);
+                    task.put("updatedAt", now);
+                    changed = true;
+                }
+            }
+            if (changed) {
+                save(db, st);
+                scheduleAlarmsLocked(st);
+                save(db, st);
+            }
+            return new JSONObject().put("paused", true);
+        });
+    }
+
+    private JSONObject deleteOwner(Owner owner) {
+        return inTx(db -> {
+            State st = load(db);
+            boolean removed = false;
+            for (int i = st.tasks.length() - 1; i >= 0; i--) {
+                JSONObject task = st.tasks.getJSONObject(i);
+                if (ownerMatches(task, owner)) {
+                    st.tasks.remove(i);
+                    removed = true;
+                }
+            }
+            long now = System.currentTimeMillis();
+            for (int i = 0; i < st.runs.length(); i++) {
+                JSONObject run = st.runs.getJSONObject(i);
+                if (ownerMatches(run, owner) && "dispatching".equals(run.optString("status"))
+                        && !run.optBoolean("submitted", false)) {
+                    run.put("status", "skipped_offline");
+                    run.put("reason", "task_deleted");
+                    run.put("finishedAt", now);
+                    run.put("submitted", true);
+                }
+            }
+            save(db, st);
+            if (removed) {
+                scheduleAlarmsLocked(st);
+                save(db, st);
+            }
+            return new JSONObject().put("deleted", true);
         });
     }
 
@@ -1484,7 +1568,7 @@ final class BotHostSchedules {
 
     private JSONObject taskDTO(JSONObject task, JSONArray runs) throws JSONException {
         JSONObject dto = new JSONObject();
-        String[] keys = {"id", "revision", "enabled", "title", "repeat", "time", "weekday", "weekdays",
+        String[] keys = {"id", "revision", "enabled", "title", "prompt", "repeat", "time", "weekday", "weekdays",
                 "monthDay", "alarmMode", "vibrate", "deleteAfterRun", "nextRunAt", "sourceTaskId",
                 "createdAt", "updatedAt"};
         for (String key : keys) {

@@ -2,7 +2,7 @@ import os from 'node:os';
 import { collectBotDirectory } from './bot-directory.js';
 import { openRemoteControl } from './remote-control-client.js';
 
-export function createCollaborationService({ host, relay, createLocalBot, displayName, platform = process.platform }) {
+export function createCollaborationService({ host, relay, createLocalBot, scheduleLocalTask, displayName, platform = process.platform }) {
   const fallbackName = displayName?.trim() || (platform !== 'android' && os.hostname().trim()) || `${platform}-${host.deviceId.slice(0, 8)}`;
   let currentName = fallbackName;
   let client = null;
@@ -106,6 +106,18 @@ export function createCollaborationService({ host, relay, createLocalBot, displa
     }
   }
 
+  async function scheduleTask({ deviceId, botId, input, signal }) {
+    if (deviceId === host.deviceId) {
+      if (typeof scheduleLocalTask === 'function') {
+        return scheduleLocalTask(botId, input);
+      }
+      const err = new Error('local runtime is not available');
+      err.code = 'NOT_CONNECTED';
+      throw err;
+    }
+    return useClient((active) => active.call(deviceId, 'scheduleTask', { botId, input }, { signal }));
+  }
+
   async function getCurrentDevice() {
     if (relay && !closed && Date.now() >= nameFreshUntil) {
       if (!refresh) {
@@ -150,5 +162,5 @@ export function createCollaborationService({ host, relay, createLocalBot, displa
     }
   }
 
-  return { listBots, createBot, getCurrentDevice, close };
+  return { listBots, createBot, scheduleTask, getCurrentDevice, close };
 }

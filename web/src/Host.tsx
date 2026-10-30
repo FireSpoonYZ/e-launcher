@@ -1291,33 +1291,41 @@ export function HostPage({
   const loadBotSchedules = useCallback(
     async (bot: UnifiedBotItem) => {
       const generation = ++scheduleLoadGeneration.current;
-      if (bot.hostKind !== 'local') {
-        setBotScheduleState({
-          tasks: [],
-          exactAlarmGranted: true,
-          schedulingError: '',
-          timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Shanghai',
-          now: Date.now(),
-        });
-        return;
-      }
-      const snap = await ensureLocalHostRunning();
-      if (!snap || snap.phase !== 'running') return;
-      const latestBots = await syncLocalBots(snap);
-      const matched = latestBots.find(b => b.botId === bot.botId);
-      const convId = bot.primaryConversationId || matched?.primaryConversationId || '';
-      if (!convId) return;
       try {
-        const env = await BotHost.call({
-          method: 'uiScheduleTask',
-          params: {
+        let rawResult: unknown;
+        if (bot.hostKind === 'local') {
+          const snap = await ensureLocalHostRunning();
+          if (!snap || snap.phase !== 'running') return;
+          const latestBots = await syncLocalBots(snap);
+          const matched = latestBots.find(b => b.botId === bot.botId);
+          const convId = bot.primaryConversationId || matched?.primaryConversationId || '';
+          if (!convId) return;
+          const env = await BotHost.call({
+            method: 'uiScheduleTask',
+            params: {
+              botId: bot.botId,
+              conversationId: convId,
+              input: { action: 'list', limit: 50 },
+            },
+          });
+          rawResult = env.result;
+        } else if (bot.hostKind === 'remote' && bot.remoteIdentity && remoteClientRef.current) {
+          rawResult = await remoteClientRef.current.api.call(bot.remoteIdentity, 'scheduleTask', {
             botId: bot.botId,
-            conversationId: convId,
             input: { action: 'list', limit: 50 },
-          },
-        });
+          });
+        } else {
+          setBotScheduleState({
+            tasks: [],
+            exactAlarmGranted: true,
+            schedulingError: '',
+            timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Shanghai',
+            now: Date.now(),
+          });
+          return;
+        }
         if (generation !== scheduleLoadGeneration.current) return;
-        const raw = record(env.result);
+        const raw = record(rawResult);
         const tasks = array<BotScheduleTask>(raw.tasks);
         const nextState: BotScheduleState = {
           tasks,

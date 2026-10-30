@@ -607,6 +607,7 @@ export interface Runtime {
   getBotSoul(botId: string): Promise<BotSoul>;
   /** CAS on the file SHA-256; conflict rejects REQUEST_CONFLICT without overwriting. */
   setBotSoul(botId: string, input: BotSoulUpdate): Promise<BotSoul>;
+  scheduleTask(botId: string, input: Record<string, unknown>): Promise<Record<string, unknown>>;
   /* Unified Shower environment (host.shower): the same six methods on every platform. */
   getShowerStatus(target: ShowerTarget): Promise<ShowerSession>;
   createShowerSession(target: ShowerTarget, input?: ShowerCreateOptions): Promise<ShowerSession>;
@@ -879,6 +880,7 @@ export interface ControlClient {
   getBotSoul(botId: string, options?: ControlClientCallOptions): Promise<BotSoul>;
   setBotSoul(botId: string, input: BotSoulUpdate, options?: ControlClientCallOptions): Promise<BotSoul>;
   setBotModel(botId: string, input: { modelRef?: string | null }, options?: ControlClientCallOptions): Promise<BotRecord>;
+  scheduleTask(botId: string, input: Record<string, unknown>, options?: ControlClientCallOptions): Promise<Record<string, unknown>>;
   getShowerStatus(target: ShowerTarget, options?: ControlClientCallOptions): Promise<ShowerSession>;
   createShowerSession(target: ShowerTarget, input?: ShowerCreateOptions, options?: ControlClientCallOptions): Promise<ShowerSession>;
   getShowerFrame(target: ShowerTarget, sessionId: string, limits?: ShowerFrameLimits, options?: ControlClientCallOptions): Promise<ShowerFrame>;
@@ -1742,6 +1744,7 @@ export interface RemoteControlMethodMap {
   };
   setBotCwd: { params: { botId: string; input: { cwd: string } }; result: BotRecord };
   setBotModel: { params: { botId: string; input: { modelRef?: string | null } }; result: BotRecord };
+  scheduleTask: { params: { botId: string; input: Record<string, unknown> }; result: Record<string, unknown> };
   validateCenterProvider: { params: CenterProviderProbe; result: ProviderCheckResult };
   discoverCenterProviderModels: { params: CenterProviderProbe; result: DiscoveryResult };
   callCapabilityAction: { params: CenterActionCall; result: ActionResult };

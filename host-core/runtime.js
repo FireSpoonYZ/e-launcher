@@ -33,6 +33,8 @@ import { renderCollaborationPrompt } from './collaboration-prompt.js';
 import { createShowerManager } from './shower-manager.js';
 import { createShowerTools } from './shower-tools.js';
 import { createRuntimeShower } from './runtime-shower.js';
+import { createScheduleManager } from './host-schedules.js';
+import { createScheduleTools } from './schedule-tools.js';
 
 const CTX = BACKGROUND_CONTEXT;
 const BOTS_SYNC_THROTTLE_MS = 1000;
@@ -157,6 +159,7 @@ export async function openRuntime(options) {
     host,
     ...options?.collaboration,
     createLocalBot: (input) => runtime.createBot(input),
+    scheduleLocalTask: (botId, input) => runtime.scheduleTask(botId, input),
   });
 
   // 每 conversationId+cwd 一个执行环境；绝不 process.chdir 或默认 process.cwd，缺 cwd 明确报错。
@@ -202,6 +205,12 @@ export async function openRuntime(options) {
   // 统一图形环境：管理器按注入的可信原生桥接（Android）或当前平台（Windows/Linux）选后端；
   // 构造不启动原生/进程资源，首次 ensure 才申请，随 Runtime 关闭释放。
   const shower = createShowerManager({ dataRoot: host.dataRoot, nativeBridge });
+  const schedules = createScheduleManager({
+    host,
+    getRuntime: () => runtime,
+    isOnline: () => online,
+    nativeBridge,
+  });
   const registry = createRegistry();
   registry.install(createCodingTools());
   registry.install(defineExtension({
@@ -234,6 +243,15 @@ export async function openRuntime(options) {
       botId: (await resolveBotIdentity(host, input.read, input.conversationId, context)).botId,
       cwd: input.env?.cwd ?? input.agent.cwd,
     }))],
+  }));
+  registry.install(defineExtension({
+    name: 'host.schedule',
+    tools: createScheduleTools({
+      host,
+      getHarness: () => harness,
+      schedules,
+      collaboration,
+    }),
   }));
   // 原生桥接工具仅显式注入时注册：主会话与 work 身份共享同一 registry，二者均可见。
   if (nativeBridge) {
@@ -364,6 +382,7 @@ export async function openRuntime(options) {
       try { await storage.close(CTX); } catch { /* close 失败不掩盖原错误 */ }
     }
     try { await plugins.close(); } catch { /* close 失败不掩盖原错误 */ }
+    try { await schedules.close(); } catch { /* close 失败不掩盖原错误 */ }
     try { await shower.close(); } catch { /* close 失败不掩盖原错误 */ }
     try { await collaboration.close(); } catch { /* close 失败不掩盖原错误 */ }
     try { await cleanupEnvs(); } catch { /* open 失败清理不掩盖原错误 */ }
@@ -408,10 +427,12 @@ export async function openRuntime(options) {
     onBotsSync: options?.onBotsSync,
     collaboration,
     shower,
+    schedules,
   });
   try {
     // 启动时初始化已有 Bot 的 SOUL 和会话人格；中心策略稍后应用。
     await runtime.initializeBots();
+    schedules.start();
   } catch (err) {
     try { await runtime.close(); } catch { /* close 失败不掩盖启动错误 */ }
     throw err;
@@ -443,7 +464,7 @@ function parseBindingKey(key) {
   }
 }
 
-function createRuntime({ host, harness, models, defaultModel, releaseOwner, cleanupEnvs, live, workContexts, decisions, plugins, coreExtensions, finalBudgetExtension, centerRuntime, setOnline, setBotModels, getBotModels, setWatermarkReader, botAdmissions, collaboration, onBotsChanged, onBotsSync, shower }) {
+function createRuntime({ host, harness, models, defaultModel, releaseOwner, cleanupEnvs, live, workContexts, decisions, plugins, coreExtensions, finalBudgetExtension, centerRuntime, setOnline, setBotModels, getBotModels, setWatermarkReader, botAdmissions, collaboration, onBotsChanged, onBotsSync, shower, schedules }) {
   let closePromise = null;
   let closing = false;
   let centerOnline = false;
@@ -623,7 +644,8 @@ function createRuntime({ host, harness, models, defaultModel, releaseOwner, clea
       if (submissionCheckPromise) {
         try { await submissionCheckPromise; } catch { /* ignore */ }
       }
-      // 再关闭 Shower：丢弃排队操作并释放本 Host 拥有的图形环境，不把在飞结果留到关库之后。
+      // 再关闭定时任务与 Shower：丢弃排队操作并释放本 Host 拥有的资源，不把在飞结果留到关库之后。
+      try { await schedules.close(); } catch (err) { errors.push(err); }
       try { await shower.close(); } catch (err) { errors.push(err); }
       // 排空已接纳导入，但共享消息账本须保留到原生工具退出。
       try { await workContexts.quiesce(); } catch (err) { errors.push(err); }
@@ -820,6 +842,7 @@ function createRuntime({ host, harness, models, defaultModel, releaseOwner, clea
     const bot = host.getBot(botId);
     if (!bot || bot.isPrimary || !bot.archivedAt) return false;
     await assertBotIdle(bot);
+    await schedules.deleteBot(bot);
     host.deleteBot({ botId });
     initializedBots.delete(botId);
     return true;
@@ -913,6 +936,7 @@ function createRuntime({ host, harness, models, defaultModel, releaseOwner, clea
         plugins.resumeAdmissions();
         centerOnline = true;
         botAdmissions.resume();
+        schedules.notifyOnline();
         return activation;
       } catch (err) {
         centerOnline = false;
@@ -1152,6 +1176,7 @@ function createRuntime({ host, harness, models, defaultModel, releaseOwner, clea
       const bot = await requireBot(botId);
       if (bot.isPrimary) throw errWithCode('primary bot cannot be archived', 'PRIMARY_BOT_PROTECTED');
       await assertBotIdle(bot);
+      await schedules.pauseBot(bot);
       const updated = host.archiveBot({ botId });
       if (onBotsSync) await onBotsSync();
       else scheduleBotsSync();
@@ -1170,12 +1195,27 @@ function createRuntime({ host, harness, models, defaultModel, releaseOwner, clea
       const bot = await requireBot(botId);
       if (bot.isPrimary) throw errWithCode('primary bot cannot be deleted', 'PRIMARY_BOT_PROTECTED');
       await assertBotIdle(bot);
+      await schedules.deleteBot(bot);
       const res = host.deleteBot({ botId });
       initializedBots.delete(botId);
       if (onBotsSync) await onBotsSync();
       else scheduleBotsSync();
       return res;
     }),
+
+    async scheduleTask(botId, input) {
+      const bot = await requireBot(botId);
+      if (
+        bot.archivedAt !== null &&
+        bot.archivedAt !== undefined &&
+        (input?.action === 'create' ||
+          input?.action === 'update' ||
+          (input?.action === 'setEnabled' && input?.enabled === true))
+      ) {
+        throw errWithCode('bot is archived and read-only', 'BOT_ARCHIVED');
+      }
+      return schedules.execute(bot, input, { taskId: 1 });
+    },
 
     getExtensionCatalog() { throw errWithCode('capabilities are managed by the center', 'INVALID_STATE'); },
     getBotExtensions() { throw errWithCode('capabilities are managed by the center', 'INVALID_STATE'); },

@@ -32,6 +32,7 @@ import {
   normalizeShowerFrameLimits,
   normalizeShowerSessionId,
 } from './shower-protocol.js';
+import { normalizeScheduleControlParams } from './schedule-protocol.js';
 
 const INVALID_ARGUMENT = 'INVALID_ARGUMENT';
 const SHA256_HEX_RE = /^[0-9a-f]{64}$/;
@@ -159,6 +160,7 @@ const CONTROL_V2_METHODS = Object.freeze([
   // 对话命令：/clear 与 /compact 是 additive v2，只接 {botId}。
   'clearHistory',
   'compact',
+  'scheduleTask',
 ]);
 
 export const CONTROL_METHODS = Object.freeze([...CONTROL_V1_METHODS, ...CONTROL_V2_METHODS]);
@@ -635,6 +637,9 @@ function normalizeControlParams(method, params) {
     case 'releaseShowerSession': {
       rejectUnknownFields(params, new Set(['botId', 'scopeId', 'sessionId']), 'params');
       return { ...showerTargetParams(params), sessionId: normalizeShowerSessionId(params.sessionId) };
+    }
+    case 'scheduleTask': {
+      return normalizeScheduleControlParams(params);
     }
     default:
       throw invalid('unknown control method');

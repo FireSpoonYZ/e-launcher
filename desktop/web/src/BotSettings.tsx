@@ -8,6 +8,7 @@ import type { BotSoul, ModelCatalog } from '../../../host-core/index.js';
 import { request, toError } from './api';
 import { openCenterManagement } from './CenterGate';
 import { BotCapabilities } from './BotCapabilities';
+import { BotSchedules } from './BotSchedules';
 import type { DesktopIdentity, DesktopPanelApi } from './types';
 
 /** 与 Host 的公开上限一致（UTF-8 字节）。 */
@@ -75,7 +76,7 @@ export function BotSettings({
   const [saving, setSaving] = useState<'soul' | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const [studioTab, setStudioTab] = useState<'all' | 'soul' | 'extensions' | 'capabilities'>('all');
+  const [studioTab, setStudioTab] = useState<'all' | 'soul' | 'extensions' | 'capabilities' | 'schedules'>('all');
   // 能力面板只在展开时挂载：收起/后台不轮询中心。
   const [detailsOpen, setDetailsOpen] = useState(Boolean(open));
 
@@ -317,6 +318,7 @@ export function BotSettings({
   const showSoulPanel = studioTab === 'all' || studioTab === 'soul';
   const showModelPanel = studioTab === 'all' || studioTab === 'extensions';
   const showCapabilityPanel = detailsOpen && studioTab === 'capabilities';
+  const showSchedulesPanel = detailsOpen && (studioTab === 'all' || studioTab === 'schedules');
   const q = modelQuery.trim().toLowerCase();
 
   return (
@@ -376,6 +378,13 @@ export function BotSettings({
               onClick={() => setStudioTab('capabilities')}
             >
               🔌 能力（插件 / MCP / 技能）
+            </button>
+            <button
+              type="button"
+              className={studioTab === 'schedules' ? 'active' : undefined}
+              onClick={() => setStudioTab('schedules')}
+            >
+              ⏰ 定时任务
             </button>
             <button type="button" onClick={() => void openCenterManagement()}>插件与中心管理</button>
           </div>
@@ -599,6 +608,15 @@ export function BotSettings({
                 <label>🔌 Bot 能力（插件 / MCP / 技能）</label>
               </div>
               <BotCapabilities key={`${identity.targetDeviceId}\u0000${botId}`} api={api} identity={identity} deviceId={identity.targetDeviceId} botId={botId} />
+            </div>
+          ) : null}
+
+          {showSchedulesPanel && identity ? (
+            <div className="field studio-card">
+              <div className="studio-card-header">
+                <label>⏰ 定时任务（主私聊自动触发）</label>
+              </div>
+              <BotSchedules key={`${identity.targetDeviceId}\u0000${botId}`} api={api} identity={identity} botId={botId} />
             </div>
           ) : null}
         </div>

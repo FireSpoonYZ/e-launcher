@@ -148,9 +148,6 @@ final class BotHostNativeTools {
                 || context.optString("scopeId").isEmpty()) {
             return "work 调用缺少 scopeId";
         }
-        if ("schedule_task".equals(frame.optString("tool")) && !"primary".equals(kind)) {
-            return "schedule_task 仅支持 primary";
-        }
         if ("shower_surface".equals(frame.optString("tool"))) {
             JSONObject showerArguments = frame.optJSONObject("arguments");
             if (showerArguments == null || showerArguments.optString("action").isEmpty()
