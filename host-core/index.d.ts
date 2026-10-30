@@ -650,6 +650,11 @@ export type {
  * transient progress; the raw history API remains the full source of truth.
  */
 
+export interface LiveMessageToolCall {
+  callId: string;
+  name: string;
+}
+
 export interface LiveMessage {
   role: 'user' | 'assistant' | 'toolResult';
   text: string;
@@ -657,6 +662,9 @@ export interface LiveMessage {
   toolName?: string;
   toolCallId?: string;
   isError?: boolean;
+  timestamp?: number;
+  durationMs?: number;
+  toolCalls?: LiveMessageToolCall[];
 }
 
 export interface LiveHistoryItem {

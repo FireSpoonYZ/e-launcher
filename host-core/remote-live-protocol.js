@@ -42,7 +42,18 @@ const STATE_KEYS = new Set([
   'queuedCount',
 ]);
 const HISTORY_ITEM_KEYS = new Set(['id', 'kind', 'messages']);
-const MESSAGE_KEYS = new Set(['role', 'text', 'truncated', 'toolName', 'toolCallId', 'isError']);
+const MESSAGE_KEYS = new Set([
+  'role',
+  'text',
+  'truncated',
+  'toolName',
+  'toolCallId',
+  'isError',
+  'timestamp',
+  'durationMs',
+  'toolCalls',
+]);
+const MESSAGE_TOOL_CALL_KEYS = new Set(['callId', 'name']);
 const TOOL_KEYS = new Set([
   'callId',
   'name',
@@ -127,6 +138,17 @@ function normalizeLiveState(state) {
       if (message.toolCallId !== undefined) assertText(message.toolCallId, 'message toolCallId');
       if (message.isError !== undefined && typeof message.isError !== 'boolean') {
         throw invalid('message isError must be a boolean');
+      }
+      if (message.timestamp !== undefined) assertNonNegativeSafeInteger(message.timestamp, 'message timestamp');
+      if (message.durationMs !== undefined) assertNonNegativeSafeInteger(message.durationMs, 'message durationMs');
+      if (message.toolCalls !== undefined) {
+        if (!Array.isArray(message.toolCalls)) throw invalid('message toolCalls must be an array');
+        for (const call of message.toolCalls) {
+          if (!isPlainObject(call)) throw invalid('message toolCalls items must be plain objects');
+          rejectUnknownFields(call, MESSAGE_TOOL_CALL_KEYS, 'message toolCall');
+          assertText(call.callId, 'message toolCall callId');
+          assertText(call.name, 'message toolCall name');
+        }
       }
     }
   }

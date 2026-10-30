@@ -77,6 +77,11 @@ import {
   saveBotAvatarConfig,
   type GrokAvatarPreset,
 } from './GrokBotAvatar';
+import {
+  formatTurnDuration,
+  parseHistoryEntries,
+  resolveActiveTurnStartedAt,
+} from './chatTurnModel';
 import { ErrorNotice, FloatingPillToast, array, errorText, record, useAction, useText } from './ui';
 
 const uuid = () =>
@@ -346,6 +351,7 @@ interface ChatPending {
   requestId: string;
   text: string;
   afterEntryId: number;
+  submittedAt?: number;
   pendingId?: string;
   draft?: DesktopDraftEntry;
   phase: 'sending' | 'recovering' | 'accepted';
@@ -368,17 +374,6 @@ function readChatDraft(key: string): string {
 function writeChatDraft(key: string, text: string): boolean {
   try { if (text) localStorage.setItem(`${key}:draft`, text); else localStorage.removeItem(`${key}:draft`); return true; }
   catch { return false; }
-}
-
-interface ChatTurn {
-  id: string;
-  role: 'user' | 'assistant';
-  text: string;
-  entryId: number;
-  error?: string;
-  thinking?: string;
-  toolSummary?: string[];
-  createdAt?: string;
 }
 
 function readBotMetaMap(): Record<string, BotPreviewMeta> {
@@ -509,70 +504,26 @@ function formatBotListTime(
   return `${date.getMonth() + 1}/${date.getDate()}`;
 }
 
-function parseHistoryEntries(items: Array<Record<string, unknown>>, clearedAfterEntryId = 0): ChatTurn[] {
-  const turns: ChatTurn[] = [];
-  for (let i = 0; i < items.length; i++) {
-    const item = items[i];
-    const numericId = typeof item.id === 'number' ? item.id : Number(item.id);
-    if (clearedAfterEntryId > 0 && Number.isFinite(numericId) && numericId <= clearedAfterEntryId) {
-      continue;
-    }
-    // raw 条目用 model 块（含工具/思考）；Host live 投影条目只有 messages:[{role,text,truncated}]。
-    const model = array<unknown>(item.model);
-    const blocks = model.length > 0 ? model : array<unknown>(item.messages);
-    for (let mIdx = 0; mIdx < blocks.length; mIdx++) {
-      const raw = blocks[mIdx];
-      if (!raw || typeof raw !== 'object') continue;
-      const entry = record(raw);
-      const role = entry.role;
-      if (role !== 'user' && role !== 'assistant') continue;
-      const content = entry.content;
-      const textParts: string[] = [];
-      const thinkingParts: string[] = [];
-      const toolParts: string[] = [];
-      if (typeof content === 'string') {
-        textParts.push(content);
-      } else if (typeof entry.text === 'string') {
-        textParts.push(entry.text);
-      } else if (Array.isArray(content)) {
-        for (const block of content) {
-          if (typeof block === 'string') {
-            textParts.push(block);
-            continue;
-          }
-          const part = record(block);
-          if (part.type === 'text' && typeof part.text === 'string') {
-            textParts.push(part.text);
-          } else if (part.type === 'thinking' && typeof part.thinking === 'string') {
-            thinkingParts.push(part.thinking);
-          } else if (part.type === 'toolCall' && typeof part.name === 'string') {
-            toolParts.push(part.name);
-          }
-        }
-      }
-      const joinedText = textParts.join('\n').trim();
-      const error = role === 'assistant'
-        ? (typeof entry.errorMessage === 'string' ? entry.errorMessage.trim() : '') ||
-          (entry.stopReason === 'error' ? 'model_error' : undefined)
-        : undefined;
-      if (!joinedText && toolParts.length === 0 && !error) continue;
-      turns.push({
-        id: `${String(item.id ?? i)}-${mIdx}`,
-        role,
-        entryId: numericId,
-        text: joinedText,
-        error,
-        thinking: thinkingParts.length > 0 ? thinkingParts.join('\n') : undefined,
-        toolSummary: toolParts.length > 0 ? toolParts : undefined,
-      });
-    }
+async function fetchBotHistoryPages(
+  fetchPage: (cursor: Record<string, unknown> | null, limit: number) => Promise<HostHistoryPage | null>,
+): Promise<Array<Record<string, unknown>>> {
+  const all: Array<Record<string, unknown>> = [];
+  let cursor: Record<string, unknown> | null = null;
+  const maxPages = 10;
+  for (let pageIdx = 0; pageIdx < maxPages; pageIdx++) {
+    const page = await fetchPage(cursor, 200);
+    const items = array<Record<string, unknown>>(page?.items);
+    if (items.length > 0) all.push(...items);
+    const next = page?.nextCursor;
+    if (!next || typeof next !== 'object' || Array.isArray(next) || items.length === 0) break;
+    cursor = next as Record<string, unknown>;
   }
-  return turns;
+  return all;
 }
 
 function mergeHistory(previous: Array<Record<string, unknown>>, next: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
   const items = new Map(previous.map(item => [String(item.id), item]));
-  for (const item of next) if (!items.has(String(item.id))) items.set(String(item.id), item);
+  for (const item of next) items.set(String(item.id), item);
   return [...items.values()];
 }
 
@@ -1439,10 +1390,14 @@ export function HostPage({
         const snap = await ensureLocalHostRunning();
         if (!snap || snap.phase !== 'running') return;
         try {
-          const histEnv = await BotHost.call({ method: 'history', params: { botId: bot.botId, limit: 50 } });
+          const items = await fetchBotHistoryPages(async (cursor, limit) => {
+            const histEnv = await BotHost.call({
+              method: 'history',
+              params: { botId: bot.botId, limit, ...(cursor ? { cursor } : {}) },
+            });
+            return (histEnv.result as HostHistoryPage) ?? null;
+          });
           if (!current()) return;
-          const page = histEnv.result as HostHistoryPage;
-          const items = page?.items ?? [];
           setChatHistory(previous => mergeHistory(previous, items));
           const turns = parseHistoryEntries(items, clearedMap[bot.key] ?? 0);
           const lastTurn = turns.at(-1);
@@ -1468,9 +1423,15 @@ export function HostPage({
         if (!api.transportConnected) return;
         const identity = bot.remoteIdentity;
         try {
-          const page = await api.call(identity, 'history', { botId: bot.botId, limit: 50 });
+          const items = await fetchBotHistoryPages(async (cursor, limit) => {
+            const page = await api.call(identity, 'history', {
+              botId: bot.botId,
+              limit,
+              ...(cursor ? { cursor } : {}),
+            });
+            return (page as unknown as HostHistoryPage) ?? null;
+          });
           if (!current()) return;
-          const items = (page?.items ?? []) as unknown as Array<Record<string, unknown>>;
           setChatHistory(previous => mergeHistory(previous, items));
           const turns = parseHistoryEntries(items, clearedMap[bot.key] ?? 0);
           const lastTurn = turns.at(-1);
@@ -1583,12 +1544,23 @@ export function HostPage({
     };
     const readHistory = async (): Promise<Array<Record<string, unknown>> | null> => {
       if (chatHostKind === 'local') {
-        const env = await BotHost.call({ method: 'history', params: { botId: chatBotId, limit: 50 } });
-        return (env.result as HostHistoryPage)?.items ?? null;
+        return fetchBotHistoryPages(async (cursor, limit) => {
+          const env = await BotHost.call({
+            method: 'history',
+            params: { botId: chatBotId, limit, ...(cursor ? { cursor } : {}) },
+          });
+          return (env.result as HostHistoryPage) ?? null;
+        });
       }
       if (!remoteTarget) return null;
-      const page = await remoteTarget.api.call(remoteTarget.identity, 'history', { botId: chatBotId, limit: 50 });
-      return ((page as unknown as HostHistoryPage)?.items as Array<Record<string, unknown>>) ?? null;
+      return fetchBotHistoryPages(async (cursor, limit) => {
+        const page = await remoteTarget.api.call(remoteTarget.identity, 'history', {
+          botId: chatBotId,
+          limit,
+          ...(cursor ? { cursor } : {}),
+        });
+        return (page as unknown as HostHistoryPage) ?? null;
+      });
     };
 
     let alive = true;
@@ -1890,6 +1862,7 @@ export function HostPage({
       if (!scopeKey) throw new Error(t('目标身份尚未就绪，草稿已保留。', 'Target identity unavailable; draft retained.'));
       const submission = {
         botKey: bot.key, scopeKey, requestId: uuid(), text: trimmed, phase: 'sending' as const,
+        submittedAt: Date.now(),
         afterEntryId: Math.max(maxHistoryEntryId(chatHistory), Number(chatLive?.state?.lastEntryId) || 0, clearedMap[bot.key] ?? 0),
       };
       chatSubmissionRef.current = submission;
@@ -1940,10 +1913,15 @@ ${newer}` : draftSnapshot;
         }
         if (!stillOwned()) return;
         updatePending({ pending: { ...submission, phase: 'accepted' }, receipt });
-        const result = await BotHost.call({ method: 'history', params: { botId: bot.botId, limit: 50 } }).catch(() => null);
-        if (currentChatScope.current === scopeKey && stillOwned() && result?.result) {
-          const page = result.result as HostHistoryPage;
-          if (page.items) setChatHistory(previous => mergeHistory(previous, page.items));
+        const items = await fetchBotHistoryPages(async (cursor, limit) => {
+          const env = await BotHost.call({
+            method: 'history',
+            params: { botId: bot.botId, limit, ...(cursor ? { cursor } : {}) },
+          });
+          return (env.result as HostHistoryPage) ?? null;
+        }).catch(() => null);
+        if (currentChatScope.current === scopeKey && stillOwned() && items && items.length > 0) {
+          setChatHistory(previous => mergeHistory(previous, items));
         }
       } finally {
         localInFlight.current.delete(submission.requestId);
@@ -2496,11 +2474,71 @@ ${newer}` : draftSnapshot;
       : null;
   }, [chatLive?.state?.tools, chatLive?.state?.busy, liveGeneratingText]);
 
+  const allChatTurns = useMemo(() => {
+    if (!activeBot) return [];
+    const clearedAfter = clearedMap[activeBot.key] ?? 0;
+    // raw history 是旧页，live 投影是新窗口：按 entry id 去重排序；同 id 保留 raw（工具/思考细节更全）。
+    const byId = new Map<string, Record<string, unknown>>();
+    for (const item of array<Record<string, unknown>>(chatLive?.state?.history)) {
+      byId.set(String(item.id), item);
+    }
+    for (const item of chatHistory) byId.set(String(item.id), item);
+    const numericId = (item: Record<string, unknown>) => {
+      const id = Number(item.id);
+      return Number.isFinite(id) ? id : 0;
+    };
+    const sorted = [...byId.values()].sort((a, b) => numericId(a) - numericId(b));
+    if (chatPending?.botKey === activeBot.key) {
+      const alreadyInHistory = parseHistoryEntries(sorted, clearedAfter).some(
+        turn => turn.role === 'user' && turn.entryId > chatPending.afterEntryId && turn.text === chatPending.text,
+      );
+      if (!alreadyInHistory) {
+        sorted.push({
+          id: chatPending.afterEntryId + 0.5,
+          kind: 'pi.user',
+          model: [
+            {
+              role: 'user',
+              content: chatPending.text,
+              ...(typeof chatPending.submittedAt === 'number' ? { timestamp: chatPending.submittedAt } : {}),
+            },
+          ],
+        });
+      }
+    }
+    return parseHistoryEntries(sorted, clearedAfter, {
+      liveTools: recoveringChat ? undefined : array<Record<string, unknown>>(chatLive?.state?.tools),
+      isBusy: isBotBusy,
+      liveGeneratingText,
+    });
+  }, [chatHistory, chatLive, activeBot, clearedMap, chatPending, recoveringChat, isBotBusy, liveGeneratingText]);
+
+  const activeTurnStartedAt = useMemo(
+    () =>
+      resolveActiveTurnStartedAt(
+        allChatTurns,
+        chatPending?.botKey === activeBot?.key ? chatPending?.submittedAt : null,
+      ),
+    [allChatTurns, chatPending, activeBot?.key],
+  );
+
+  const visibleTurns = useMemo(() => {
+    const q = chatSearchQuery.trim().toLowerCase();
+    if (!chatSearchOpen || !q) return allChatTurns;
+    return allChatTurns.filter(
+      turn =>
+        turn.text.toLowerCase().includes(q) ||
+        Boolean(turn.tools?.some(tool => tool.name.toLowerCase().includes(q))),
+    );
+  }, [allChatTurns, chatSearchOpen, chatSearchQuery]);
+
+  const latestTurnToolCount = visibleTurns.at(-1)?.tools?.length ?? 0;
+
   useEffect(() => {
     if (screen === 'chat' && chatScrollRef.current) {
       chatScrollRef.current.scrollTop = chatScrollRef.current.scrollHeight;
     }
-  }, [screen, visibleTurns.length, liveGeneratingText, isBotBusy, activeLiveToolName, submissionFailure]);
+  }, [screen, visibleTurns.length, latestTurnToolCount, liveGeneratingText, isBotBusy, activeLiveToolName, submissionFailure]);
 
   const [hubRefreshing, setHubRefreshing] = useState(false);
   const hubRefreshRunning = useRef(false);
@@ -3346,39 +3384,112 @@ ${newer}` : draftSnapshot;
                 </p>
               </div>
             ) : (
-              visibleTurns.map(turn => (
-                <article key={turn.id} className={`bot-chat-bubble ${turn.role}`}>
-                  {turn.thinking && (
-                    <details className="bot-chat-thinking">
-                      <summary>{t('思考过程', 'Thinking')}</summary>
-                      <pre>{turn.thinking}</pre>
-                    </details>
-                  )}
-                  {turn.toolSummary && turn.toolSummary.length > 0 && (
-                    <div className="bot-chat-tools">
-                      {turn.toolSummary.map((toolName, i) => (
-                        <span key={i} className="bot-chat-tool-chip">
-                          🔧 {toolName}
-                        </span>
-                      ))}
-                    </div>
-                  )}
-                  {turn.text && <Markdown text={turn.text} />}
-                  <ErrorNotice
-                    compact
-                    error={turn.error === 'model_error'
-                      ? t('模型生成失败，请重试或检查模型配置。', 'Model generation failed. Retry or check the model configuration.')
-                      : turn.error}
-                    actionLabel={t('模型设置', 'Model Settings')}
-                    onAction={() => openBotProfile(activeBot)}
-                  />
-                </article>
-              ))
-            )}
-            {liveGeneratingText && (
-              <article className="bot-chat-bubble assistant streaming">
-                <Markdown text={liveGeneratingText} />
-              </article>
+              visibleTurns.map((turn, turnIdx) => {
+                const isLastAssistantTurn =
+                  turn.role === 'assistant' && turnIdx === visibleTurns.length - 1;
+                const showTurnDuration =
+                  turn.role === 'assistant' &&
+                  typeof turn.durationMs === 'number' &&
+                  turn.durationMs > 0 &&
+                  !(isLastAssistantTurn && isBotBusy);
+                return (
+                  <article
+                    key={turn.id}
+                    className={`bot-chat-bubble ${turn.role}${turn.isStreaming ? ' streaming' : ''}`}
+                  >
+                    {turn.thinking && (
+                      <details className="bot-chat-thinking">
+                        <summary>{t('思考过程', 'Thinking')}</summary>
+                        <pre>{turn.thinking}</pre>
+                      </details>
+                    )}
+                    {turn.tools && turn.tools.length > 0 && (
+                      <div className="bot-chat-tools" role="list" aria-label={t('工具调用', 'Tool calls')}>
+                        {turn.tools.map(tool => (
+                          <span
+                            key={tool.id}
+                            role="listitem"
+                            className={`bot-chat-tool-chip is-${tool.status}`}
+                          >
+                            <span className="bot-tool-step-icon" aria-hidden="true">
+                              {tool.status === 'running' ? (
+                                <svg viewBox="0 0 16 16" fill="none">
+                                  <circle
+                                    cx="8"
+                                    cy="8"
+                                    r="5.75"
+                                    stroke="currentColor"
+                                    strokeOpacity="0.24"
+                                    strokeWidth="1.75"
+                                  />
+                                  <path
+                                    d="M8 2.25A5.75 5.75 0 0 1 13.75 8"
+                                    stroke="currentColor"
+                                    strokeWidth="1.75"
+                                    strokeLinecap="round"
+                                  />
+                                </svg>
+                              ) : tool.status === 'error' ? (
+                                <svg viewBox="0 0 16 16" fill="none">
+                                  <circle
+                                    cx="8"
+                                    cy="8"
+                                    r="6"
+                                    stroke="currentColor"
+                                    strokeWidth="1.6"
+                                  />
+                                  <path
+                                    d="M8 5v3.5M8 11h.01"
+                                    stroke="currentColor"
+                                    strokeWidth="1.75"
+                                    strokeLinecap="round"
+                                  />
+                                </svg>
+                              ) : (
+                                <svg viewBox="0 0 16 16" fill="none">
+                                  <path
+                                    d="M3.75 8.25 6.6 11.1 12.25 5.25"
+                                    stroke="currentColor"
+                                    strokeWidth="1.8"
+                                    strokeLinecap="round"
+                                    strokeLinejoin="round"
+                                  />
+                                </svg>
+                              )}
+                            </span>
+                            <span className="bot-tool-step-name">{tool.name}</span>
+                            <span className="bot-tool-step-state">
+                              {tool.status === 'running'
+                                ? t('调用中', 'Calling')
+                                : tool.status === 'error'
+                                  ? t('失败', 'Failed')
+                                  : t('已完成', 'Done')}
+                            </span>
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                    {turn.text && <Markdown text={turn.text} />}
+                    <ErrorNotice
+                      compact
+                      error={turn.error === 'model_error'
+                        ? t('模型生成失败，请重试或检查模型配置。', 'Model generation failed. Retry or check the model configuration.')
+                        : turn.error}
+                      actionLabel={t('模型设置', 'Model Settings')}
+                      onAction={() => openBotProfile(activeBot)}
+                    />
+                    {showTurnDuration && (
+                      <div className="bot-chat-turn-meta" aria-label={formatTurnDuration(turn.durationMs!, t)}>
+                        <svg className="bot-chat-turn-clock" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                          <circle cx="8" cy="8" r="5.75" stroke="currentColor" strokeWidth="1.5" />
+                          <path d="M8 5v3.25l2.1 1.35" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                        </svg>
+                        <span>{formatTurnDuration(turn.durationMs!, t)}</span>
+                      </div>
+                    )}
+                  </article>
+                );
+              })
             )}
             <GrokBotWorkingSlot
               key={activeBot.key}
@@ -3477,6 +3588,7 @@ ${newer}` : draftSnapshot;
                   const old = pendingByBot.current.get(activeChatScope)?.pending;
                   const pending: ChatPending = old?.requestId === requestId ? old : {
                     botKey: activeBot.key, scopeKey: activeChatScope, requestId, text, draft, phase: 'sending',
+                    submittedAt: Date.now(),
                     afterEntryId: Math.max(maxHistoryEntryId(chatHistory), Number(chatLive?.state?.lastEntryId) || 0, clearedMap[activeBot.key] ?? 0),
                   };
                   if (currentChatScope.current === activeChatScope) chatSubmissionRef.current = pending;

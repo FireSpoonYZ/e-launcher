@@ -61,17 +61,50 @@ function textFromBlocks(content, cap) {
   return { text: out, truncated };
 }
 
-/** 投影一条消息；跳过 system/未知角色与无文本消息，只带文本和工具结果安全字段。 */
+function toolCallsFromBlocks(content) {
+  if (!Array.isArray(content)) return [];
+  const calls = [];
+  for (const block of content) {
+    if (!block || block.type !== 'toolCall' || typeof block.name !== 'string' || block.name === '') continue;
+    calls.push({
+      callId: typeof block.id === 'string' ? block.id : '',
+      name: block.name,
+    });
+    if (calls.length >= MAX_TOOLS) break;
+  }
+  return calls;
+}
+
+/** 投影一条消息；跳过 system/未知角色与无内容消息，只带文本和工具安全字段与时间戳。 */
 function projectMessage(message) {
   const role = message?.role;
   if (role !== 'user' && role !== 'assistant' && role !== 'toolResult') return null;
   const { text, truncated } = textFromBlocks(message.content, MAX_MESSAGE_UNITS);
-  if (text === '') return null;
+  const toolCalls = role === 'assistant' ? toolCallsFromBlocks(message.content) : [];
+  const hasToolResultIdentity =
+    role === 'toolResult' &&
+    ((typeof message.toolName === 'string' && message.toolName !== '') ||
+      (typeof message.toolCallId === 'string' && message.toolCallId !== ''));
+  const isAssistantError =
+    role === 'assistant' &&
+    (message.stopReason === 'error' || (typeof message.errorMessage === 'string' && message.errorMessage.trim() !== ''));
+
+  if (text === '' && toolCalls.length === 0 && !hasToolResultIdentity && !isAssistantError) return null;
+
   const projected = { role, text, truncated };
   if (role === 'toolResult') {
     if (typeof message.toolName === 'string') projected.toolName = message.toolName;
     if (typeof message.toolCallId === 'string') projected.toolCallId = message.toolCallId;
     if (message.isError === true) projected.isError = true;
+  } else if (role === 'assistant') {
+    if (toolCalls.length > 0) projected.toolCalls = toolCalls;
+    if (isAssistantError) projected.isError = true;
+  }
+  if (Number.isSafeInteger(message.timestamp) && message.timestamp >= 0) {
+    projected.timestamp = message.timestamp;
+  }
+  if (Number.isSafeInteger(message.durationMs) && message.durationMs >= 0) {
+    projected.durationMs = message.durationMs;
   }
   return projected;
 }

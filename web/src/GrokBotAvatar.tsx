@@ -400,6 +400,19 @@ export function GrokBotAnimatedMark({
   );
 }
 
+const workingStartMsByBotKey = new Map<string, number>();
+
+export function formatWorkingElapsed(seconds: number): string {
+  const safe = Math.max(0, Math.floor(seconds));
+  if (safe < 60) return `${safe}s`;
+  const mins = Math.floor(safe / 60);
+  const secs = safe % 60;
+  if (mins < 60) return `${mins}m ${String(secs).padStart(2, '0')}s`;
+  const hours = Math.floor(mins / 60);
+  const remMins = mins % 60;
+  return `${hours}h ${String(remMins).padStart(2, '0')}m`;
+}
+
 export function GrokBotWorkingSlot({
   botKey,
   preset,
@@ -411,6 +424,7 @@ export function GrokBotWorkingSlot({
   hasError = false,
   isSending = false,
   isRecovering = false,
+  startedAt,
   t,
 }: {
   botKey: string;
@@ -423,23 +437,42 @@ export function GrokBotWorkingSlot({
   hasError?: boolean;
   isSending?: boolean;
   isRecovering?: boolean;
+  startedAt?: number | null;
   t: (zh: string, en: string) => string;
 }) {
-  const [elapsedSec, setElapsedSec] = useState(0);
+  const resolveStartMs = () => {
+    if (typeof startedAt === 'number' && Number.isFinite(startedAt) && startedAt > 0) {
+      const clamped = Math.min(startedAt, Date.now());
+      workingStartMsByBotKey.set(botKey, clamped);
+      return clamped;
+    }
+    const cached = workingStartMsByBotKey.get(botKey);
+    if (typeof cached === 'number' && Number.isFinite(cached) && cached > 0) {
+      return cached;
+    }
+    const now = Date.now();
+    if (isBusy) workingStartMsByBotKey.set(botKey, now);
+    return now;
+  };
+
+  const [elapsedSec, setElapsedSec] = useState(() =>
+    isBusy ? Math.max(0, Math.floor((Date.now() - resolveStartMs()) / 1000)) : 0,
+  );
   const [settlementOutcome, setSettlementOutcome] = useState<'success' | 'error' | null>(null);
   const [emphasized, setEmphasized] = useState(false);
   const [pulseThinkingMorph, setPulseThinkingMorph] = useState(false);
-  const wasBusyRef = useRef(false);
+  const wasBusyRef = useRef(isBusy);
 
   useEffect(() => {
     if (isBusy) {
       wasBusyRef.current = true;
       setSettlementOutcome(null);
-      const startMs = Date.now();
-      setElapsedSec(0);
-      const timer = window.setInterval(() => {
+      const startMs = resolveStartMs();
+      const update = () => {
         setElapsedSec(Math.max(0, Math.floor((Date.now() - startMs) / 1000)));
-      }, 1000);
+      };
+      update();
+      const timer = window.setInterval(update, 250);
       return () => window.clearInterval(timer);
     }
     if (isRecovering) {
@@ -449,6 +482,11 @@ export function GrokBotWorkingSlot({
     }
     if (wasBusyRef.current) {
       wasBusyRef.current = false;
+      const finalStartMs = workingStartMsByBotKey.get(botKey);
+      if (typeof finalStartMs === 'number' && Number.isFinite(finalStartMs) && finalStartMs > 0) {
+        setElapsedSec(Math.max(0, Math.floor((Date.now() - finalStartMs) / 1000)));
+      }
+      workingStartMsByBotKey.delete(botKey);
       setSettlementOutcome(hasError ? 'error' : 'success');
       const settleTimer = window.setTimeout(() => {
         setSettlementOutcome(null);
@@ -456,8 +494,10 @@ export function GrokBotWorkingSlot({
       }, 1450);
       return () => window.clearTimeout(settleTimer);
     }
+    workingStartMsByBotKey.delete(botKey);
     return undefined;
-  }, [isBusy, hasError, isRecovering]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isBusy, startedAt, botKey, hasError, isRecovering]);
 
   useEffect(() => {
     if (!isBusy || isStreaming || activeToolName) {
@@ -548,8 +588,8 @@ export function GrokBotWorkingSlot({
           <span className={`sand-activity-label-text${isBusy ? ' is-shimmering' : ''}`}>
             {statusText}
           </span>
-          {isBusy && elapsedSec >= 1 && (
-            <span className="sand-activity-elapsed">{elapsedSec}s</span>
+          {(isBusy || Boolean(settlementOutcome)) && (
+            <span className="sand-activity-elapsed">{formatWorkingElapsed(elapsedSec)}</span>
           )}
         </span>
       </div>
