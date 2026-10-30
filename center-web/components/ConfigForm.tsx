@@ -52,6 +52,16 @@ function fields(schema: JsonSchema, root: JsonSchema, data: JsonValue | undefine
   return path.length ? [path] : [];
 }
 
+/** uiSchema 中 ui:widget=hidden 的顶层字段不作为独立覆盖项展示（如废弃的旧键）。 */
+function hiddenTopLevelPaths(uiSchema: JsonObject | undefined): Set<string> {
+  const hidden = new Set<string>();
+  if (!isObject(uiSchema)) return hidden;
+  for (const [key, fieldUi] of Object.entries(uiSchema)) {
+    if (isObject(fieldUi) && fieldUi['ui:widget'] === 'hidden') hidden.add(key);
+  }
+  return hidden;
+}
+
 function isAdditionalPath(schema: JsonSchema, root: JsonSchema, path: Path): boolean {
   let node = resolve(schema, root);
   for (const key of path) {
@@ -223,6 +233,7 @@ export default function ConfigForm({
   useEffect(() => setValue(overrides ?? globalConfig), [globalConfig, overrides]);
   const effective = overrides === undefined ? value : (merge(globalConfig, value) as JsonObject);
   const paths = useMemo(() => fields(schema, schema, effective), [schema, effective]);
+  const hidden = useMemo(() => hiddenTopLevelPaths(uiSchema), [uiSchema]);
   const ui = makeUi(schema, schema, uiSchema ?? {}, [], overrides === undefined ? undefined : value, effective);
 
   return (
@@ -234,7 +245,7 @@ export default function ConfigForm({
             未勾选的字段继承全局配置；数组作为整体替换。字典中编辑的键自动覆盖，继承的键不能删除。
           </p>
           <div className="override-grid">
-            {paths.map(path => {
+            {paths.filter(path => !(path.length === 1 && hidden.has(path[0]))).map(path => {
               const active = at(value, path) !== undefined;
               return (
                 <label className={`config-override${active ? ' is-active' : ''}`} key={JSON.stringify(path)}>

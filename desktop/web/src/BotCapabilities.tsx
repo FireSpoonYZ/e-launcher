@@ -32,7 +32,12 @@ type FieldKind = 'string' | 'number' | 'boolean' | 'enum';
 interface Field {
   key: string;
   kind: FieldKind;
+  title?: string;
+  description?: string;
+  hasDefault: boolean;
+  defaultValue?: JsonValue;
   options?: string[];
+  optionNames?: string[];
 }
 
 interface Editor {
@@ -53,8 +58,9 @@ const formatRemoteError = (err: { code: string; message: string }): string =>
 const isObject = (value: unknown): value is JsonObject =>
   value !== null && typeof value === 'object' && !Array.isArray(value);
 
-/** 扁平标量属性可逐项“继承/覆盖”；嵌套、数组、未知类型返回 null（改用 JSON 覆写）。 */
-function flatFields(schema: JsonSchema | undefined): Field[] | null {
+/** 扁平标量属性可逐项“继承/覆盖”；嵌套、数组、未知类型返回 null（改用 JSON 覆写）。
+    uiSchema 顶层字段标记 ui:widget=hidden 的旧键不展示。 */
+function flatFields(schema: JsonSchema | undefined, uiSchema?: JsonObject): Field[] | null {
   if (!isObject(schema)) return null;
   const properties = schema.properties;
   if (properties === undefined) return Object.keys(schema).length === 0 ? [] : null;
@@ -62,20 +68,43 @@ function flatFields(schema: JsonSchema | undefined): Field[] | null {
   const fields: Field[] = [];
   for (const [key, raw] of Object.entries(properties)) {
     if (!isObject(raw)) return null;
+    const fieldUi = uiSchema?.[key];
+    if (isObject(fieldUi) && fieldUi['ui:widget'] === 'hidden') continue;
     const values = raw.enum;
+    const names = raw.enumNames;
+    const base: Field = {
+      key,
+      kind: 'string',
+      ...(typeof raw.title === 'string' && raw.title ? { title: raw.title } : {}),
+      ...(typeof raw.description === 'string' && raw.description ? { description: raw.description } : {}),
+      hasDefault: 'default' in raw,
+      ...('default' in raw ? { defaultValue: raw.default } : {}),
+    };
     if (raw.type === 'string' && Array.isArray(values) && values.every((value) => typeof value === 'string')) {
-      fields.push({ key, kind: 'enum', options: values as string[] });
+      fields.push({
+        ...base,
+        kind: 'enum',
+        options: values as string[],
+        ...(Array.isArray(names) && names.length === values.length && names.every((name) => typeof name === 'string')
+          ? { optionNames: names as string[] }
+          : {}),
+      });
     } else if (raw.type === 'boolean') {
-      fields.push({ key, kind: 'boolean' });
+      fields.push({ ...base, kind: 'boolean' });
     } else if (raw.type === 'string') {
-      fields.push({ key, kind: 'string' });
+      fields.push(base);
     } else if (raw.type === 'number' || raw.type === 'integer') {
-      fields.push({ key, kind: 'number' });
+      fields.push({ ...base, kind: 'number' });
     } else {
       return null;
     }
   }
   return fields;
+}
+
+/** 勾选覆写时的初值：优先全局值，其次 schema default；保留显式 false/0，都不存在才写 null。 */
+function initialOverride(field: Field, globalValue: JsonValue | undefined): JsonValue {
+  return globalValue ?? (field.hasDefault ? (field.defaultValue as JsonValue) : null);
 }
 
 function timeText(iso: string | null): string {
@@ -238,7 +267,7 @@ export function BotCapabilities({ api, identity, deviceId, botId, t = identityTe
       revision: entry.config.revision,
       enabled: entry.config.enabled,
       overrides: entry.config.overrides,
-      text: flatFields(entry.config.configSchema) === null ? JSON.stringify(entry.config.overrides, null, 2) : null,
+      text: flatFields(entry.config.configSchema, entry.uiSchema) === null ? JSON.stringify(entry.config.overrides, null, 2) : null,
     });
     setError('');
     setNotice('');
@@ -350,7 +379,7 @@ export function BotCapabilities({ api, identity, deviceId, botId, t = identityTe
       {entries.map((entry) => {
         const { installation, config } = entry;
         const draft = editor?.installationId === installation.installationId ? editor : null;
-        const fields = flatFields(config.configSchema);
+        const fields = flatFields(config.configSchema, entry.uiSchema);
         return (
           <section
             key={installation.installationId}
@@ -422,40 +451,63 @@ export function BotCapabilities({ api, identity, deviceId, botId, t = identityTe
                 ) : fields.map((field) => {
                   const overridden = field.key in draft.overrides;
                   const value = draft.overrides[field.key];
+                  const label = field.title ? field.title + '（' + field.key + '）' : field.key;
+                  const effectiveGlobal = config.globalConfig[field.key] ?? (field.hasDefault ? field.defaultValue : undefined);
+                  const controlId = 'bot-cap-override-' + field.key;
+                  const describedBy = field.description ? controlId + '-desc' : undefined;
                   return (
                     <div className="bot-cap-override" key={field.key}>
-                      <label className="bot-cap-override-head">
+                      <label className="bot-cap-override-head" htmlFor={controlId + '-override'}>
                         <input
+                          id={controlId + '-override'}
                           type="checkbox"
                           checked={overridden}
                           disabled={busy !== ''}
-                          onChange={(event) => setOverride(field.key, event.target.checked ? config.globalConfig[field.key] ?? null : undefined)}
+                          aria-label={label}
+                          aria-describedby={describedBy}
+                          onChange={(event) => setOverride(field.key, event.target.checked ? initialOverride(field, config.globalConfig[field.key]) : undefined)}
                         />
-                        {`${field.key} · ${overridden ? t('覆写', 'override') : t('继承全局', 'inherit')} (${json(config.globalConfig[field.key])})`}
+                        {label + ' · ' + (overridden ? t('覆写', 'override') : t('继承全局', 'inherit')) + ' (' + json(effectiveGlobal) + ')'}
                       </label>
+                      {field.description
+                        ? <p className="metadata bot-cap-item-note" id={controlId + '-desc'}>{field.description}</p>
+                        : null}
                       {!overridden ? null : field.kind === 'boolean' ? (
                         <select
+                          id={controlId}
                           value={value === true ? 'true' : 'false'}
                           disabled={busy !== ''}
+                          aria-label={label}
+                          aria-describedby={describedBy}
                           onChange={(event) => setOverride(field.key, event.target.value === 'true')}
                         >
-                          <option value="true">true</option>
-                          <option value="false">false</option>
+                          <option value="true">{t('启用', 'enabled')}</option>
+                          <option value="false">{t('关闭', 'disabled')}</option>
                         </select>
                       ) : field.kind === 'enum' ? (
                         <select
+                          id={controlId}
                           value={typeof value === 'string' ? value : ''}
                           disabled={busy !== ''}
+                          aria-label={label}
+                          aria-describedby={describedBy}
                           onChange={(event) => setOverride(field.key, event.target.value)}
                         >
                           <option value="">—</option>
-                          {(field.options ?? []).map((option) => <option key={option} value={option}>{option}</option>)}
+                          {(field.options ?? []).map((option, index) => (
+                            <option key={option} value={option}>
+                              {field.optionNames ? field.optionNames[index] + '（' + option + '）' : option}
+                            </option>
+                          ))}
                         </select>
                       ) : (
                         <input
+                          id={controlId}
                           type={field.kind === 'number' ? 'number' : 'text'}
                           value={typeof value === 'string' || typeof value === 'number' ? String(value) : ''}
                           disabled={busy !== ''}
+                          aria-label={label}
+                          aria-describedby={describedBy}
                           onChange={(event) => setOverride(field.key, field.kind === 'number'
                             ? (event.target.value === '' ? undefined : Number(event.target.value))
                             : event.target.value)}

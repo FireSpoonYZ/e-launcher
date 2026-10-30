@@ -1,7 +1,7 @@
 {
   "manifestVersion": 1,
   "id": "e-launcher.hindsight",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "kind": "plugin",
   "displayName": "Hindsight",
   "hostApi": "^1.0.0",
@@ -17,6 +17,7 @@
     "android"
   ],
   "configSchema": "config.schema.json",
+  "uiSchema": "ui.schema.json",
   "stateVersion": 1,
   "contributions": [
     "tools",

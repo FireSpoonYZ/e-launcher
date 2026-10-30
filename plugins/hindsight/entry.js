@@ -39,10 +39,12 @@ export function createPlugin({ installationId, dataDir, host }) {
       if (!enabled) await writePolicy(botId, false);
     },
     async forBot({ deviceId, botId, effectiveConfig, credentials }) {
-      const { baseUrl, apiKeyRef, mode = 'read-write', sharedMemory, timeoutMs, reflectTimeoutMs, topic } = effectiveConfig;
+      // projectId 是 topic 的新名称；旧配置仍可能只有 topic，优先 projectId。
+      const { baseUrl, apiKeyRef, mode = 'read-write', sharedMemory, agentUse, timeoutMs, reflectTimeoutMs, projectId, topic } = effectiveConfig;
+      const effectiveTopic = projectId ?? topic;
       const normalized = normalizeHindsightConfig({ baseUrl, ...(sharedMemory === undefined ? {} : { sharedMemory }),
         ...(timeoutMs === undefined ? {} : { timeoutMs }), ...(reflectTimeoutMs === undefined ? {} : { reflectTimeoutMs }),
-        ...(topic === undefined ? {} : { topic }) });
+        ...(effectiveTopic === undefined ? {} : { topic: effectiveTopic }) });
       const apiKey = apiKeyRef === undefined ? undefined : credentials[apiKeyRef];
       if (apiKeyRef !== undefined && (typeof apiKey !== 'string' || !/^[\x21-\x7e]+$/.test(apiKey))) {
         throw Object.assign(new Error('Hindsight credential is unavailable or invalid.'), { code: 'INVALID_ARGUMENT' });
@@ -76,6 +78,7 @@ export function createPlugin({ installationId, dataDir, host }) {
         const patch = {
           enabled: true,
           setupComplete: Boolean(config.baseUrl),
+          ...(agentUse === undefined ? {} : { agentUse }),
           ...(config.topic ? { scope: { projectId: config.topic } } : {}),
           hindsight: {
             baseUrl: config.baseUrl,

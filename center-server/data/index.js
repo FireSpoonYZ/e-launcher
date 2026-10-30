@@ -196,6 +196,21 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
     const binding = bindingFor(deviceId, botId, id);
     return { ...binding, globalConfig: config.globalConfig, effectiveConfig: merge(config.globalConfig, binding.overrides), configSchema: config.configSchema };
   }
+  /** Default Hindsight binding for a newly registered Bot: projectId is name-botId. Existing rows (incl. explicit disables) are kept. Caller must hold a transaction. */
+  function initializeBotHindsight(bot) {
+    let added = false;
+    for (const installation of store.listInstallations()) {
+      if (installation.packageId !== 'e-launcher.hindsight' || installation.kind !== 'plugin' || installation.target !== 'host' || !activeInstallation(installation)) continue;
+      if (bindingFor(bot.deviceId, bot.botId, installation.installationId).revision !== 0) continue;
+      const overrides = { projectId: `${bot.name}-${bot.botId}` };
+      const config = configFor(installation.installationId);
+      validate(config.configSchema, merge(config.globalConfig, overrides));
+      const binding = { deviceId: bot.deviceId, botId: bot.botId, installationId: installation.installationId, enabled: true, overrides, revision: 1 };
+      db.prepare('INSERT INTO bindings VALUES (?, ?, ?, ?)').run(bot.deviceId, bot.botId, installation.installationId, json(binding));
+      added = true;
+    }
+    return added;
+  }
   function checkEnabledBindings(id, config, installation) {
     if (!installation.enabled) return;
     const bindings = db.prepare('SELECT json FROM bindings WHERE installation_id = ?').all(id).map(parse);
@@ -414,6 +429,7 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
           const nowIso = new Date().toISOString();
           const upsertBotStmt = db.prepare('INSERT INTO device_bots (device_id, bot_id, json, seq) VALUES (?, ?, ?, ?) ON CONFLICT(device_id, bot_id) DO UPDATE SET json = excluded.json, seq = excluded.seq');
           const insertEventStmt = db.prepare('INSERT INTO bot_events (seq, device_id, bot_id, op, json, updated_at) VALUES (?, ?, ?, ?, ?, ?)');
+          let defaultsAdded = false;
           for (const normalized of normalizedList) {
             const serialized = json(normalized);
             const oldSerialized = existingMap.get(normalized.botId);
@@ -422,6 +438,7 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
               upsertBotStmt.run(deviceId, normalized.botId, serialized, seq);
               insertEventStmt.run(seq, deviceId, normalized.botId, 'upsert', serialized, nowIso);
             }
+            if (oldSerialized === undefined && initializeBotHindsight(normalized)) defaultsAdded = true;
             existingMap.delete(normalized.botId);
           }
           const deleteBotStmt = db.prepare('DELETE FROM device_bots WHERE device_id = ? AND bot_id = ?');
@@ -440,7 +457,7 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
               db.prepare('DELETE FROM bot_events WHERE seq <= ?').run(seq - 5000);
             }
           }
-          if (bumpRevision && seq !== meta.seq) bump();
+          if ((bumpRevision && seq !== meta.seq) || defaultsAdded) bump();
           return { epoch: meta.epoch, seq };
         });
       },
@@ -492,6 +509,7 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
             // Only a real Bot addition changes execution content; profile edits stay display-only.
             if (!existingRow) bump();
           }
+          if (!existingRow) initializeBotHindsight(merged);
           return { ...merged, seq: targetSeq };
         });
       },

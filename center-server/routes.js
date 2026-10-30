@@ -122,7 +122,8 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
       name: typeof created?.name === 'string' ? created.name : created?.role ?? text(req.body?.role, 'role'),
       ...(typeof req.body?.makePrimary === 'boolean' && created?.isPrimary === undefined ? { isPrimary: req.body.makePrimary } : {}),
     });
-
+    await packages.reconcileDevice(deviceId);
+    notify(deviceId);
     return reply.code(201).send(bot);
   }, true);
   route('PATCH', '/api/devices/:deviceId/bots/:botId', async req => {
@@ -315,10 +316,16 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
     await packages.reconcileDevice(id);
     return { snapshot: snapshot(id) };
   });
-  host('POST', '/api/host/bots-sync', req => {
+  host('POST', '/api/host/bots-sync', async req => {
     const body = object(req.body); const id = req.centerDevice.deviceId;
     if (body.deviceId !== id || !Array.isArray(body.bots)) fail('INVALID_ARGUMENT', 'Invalid bots sync');
-    return store.replaceDeviceBots(id, body.bots, { bumpRevision: false });
+    const known = new Set(store.listDeviceBots(id).map(bot => bot.botId));
+    const result = store.replaceDeviceBots(id, body.bots, { bumpRevision: false });
+    if (body.bots.some(bot => !known.has(bot.botId))) {
+      await packages.reconcileDevice(id);
+      notify(id);
+    }
+    return result;
   });
   host('GET', '/api/host/bot-directory', req => {
     const epoch = typeof req.query?.epoch === 'string' ? req.query.epoch : undefined;
