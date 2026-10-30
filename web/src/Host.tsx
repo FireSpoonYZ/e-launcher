@@ -5699,7 +5699,7 @@ function RemotePendingComposer({
           </button>
         </section>
       )}
-      {(drafts.attempt || blocked) && (
+      {(blocked || (drafts.attempt && !['locked', 'enqueued', 'cleared'].includes(drafts.attempt.phase))) && (
         <section className="grok-card-group grok-pending-freeze-card" role="status" style={{ marginBottom: 8 }}>
           <div className="grok-pending-freeze-head">
             <span className="grok-pending-freeze-badge">{t('发送结果待确认', 'Send result unconfirmed')}</span>
