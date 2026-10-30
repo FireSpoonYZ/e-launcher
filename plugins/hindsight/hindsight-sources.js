@@ -499,9 +499,10 @@ export function createHindsightSources({ host, getHarness, context, getBotPolicy
     const target = normalizeTarget(memoryContext.target);
     const botId = nonBlankString(memoryContext.botId, 'context.botId');
     const targetKind = target.kind;
-    // 固定 context/tag 标记，不复制任意原始 scopeId（身份已在 bank 哈希/省名）。
-    const contextLabel = 'e-launcher:' + targetKind;
-    const tags = ['source:e-launcher', 'target:' + targetKind];
+    const topic = typeof memoryContext.topic === 'string' && memoryContext.topic.trim().length > 0 ? memoryContext.topic.trim() : null;
+    // 固定 context/tag 标记，不复制任意原始 scopeId（身份已在 bank 哈希/省名）；可选 topic 显式注入标记。
+    const contextLabel = topic ? 'e-launcher:' + targetKind + ':' + topic : 'e-launcher:' + targetKind;
+    const tags = topic ? ['source:e-launcher', 'target:' + targetKind, 'topic:' + topic] : ['source:e-launcher', 'target:' + targetKind];
 
     const jobs = [];
     const list = Array.isArray(items) ? items : [];
@@ -531,6 +532,7 @@ export function createHindsightSources({ host, getHarness, context, getBotPolicy
           locator,
           rawDigest,
           part,
+          ...(topic ? [topic] : []),
         ]));
         const metadata = { provenance: JSON.stringify(proven) };
         const fingerprint = sha256Hex(JSON.stringify([documentId, content, contextLabel, metadata, tags, timestamp]));

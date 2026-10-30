@@ -9,7 +9,7 @@ import { ErrorNotice, errorText, useText } from './ui';
 
 const levels = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
 
-export type BotSettingsTab = 'model' | 'capabilities';
+export type BotSettingsTab = 'model' | 'capabilities' | 'advanced';
 
 type Props = { api: DesktopPanelApi; identity: DesktopIdentity; botId: string; initialTab?: BotSettingsTab; onClose(): void };
 
@@ -86,7 +86,7 @@ export function BotModelSheet({ api, identity, botId, initialTab = 'model', onCl
       if (alive.current) setBusy(false);
     }
   };
-  const update = (key: keyof CenterModelSelection, value: string | null | undefined) => {
+  const update = (key: 'modelRef' | 'thinkingLevel', value: string | null | undefined) => {
     setDraft(previous => {
       const next = { ...previous };
       if (value === undefined) delete next[key]; else next[key] = value;
@@ -94,7 +94,30 @@ export function BotModelSheet({ api, identity, botId, initialTab = 'model', onCl
     });
     setNotice('');
   };
+  const updateBool = (key: 'codemode' | 'codemodeOnly', value: string) => {
+    setDraft(previous => {
+      const next = { ...previous };
+      if (value === '__inherit') delete next[key];
+      else if (value === '__null') next[key] = null;
+      else if (value === 'true') {
+        next[key] = true;
+        if (key === 'codemodeOnly') next.codemode = true;
+      } else if (value === 'false') {
+        next[key] = false;
+        if (key === 'codemode' && next.codemodeOnly === true) next.codemodeOnly = false;
+      }
+      return next;
+    });
+    setNotice('');
+  };
   const describe = (value: string | null | undefined) => value === undefined ? t('继承', 'Inherit') : value === null ? t('显式清空', 'Explicitly cleared') : value;
+  const describeCodemode = (sel?: CenterModelSelection) => {
+    if (!sel) return t('默认', 'Default');
+    if (sel.codemodeOnly === true) return t('仅 Code Mode（渐进式加载）', 'Codemode Only');
+    if (sel.codemode === true) return t('已开启 Code Mode', 'Codemode On');
+    if (sel.codemode === false && sel.codemodeOnly === false) return t('已关闭', 'Off');
+    return t('继承 / 默认', 'Inherit / Default');
+  };
   const q = query.trim().toLowerCase();
 
   return <div className="grok-sheet-backdrop" role="dialog" aria-modal="true" aria-label={t('Bot 设置', 'Bot settings')} onClick={onClose}>
@@ -109,44 +132,112 @@ export function BotModelSheet({ api, identity, botId, initialTab = 'model', onCl
         <div className="grok-segmented-tabs" role="tablist" aria-label={t('Bot 设置视图', 'Bot settings views')}>
           <button type="button" role="tab" aria-selected={tab === 'model'} className={tab === 'model' ? 'active' : undefined} onClick={() => setTab('model')}>{t('模型', 'Model')}</button>
           <button type="button" role="tab" aria-selected={tab === 'capabilities'} className={tab === 'capabilities' ? 'active' : undefined} onClick={() => setTab('capabilities')}>{t('插件 / 技能 / MCP', 'Plugins / Skills / MCP')}</button>
+          <button type="button" role="tab" aria-selected={tab === 'advanced'} className={tab === 'advanced' ? 'active' : undefined} onClick={() => setTab('advanced')}>{t('高级设置', 'Advanced')}</button>
         </div>
         {tab === 'capabilities' && <BotCapabilities api={api} identity={identity} deviceId={identity.targetDeviceId} botId={botId} t={t} showTitle={false} onAuthenticated={() => setAuthenticated(true)}/>}
-        {tab === 'model' && <>
+        {(tab === 'model' || tab === 'advanced') && <>
         {busy && <p role="status">{t('正在处理…', 'Working…')}</p>}
         {!busy && !authenticated && catalog && <form className="grok-sheet-login" onSubmit={e => { e.preventDefault(); void login(); }}>
           <label className="grok-section-label" htmlFor="center-owner-password">{t('中心管理员密码', 'Center administrator password')}</label>
           <input id="center-owner-password" type="password" autoComplete="current-password" value={password} onChange={e => setPassword(e.target.value)} />
           <button type="submit" className="grok-done-pill-btn" disabled={!password}>{t('中心管理员登录', 'Center administrator login')}</button>
         </form>}
-        {config && <>
-          <p>{t('中心全局', 'Global')}: {describe(config.global.modelRef)} · {describe(config.global.thinkingLevel)}</p>
-          <p>{t('当前覆盖', 'Override')}: {describe(config.overrides.modelRef)} · {describe(config.overrides.thinkingLevel)}</p>
-          <p>{t('当前有效', 'Effective')}: {describe(config.effective.modelRef)} · {describe(config.effective.thinkingLevel)}</p>
-          <label className="grok-section-label">{t('模型', 'Model')}</label>
+        {config && tab === 'model' && <>
+          <p className="grok-card-footnote" style={{ marginTop: 0 }}>
+            {t('当前生效模型', 'Effective model')}: <strong>{describe(config.effective.modelRef)}</strong> · {describeCodemode(config.effective)}
+          </p>
+          <label className="grok-section-label">{t('模型选择', 'Model')}</label>
           <section className="grok-card-group">
-            <button type="button" className="grok-card-row" disabled={busy} onClick={() => update('modelRef', undefined)}><Cpu size={18}/><span className="grok-row-label">{t('继承全局', 'Inherit global')}</span>{draft.modelRef === undefined && <Check size={18}/>}</button>
-            <button type="button" className="grok-card-row" disabled={busy} onClick={() => update('modelRef', null)}><span className="grok-row-label">{t('显式清空', 'Explicitly clear')}</span>{draft.modelRef === null && <Check size={18}/>}</button>
+            <button type="button" className="grok-card-row" disabled={busy} onClick={() => update('modelRef', undefined)}>
+              <Cpu size={18}/>
+              <span className="grok-row-label">{t('继承全局默认模型', 'Inherit global default')} ({config.global.modelRef ?? t('未设置', 'Unset')})</span>
+              {draft.modelRef === undefined && <Check size={18}/>}
+            </button>
           </section>
           <div className="grok-model-sheet-search"><input type="search" value={query} onChange={e => setQuery(e.target.value)} placeholder={t('搜索模型…', 'Search models…')}/></div>
           <section className="grok-card-group">
             {draft.modelRef && !catalog?.models.some(model => model.modelRef === draft.modelRef) && <p>{t('当前模型不在目录中', 'Current model not in catalog')}: {draft.modelRef}</p>}
             {catalog?.models.filter(model => !q || `${model.name} ${model.modelRef}`.toLowerCase().includes(q)).map(model => <button type="button" className="grok-card-row" key={model.modelRef} disabled={busy} onClick={() => update('modelRef', model.modelRef)}><span className="grok-row-label">{model.name} · {model.modelRef}</span>{draft.modelRef === model.modelRef && <Check size={18}/>}</button>)}
           </section>
-          <label className="grok-section-label" htmlFor="bot-thinking-level">{t('思考档位', 'Thinking level')}</label>
-          <select id="bot-thinking-level" className="grok-inline-select" disabled={busy} value={draft.thinkingLevel === undefined ? '__inherit' : draft.thinkingLevel === null ? '__null' : draft.thinkingLevel} onChange={e => update('thinkingLevel', e.target.value === '__inherit' ? undefined : e.target.value === '__null' ? null : e.target.value)}>
-            <option value="__inherit">{t('继承全局', 'Inherit global')}</option><option value="__null">{t('显式清空', 'Explicitly clear')}</option>
-            {draft.thinkingLevel && !levels.includes(draft.thinkingLevel) && <option value={draft.thinkingLevel}>{draft.thinkingLevel}</option>}
-            {levels.map(level => <option key={level} value={level}>{level}</option>)}
-          </select>
-          <button type="button" className="grok-done-pill-btn" disabled={busy} onClick={() => void save()}>{t('保存', 'Save')}</button>
+          <button type="button" className="grok-done-pill-btn" disabled={busy} onClick={() => void save()}>{t('保存模型设置', 'Save Model')}</button>
+          <section className="grok-card-group">
+            <button type="button" className="grok-card-row" onClick={() => void openCenterManagement().catch(failure => setError(errorText(failure)))}>
+              <span className="grok-row-label">{t('管理模型服务商', 'Manage model providers')}</span>
+              <span className="grok-row-value">{t('在中心管理中打开', 'Opens Center management')}</span>
+              <ExternalLink size={16} className="grok-row-chevron"/>
+            </button>
+          </section>
         </>}
-        <section className="grok-card-group">
-          <button type="button" className="grok-card-row" onClick={() => void openCenterManagement().catch(failure => setError(errorText(failure)))}>
-            <span className="grok-row-label">{t('管理模型服务商', 'Manage model providers')}</span>
-            <span className="grok-row-value">{t('在中心管理中打开', 'Opens Center management')}</span>
-            <ExternalLink size={16} className="grok-row-chevron"/>
-          </button>
-        </section>
+        {config && tab === 'advanced' && <>
+          <label className="grok-section-label" htmlFor="bot-codemode">{t('工具执行与渐进式加载 (Code Mode)', 'Code Mode & Progressive Tool Loading')}</label>
+          <p className="grok-card-footnote" style={{ marginTop: 0 }}>
+            {t('启用 Code Mode 后模型可在 QuickJS 沙盒内编排多工具脚本；开启“仅 Code Mode”后所有工具与 MCP 均转为按需搜索与渐进式加载。', 'Enable QuickJS sandbox tool orchestration; Codemode Only defers all tools & MCPs for progressive on-demand loading.')}
+          </p>
+          <section className="grok-card-group">
+            <div className="grok-card-row no-active">
+              <span className="grok-row-label">{t('启用 Code Mode (codemode)', 'Enable Code Mode')}</span>
+              <select
+                id="bot-codemode"
+                className="grok-inline-select"
+                disabled={busy}
+                value={draft.codemode === undefined ? '__inherit' : draft.codemode === null ? '__null' : draft.codemode ? 'true' : 'false'}
+                onChange={e => updateBool('codemode', e.target.value)}
+              >
+                <option value="__inherit">{t('继承全局', 'Inherit global')} ({config.global.codemode ? t('开启', 'On') : t('关闭', 'Off')})</option>
+                <option value="true">{t('开启', 'Enabled')}</option>
+                <option value="false">{t('关闭', 'Disabled')}</option>
+              </select>
+            </div>
+            <div className="grok-card-row no-active">
+              <span className="grok-row-label">{t('仅 Code Mode (渐进式加载)', 'Codemode Only')}</span>
+              <select
+                id="bot-codemode-only"
+                className="grok-inline-select"
+                disabled={busy}
+                value={draft.codemodeOnly === undefined ? '__inherit' : draft.codemodeOnly === null ? '__null' : draft.codemodeOnly ? 'true' : 'false'}
+                onChange={e => updateBool('codemodeOnly', e.target.value)}
+              >
+                <option value="__inherit">{t('继承全局', 'Inherit global')} ({config.global.codemodeOnly ? t('开启', 'On') : t('关闭', 'Off')})</option>
+                <option value="true">{t('开启（仅暴露 codemode）', 'Enabled (codemode only)')}</option>
+                <option value="false">{t('关闭（保留常规工具）', 'Disabled (normal tools)')}</option>
+              </select>
+            </div>
+          </section>
+
+          <label className="grok-section-label" htmlFor="bot-thinking-level">{t('推理与高级覆盖策略', 'Reasoning & Override Policy')}</label>
+          <section className="grok-card-group">
+            <div className="grok-card-row no-active">
+              <span className="grok-row-label">{t('思考档位', 'Thinking level')}</span>
+              <select id="bot-thinking-level" className="grok-inline-select" disabled={busy} value={draft.thinkingLevel === undefined ? '__inherit' : draft.thinkingLevel === null ? '__null' : draft.thinkingLevel} onChange={e => update('thinkingLevel', e.target.value === '__inherit' ? undefined : e.target.value === '__null' ? null : e.target.value)}>
+                <option value="__inherit">{t('继承全局', 'Inherit global')}</option><option value="__null">{t('显式清空', 'Explicitly clear')}</option>
+                {draft.thinkingLevel && !levels.includes(draft.thinkingLevel) && <option value={draft.thinkingLevel}>{draft.thinkingLevel}</option>}
+                {levels.map(level => <option key={level} value={level}>{level}</option>)}
+              </select>
+            </div>
+            <div className="grok-card-row no-active">
+              <span className="grok-row-label">{t('显式清空模型覆盖', 'Explicitly Clear Model')}</span>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={draft.modelRef === null}
+                className={`grok-toggle-switch${draft.modelRef === null ? ' checked' : ''}`}
+                disabled={busy}
+                onClick={() => update('modelRef', draft.modelRef === null ? undefined : null)}
+              >
+                <span className="grok-toggle-knob" />
+              </button>
+            </div>
+          </section>
+
+          <label className="grok-section-label">{t('配置透视 (Global / Override / Effective)', 'Configuration Diagnostics')}</label>
+          <section className="grok-card-group" style={{ padding: '10px 14px' }}>
+            <p style={{ margin: '4px 0', fontSize: '.82rem' }}>{t('中心全局', 'Global')}: {describe(config.global.modelRef)} · {describe(config.global.thinkingLevel)} · {describeCodemode(config.global)}</p>
+            <p style={{ margin: '4px 0', fontSize: '.82rem' }}>{t('当前覆盖', 'Override')}: {describe(config.overrides.modelRef)} · {describe(config.overrides.thinkingLevel)} · {describeCodemode(config.overrides)}</p>
+            <p style={{ margin: '4px 0', fontSize: '.82rem' }}>{t('当前有效', 'Effective')}: {describe(config.effective.modelRef)} · {describe(config.effective.thinkingLevel)} · {describeCodemode(config.effective)}</p>
+          </section>
+
+          <button type="button" className="grok-done-pill-btn" disabled={busy} onClick={() => void save()}>{t('保存高级设置', 'Save Advanced Settings')}</button>
+        </>}
         <ErrorNotice error={error} onDismiss={() => setError('')}/>{notice && <ErrorNotice error={notice} tone="success" compact onDismiss={() => setNotice('')}/>}
         </>}
       </div>

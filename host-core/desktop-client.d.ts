@@ -171,7 +171,7 @@ export interface DesktopCenterStatus {
   savedConnection?: { url: string; deviceId: string; ca: string };
 }
 
-export interface CenterModelSelection { modelRef?: string | null; thinkingLevel?: string | null }
+export interface CenterModelSelection { modelRef?: string | null; thinkingLevel?: string | null; codemode?: boolean | null; codemodeOnly?: boolean | null }
 export interface CenterBotModelConfig { global: CenterModelSelection; overrides: CenterModelSelection; effective: CenterModelSelection; revision: number }
 
 /** Center-reported apply status; `pending` is synthesized by the center and never sent by a Host. */

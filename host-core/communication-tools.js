@@ -4,6 +4,7 @@ import { defineTool } from '@earendil-works/pi-durable';
 import { resolveBotIdentity } from './bot-identity.js';
 import { assertId, digest, messageError } from './message-protocol.js';
 import { inboxQueryKey } from './message-queries.js';
+import { CONTROL_ERROR_CODES } from './remote-control-protocol.js';
 
 const MAX_OUTPUT_BYTES = 50 * 1024;
 const MAX_TEXT_UNITS = 4096;
@@ -13,9 +14,17 @@ const TOOL_ERROR_CODES = new Set([
   'SCOPE_NOT_FOUND', 'SCOPE_FORBIDDEN', 'MESSAGE_NOT_FOUND', 'REQUEST_CONFLICT',
   'STALE_INPUT', 'WORK_STOPPED', 'WORK_CONTEXT_INACTIVE', 'RESPONSE_TOO_LARGE',
   'SCOPE_UNMANAGED', 'SCOPE_AUTHORITY_REQUIRED',
+  'CENTER_REQUEST_FAILED', 'NOT_FOUND', 'FORBIDDEN', 'VALIDATION_FAILED',
+  ...CONTROL_ERROR_CODES,
 ]);
 const ID_SCHEMA = { type: 'string', minLength: 1 };
 const LIMIT_SCHEMA = { type: 'integer', minimum: 1, maximum: 200 };
+const THINKING_LEVEL_SCHEMA = {
+  anyOf: [
+    { type: 'string', enum: ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] },
+    { type: 'null' },
+  ],
+};
 const MEMBER_SCHEMA = {
   type: 'object',
   properties: { deviceId: ID_SCHEMA, botId: ID_SCHEMA },
@@ -102,12 +111,13 @@ function replyPage(identity, page, status) {
 }
 
 export function createCommunicationTools({ host, getHarness, getMessageLog, publishWork, collaboration }) {
-  function tool({ name, description, properties, required = [], run }) {
+  function tool({ name, description, properties, required = [], deferred, run }) {
     return defineTool({
       name,
       description,
       parameters: { type: 'object', properties, required, additionalProperties: false },
       replay: 'safe',
+      ...(deferred !== undefined ? { deferred } : {}),
       outputLimits: { maxBytes: MAX_OUTPUT_BYTES },
       async execute(args, api, context) {
         try {
@@ -127,7 +137,14 @@ export function createCommunicationTools({ host, getHarness, getMessageLog, publ
             }), isError: true };
           }
           if (!TOOL_ERROR_CODES.has(error?.code)) throw error;
-          return { ...output({ code: error.code, message: error.message }), isError: true };
+          return {
+            ...output({
+              code: error.code,
+              message: error.message,
+              ...(error.outcome ? { outcome: error.outcome } : {}),
+            }),
+            isError: true,
+          };
         }
       },
     });
@@ -177,6 +194,18 @@ export function createCommunicationTools({ host, getHarness, getMessageLog, publ
   const isMember = (member, identity) =>
     member.deviceId === identity.deviceId && member.botId === identity.botId;
 
+  function assertTargetBot(args) {
+    assertId(args.deviceId, 'deviceId');
+    assertId(args.botId, 'botId');
+  }
+
+  function assertNotSelf(args, identity, actionLabel) {
+    assertTargetBot(args);
+    if (args.deviceId === identity.deviceId && args.botId === identity.botId) {
+      throw messageError('INVALID_ARGUMENT', `cannot ${actionLabel} the calling Bot itself during its own turn`);
+    }
+  }
+
   return [
     ...(collaboration ? [
       tool({
@@ -189,6 +218,7 @@ export function createCommunicationTools({ host, getHarness, getMessageLog, publ
             ...snapshot.devices.map((device) => ({ type: 'device', device })),
             ...snapshot.bots.map((bot) => ({ type: 'bot', bot: {
               botId: bot.botId, name: bot.role, description: bot.description ?? '',
+              isPrimary: Boolean(bot.isPrimary), archivedAt: bot.archivedAt ?? null,
               deviceId: bot.deviceId, deviceName: bot.deviceName, platform: bot.platform, online: bot.online,
             } })),
             ...snapshot.errors.map((error) => ({ type: 'error', error })),
@@ -210,6 +240,16 @@ export function createCommunicationTools({ host, getHarness, getMessageLog, publ
         },
       }),
       tool({
+        name: 'get_bot',
+        description: 'Inspect full metadata, workspace cwd, primary/archive status, and last activity of a Bot on the specified device.',
+        properties: { deviceId: ID_SCHEMA, botId: ID_SCHEMA },
+        required: ['deviceId', 'botId'],
+        async run(args, _identity, _log, _api, context) {
+          assertTargetBot(args);
+          return collaboration.getBot({ ...args, signal: context.abortSignal });
+        },
+      }),
+      tool({
         name: 'create_bot',
         description: 'Create a normal, user-manageable Bot on the specified device. Omit cwd to use that device\'s default workspace. A receipt does not start a task.',
         properties: {
@@ -217,10 +257,11 @@ export function createCommunicationTools({ host, getHarness, getMessageLog, publ
           description: { type: 'string', maxLength: 2000 }, modelRef: { type: 'string' }, cwd: { type: 'string' },
         },
         required: ['deviceId', 'name', 'description'],
-        async run(args, identity, log, api, context) {
+        async run(args, _identity, _log, api, context) {
+          assertId(args.deviceId, 'deviceId');
           const requestId = await memoRequestId(api, context);
           try {
-            const bot = await collaboration.createBot({ ...args, requestId });
+            const bot = await collaboration.createBot({ ...args, requestId, signal: context.abortSignal });
             return { ...bot, requestId };
           } catch (error) {
             context.abortSignal?.throwIfAborted();
@@ -231,6 +272,162 @@ export function createCommunicationTools({ host, getHarness, getMessageLog, publ
             failure.deviceId = args.deviceId;
             throw failure;
           }
+        },
+      }),
+      tool({
+        name: 'update_bot_profile',
+        description: 'Update a Bot\'s display name (role) and/or responsibility description on the specified device.',
+        properties: {
+          deviceId: ID_SCHEMA,
+          botId: ID_SCHEMA,
+          name: { type: 'string', minLength: 1, maxLength: 120 },
+          description: { type: 'string', maxLength: 2000 },
+        },
+        required: ['deviceId', 'botId'],
+        async run(args, _identity, _log, _api, context) {
+          assertTargetBot(args);
+          return collaboration.updateBotProfile({ ...args, signal: context.abortSignal });
+        },
+      }),
+      tool({
+        name: 'get_bot_soul',
+        description: 'Read a Bot\'s SOUL.md persona and responsibility document along with its current revision.',
+        properties: { deviceId: ID_SCHEMA, botId: ID_SCHEMA },
+        required: ['deviceId', 'botId'],
+        async run(args, _identity, _log, _api, context) {
+          assertTargetBot(args);
+          return collaboration.getBotSoul({ ...args, signal: context.abortSignal });
+        },
+      }),
+      tool({
+        name: 'set_bot_soul',
+        description: 'Update an idle Bot\'s SOUL.md persona and responsibility document. If expectedRevision is omitted, the current revision is read automatically.',
+        properties: {
+          deviceId: ID_SCHEMA,
+          botId: ID_SCHEMA,
+          text: { type: 'string', maxLength: 65536 },
+          expectedRevision: { type: 'string' },
+        },
+        required: ['deviceId', 'botId', 'text'],
+        async run(args, _identity, _log, _api, context) {
+          assertTargetBot(args);
+          return collaboration.setBotSoul({ ...args, signal: context.abortSignal });
+        },
+      }),
+      tool({
+        name: 'get_bot_model',
+        description: 'Get a Bot\'s Center-managed model selection (modelRef and thinkingLevel) and the catalog of available models.',
+        properties: { deviceId: ID_SCHEMA, botId: ID_SCHEMA },
+        required: ['deviceId', 'botId'],
+        async run(args, _identity, _log, _api, context) {
+          assertTargetBot(args);
+          return collaboration.getBotModel({ ...args, signal: context.abortSignal });
+        },
+      }),
+      tool({
+        name: 'set_bot_model',
+        description: 'Set a Bot\'s Center-managed modelRef (provider/modelId), thinkingLevel (off, minimal, low, medium, high, xhigh, max), codemode, or codemodeOnly overrides.',
+        properties: {
+          deviceId: ID_SCHEMA,
+          botId: ID_SCHEMA,
+          modelRef: { anyOf: [{ type: 'string', minLength: 1 }, { type: 'null' }] },
+          thinkingLevel: THINKING_LEVEL_SCHEMA,
+          codemode: { anyOf: [{ type: 'boolean' }, { type: 'null' }] },
+          codemodeOnly: { anyOf: [{ type: 'boolean' }, { type: 'null' }] },
+          expectedRevision: { type: 'integer', minimum: 0 },
+        },
+        required: ['deviceId', 'botId'],
+        async run(args, _identity, _log, _api, context) {
+          assertTargetBot(args);
+          return collaboration.setBotModel({ ...args, signal: context.abortSignal });
+        },
+      }),
+      tool({
+        name: 'get_bot_capabilities',
+        description: 'List Center-managed capabilities (plugins, skills, MCP servers) and their per-Bot configuration (enabled, overrides, revision) for a Bot.',
+        properties: { deviceId: ID_SCHEMA, botId: ID_SCHEMA },
+        required: ['deviceId', 'botId'],
+        async run(args, _identity, _log, _api, context) {
+          assertTargetBot(args);
+          return collaboration.getBotCapabilities({ ...args, signal: context.abortSignal });
+        },
+      }),
+      tool({
+        name: 'set_bot_capability',
+        description: 'Enable/disable a Center-managed capability or update its per-Bot config overrides (such as Hindsight mode or topic) for a Bot.',
+        properties: {
+          deviceId: ID_SCHEMA,
+          botId: ID_SCHEMA,
+          installationId: ID_SCHEMA,
+          enabled: { type: 'boolean' },
+          overrides: { type: 'object' },
+          expectedRevision: { type: 'integer', minimum: 0 },
+        },
+        required: ['deviceId', 'botId', 'installationId'],
+        async run(args, _identity, _log, _api, context) {
+          assertTargetBot(args);
+          assertId(args.installationId, 'installationId');
+          return collaboration.setBotCapability({ ...args, signal: context.abortSignal });
+        },
+      }),
+      tool({
+        name: 'abort_bot',
+        description: 'Abort any active generation task in another Bot\'s primary conversation.',
+        properties: { deviceId: ID_SCHEMA, botId: ID_SCHEMA },
+        required: ['deviceId', 'botId'],
+        async run(args, identity, _log, _api, context) {
+          assertNotSelf(args, identity, 'abort');
+          return collaboration.abortBot({ ...args, signal: context.abortSignal });
+        },
+      }),
+      tool({
+        name: 'clear_bot_history',
+        description: 'Reset/clear an idle, non-archived Bot\'s primary conversation context.',
+        properties: { deviceId: ID_SCHEMA, botId: ID_SCHEMA },
+        required: ['deviceId', 'botId'],
+        async run(args, identity, _log, _api, context) {
+          assertNotSelf(args, identity, 'clear history of');
+          return collaboration.clearBotHistory({ ...args, signal: context.abortSignal });
+        },
+      }),
+      tool({
+        name: 'compact_bot',
+        description: 'Manually compact an idle, non-archived Bot\'s primary conversation context.',
+        properties: { deviceId: ID_SCHEMA, botId: ID_SCHEMA },
+        required: ['deviceId', 'botId'],
+        async run(args, identity, _log, _api, context) {
+          assertNotSelf(args, identity, 'compact');
+          return collaboration.compactBot({ ...args, signal: context.abortSignal });
+        },
+      }),
+      tool({
+        name: 'archive_bot',
+        description: 'Archive an idle, non-primary Bot so it becomes read-only.',
+        properties: { deviceId: ID_SCHEMA, botId: ID_SCHEMA },
+        required: ['deviceId', 'botId'],
+        async run(args, identity, _log, _api, context) {
+          assertNotSelf(args, identity, 'archive');
+          return collaboration.archiveBot({ ...args, signal: context.abortSignal });
+        },
+      }),
+      tool({
+        name: 'unarchive_bot',
+        description: 'Unarchive an archived Bot so it can accept tasks again.',
+        properties: { deviceId: ID_SCHEMA, botId: ID_SCHEMA },
+        required: ['deviceId', 'botId'],
+        async run(args, _identity, _log, _api, context) {
+          assertTargetBot(args);
+          return collaboration.unarchiveBot({ ...args, signal: context.abortSignal });
+        },
+      }),
+      tool({
+        name: 'delete_bot',
+        description: 'Permanently delete an idle, non-primary Bot from the specified device.',
+        properties: { deviceId: ID_SCHEMA, botId: ID_SCHEMA },
+        required: ['deviceId', 'botId'],
+        async run(args, identity, _log, _api, context) {
+          assertNotSelf(args, identity, 'delete');
+          return collaboration.deleteBot({ ...args, signal: context.abortSignal });
         },
       }),
     ] : []),

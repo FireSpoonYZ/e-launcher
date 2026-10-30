@@ -182,10 +182,12 @@ const DYNAMIC_ASSET_RE = /(?:require\s*\.\s*resolve|createRequire\s*\([^)]*\)\s*
 // `declared` is the manifest license to match, `license` the in-repo text file; a
 // package@version outside this map still fails the missing-license check.
 const UPSTREAM_LICENSE_ALLOWLIST = new Map([
-  ['@earendil-works/chord', { version: '1.3.0', declared: 'MIT', license: 'pi-v1.3.0-MIT.txt' }],
-  ['@earendil-works/pi-ai', { version: '1.3.0', declared: 'MIT', license: 'pi-v1.3.0-MIT.txt' }],
-  ['@earendil-works/pi-durable', { version: '1.3.0', declared: 'MIT', license: 'pi-v1.3.0-MIT.txt' }],
-  ['@earendil-works/pi-mcp', { version: '1.3.0', declared: 'MIT', license: 'pi-v1.3.0-MIT.txt' }],
+  ['@earendil-works/chord', { version: '1.4.0', declared: 'MIT', license: 'pi-v1.3.0-MIT.txt' }],
+  ['@earendil-works/pi-ai', { version: '1.4.0', declared: 'MIT', license: 'pi-v1.3.0-MIT.txt' }],
+  ['@earendil-works/pi-codemode', { version: '1.4.0', declared: 'MIT', license: 'pi-v1.3.0-MIT.txt' }],
+  ['@earendil-works/pi-durable', { version: '1.4.0', declared: 'MIT', license: 'pi-v1.3.0-MIT.txt' }],
+  ['@earendil-works/pi-mcp', { version: '1.4.0', declared: 'MIT', license: 'pi-v1.3.0-MIT.txt' }],
+  ['@earendil-works/pi-telemetry', { version: '1.4.0', declared: 'MIT', license: 'pi-v1.3.0-MIT.txt' }],
   ['@vectorize-io/hindsight-client', { version: '0.9.2', declared: 'MIT', license: 'hindsight-client-0.9.2-MIT.txt' }],
   ['standardwebhooks', { version: '1.1.1', declared: 'MIT', license: 'standardwebhooks-1.1.1-LICENSE.txt' }],
 ]);

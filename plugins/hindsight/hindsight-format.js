@@ -21,13 +21,17 @@ function messageBytes(content) {
 
 /**
  * 稳定 Bot/target bank ID：'elauncher-' + sha256(JSON.stringify([...]))。
- * deviceId/botId/target 为内部已归一化值，直接信任。
+ * deviceId/botId/target 为内部已归一化值，直接信任；可选 topic 在非空时纳入派生哈希。
  */
-export function hindsightBankId(deviceId, botId, target) {
+export function hindsightBankId(deviceId, botId, target, topic) {
   const kind = target.kind;
   const scopeId = kind === 'scope' ? target.scopeId : null;
+  const normalizedTopic = typeof topic === 'string' && topic.trim().length > 0 ? topic.trim() : null;
+  const payload = normalizedTopic
+    ? ['hindsight-v1', deviceId, botId, kind, scopeId, normalizedTopic]
+    : ['hindsight-v1', deviceId, botId, kind, scopeId];
   const digest = createHash('sha256')
-    .update(JSON.stringify(['hindsight-v1', deviceId, botId, kind, scopeId]))
+    .update(JSON.stringify(payload))
     .digest('hex');
   return `elauncher-${digest}`;
 }
@@ -120,17 +124,34 @@ function footerFor(omitted, truncated) {
  * 首个超预算前缀即停止（后续前缀只增不减，footer 缩减有限，不会重新适配）；
  * omitted/truncated 计数为实际值，不使用悲观占位。
  */
-export function renderHindsightRecall(banks) {
+export function renderHindsightRecall(banks, options = {}) {
   if (!Array.isArray(banks)) return null;
+  const mentalModels =
+    typeof options?.mentalModels === 'string' && options.mentalModels.trim().length > 0
+      ? options.mentalModels.trim()
+      : '';
   const prepared = [];
   for (const entry of banks) {
     for (const item of entry.result.results) {
       prepared.push(itemRecord(item, entry.bankId, entry.target));
     }
   }
-  if (prepared.length === 0) return null;
+  if (prepared.length === 0) {
+    if (mentalModels && messageBytes(mentalModels) <= RECALL_MESSAGE_MAX_BYTES) {
+      return { role: 'user', content: mentalModels, timestamp: 0 };
+    }
+    return null;
+  }
 
-  const header = `${RECALL_DERIVED_HEADER}\n`;
+  const withMentalHeader = mentalModels
+    ? `${mentalModels}\n\n${RECALL_DERIVED_HEADER}\n`
+    : `${RECALL_DERIVED_HEADER}\n`;
+  const header =
+    mentalModels &&
+    messageBytes(withMentalHeader + prepared[0].line + footerFor(prepared.length - 1, prepared[0].truncated ? 1 : 0)) <=
+      RECALL_MESSAGE_MAX_BYTES
+      ? withMentalHeader
+      : `${RECALL_DERIVED_HEADER}\n`;
   const selected = [];
   let truncatedCount = 0;
   let base = header;

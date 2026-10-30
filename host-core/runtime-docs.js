@@ -14,6 +14,7 @@ export const PrimaryIndex = defineDoc({
   version: 1,
   scope: 'session',
   initial: () => ({ byPrimary: {} }),
+  checkpointWhen: () => false,
 });
 
 // 本模块请求正文去重索引：key 为 'r:'+requestId，保存正文 SHA-256 摘要。
@@ -24,6 +25,7 @@ export const RequestKeys = defineDoc({
   history: 'latest',
   fork: 'initial',
   initial: () => ({ digests: {} }),
+  checkpointWhen: () => false,
 });
 
 /**
@@ -51,6 +53,7 @@ export async function createPrimaryInTransaction(tx, bot, options = {}) {
     instructions: options.instructions === undefined ? bot.role : options.instructions,
     cwd: bot.cwd,
     tools: initialToolsChange(options.removeTools),
+    ...(options.codemodeOnly ? { modelTools: [{ name: 'codemode' }] } : {}),
   });
   draft.byPrimary[primaryId] = record.id;
   return record.id;
@@ -127,6 +130,17 @@ export function agentProfileChange(state, profile) {
     const current = state?.extensions;
     if (!Array.isArray(current) || current.length !== desired.length || current.some((name, index) => name !== desired[index].name)) {
       change.extensions = desired;
+    }
+  }
+
+  if (profile?.codemodeOnly !== undefined) {
+    const currentModelTools = state?.modelTools;
+    if (profile.codemodeOnly === true) {
+      if (!Array.isArray(currentModelTools) || currentModelTools.length !== 1 || currentModelTools[0] !== 'codemode') {
+        change.modelTools = [{ name: 'codemode' }];
+      }
+    } else if (Array.isArray(currentModelTools)) {
+      change.modelTools = null;
     }
   }
 

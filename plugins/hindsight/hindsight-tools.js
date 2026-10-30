@@ -6,6 +6,7 @@
 // {truncated:true,preview:<Unicode 安全前缀>}；仅稳定错误码映射为 isError 输出，
 // 且只输出固定安全文案，不回显原始错误消息。
 import { clipMemoryText, renderHindsightRecall } from './hindsight-format.js';
+import { createOperationCatalog } from './operations/operation-catalog.js';
 
 const MAX_OUTPUT_BYTES = 50 * 1024;
 
@@ -204,5 +205,121 @@ export function createHindsightTools(controller, defineTool, namespace) {
       operation: 'retryMemory',
       replay: 'unsafe',
     }),
+    ...buildPiCatalogTools(controller, defineTool, namespace),
   ];
+}
+
+const DURABLE_CORE_TOOL_NAMES = new Set([
+  'hindsight_status',
+  'hindsight_recall',
+  'hindsight_reflect',
+  'hindsight_retain',
+  'hindsight_get',
+  'hindsight_source',
+  'hindsight_correct',
+  'hindsight_retry',
+]);
+
+function isMutatingCatalogCall(toolName, args = {}) {
+  if (
+    toolName === 'hindsight_retain_global' ||
+    toolName === 'hindsight_seed_git' ||
+    toolName === 'hindsight_scope_migrate'
+  ) {
+    return true;
+  }
+  const action = typeof args?.action === 'string' ? args.action.trim() : '';
+  if (toolName === 'hindsight_config') {
+    return ['set', 'unset', 'init'].includes(action);
+  }
+  if (toolName === 'hindsight_bank') {
+    return ['import_template', 'set_config', 'reset_config', 'apply_strategy'].includes(action);
+  }
+  if (toolName === 'hindsight_mental_model') {
+    return ['create', 'update', 'refresh', 'delete'].includes(action);
+  }
+  if (toolName === 'hindsight_knowledge') {
+    return ['create_folder', 'create_page', 'update', 'delete', 'seed_taxonomy'].includes(action);
+  }
+  return false;
+}
+
+function buildPiCatalogTools(controller, defineTool, namespace) {
+  if (!controller?.piDeps) return [];
+  const catalog = createOperationCatalog(controller.piDeps);
+  const extraTools = [];
+  for (const catalogTool of catalog.tools) {
+    if (DURABLE_CORE_TOOL_NAMES.has(catalogTool.name)) continue;
+    const rawName = catalogTool.name;
+    const suffix = rawName.startsWith('hindsight_')
+      ? rawName.slice('hindsight_'.length)
+      : rawName;
+    extraTools.push(
+      defineTool({
+        name: `${namespace}_${suffix}`,
+        description: catalogTool.description,
+        parameters: catalogTool.parameters,
+        async execute(args, api, context) {
+          const isWrite = isMutatingCatalogCall(rawName, args);
+          try {
+            const run = async () => {
+              const ctx = {
+                cwd: controller.botDataDir || process.cwd(),
+                hasUI: false,
+                signal: context?.abortSignal,
+                ui: {
+                  notify() {},
+                  setStatus() {},
+                },
+                sessionManager: {
+                  getEntries: () => [],
+                  getBranch: () => [],
+                  getSessionId: () => String(api?.conversationId ?? 'default'),
+                  getSessionFile: () => undefined,
+                },
+              };
+              const res = await catalogTool.execute(
+                String(api?.toolCallId ?? 'call_1'),
+                args ?? {},
+                context?.abortSignal,
+                undefined,
+                ctx,
+              );
+              const text = Array.isArray(res?.content)
+                ? res.content
+                    .map((part) => (typeof part?.text === 'string' ? part.text : ''))
+                    .filter(Boolean)
+                    .join('\n')
+                : '';
+              return boundedOutput({
+                ok: !res?.isError,
+                text,
+                details: res?.details ?? null,
+              });
+            };
+            if (typeof controller.runPiTool === 'function') {
+              return await controller.runPiTool(api, context, isWrite, run);
+            }
+            return await run();
+          } catch (error) {
+            if (error?.name === 'AbortError' || context?.abortSignal?.aborted) {
+              throw error;
+            }
+            if (!TOOL_ERROR_CODES.has(error?.code)) {
+              return {
+                ...output({
+                  code: 'HINDSIGHT_UNAVAILABLE',
+                  message: SAFE_ERROR_MESSAGES.HINDSIGHT_UNAVAILABLE,
+                }),
+                isError: true,
+              };
+            }
+            const message = SAFE_ERROR_MESSAGES[error.code] ?? error.code;
+            return { ...output({ code: error.code, message }), isError: true };
+          }
+        },
+      }),
+    );
+  }
+  return extraTools;
 }

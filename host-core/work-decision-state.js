@@ -17,6 +17,7 @@ export const WorkDecisionState = defineDoc({
   history: 'latest',
   fork: 'initial',
   initial: initialDecisionState,
+  checkpointWhen: () => false,
 });
 
 /** 传入 tx.doc 草稿时须在 commit 内调用，逐字段复制，不能带出已结算的 overlay。 */

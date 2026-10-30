@@ -6,7 +6,7 @@
 // bound, per-operation timeouts and the draining close(), while keeping the
 // existing method signatures, DTO checks and stable error codes. No global fetch
 // patch, no automatic retries, no mutation replay.
-import { createClient, createConfig, sdk } from '@vectorize-io/hindsight-client';
+import { createClient, createConfig, sdk } from './client/hindsight-sdk.js';
 
 const MAX_BODY_BYTES = 2 * 1024 * 1024; // request/response UTF-8 bound, 2MiB
 const DEFAULT_TIMEOUT_MS = 30_000;
@@ -133,6 +133,7 @@ export function normalizeHindsightConfig(value) {
     'sharedMemory',
     'timeoutMs',
     'reflectTimeoutMs',
+    'topic',
   ]);
   for (const key of Object.keys(value)) {
     if (!allowed.has(key)) {
@@ -165,6 +166,17 @@ export function normalizeHindsightConfig(value) {
   if (value.reflectTimeoutMs !== undefined) {
     normalized.reflectTimeoutMs = normalizeTimeout(value.reflectTimeoutMs, 'reflectTimeoutMs');
   }
+  if (value.topic !== undefined) {
+    if (
+      typeof value.topic !== 'string' ||
+      value.topic.trim().length === 0 ||
+      value.topic.trim().length > 256 ||
+      !value.topic.isWellFormed()
+    ) {
+      throw clientError('INVALID_ARGUMENT', 'hindsight topic must be a non-blank string <= 256 chars');
+    }
+    normalized.topic = value.topic.trim();
+  }
   return normalized;
 }
 
@@ -195,6 +207,7 @@ export function parseHindsightOptions(value) {
     sharedMemory: normalized.sharedMemory,
     timeoutMs: normalized.timeoutMs ?? DEFAULT_TIMEOUT_MS,
     reflectTimeoutMs: normalized.reflectTimeoutMs ?? DEFAULT_REFLECT_TIMEOUT_MS,
+    ...(normalized.topic !== undefined ? { topic: normalized.topic } : {}),
   };
 }
 
@@ -477,6 +490,9 @@ export function createHindsightClient(config) {
       if (opts.reflectMission !== undefined) {
         payload.reflect_mission = mustOptString(opts.reflectMission, 'reflectMission');
       }
+      if (opts.observationsMission !== undefined) {
+        payload.observations_mission = mustOptString(opts.observationsMission, 'observationsMission');
+      }
       return request(async (sdkSignal) => {
         const response = await sdkCall(
           sdk.createOrUpdateBank,
@@ -508,6 +524,8 @@ export function createHindsightClient(config) {
       }
       if (opts.tags !== undefined) item.tags = mustStringArray(opts.tags, 'tags');
       if (opts.timestamp !== undefined) item.timestamp = mustOptString(opts.timestamp, 'timestamp');
+      if (opts.strategy !== undefined) item.strategy = mustOptString(opts.strategy, 'strategy');
+      if (opts.observationScopes !== undefined) item.observation_scopes = opts.observationScopes;
       return request(async (sdkSignal) => {
         const response = await sdkCall(
           sdk.retainMemories,
@@ -684,6 +702,18 @@ export function createHindsightClient(config) {
         protocolCheck(response.bank_id === id, 'document response bank_id mismatch');
         return response;
       }, timeoutMs, signal);
+    },
+    async listMentalModels(bankId, options = {}, signal) {
+      const id = mustResourceId(bankId, 'bankId');
+      const effectiveSignal = signal ?? options?.signal;
+      return request(async (sdkSignal) => {
+        const response = await sdkCall(
+          sdk.listMentalModels,
+          { path: { bank_id: id } },
+          sdkSignal,
+        );
+        return plainObject(response);
+      }, timeoutMs, effectiveSignal);
     },
     close,
   };

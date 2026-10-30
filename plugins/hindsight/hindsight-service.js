@@ -179,10 +179,11 @@ export function createHindsightService({
       if (!config.sharedMemory) throw sharedDisabled();
     }
     return {
-      key: memoryContextKey(botId, normalizedTarget),
+      key: memoryContextKey(botId, normalizedTarget, config.topic),
       botId,
       target: normalizedTarget,
-      bankId: hindsightBankId(host.deviceId, botId, normalizedTarget),
+      bankId: hindsightBankId(host.deviceId, botId, normalizedTarget, config.topic),
+      ...(config.topic ? { topic: config.topic } : {}),
       policy,
     };
   }
@@ -206,6 +207,7 @@ export function createHindsightService({
         target: normalized.target,
         enabled: false,
         sharedMemory: false,
+        topic: null,
         bankId: null,
         pending: null,
         accepted: null,
@@ -232,6 +234,7 @@ export function createHindsightService({
       target: ctx.target,
       enabled: true,
       sharedMemory: config.sharedMemory,
+      topic: config.topic ?? null,
       bankId: ctx.bankId,
     };
     // 已配置但尚无本地跟踪文件：返回 0 计数与空 jobs，不创建 DB/上下文。

@@ -2286,8 +2286,9 @@ ${newer}` : draftSnapshot;
     setScheduleEditing('edit');
   };
 
-  const handleToggleSchedule = (task: BotScheduleTask, nextEnabled: boolean) =>
-    action.run(async () => {
+  const executeActiveBotSchedule = async (input: Record<string, unknown>) => {
+    if (!activeBot) return;
+    if (activeBot.hostKind === 'local') {
       const owner = await resolveLocalBotScheduleOwner();
       if (!owner) return;
       await BotHost.call({
@@ -2295,49 +2296,45 @@ ${newer}` : draftSnapshot;
         params: {
           botId: owner.botId,
           conversationId: owner.conversationId,
-          input: {
-            action: 'setEnabled',
-            id: task.id,
-            revision: task.revision,
-            enabled: nextEnabled,
-          },
+          input,
         },
       });
-      if (activeBot) {
-        await loadBotSchedules({
-          ...activeBot,
-          botId: owner.botId,
-          key: owner.botKey,
-          primaryConversationId: owner.conversationId,
-        });
+      await loadBotSchedules({
+        ...activeBot,
+        botId: owner.botId,
+        key: owner.botKey,
+        primaryConversationId: owner.conversationId,
+      });
+    } else if (activeBot.hostKind === 'remote') {
+      if (!activeBot.remoteIdentity || !remoteClientRef.current || !remoteConnected || activeBot.online === false) {
+        throw new Error(t('目标设备离线，已拒绝修改', 'Target device is offline; operation rejected'));
       }
+      await remoteClientRef.current.api.call(activeBot.remoteIdentity, 'scheduleTask', {
+        botId: activeBot.botId,
+        input,
+      });
+      await loadBotSchedules(activeBot);
+    }
+  };
+
+  const handleToggleSchedule = (task: BotScheduleTask, nextEnabled: boolean) =>
+    action.run(async () => {
+      await executeActiveBotSchedule({
+        action: 'setEnabled',
+        id: task.id,
+        revision: task.revision,
+        enabled: nextEnabled,
+      });
     });
 
   const handleDeleteSchedule = (task: BotScheduleTask) =>
     action.run(async () => {
-      const owner = await resolveLocalBotScheduleOwner();
-      if (!owner) return;
-      await BotHost.call({
-        method: 'uiScheduleTask',
-        params: {
-          botId: owner.botId,
-          conversationId: owner.conversationId,
-          input: {
-            action: 'delete',
-            id: task.id,
-            revision: task.revision,
-          },
-        },
+      await executeActiveBotSchedule({
+        action: 'delete',
+        id: task.id,
+        revision: task.revision,
       });
       setScheduleEditing(null);
-      if (activeBot) {
-        await loadBotSchedules({
-          ...activeBot,
-          botId: owner.botId,
-          key: owner.botKey,
-          primaryConversationId: owner.conversationId,
-        });
-      }
     });
 
   const handleSaveSchedule = () =>
@@ -2353,8 +2350,6 @@ ${newer}` : draftSnapshot;
       if (scheduleDraft.repeat === 'weekly' && scheduleDraft.weekdays.length === 0) {
         throw new Error(t('请至少选择一个执行星期', 'Please select at least one weekday'));
       }
-      const owner = await resolveLocalBotScheduleOwner();
-      if (!owner) return;
 
       const basePayload: Record<string, unknown> = {
         title,
@@ -2372,41 +2367,19 @@ ${newer}` : draftSnapshot;
       }
 
       if (scheduleEditing === 'edit' && scheduleDraft.id && scheduleDraft.revision) {
-        await BotHost.call({
-          method: 'uiScheduleTask',
-          params: {
-            botId: owner.botId,
-            conversationId: owner.conversationId,
-            input: {
-              action: 'update',
-              id: scheduleDraft.id,
-              revision: scheduleDraft.revision,
-              ...basePayload,
-            },
-          },
+        await executeActiveBotSchedule({
+          action: 'update',
+          id: scheduleDraft.id,
+          revision: scheduleDraft.revision,
+          ...basePayload,
         });
       } else {
-        await BotHost.call({
-          method: 'uiScheduleTask',
-          params: {
-            botId: owner.botId,
-            conversationId: owner.conversationId,
-            input: {
-              action: 'create',
-              ...basePayload,
-            },
-          },
+        await executeActiveBotSchedule({
+          action: 'create',
+          ...basePayload,
         });
       }
       setScheduleEditing(null);
-      if (activeBot) {
-        await loadBotSchedules({
-          ...activeBot,
-          botId: owner.botId,
-          key: owner.botKey,
-          primaryConversationId: owner.conversationId,
-        });
-      }
     });
 
   const handleRequestExactAlarm = () =>
@@ -3840,6 +3813,20 @@ ${newer}` : draftSnapshot;
                 <span className="grok-row-label">{t('插件 / 技能 / MCP', 'Plugins / Skills / MCP')}</span>
                 <span className="grok-row-value grok-row-value-path">
                   {getOrCreateRemoteClient ? t('设置', 'Settings') : t('请在独立助手中设置 Bot 能力', 'Set bot capabilities in the standalone assistant')}
+                </span>
+                <ChevronRight size={18} className="grok-row-chevron" />
+              </button>
+
+              <button
+                type="button"
+                className="grok-card-row"
+                onClick={() => openModelPickerSheet('bot-profile', 'advanced')}
+                disabled={!getOrCreateRemoteClient || !remoteConnected || !remoteIdentity || (activeBot.hostKind === 'local' && !localHost?.deviceId)}
+              >
+                <Settings size={20} className="grok-row-icon" />
+                <span className="grok-row-label">{t('高级设置', 'Advanced Settings')}</span>
+                <span className="grok-row-value grok-row-value-path">
+                  {getOrCreateRemoteClient ? t('Code Mode · 思考档位', 'Code Mode · Thinking') : t('请在独立助手中设置', 'Configure in standalone assistant')}
                 </span>
                 <ChevronRight size={18} className="grok-row-chevron" />
               </button>
@@ -5885,6 +5872,7 @@ function HubSettingsView({
   const [credJson, setCredJson] = useState('');
   const [voice, setVoice] = useState<HostVoiceSettings>();
   const [showLocalConfig, setShowLocalConfig] = useState(false);
+  const [settingsTab, setSettingsTab] = useState<'basic' | 'advanced'>('basic');
 
   useEffect(() => {
     void ensureRemoteApi();
@@ -6053,6 +6041,28 @@ function HubSettingsView({
       </header>
 
       <div className="grok-subpage-scroll">
+        <div className="grok-segmented-tabs" role="tablist" aria-label={t('设置分栏', 'Settings tabs')} style={{ marginBottom: 14 }}>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={settingsTab === 'basic'}
+            className={settingsTab === 'basic' ? 'active' : undefined}
+            onClick={() => setSettingsTab('basic')}
+          >
+            {t('常规设置', 'General')}
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={settingsTab === 'advanced'}
+            className={settingsTab === 'advanced' ? 'active' : undefined}
+            onClick={() => setSettingsTab('advanced')}
+          >
+            {t('高级设置', 'Advanced')}
+          </button>
+        </div>
+
+        {settingsTab === 'basic' && <>
         {/* Section 0: Center Connection (Moved from top of Bot Hub into Settings) */}
         <div className="grok-field-section">
           <div className="grok-provider-group-head">
@@ -6164,28 +6174,6 @@ function HubSettingsView({
                         ? t('留空使用已保存令牌', 'Blank to use saved token')
                         : t('输入中心访问令牌', 'Enter client token')
                     }
-                  />
-                </label>
-
-                <label className="grok-card-row grok-input-row">
-                  <span className="grok-input-label">{t('本机节点令牌', 'Host Token')}</span>
-                  <input
-                    type="password"
-                    autoComplete="new-password"
-                    className="grok-inline-input"
-                    value={centerConn.hostToken}
-                    onChange={e => centerConn.setHostToken(e.target.value)}
-                    placeholder={t('选填，留空不更改本机节点连接', 'Optional; leave blank to keep local Host settings')}
-                  />
-                </label>
-
-                <label className="grok-card-row grok-input-row">
-                  <span className="grok-input-label">{t('CA 证书', 'CA PEM')}</span>
-                  <input
-                    className="grok-inline-input"
-                    value={centerConn.ca}
-                    onChange={e => centerConn.setCa(e.target.value)}
-                    placeholder={t('自签名证书 PEM（选填）', 'Optional self-signed PEM')}
                   />
                 </label>
 
@@ -6303,10 +6291,68 @@ function HubSettingsView({
           </p>
         </div>
 
+        {/* Section 2: System Permissions & Console */}
+        <div className="grok-field-section">
+          <label className="grok-section-label">{t('系统与控制台', 'System & Console')}</label>
+          <section className="grok-card-group">
+            {onOpenSystemSettings && (
+              <button type="button" className="grok-card-row" onClick={onOpenSystemSettings}>
+                <Settings size={20} className="grok-row-icon" />
+                <span className="grok-row-label">{t('系统权限与设置', 'System permissions & settings')}</span>
+                <span className="grok-row-value">{t('Shizuku、唤醒词、外观', 'Permissions & Theme')}</span>
+                <ChevronRight size={18} className="grok-row-chevron" />
+              </button>
+            )}
+
+            <button
+              type="button"
+              className="grok-card-row"
+              onClick={() => void openCenterManagement()}
+            >
+              <ExternalLink size={20} className="grok-row-icon" />
+              <span className="grok-row-label">{t('中心管理控制台', 'Center Management Console')}</span>
+              <span className="grok-row-value">{t('浏览器打开', 'Open in browser')}</span>
+              <ChevronRight size={18} className="grok-row-chevron" />
+            </button>
+          </section>
+        </div>
+        </>}
+
+        {settingsTab === 'advanced' && <>
+        <div className="grok-field-section">
+          <label className="grok-section-label">{t('中心连接进阶参数', 'Center Advanced TLS & Host Token')}</label>
+          <section className="grok-card-group">
+            <label className="grok-card-row grok-input-row">
+              <span className="grok-input-label">{t('本机节点令牌', 'Host Token')}</span>
+              <input
+                type="password"
+                autoComplete="new-password"
+                className="grok-inline-input"
+                value={centerConn.hostToken}
+                onChange={e => centerConn.setHostToken(e.target.value)}
+                placeholder={t('选填，留空保持本机节点令牌不变', 'Optional; leave blank to keep local Host token')}
+              />
+            </label>
+
+            <label className="grok-card-row grok-input-row">
+              <span className="grok-input-label">{t('CA 证书', 'CA PEM')}</span>
+              <input
+                className="grok-inline-input"
+                value={centerConn.ca}
+                onChange={e => centerConn.setCa(e.target.value)}
+                placeholder={t('自签名证书 PEM（选填）', 'Optional self-signed PEM')}
+              />
+            </label>
+          </section>
+          <p className="grok-card-footnote">
+            {t('仅在使用自签证书中心或需单独指定本机 Host 设备令牌时填写。', 'Only needed for self-signed TLS certificates or custom local Host tokens.')}
+          </p>
+        </div>
+
         {/* Section 2: Remote Connections */}
         <div className="grok-field-section">
           <div className="grok-provider-group-head">
-            <label className="grok-section-label">{t('远程节点', 'Remote Hosts')}</label>
+            <label className="grok-section-label">{t('自定义远程节点 / 直连配置', 'Custom Remote Hosts')}</label>
             <button
               type="button"
               className="grok-provider-edit-link"
@@ -6540,30 +6586,10 @@ function HubSettingsView({
           </p>
         </div>
 
-        {/* Section 3: System & Advanced */}
+        {/* Section 3: Local Host Raw JSON */}
         <div className="grok-field-section">
-          <label className="grok-section-label">{t('系统与高级', 'System & Advanced')}</label>
+          <label className="grok-section-label">{t('本机底层配置与凭据', 'Local Host Raw Config')}</label>
           <section className="grok-card-group">
-            {onOpenSystemSettings && (
-              <button type="button" className="grok-card-row" onClick={onOpenSystemSettings}>
-                <Settings size={20} className="grok-row-icon" />
-                <span className="grok-row-label">{t('系统权限与设置', 'System permissions & settings')}</span>
-                <span className="grok-row-value">{t('Shizuku、唤醒词、外观', 'Permissions & Theme')}</span>
-                <ChevronRight size={18} className="grok-row-chevron" />
-              </button>
-            )}
-
-            <button
-              type="button"
-              className="grok-card-row"
-              onClick={() => void openCenterManagement()}
-            >
-              <ExternalLink size={20} className="grok-row-icon" />
-              <span className="grok-row-label">{t('中心管理控制台', 'Center Management Console')}</span>
-              <span className="grok-row-value">{t('浏览器打开', 'Open in browser')}</span>
-              <ChevronRight size={18} className="grok-row-chevron" />
-            </button>
-
             <button type="button" className="grok-card-row" onClick={toggleLocalConfig}>
               <Code2 size={20} className="grok-row-icon" />
               <span className="grok-row-label">{t('高级配置 (JSON)', 'Advanced JSON')}</span>
@@ -6614,6 +6640,7 @@ function HubSettingsView({
             </div>
           )}
         </div>
+        </>}
 
         <ErrorNotice error={action.error} onDismiss={() => action.setError('')} />
       </div>

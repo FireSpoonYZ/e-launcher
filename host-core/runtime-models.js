@@ -128,6 +128,14 @@ export function parseModelRef(value) {
   return { provider, modelId };
 }
 
+export function normalizeCodemodeFlag(value, fieldName = 'codemode') {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== 'boolean') {
+    throw invalidArgument(`${fieldName} must be a boolean`);
+  }
+  return value;
+}
+
 /** 可选默认思考档位：仅接受已知 pi 档位；undefined/null 表示交给 SDK 默认值。 */
 export function normalizeThinkingLevel(value) {
   if (value === undefined || value === null) return undefined;
@@ -465,6 +473,8 @@ export function applyCenterModels(snapshot, existingModels) {
       }
     }
     normalizeThinkingLevel(selection.thinkingLevel);
+    normalizeCodemodeFlag(selection.codemode, 'codemode');
+    normalizeCodemodeFlag(selection.codemodeOnly, 'codemodeOnly');
     botModels[bot.botId] = selection;
   }
   const built = normalized.map((provider) => {

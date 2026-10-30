@@ -35,6 +35,12 @@
       "type": "integer",
       "minimum": 1,
       "maximum": 120000
+    },
+    "topic": {
+      "type": "string",
+      "title": "Hindsight topic",
+      "minLength": 1,
+      "maxLength": 256
     }
   },
   "required": [

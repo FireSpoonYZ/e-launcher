@@ -76,7 +76,7 @@ export function BotSettings({
   const [saving, setSaving] = useState<'soul' | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const [studioTab, setStudioTab] = useState<'all' | 'soul' | 'extensions' | 'capabilities' | 'schedules'>('all');
+  const [studioTab, setStudioTab] = useState<'all' | 'soul' | 'extensions' | 'capabilities' | 'schedules' | 'advanced'>('all');
   // 能力面板只在展开时挂载：收起/后台不轮询中心。
   const [detailsOpen, setDetailsOpen] = useState(Boolean(open));
 
@@ -277,11 +277,28 @@ export function BotSettings({
     }
   }
 
-  function updateModelDraft(k: keyof CenterModelSelection, v: string | null | undefined): void {
+  function updateModelDraft(k: 'modelRef' | 'thinkingLevel', v: string | null | undefined): void {
     setModelDraft((prev) => {
       const next = { ...prev };
       if (v === undefined) delete next[k];
       else next[k] = v;
+      return next;
+    });
+    setNotice(null);
+  }
+
+  function updateCodemodeDraft(k: 'codemode' | 'codemodeOnly', v: string): void {
+    setModelDraft((prev) => {
+      const next = { ...prev };
+      if (v === '__inherit') delete next[k];
+      else if (v === '__null') next[k] = null;
+      else if (v === 'true') {
+        next[k] = true;
+        if (k === 'codemodeOnly') next.codemode = true;
+      } else if (v === 'false') {
+        next[k] = false;
+        if (k === 'codemode' && next.codemodeOnly === true) next.codemodeOnly = false;
+      }
       return next;
     });
     setNotice(null);
@@ -314,11 +331,19 @@ export function BotSettings({
 
   const describeVal = (v: string | null | undefined) =>
     v === undefined ? '继承全局' : v === null ? '显式清空' : v;
+  const describeCodemode = (sel?: CenterModelSelection) => {
+    if (!sel) return '默认';
+    if (sel.codemodeOnly === true) return '仅 Code Mode（渐进式加载）';
+    if (sel.codemode === true) return '已开启 Code Mode';
+    if (sel.codemode === false && sel.codemodeOnly === false) return '已关闭';
+    return '继承全局';
+  };
 
   const showSoulPanel = studioTab === 'all' || studioTab === 'soul';
   const showModelPanel = studioTab === 'all' || studioTab === 'extensions';
   const showCapabilityPanel = detailsOpen && studioTab === 'capabilities';
   const showSchedulesPanel = detailsOpen && (studioTab === 'all' || studioTab === 'schedules');
+  const showAdvancedPanel = studioTab === 'advanced';
   const q = modelQuery.trim().toLowerCase();
 
   return (
@@ -370,7 +395,7 @@ export function BotSettings({
               className={studioTab === 'extensions' ? 'active' : undefined}
               onClick={() => setStudioTab('extensions')}
             >
-              🤖 模型与思考 (CPA)
+              🤖 模型选择
             </button>
             <button
               type="button"
@@ -385,6 +410,13 @@ export function BotSettings({
               onClick={() => setStudioTab('schedules')}
             >
               ⏰ 定时任务
+            </button>
+            <button
+              type="button"
+              className={studioTab === 'advanced' ? 'active' : undefined}
+              onClick={() => setStudioTab('advanced')}
+            >
+              ⚙️ 高级设置
             </button>
             <button type="button" onClick={() => void openCenterManagement()}>插件与中心管理</button>
           </div>
@@ -493,7 +525,7 @@ export function BotSettings({
           {showModelPanel ? (
             <div className="field studio-card">
               <div className="studio-card-header">
-                <label>🤖 Bot 模型与思考档位（CPA 中心下发）</label>
+                <label>🤖 Bot 模型选择（CPA 中心下发）</label>
                 {modelConfig ? (
                   <span className="studio-pill emerald">
                     {`有效模型: ${describeVal(modelConfig.effective.modelRef)}`}
@@ -503,7 +535,7 @@ export function BotSettings({
               {modelConfig ? (
                 <>
                   <div className="metadata">
-                    {`中心全局: ${describeVal(modelConfig.global.modelRef)} (${describeVal(modelConfig.global.thinkingLevel)}) · 当前覆盖: ${describeVal(modelConfig.overrides.modelRef)} (${describeVal(modelConfig.overrides.thinkingLevel)}) · revision ${modelConfig.revision}`}
+                    {`当前生效: ${describeVal(modelConfig.effective.modelRef)} · ${describeCodemode(modelConfig.effective)}`}
                   </div>
                   <label>
                     搜索过滤模型
@@ -520,25 +552,18 @@ export function BotSettings({
                     <select
                       disabled={busy || !online}
                       value={
-                        modelDraft.modelRef === undefined
+                        modelDraft.modelRef === undefined || modelDraft.modelRef === null
                           ? '__inherit'
-                          : modelDraft.modelRef === null
-                            ? '__null'
-                            : modelDraft.modelRef
+                          : modelDraft.modelRef
                       }
                       onChange={(e) =>
                         updateModelDraft(
                           'modelRef',
-                          e.target.value === '__inherit'
-                            ? undefined
-                            : e.target.value === '__null'
-                              ? null
-                              : e.target.value,
+                          e.target.value === '__inherit' ? undefined : e.target.value,
                         )
                       }
                     >
                       <option value="__inherit">继承中心全局 ({describeVal(modelConfig.global.modelRef)})</option>
-                      <option value="__null">显式清空</option>
                       {modelDraft.modelRef &&
                       !modelCatalog?.models.some((m) => m.modelRef === modelDraft.modelRef) ? (
                         <option value={modelDraft.modelRef}>{modelDraft.modelRef}（当前配置）</option>
@@ -553,6 +578,90 @@ export function BotSettings({
                             {m.name} · {m.modelRef}
                           </option>
                         ))}
+                    </select>
+                  </label>
+                  <div className="form-actions">
+                    <button
+                      type="button"
+                      disabled={busy || !online}
+                      onClick={() => void saveModelConfig()}
+                    >
+                      {modelSaving ? '保存模型中…' : '保存模型配置'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setStudioTab('advanced')}
+                    >
+                      ⚙️ 前往高级设置（Code Mode / 思考档位）
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <div className="metadata">{loading ? '读取模型配置中…' : '尚未加载模型配置'}</div>
+              )}
+            </div>
+          ) : null}
+
+          {showAdvancedPanel ? (
+            <div className="field studio-card">
+              <div className="studio-card-header">
+                <label>⚙️ 高级设置（Code Mode · 渐进式工具加载 · 思考档位）</label>
+                {modelConfig ? (
+                  <span className="studio-pill purple">
+                    {describeCodemode(modelConfig.effective)}
+                  </span>
+                ) : null}
+              </div>
+              {modelConfig ? (
+                <>
+                  <div className="metadata">
+                    {`中心全局: ${describeVal(modelConfig.global.modelRef)} (${describeVal(modelConfig.global.thinkingLevel)}, ${describeCodemode(modelConfig.global)}) · 当前覆盖: ${describeVal(modelConfig.overrides.modelRef)} (${describeVal(modelConfig.overrides.thinkingLevel)}, ${describeCodemode(modelConfig.overrides)}) · revision ${modelConfig.revision}`}
+                  </div>
+                  <p className="hint">
+                    启用 Code Mode 后模型可在受控 QuickJS 沙盒中编写 JS 脚本批量编排工具调用；启用“仅 Code Mode 模式”后，仅向模型暴露 codemode 工具，所有内置工具、插件与 MCP 转为沙盒内渐进式按需搜索与加载，大幅降低上下文开销。
+                  </p>
+                  <label>
+                    启用 Code Mode (codemode)
+                    <select
+                      disabled={busy || !online}
+                      value={
+                        modelDraft.codemode === undefined
+                          ? '__inherit'
+                          : modelDraft.codemode === null
+                            ? '__null'
+                            : modelDraft.codemode
+                              ? 'true'
+                              : 'false'
+                      }
+                      onChange={(e) => updateCodemodeDraft('codemode', e.target.value)}
+                    >
+                      <option value="__inherit">
+                        继承中心全局（{modelConfig.global.codemode ? '开启' : '关闭'}）
+                      </option>
+                      <option value="true">开启 — 提供 codemode 沙盒工具</option>
+                      <option value="false">关闭 — 仅使用常规工具调用</option>
+                    </select>
+                  </label>
+                  <label>
+                    仅 Code Mode 模式 (codemodeOnly — 全量工具与 MCP 渐进式按需加载)
+                    <select
+                      disabled={busy || !online}
+                      value={
+                        modelDraft.codemodeOnly === undefined
+                          ? '__inherit'
+                          : modelDraft.codemodeOnly === null
+                            ? '__null'
+                            : modelDraft.codemodeOnly
+                              ? 'true'
+                              : 'false'
+                      }
+                      onChange={(e) => updateCodemodeDraft('codemodeOnly', e.target.value)}
+                    >
+                      <option value="__inherit">
+                        继承中心全局（{modelConfig.global.codemodeOnly ? '开启' : '关闭'}）
+                      </option>
+                      <option value="true">开启 — 仅向模型暴露 codemode（全工具渐进式加载）</option>
+                      <option value="false">关闭 — 保留常规工具直接调用</option>
                     </select>
                   </label>
                   <label>
@@ -578,12 +687,26 @@ export function BotSettings({
                       }
                     >
                       <option value="__inherit">继承中心全局 ({describeVal(modelConfig.global.thinkingLevel)})</option>
-                      <option value="__null">显式清空</option>
+                      <option value="__null">显式清空（SDK 默认）</option>
                       {THINKING_LEVELS.map((lv) => (
                         <option key={lv} value={lv}>
                           {lv}
                         </option>
                       ))}
+                    </select>
+                  </label>
+                  <label>
+                    模型覆盖策略
+                    <select
+                      disabled={busy || !online}
+                      value={modelDraft.modelRef === null ? '__null' : '__normal'}
+                      onChange={(e) => {
+                        if (e.target.value === '__null') updateModelDraft('modelRef', null);
+                        else if (modelDraft.modelRef === null) updateModelDraft('modelRef', undefined);
+                      }}
+                    >
+                      <option value="__normal">正常（继承全局或使用所选模型）</option>
+                      <option value="__null">显式清空（强制阻断继承全局模型）</option>
                     </select>
                   </label>
                   <div className="form-actions">
@@ -592,12 +715,12 @@ export function BotSettings({
                       disabled={busy || !online}
                       onClick={() => void saveModelConfig()}
                     >
-                      {modelSaving ? '保存模型中…' : '保存模型配置'}
+                      {modelSaving ? '保存中…' : '保存高级设置'}
                     </button>
                   </div>
                 </>
               ) : (
-                <div className="metadata">{loading ? '读取模型配置中…' : '尚未加载模型配置'}</div>
+                <div className="metadata">{loading ? '读取配置中…' : '尚未加载配置'}</div>
               )}
             </div>
           ) : null}

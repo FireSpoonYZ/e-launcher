@@ -57,11 +57,15 @@ function assertBackendId(value, name) {
 }
 
 /**
- * memoryContextKey：稳定上下文键 = JSON.stringify([botId, kind, scopeId|null])。
+ * memoryContextKey：稳定上下文键 = JSON.stringify([botId, kind, scopeId|null, ...(topic ? [topic] : [])])。
  * 信任已归一化 target（normalizeMemoryTarget 产物）；非 scope 变体 scopeId 为 null。
  */
-export function memoryContextKey(botId, target) {
-  return JSON.stringify([botId, target.kind, target.kind === 'scope' ? target.scopeId : null]);
+export function memoryContextKey(botId, target, topic) {
+  const normalizedTopic = typeof topic === 'string' && topic.trim().length > 0 ? topic.trim() : null;
+  const tuple = normalizedTopic
+    ? [botId, target.kind, target.kind === 'scope' ? target.scopeId : null, normalizedTopic]
+    : [botId, target.kind, target.kind === 'scope' ? target.scopeId : null];
+  return JSON.stringify(tuple);
 }
 
 /**

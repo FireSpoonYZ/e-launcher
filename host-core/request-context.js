@@ -8,6 +8,7 @@ export const RequestContext = defineDoc({
   history: 'rewindable',
   fork: 'asOf',
   initial: () => ({ prepared: null }),
+  checkpointWhen: () => true,
 });
 
 export function countMessageTokens({ text = '', thinkingTokens = 0 }) {

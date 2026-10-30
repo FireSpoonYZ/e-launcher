@@ -18,6 +18,7 @@ export const WorkIndex = defineDoc({
   version: 1,
   scope: 'session',
   initial: () => ({ byKey: {} }),
+  checkpointWhen: () => false,
 });
 
 export const WorkContextState = defineDoc({
@@ -36,6 +37,7 @@ export const WorkContextState = defineDoc({
     lastImportedLocalId: 0,
     importedCount: 0,
   }),
+  checkpointWhen: () => false,
 });
 
 /** 只读快照：缺失时不创建文档或会话。 */
@@ -69,6 +71,7 @@ export async function ensureWorkBinding(tx, deviceId, bot, scope, profile) {
     model: profile.model,
     extensions: profile.selectedExtensions,
     tools: initialToolsChange(profile.removeTools),
+    ...(profile.codemodeOnly ? { modelTools: [{ name: 'codemode' }] } : {}),
   });
   const state = await tx.doc(WorkContextState, nativeId);
   Object.assign(state, {

@@ -45,7 +45,7 @@ export interface Model {
   enabled: boolean;
   revision: number;
 }
-export interface ModelSelection { modelRef?: string | null; thinkingLevel?: string | null }
+export interface ModelSelection { modelRef?: string | null; thinkingLevel?: string | null; codemode?: boolean | null; codemodeOnly?: boolean | null }
 export interface ModelConfig { global: ModelSelection; revision: number }
 export interface BotModelConfig { global: ModelSelection; overrides: ModelSelection; effective: ModelSelection; revision: number }
 export interface ActionDescriptor {

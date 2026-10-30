@@ -1,17 +1,22 @@
 import { createHash } from 'node:crypto';
-import { join } from 'node:path';
+import { readFile } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import * as durable from '@earendil-works/pi-durable';
 import * as chord from '@earendil-works/chord';
 import { Harness, createRegistry, defineExtension, section, hook, GenerationTask } from '@earendil-works/pi-durable';
+import { createCodemodeExtension } from '@earendil-works/pi-durable/codemode';
 import { openNodeSqliteStorage } from '@earendil-works/pi-durable/storage/sqlite/node';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { createModels } from '@earendil-works/pi-ai/models';
+import { InlineCodemodeSandbox } from '@earendil-works/pi-codemode/portable';
 import { createCodingTools } from '@earendil-works/pi-durable/tools';
+import { createToolSearchExtension } from '@earendil-works/pi-durable/tool-search';
 import { createAndroidTools } from './android-tools.js';
 import { createHostExecutionEnv } from './host-environment.js';
 import { openHost } from './host.js';
 import { acquireRuntimeOwner } from './runtime-owner.js';
-import { parseExecutionOptions, parseModelRef, normalizeThinkingLevel, describeModelCatalog, discoverProviderModels, applyCenterModels } from './runtime-models.js';
+import { parseExecutionOptions, parseModelRef, normalizeThinkingLevel, normalizeCodemodeFlag, describeModelCatalog, discoverProviderModels, applyCenterModels } from './runtime-models.js';
 import { createGrepTool } from './grep-tool.js';
 import { createFindTool } from './find-tool.js';
 import { createLsTool } from './ls-tool.js';
@@ -40,6 +45,43 @@ const CTX = BACKGROUND_CONTEXT;
 const BOTS_SYNC_THROTTLE_MS = 1000;
 const ARCHIVE_RETENTION_MS = 14 * 24 * 60 * 60 * 1000;
 const ARCHIVE_PURGE_INTERVAL_MS = 6 * 3600 * 1000;
+
+let quickJsWasmPromise = null;
+function loadHostQuickJsWasm() {
+  if (!quickJsWasmPromise) {
+    quickJsWasmPromise = (async () => {
+      const runtimeDir = dirname(fileURLToPath(import.meta.url));
+      const candidates = [
+        join(runtimeDir, 'quickjs.wasm'),
+        join(runtimeDir, 'node_modules', 'quickjs-wasi', 'quickjs.wasm'),
+      ];
+      let lastErr = null;
+      for (const candidate of candidates) {
+        try {
+          const bytes = await readFile(candidate);
+          return await globalThis.WebAssembly.compile(bytes);
+        } catch (err) {
+          lastErr = err;
+        }
+      }
+      throw lastErr ?? new Error('quickjs.wasm not found');
+    })().catch((err) => {
+      quickJsWasmPromise = null;
+      throw err;
+    });
+  }
+  return quickJsWasmPromise;
+}
+
+function createHostCodemodeSandbox() {
+  return new InlineCodemodeSandbox({
+    wasm: {
+      then(onFulfilled, onRejected) {
+        return loadHostQuickJsWasm().then(onFulfilled, onRejected);
+      },
+    },
+  });
+}
 
 function errWithCode(message, code) {
   const err = new Error(message);
@@ -160,6 +202,8 @@ export async function openRuntime(options) {
     ...options?.collaboration,
     createLocalBot: (input) => runtime.createBot(input),
     scheduleLocalTask: (botId, input) => runtime.scheduleTask(botId, input),
+    getLocalRuntime: () => runtime,
+    getCenterClient: () => centerRuntime.getClient(),
   });
 
   // 每 conversationId+cwd 一个执行环境；绝不 process.chdir 或默认 process.cwd，缺 cwd 明确报错。
@@ -213,6 +257,7 @@ export async function openRuntime(options) {
   });
   const registry = createRegistry();
   registry.install(createCodingTools());
+  registry.install(createToolSearchExtension());
   registry.install(defineExtension({
     name: 'host.tools',
     tools: [
@@ -291,7 +336,12 @@ export async function openRuntime(options) {
     getExecutionEnv: async (botId) => envFor({ conversationId: 'plugin:' + botId, cwd: host.getBot(botId).cwd }),
     getBotEntryWatermark: (botId) => getBotEntryWatermark(botId),
     documents: { PrimaryIndex, RequestKeys, WorkIndex, WorkContextState, WorkDecisionState, RequestContext, ContextState: RequestContext },
-    sdk: { ...durable, chord }, countMessageTokens,
+    sdk: {
+      ...durable,
+      defineDoc: (definition) => durable.defineDoc({ checkpointWhen: () => false, ...definition }),
+      defineDocFamily: (definition) => durable.defineDocFamily({ checkpointWhen: () => false, ...definition }),
+      chord,
+    }, countMessageTokens,
     centerClient: {
       listCapabilityTools: (...args) => {
         const client = centerRuntime.getClient();
@@ -364,8 +414,10 @@ export async function openRuntime(options) {
       }
     },
   })] });
+  const codemodeExtension = createCodemodeExtension({ sandbox: createHostCodemodeSandbox() });
+  registry.install(codemodeExtension);
   registry.install(finalBudgetExtension);
-  const coreExtensions = registry.snapshot().installed().filter((extension) => extension !== finalBudgetExtension);
+  const coreExtensions = registry.snapshot().installed().filter((extension) => extension !== finalBudgetExtension && extension !== codemodeExtension);
   try {
     releaseOwner = acquireRuntimeOwner(host.dataRoot);
     storage = await openNodeSqliteStorage(join(host.dataRoot, 'durable.sqlite'));
@@ -400,7 +452,7 @@ export async function openRuntime(options) {
     host,
     harness,
     context: CTX,
-    getProfile: (botId, workMeta) => botProfile(host, plugins, botModels, coreExtensions, finalBudgetExtension, botId, workMeta),
+    getProfile: (botId, workMeta) => botProfile(host, plugins, botModels, coreExtensions, codemodeExtension, finalBudgetExtension, botId, workMeta),
     // sync 提交成功后附着等待中的 work watch（事务外，观察失败不影响导入）。
     onBound: (botId, scopeId, binding) => live.bindWork(botId, scopeId, binding),
   });
@@ -416,6 +468,7 @@ export async function openRuntime(options) {
     decisions,
     plugins,
     coreExtensions,
+    codemodeExtension,
     finalBudgetExtension,
     centerRuntime,
     setOnline: (value) => { online = value; },
@@ -441,7 +494,7 @@ export async function openRuntime(options) {
 }
 
 /** 构建该 Bot 的 SOUL、中心模型和明确的 core + 插件扩展视图。 */
-function botProfile(host, plugins, botModels, coreExtensions, finalBudgetExtension, botId, workMeta) {
+function botProfile(host, plugins, botModels, coreExtensions, codemodeExtension, finalBudgetExtension, botId, workMeta) {
   const selection = botModels[botId] ?? {};
   const modelRef = selection.modelRef ?? null;
   let model;
@@ -451,8 +504,24 @@ function botProfile(host, plugins, botModels, coreExtensions, finalBudgetExtensi
   const soul = host.getBotSoul(botId).text;
   const instructions = workMeta ? workInstructions(soul, workMeta) : (soul === '' ? null : soul);
   const pluginExtensions = plugins.extensionsFor(botId);
+  const codemodeOnly = Boolean(selection.codemodeOnly);
+  const codemodeEnabled = Boolean(selection.codemode) || codemodeOnly;
+  const selectedExtensions = [
+    ...coreExtensions,
+    ...(codemodeEnabled && codemodeExtension ? [codemodeExtension] : []),
+    ...pluginExtensions,
+    finalBudgetExtension,
+  ];
   // thinkingLevel 总是给出：(null 表示 SDK 默认) 才能让 reload 后重应用人格时回写变更。
-  return { instructions, selectedExtensions: [...coreExtensions, ...pluginExtensions, finalBudgetExtension], pluginTools: pluginExtensions.flatMap((extension) => extension.tools ?? []), thinkingLevel: selection.thinkingLevel ?? null, ...(model ? { model } : {}) };
+  return {
+    instructions,
+    selectedExtensions,
+    pluginTools: pluginExtensions.flatMap((extension) => extension.tools ?? []),
+    thinkingLevel: selection.thinkingLevel ?? null,
+    codemode: codemodeEnabled,
+    codemodeOnly,
+    ...(model ? { model } : {}),
+  };
 }
 
 function parseBindingKey(key) {
@@ -464,7 +533,7 @@ function parseBindingKey(key) {
   }
 }
 
-function createRuntime({ host, harness, models, defaultModel, releaseOwner, cleanupEnvs, live, workContexts, decisions, plugins, coreExtensions, finalBudgetExtension, centerRuntime, setOnline, setBotModels, getBotModels, setWatermarkReader, botAdmissions, collaboration, onBotsChanged, onBotsSync, shower, schedules }) {
+function createRuntime({ host, harness, models, defaultModel, releaseOwner, cleanupEnvs, live, workContexts, decisions, plugins, coreExtensions, codemodeExtension, finalBudgetExtension, centerRuntime, setOnline, setBotModels, getBotModels, setWatermarkReader, botAdmissions, collaboration, onBotsChanged, onBotsSync, shower, schedules }) {
   let closePromise = null;
   let closing = false;
   let centerOnline = false;
@@ -674,7 +743,7 @@ function createRuntime({ host, harness, models, defaultModel, releaseOwner, clea
     return workContexts.runMessageOperation(operation);
   };
 
-  const profileFor = (botId, workMeta) => botProfile(host, plugins, getBotModels(), coreExtensions, finalBudgetExtension, botId, workMeta);
+  const profileFor = (botId, workMeta) => botProfile(host, plugins, getBotModels(), coreExtensions, codemodeExtension, finalBudgetExtension, botId, workMeta);
 
   // 统一图形环境的 Runtime 门面：Actor 只来自可信主会话或工作绑定，绝不采信调用方会话。
   const showerRuntime = createRuntimeShower({
@@ -734,6 +803,7 @@ function createRuntime({ host, harness, models, defaultModel, releaseOwner, clea
     const bot = host.createBot(input);
     await initializeBot(bot.botId);
     if (onBotsChanged) await onBotsChanged();
+    else if (onBotsSync) await onBotsSync();
     else scheduleBotsSync();
     return bot;
   }
@@ -1011,8 +1081,10 @@ function createRuntime({ host, harness, models, defaultModel, releaseOwner, clea
         if (!models.getModel(ref.provider, ref.modelId)) throw errWithCode('center selected model is unavailable', 'MODEL_NOT_FOUND');
       }
       normalizeThinkingLevel(selection?.thinkingLevel);
+      normalizeCodemodeFlag(selection?.codemode, 'codemode');
+      normalizeCodemodeFlag(selection?.codemodeOnly, 'codemodeOnly');
       const nextModels = { ...getBotModels() };
-      if (selection && (selection.modelRef != null || selection.thinkingLevel != null)) nextModels[botId] = selection;
+      if (selection && (selection.modelRef != null || selection.thinkingLevel != null || selection.codemode != null || selection.codemodeOnly != null)) nextModels[botId] = selection;
       else delete nextModels[botId];
       setBotModels(nextModels);
       const applied = await plugins.applyBot(record, capabilities, { deviceId: host.deviceId, credentials });
@@ -1158,6 +1230,14 @@ function createRuntime({ host, harness, models, defaultModel, releaseOwner, clea
     callCapabilityAction: (id, action, request) => plugins.action(id, action, request),
     getCurrentDevice: collaboration.getCurrentDevice,
     createBot: createRuntimeBot,
+    getBot: (botId) => requireBot(botId),
+    updateBotProfile: (input) => admitBot(input?.botId, async () => {
+      const updated = host.updateBotProfile(input);
+      if (onBotsSync) await onBotsSync();
+      else if (onBotsChanged) await onBotsChanged();
+      else scheduleBotsSync();
+      return updated;
+    }),
     initializeBot,
 
     async initializeBots() {
@@ -1267,6 +1347,7 @@ function createRuntime({ host, harness, models, defaultModel, releaseOwner, clea
           thinkingLevel: profile.thinkingLevel,
           instructions: profile.instructions,
           removeTools: profile.removeTools,
+          codemodeOnly: profile.codemodeOnly,
         }, CTX);
       }
       // 新提交前刷新人格/工具（含空闲编辑后的下一次请求）；无变化不提交。

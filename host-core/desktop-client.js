@@ -632,9 +632,13 @@ export function openDesktopClient(options) {
     if (kind === 'set') {
       if (!Number.isSafeInteger(params.expectedRevision) || params.expectedRevision < 0) throw invalid('invalid expectedRevision');
       if (!isPlainObject(params.value)) throw invalid('model selection must be an object');
-      rejectUnknownFields(params.value, new Set(['modelRef', 'thinkingLevel']), 'model selection');
-      for (const value of Object.values(params.value)) {
-        if (value !== null && (typeof value !== 'string' || !value.length)) throw invalid('invalid model selection');
+      rejectUnknownFields(params.value, new Set(['modelRef', 'thinkingLevel', 'codemode', 'codemodeOnly']), 'model selection');
+      for (const [key, value] of Object.entries(params.value)) {
+        if (key === 'codemode' || key === 'codemodeOnly') {
+          if (value !== null && typeof value !== 'boolean') throw invalid('invalid model selection');
+        } else if (value !== null && (typeof value !== 'string' || !value.length)) {
+          throw invalid('invalid model selection');
+        }
       }
     }
     const client = centerClient;

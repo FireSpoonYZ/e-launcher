@@ -21,7 +21,7 @@ const modelSchema = {
   properties: { id: string, name: string, contextWindow: { type: 'integer', minimum: 1 }, maxTokens: { type: 'integer', minimum: 1 }, input: { type: 'array', items: string }, reasoning: { type: 'boolean' }, enabled: { type: 'boolean' }, revision, thinkingLevelMap: { type: 'object' }, cost: { type: 'object' }, compat: { type: 'object' }, inputLimits: { type: 'object' } },
   additionalProperties: false,
 };
-const selectionSchema = { type: 'object', properties: { modelRef: { anyOf: [string, { type: 'null' }] }, thinkingLevel: { anyOf: [string, { type: 'null' }] } }, additionalProperties: false };
+const selectionSchema = { type: 'object', properties: { modelRef: { anyOf: [string, { type: 'null' }] }, thinkingLevel: { anyOf: [string, { type: 'null' }] }, codemode: { anyOf: [{ type: 'boolean' }, { type: 'null' }] }, codemodeOnly: { anyOf: [{ type: 'boolean' }, { type: 'null' }] } }, additionalProperties: false };
 function validate(schema, value) { if (!ajv.validate(schema, value)) fail('VALIDATION_FAILED', 'Invalid input'); return value; }
 /** Hosts report these; 'pending' is derived by the center and never accepted. */
 const runtimeStatuses = ['applying', 'waiting-idle', 'applied', 'failed'];

@@ -45,6 +45,14 @@ function compareBots(a: BotRef, b: BotRef): number {
   return a.botId.localeCompare(b.botId);
 }
 
+function formatCodemodeBadge(sel?: ModelSelection): string {
+  if (!sel) return '默认（标准工具 + MCP 延迟搜索）';
+  if (sel.codemodeOnly === true) return '仅 Code Mode（全量渐进式工具加载）';
+  if (sel.codemode === true) return '已启用 Code Mode 沙盒';
+  if (sel.codemode === false && sel.codemodeOnly === false) return '已关闭 Code Mode';
+  return '默认（标准工具 + MCP 延迟搜索）';
+}
+
 function SelectionForm({
   value,
   inherited,
@@ -61,17 +69,35 @@ function SelectionForm({
   onCancel?: () => void;
 }) {
   const [draft, setDraft] = useState<ModelSelection>(value);
+  const [tab, setTab] = useState<'basic' | 'advanced'>('basic');
   useEffect(() => setDraft(value), [value]);
-  const update = (key: keyof ModelSelection, next: string) => {
+  const updateString = (key: 'modelRef' | 'thinkingLevel', next: string) => {
     const copy = { ...draft };
     if (next === '__inherit') delete copy[key];
     else copy[key] = next === '__null' ? null : next;
     setDraft(copy);
   };
-  const selected = (key: keyof ModelSelection) =>
+  const updateBool = (key: 'codemode' | 'codemodeOnly', next: string) => {
+    const copy = { ...draft };
+    if (next === '__inherit') delete copy[key];
+    else if (next === '__null') copy[key] = null;
+    else if (next === 'true') {
+      copy[key] = true;
+      if (key === 'codemodeOnly') copy.codemode = true;
+    } else if (next === 'false') {
+      copy[key] = false;
+      if (key === 'codemode' && copy.codemodeOnly === true) copy.codemodeOnly = false;
+    }
+    setDraft(copy);
+  };
+  const selectedString = (key: 'modelRef' | 'thinkingLevel') =>
     draft[key] === undefined ? '__inherit' : draft[key] === null ? '__null' : draft[key]!;
-  const modelRef = selected('modelRef');
-  const level = selected('thinkingLevel');
+  const selectedBool = (key: 'codemode' | 'codemodeOnly') =>
+    draft[key] === undefined ? '__inherit' : draft[key] === null ? '__null' : draft[key] ? 'true' : 'false';
+  const modelRef = selectedString('modelRef');
+  const level = selectedString('thinkingLevel');
+  const codemode = selectedBool('codemode');
+  const codemodeOnly = selectedBool('codemodeOnly');
   return (
     <form
       className="form"
@@ -80,39 +106,132 @@ function SelectionForm({
         save(draft);
       }}
     >
+      <div className="filter-bar" role="tablist" aria-label="模型配置分栏" style={{ marginBottom: 8 }}>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={tab === 'basic'}
+          className={`filter-chip ${tab === 'basic' ? 'is-active' : ''}`}
+          onClick={() => setTab('basic')}
+        >
+          基础设置
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={tab === 'advanced'}
+          className={`filter-chip ${tab === 'advanced' ? 'is-active' : ''}`}
+          onClick={() => setTab('advanced')}
+        >
+          <Sliders size={14} />
+          高级设置
+        </button>
+      </div>
+
       {inherited && (
-        <p className="secondary">
-          继承全局：{inherited.modelRef ?? '未选择模型'} · 思考档位 {inherited.thinkingLevel ?? '未设置'}
+        <p className="secondary" style={{ marginTop: 0 }}>
+          继承全局：{inherited.modelRef ?? '未选择模型'} · 思考档位 {inherited.thinkingLevel ?? '默认'} ·{' '}
+          {formatCodemodeBadge(inherited)}
         </p>
       )}
-      <label>
-        模型
-        <select value={modelRef} onChange={e => update('modelRef', e.target.value)}>
-          <option value="__inherit">{inherited ? '继承全局' : '未设置'}</option>
-          <option value="__null">显式清空</option>
-          {modelRef !== '__inherit' && modelRef !== '__null' && !options.some(o => o.ref === modelRef) && (
-            <option value={modelRef}>{modelRef}（不可用）</option>
+
+      {tab === 'basic' ? (
+        <label>
+          模型选择
+          <select
+            value={modelRef === '__null' ? '__inherit' : modelRef}
+            onChange={e => updateString('modelRef', e.target.value)}
+          >
+            <option value="__inherit">{inherited ? `继承全局 (${inherited.modelRef ?? '未设置'})` : '未设置'}</option>
+            {modelRef !== '__inherit' && modelRef !== '__null' && !options.some(o => o.ref === modelRef) && (
+              <option value={modelRef}>{modelRef}（不可用）</option>
+            )}
+            {options.map(o => (
+              <option key={o.ref} value={o.ref}>
+                {o.name} · {o.ref}
+              </option>
+            ))}
+          </select>
+          {modelRef === '__null' && (
+            <span className="secondary">当前已在“高级设置”中设为显式清空模型覆盖。</span>
           )}
-          {options.map(o => (
-            <option key={o.ref} value={o.ref}>
-              {o.name} · {o.ref}
-            </option>
-          ))}
-        </select>
-      </label>
-      <label>
-        思考档位
-        <select value={level} onChange={e => update('thinkingLevel', e.target.value)}>
-          <option value="__inherit">{inherited ? '继承全局' : '未设置'}</option>
-          <option value="__null">显式清空</option>
-          {level !== '__inherit' && level !== '__null' && !levels.includes(level) && <option value={level}>{level}</option>}
-          {levels.map(v => (
-            <option key={v} value={v}>
-              {v}
-            </option>
-          ))}
-        </select>
-      </label>
+        </label>
+      ) : (
+        <div className="form" style={{ gap: 14 }}>
+          <div className="card-group" style={{ padding: 14, margin: 0 }}>
+            <strong style={{ display: 'block', marginBottom: 4 }}>工具执行与渐进式加载 (Code Mode)</strong>
+            <p className="secondary" style={{ marginTop: 0, marginBottom: 12 }}>
+              启用 Code Mode 后模型可在受控 QuickJS 沙盒中编排多工具脚本；开启“仅 Code Mode”后所有内置工具、插件与 MCP 均转为沙盒内按需搜索与渐进式加载。
+            </p>
+            <div className="form-grid">
+              <label>
+                启用 Code Mode (codemode)
+                <select value={codemode} onChange={e => updateBool('codemode', e.target.value)}>
+                  <option value="__inherit">
+                    {inherited
+                      ? `继承全局（${inherited.codemode ? '开启' : '关闭'}）`
+                      : '默认（关闭）'}
+                  </option>
+                  <option value="true">开启 — 提供 codemode 沙盒工具</option>
+                  <option value="false">关闭 — 仅使用常规工具调用</option>
+                </select>
+              </label>
+              <label>
+                仅 Code Mode 模式 (codemodeOnly)
+                <select value={codemodeOnly} onChange={e => updateBool('codemodeOnly', e.target.value)}>
+                  <option value="__inherit">
+                    {inherited
+                      ? `继承全局（${inherited.codemodeOnly ? '开启' : '关闭'}）`
+                      : '默认（关闭）'}
+                  </option>
+                  <option value="true">开启 — 仅暴露 codemode（全工具渐进式按需加载）</option>
+                  <option value="false">关闭 — 保留常规工具直接调用</option>
+                </select>
+              </label>
+            </div>
+          </div>
+
+          <div className="card-group" style={{ padding: 14, margin: 0 }}>
+            <strong style={{ display: 'block', marginBottom: 4 }}>推理与高级覆盖策略</strong>
+            <p className="secondary" style={{ marginTop: 0, marginBottom: 12 }}>
+              大多数场景保持默认即可；需要特定推理强度或强制阻断全局继承时可在此覆写。
+            </p>
+            <div className="form-grid">
+              <label>
+                思考档位 (Thinking Level)
+                <select value={level} onChange={e => updateString('thinkingLevel', e.target.value)}>
+                  <option value="__inherit">
+                    {inherited ? `继承全局（${inherited.thinkingLevel ?? 'SDK 默认'}）` : '未设置（SDK 默认）'}
+                  </option>
+                  <option value="__null">显式清空（强制使用 SDK 默认）</option>
+                  {level !== '__inherit' && level !== '__null' && !levels.includes(level) && (
+                    <option value={level}>{level}</option>
+                  )}
+                  {levels.map(v => (
+                    <option key={v} value={v}>
+                      {v}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                显式清空模型覆盖
+                <select
+                  value={modelRef === '__null' ? '__null' : '__normal'}
+                  onChange={e => {
+                    if (e.target.value === '__null') updateString('modelRef', '__null');
+                    else if (modelRef === '__null') updateString('modelRef', '__inherit');
+                  }}
+                >
+                  <option value="__normal">正常（使用基础设置中的模型或继承全局）</option>
+                  <option value="__null">显式清空（不继承全局模型）</option>
+                </select>
+              </label>
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className="action-row">
         <button className="button" disabled={busy}>
           保存
@@ -394,9 +513,10 @@ export default function Devices() {
       {global && (
         <section className="summary-bar card-group">
           <div>
-            <strong>全局默认模型</strong>
+            <strong>全局默认模型与高级策略</strong>
             <p className="secondary" style={{ marginBottom: 0 }}>
-              模型：{global.global.modelRef ?? '未设置'} · 思考档位：{global.global.thinkingLevel ?? '未设置'}
+              模型：{global.global.modelRef ?? '未设置'} · 思考档位：{global.global.thinkingLevel ?? '默认'} ·{' '}
+              {formatCodemodeBadge(global.global)}
             </p>
           </div>
           <button
@@ -788,10 +908,10 @@ export default function Devices() {
         onOpenChange={isOpen => {
           if (!isOpen) setSelected(undefined);
         }}
-        title={selected ? `${selected.bot.name || selected.bot.botId} 的模型覆盖` : 'Bot 模型覆盖'}
+        title={selected ? `${selected.bot.name || selected.bot.botId} 的模型与高级设置` : 'Bot 模型与高级设置'}
         description={
           selected
-            ? `当前有效模型：${selected.config.effective.modelRef ?? '未选择'} · 思考档位 ${selected.config.effective.thinkingLevel ?? '未设置'}`
+            ? `当前有效：${selected.config.effective.modelRef ?? '未选择'} · 思考档位 ${selected.config.effective.thinkingLevel ?? '默认'} · ${formatCodemodeBadge(selected.config.effective)}`
             : undefined
         }
       >
