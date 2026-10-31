@@ -61,6 +61,13 @@ export function toError(e: unknown): DesktopRemoteError {
   });
 }
 
+/** relay 侧「目标 Host 不可达」错误族：peer 不在线或控制通道不可用，不代表客户端
+ * transport/中心连接断开。此类错误只应出现在对应目标上下文，不得升级为全局离线横幅。 */
+export function isTargetOfflineError(e: unknown): boolean {
+  const code = e && typeof e === 'object' ? (e as { code?: unknown }).code : undefined;
+  return code === 'OFFLINE' || code === 'CONTROL_UNAVAILABLE';
+}
+
 /** 需要 transport 连接的远程 broker op（本地/仅会话 op 除外；pending_send/reconcile 在 pending() 内单独校验）。 */
 const REMOTE_BROKER_OPS = new Set<string>([
   'devices',
@@ -658,12 +665,9 @@ export class DesktopViewApiImpl implements DesktopPanelApi {
           resolveReady();
         },
         (e) => {
-          const err = toError(e);
-          if (!closed) {
-            closed = true;
-            this.reportError(err);
-          }
-          rejectReady(err);
+          // admission 失败（含目标 OFFLINE）只经 ready 拒绝交给调用方上下文展示，不报全局横幅。
+          if (!closed) closed = true;
+          rejectReady(toError(e));
         },
       );
 

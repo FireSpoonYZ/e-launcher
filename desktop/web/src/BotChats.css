@@ -49,8 +49,9 @@
   gap: 8px;
   overflow-x: auto;
   padding: 12px 14px 6px;
-  scrollbar-width: thin;
+  scrollbar-width: none;
 }
+.hub-hero-strip::-webkit-scrollbar { display: none; }
 .hub-hero-strip:empty { display: none; }
 
 .hub-hero-card {
@@ -138,8 +139,9 @@
   gap: 6px;
   overflow-x: auto;
   padding: 0 14px 8px;
-  scrollbar-width: thin;
+  scrollbar-width: none;
 }
+.hub-device-chips::-webkit-scrollbar { display: none; }
 .hub-device-chips .chip {
   flex: none;
   min-height: 26px;
@@ -841,14 +843,12 @@
 }
 
 .hub-list-scroll::-webkit-scrollbar,
-.hub-hero-strip::-webkit-scrollbar,
 .inspector-body::-webkit-scrollbar,
 .composer::-webkit-scrollbar {
   width: 6px;
   height: 6px;
 }
 .hub-list-scroll::-webkit-scrollbar-thumb,
-.hub-hero-strip::-webkit-scrollbar-thumb,
 .inspector-body::-webkit-scrollbar-thumb,
 .composer::-webkit-scrollbar-thumb {
   background: var(--line);

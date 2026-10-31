@@ -3,6 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { Copy, ExternalLink } from 'lucide-react';
 import { GrokBotAvatar, JARVIS_AVATAR_PRESET } from '../../../web/src/GrokBotAvatar';
 import { ErrorNotice, errorText, useText } from '../../../web/src/ui';
+import type { DesktopClientStatus } from '../../../host-core/desktop-client.js';
 import './CenterGate.css';
 
 type SavedConnection = { url: string; deviceId: string; ca: string };
@@ -11,6 +12,9 @@ export type CenterStatus = {
   centerUrl: string;
   clientId: string;
   savedConnection?: SavedConnection;
+  /** center ready 时随轮询附带的 broker transport 快照（phase/generation/connection）；
+   * 前端只采纳，不据此自动 connect。 */
+  broker?: DesktopClientStatus;
 };
 type Props = { children: ReactNode; onDisconnected(): void };
 
@@ -64,6 +68,38 @@ export function CenterGate({ children, onDisconnected }: Props) {
   const epoch = useRef(0);
   const autoAttempted = useRef(false);
   const wasReady = useRef(false);
+  const lastProbeAt = useRef(0);
+  const probeInFlight = useRef(false);
+  const statusRef = useRef(status);
+  statusRef.current = status;
+
+  /** center ready 时顺带读取 broker transport 快照（仅多一次本地 sidecar 读）。 */
+  const readStatus = async (params: object = {}): Promise<CenterStatus> => {
+    const next = await request<CenterStatus>('center_status', params);
+    if (next.state !== 'ready') return next;
+    try {
+      const broker = await request<DesktopClientStatus>('status');
+      return { ...next, broker };
+    } catch {
+      return next;
+    }
+  };
+
+  /** 显式探测：复用 broker center_status({probe:true})——ready 时验证双链路，
+   * connecting 时绕过退避立即重试；不发起 UI 侧 connect，不违背显式断开。 */
+  const probe = async (): Promise<void> => {
+    const issued = epoch.current;
+    lastProbeAt.current = Date.now();
+    try {
+      const next = await readStatus({ probe: true });
+      if (issued === epoch.current) {
+        setStatus(next);
+        setSaved(next.savedConnection);
+      }
+    } catch {
+      if (issued === epoch.current) setStatus(undefined);
+    }
+  };
 
   useEffect(() => {
     if (!url || !deviceId) {
@@ -92,7 +128,7 @@ export function CenterGate({ children, onDisconnected }: Props) {
     const poll = async () => {
       const issued = epoch.current;
       try {
-        const next = await request<CenterStatus>('center_status');
+        const next = await readStatus();
         if (live && issued === epoch.current) {
           setStatus(next);
           setSaved(next.savedConnection);
@@ -135,6 +171,38 @@ export function CenterGate({ children, onDisconnected }: Props) {
     };
     void poll();
     return () => { live = false; clearTimeout(timer); };
+  }, []);
+
+  // 窗口回到前台探测一次（节流 10s、单飞）：ready 也探测——休眠期 cached-ready 的
+  // 半开连接只能靠 probe 暴露。broker 显式 disconnected 时不探，避免后台触发重连。
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.hidden || probeInFlight.current || Date.now() - lastProbeAt.current < 10000) return;
+      probeInFlight.current = true;
+      void (async () => {
+        const issued = epoch.current;
+        try {
+          const cur = statusRef.current;
+          if (cur?.state === 'ready') {
+            try {
+              const broker = await request<DesktopClientStatus>('status');
+              if (issued !== epoch.current) return;
+              if (broker.phase === 'disconnected') return;
+            } catch { /* status 读失败仍走 probe 判定 */ }
+          }
+          await probe();
+        } finally {
+          probeInFlight.current = false;
+        }
+      })();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    window.addEventListener('focus', onVisible);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisible);
+      window.removeEventListener('focus', onVisible);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -246,6 +314,20 @@ export function CenterGate({ children, onDisconnected }: Props) {
             {connecting ? t('连接中…', 'Connecting…') : t('连接中心', 'Connect')}
           </button>
         </form>
+        <button
+          type="button"
+          className="secondary-button gate-manage"
+          disabled={busy}
+          onClick={() => {
+            if (status?.broker?.phase === 'disconnected' || status?.state === 'disconnected') {
+              setError(t('已显式断开：请在上方重新连接中心。', 'Explicitly disconnected — reconnect above.'));
+              return;
+            }
+            void probe();
+          }}
+        >
+          {t('检查连接', 'Check connection')}
+        </button>
         <button
           type="button"
           className="secondary-button gate-manage"

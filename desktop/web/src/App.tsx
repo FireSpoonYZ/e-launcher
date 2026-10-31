@@ -68,13 +68,21 @@ interface AppState {
   form: ProfileFormState;
   globalError: string | null;
   bannerError: string | null;
+  /** transport/relay 断开提示（可恢复）；与请求级 bannerError 分离，目标 OFFLINE 不会进入此横幅。 */
+  connectionError: string | null;
   selectedDeviceId: string;
   settingsOpen: boolean;
   devices: DevicesSectionState;
 }
 
 interface CenterConnectionBridge {
-  status?: { state: 'disconnected' | 'connecting' | 'ready'; centerUrl: string; clientId: string };
+  status?: {
+    state: 'disconnected' | 'connecting' | 'ready';
+    centerUrl: string;
+    clientId: string;
+    /** Gate 轮询附带的 broker transport 快照（phase/generation/connection）。 */
+    broker?: DesktopClientStatus;
+  };
   disconnectCenter: () => Promise<void>;
 }
 
@@ -120,6 +128,65 @@ class App extends Component<AppProps, AppState> {
   private scopedApi: DesktopViewApi | null = null;
   private devicesMounted = true;
   private settingsButtonRef: HTMLButtonElement | null = null;
+  /** 显式断开/connect 进行中不做恢复采纳：不得违背用户意图把 transport 重新置真。 */
+  private suppressRecovery = false;
+  /** 已应用的 broker generation；变化表示后端已重连，旧 UI 身份代次必须作废。 */
+  private lastBrokerGeneration: number | undefined;
+
+  /**
+   * 与 broker transport 快照对齐（来自 Gate 普通轮询或手动检查）：
+   * - phase 非 connected → transport 置 false；
+   * - generation 变化（含 UI 一直 true 期间的后端重连）→ 先置 false 作废旧身份代次与观察，
+   *   再重新置 true 安装新连接观察，组件按新 sess 重建只读观察；
+   * - 仅当身份端点与当前 profile 的 relay url/deviceId 一致、且非显式断开/切换中时采纳。
+   * 不发起 connect、不重放写入；显式断开（suppressRecovery）保持离线。
+   */
+  private applyBrokerSnapshot(broker: DesktopClientStatus | null | undefined): void {
+    if (!broker || this.actionInFlight ||
+        (this.lastBrokerGeneration !== undefined && broker.generation < this.lastBrokerGeneration)) return;
+    const api = this.props.api;
+    // broker 快照只校准 relay 会话：local profile 的 connection.kind==='local' 不属于本路径。
+    if (api.identity?.kind !== 'relay') return;
+    if (broker.phase !== 'connected' || broker.connection?.kind !== 'relay') {
+      this.lastBrokerGeneration = broker.generation;
+      if (api.transportConnected) api.setTransportConnected(false);
+      return;
+    }
+    const genChanged =
+      this.lastBrokerGeneration !== undefined && broker.generation !== this.lastBrokerGeneration;
+    this.lastBrokerGeneration = broker.generation;
+    if (this.suppressRecovery || this.actionInFlight) return;
+    const identity = api.identity;
+    if (!identity) return;
+    const conn = broker.connection;
+    const profile = this.state.profiles.find((p) => p.id === identity.profileId);
+    if (!conn || conn.kind !== 'relay' || !profile || profile.kind !== 'relay' ||
+        profile.url !== conn.url || profile.deviceId !== conn.deviceId) return;
+    if (genChanged && api.transportConnected) api.setTransportConnected(false);
+    if (!api.transportConnected) api.setTransportConnected(true);
+  }
+
+  /** 手动「检查连接」：只读 status 后走同一采纳路径；显式断开明确提示回设置重连。 */
+  private checkConnection = async (): Promise<void> => {
+    if (!this.props.api.identity) return;
+    try {
+      const st = await request('status', {});
+      if (!this.devicesMounted) return;
+      this.setState({ status: st });
+      this.applyBrokerSnapshot(st);
+      if (this.props.api.transportConnected) return;
+      this.setState({
+        connectionError:
+          st.phase === 'disconnected'
+            ? '已断开：请在设置中选择 profile 后显式连接。'
+            : st.phase === 'connecting'
+              ? '连接已中断，正在恢复中…'
+              : '连接不可用：请检查中心与设备后重试。',
+      });
+    } catch (e) {
+      if (this.devicesMounted) this.setState({ connectionError: '检查连接失败：' + toError(e).message });
+    }
+  };
 
   constructor(props: AppProps) {
     super(props);
@@ -137,6 +204,7 @@ class App extends Component<AppProps, AppState> {
       form: { title: '', kind: 'local', url: '', expectedDeviceId: '', deviceId: '' },
       globalError: null,
       bannerError: null,
+      connectionError: null,
       selectedDeviceId: '',
       settingsOpen: false,
       devices: emptyDevices,
@@ -170,9 +238,19 @@ class App extends Component<AppProps, AppState> {
     if (a?.profileId !== b?.profileId || a?.kind !== b?.kind) {
       this.setState({ devices: emptyDevices }, () => void this.loadDevices());
     } else if (!prevState.transportConnected && this.state.transportConnected) {
+      this.setState({ connectionError: null });
       void this.loadDevices();
     } else if (prevState.transportConnected && !this.state.transportConnected) {
-      this.setState((s) => ({ devices: { ...s.devices, busy: false } }));
+      this.setState((s) => ({
+        devices: { ...s.devices, busy: false },
+        connectionError: s.identity
+          ? '连接已中断：远程操作不可用，目录为只读缓存。'
+          : s.connectionError,
+      }));
+    }
+    // 只采纳新快照，避免观察失败后被同一份过期 connected 快照反复激活。
+    if (prev.centerConnection.status?.broker !== this.props.centerConnection.status?.broker) {
+      this.applyBrokerSnapshot(this.props.centerConnection.status?.broker);
     }
     // 群聊/待发送需要目标设备：目录读完后自动选中第一台在线设备；不强行选离线节点。
     if (this.state.identity && !this.state.selectedDeviceId) {
@@ -358,6 +436,7 @@ class App extends Component<AppProps, AppState> {
       if (this.state.ca.trim()) input.ca = this.state.ca.trim();
     }
     this.actionInFlight = true;
+    this.suppressRecovery = false;
     // 连接开始即封住旧身份并标记 transport 断开；迟到旧结果不能覆盖新选择。
     this.props.api.setTransportConnected(false);
     this.props.api.setIdentity(null);
@@ -368,6 +447,7 @@ class App extends Component<AppProps, AppState> {
         'connect',
         { connection: input },
       );
+      this.lastBrokerGeneration = status.generation;
       let targetDeviceId = '';
       if (status.connection && status.connection.kind === 'local') {
         targetDeviceId = status.connection.deviceId ?? '';
@@ -393,6 +473,8 @@ class App extends Component<AppProps, AppState> {
     const identity = this.state.identity;
     if (this.actionInFlight || !identity) return;
     this.actionInFlight = true;
+    // 显式断开：禁止恢复探测在用户意图之外重新置真 transport。
+    this.suppressRecovery = true;
     // 断开开始即封住旧身份（generation 增）并标记 transport 断开；保留队列 identity/目标。
     this.props.api.setTransportConnected(false);
     this.props.api.setIdentity({
@@ -535,6 +617,19 @@ class App extends Component<AppProps, AppState> {
             <div className="error-banner" role="alert">
               {this.state.bannerError}
               <button onClick={() => this.setState({ bannerError: null })}>关闭</button>
+            </div>
+          )}
+          {this.state.connectionError && identity && !transportConnected && (
+            <div className="error-banner" role="alert">
+              {this.state.connectionError}
+              {status?.errorCode ? (
+                <details>
+                  <summary>技术详情</summary>
+                  <code>{'phase=' + status.phase + ' · errorCode=' + status.errorCode}</code>
+                </details>
+              ) : null}
+              <button type="button" onClick={() => void this.checkConnection()}>检查连接</button>
+              <button onClick={() => this.setState({ connectionError: null })}>关闭</button>
             </div>
           )}
           <div className="workspace-body">

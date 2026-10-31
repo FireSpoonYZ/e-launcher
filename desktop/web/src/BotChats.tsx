@@ -36,6 +36,7 @@ import type {
   PendingListPage,
   PendingRecord,
 } from '../../../host-core/index.js';
+import { isTargetOfflineError } from './api';
 import { useDrafts } from './drafts';
 import type { DraftSnapshot } from './drafts';
 import { type QuestionnaireSubmitPayload } from '../../../web/src/ToolPresentation';
@@ -88,9 +89,10 @@ function readDirectoryCache(profileKey: string): CachedBotDirectory | null {
     if (!raw) return null;
     const parsed = JSON.parse(raw) as Partial<CachedBotDirectory>;
     if (!Array.isArray(parsed.bots) || !Array.isArray(parsed.devices)) return null;
+    // 缓存仅恢复列表内容，不冒充实时在线：online 一律置 false，等下一次成功刷新恢复。
     return {
-      bots: parsed.bots,
-      devices: parsed.devices,
+      bots: parsed.bots.map((b) => ({ ...b, online: false })),
+      devices: parsed.devices.map((d) => ({ ...d, online: false })),
       updatedAt: typeof parsed.updatedAt === 'string' ? parsed.updatedAt : '',
     };
   } catch {
@@ -141,6 +143,12 @@ function errText(e: unknown): string {
     if (message) return message;
   }
   return String(e);
+}
+
+/** 目标 Host 不可达（OFFLINE/CONTROL_UNAVAILABLE）只污染对应聊天上下文，不上全局横幅；
+ * 其余错误（含未知 outcome 的写入失败）照旧 reportError，不吞未知结果。 */
+function reportUnlessTargetOffline(api: { reportError(e: unknown): void }, e: unknown): void {
+  if (!isTargetOfflineError(e)) api.reportError(e);
 }
 
 /** 只有 error.outcome 明确 not-sent（未派发）才可判定未入队；其余一律视为结果未知。 */
@@ -422,7 +430,7 @@ function CreateBotForm({
       setError(
         `${errText(e)}（原 requestId: ${requestId}；未确认结果请在待发送面板选择原设备对账，不会自动重发）`,
       );
-      api.reportError(e);
+      reportUnlessTargetOffline(api, e);
     } finally {
       sendingRef.current = false;
       if (mountedRef.current) setBusy(false);
@@ -900,6 +908,9 @@ function PrimaryChatPane({
   const identity = api.identity;
   const sess = sessionKey(identity);
   const online = api.transportConnected;
+  /** 目标离线时带设备/Bot 上下文；其余错误原样 code: message。 */
+  const tErr = (e: unknown): string =>
+    isTargetOfflineError(e) ? `目标 ${deviceName}（${bot.role}）离线：${errText(e)}` : errText(e);
   const isArchived = Boolean(bot.archivedAt);
   const isPrimary = Boolean(bot.isPrimary);
   const compactOverlay = useInspectorCompact();
@@ -994,8 +1005,8 @@ function PrimaryChatPane({
       });
     } catch (e) {
       if (mountedRef.current && sessionKey(api.identity) === sess) {
-        setManageError(`设为主 Bot 失败：${errText(e)}`);
-        api.reportError(e);
+        setManageError(`设为主 Bot 失败：${tErr(e)}`);
+        reportUnlessTargetOffline(api, e);
       }
     } finally {
       manageInFlightRef.current = false;
@@ -1026,8 +1037,8 @@ function PrimaryChatPane({
       });
     } catch (e) {
       if (mountedRef.current && sessionKey(api.identity) === sess) {
-        setManageError(`归档失败：${errText(e)}`);
-        api.reportError(e);
+        setManageError(`归档失败：${tErr(e)}`);
+        reportUnlessTargetOffline(api, e);
       }
     } finally {
       manageInFlightRef.current = false;
@@ -1050,8 +1061,8 @@ function PrimaryChatPane({
       });
     } catch (e) {
       if (mountedRef.current && sessionKey(api.identity) === sess) {
-        setManageError(`恢复失败：${errText(e)}`);
-        api.reportError(e);
+        setManageError(`恢复失败：${tErr(e)}`);
+        reportUnlessTargetOffline(api, e);
       }
     } finally {
       manageInFlightRef.current = false;
@@ -1071,8 +1082,8 @@ function PrimaryChatPane({
       onBotDeleted(bot.botId);
     } catch (e) {
       if (mountedRef.current && sessionKey(api.identity) === sess) {
-        setManageError(`删除失败：${errText(e)}`);
-        api.reportError(e);
+        setManageError(`删除失败：${tErr(e)}`);
+        reportUnlessTargetOffline(api, e);
       }
     } finally {
       manageInFlightRef.current = false;
@@ -1150,8 +1161,8 @@ function PrimaryChatPane({
     } catch (e) {
       if (!mountedRef.current || sessionKey(api.identity) !== sess) return;
       setSendNotice(null);
-      setSendError(command + ' 失败：' + errText(e) + '；草稿与历史保留，不会当普通消息发送。');
-      api.reportError(e);
+      setSendError(command + ' 失败：' + tErr(e) + '；草稿与历史保留，不会当普通消息发送。');
+      reportUnlessTargetOffline(api, e);
     } finally {
       lockedRef.current = false;
       if (mountedRef.current) {
@@ -1205,14 +1216,14 @@ function PrimaryChatPane({
       try {
         rec = await api.pending(identity, 'pending_enqueue', { input: frozen });
       } catch (e) {
-        api.reportError(e);
+        reportUnlessTargetOffline(api, e);
         // 只有本阶段明确 not-sent（无队列记录）才可声称未入队。
         if (isNotSent(e)) {
-          const errMsg = `发送未入队（not-sent）：${errText(e)}。原 requestId ${businessId} 已冻结，无队列记录，可恢复编辑后重试。`;
+          const errMsg = `发送未入队（not-sent）：${tErr(e)}。原 requestId ${businessId} 已冻结，无队列记录，可恢复编辑后重试。`;
           drafts.markNotSent(started.handle, errMsg);
           setSendError(errMsg);
         } else {
-          const errMsg = `入队结果未确认：${errText(e)}（原 requestId ${businessId}）；保持原 ID 锁，请查询原记录，不会自动补发。`;
+          const errMsg = `入队结果未确认：${tErr(e)}（原 requestId ${businessId}）；保持原 ID 锁，请查询原记录，不会自动补发。`;
           drafts.markUnconfirmed(started.handle);
           setSendError(errMsg);
         }
@@ -1240,9 +1251,9 @@ function PrimaryChatPane({
         reportSendRecord(started.handle, sent, pendingId);
       } catch (e) {
         // 回执丢失/超时/未知：已入队，保留原 ID 锁，绝不标未入队。
-        api.reportError(e);
+        reportUnlessTargetOffline(api, e);
         drafts.markUnconfirmed(started.handle);
-        setSendError(`发送回执未确认：已入队（${pendingId}）· ${errText(e)}；保持原 ID 锁，请查询原记录，不会自动补发。`);
+        setSendError(`发送回执未确认：已入队（${pendingId}）· ${tErr(e)}；保持原 ID 锁，请查询原记录，不会自动补发。`);
       }
     } finally {
       lockedRef.current = false;
@@ -1376,8 +1387,8 @@ function PrimaryChatPane({
       // 本地 outbox 记录 receipt 仍带旧 admission：显式对账刷新一次（只读，不改远端状态）。
       try { await api.pending(current, 'pending_reconcile', { id: rec.id }); } catch { /* 对账失败不掩盖重试结果 */ }
     } catch (e) {
-      api.reportError(e);
-      setSendError('准入重试未确认：' + errText(e) + '。原 requestId 与记录保留，可再次显式重试，不会自动补发。');
+      reportUnlessTargetOffline(api, e);
+      setSendError('准入重试未确认：' + tErr(e) + '。原 requestId 与记录保留，可再次显式重试，不会自动补发。');
     } finally {
       lockedRef.current = false;
       setSendState('idle');
@@ -1452,8 +1463,8 @@ function PrimaryChatPane({
     } catch (e) {
       // 失败保留旧数据：重试按钮在聊天流顶部可见，下一次完结/重连也会再补跑。
       if (rawSessRef.current === localSess) {
-        setRawError(errText(e));
-        api.reportError(e);
+        setRawError(tErr(e));
+        reportUnlessTargetOffline(api, e);
       }
     } finally {
       latestFlightRef.current.inFlight = false;
@@ -1540,14 +1551,14 @@ function PrimaryChatPane({
         });
         h.ready.catch((e) => {
           if (!disposed) {
-            setLiveError('观察建立失败：' + errText(e));
+            setLiveError('观察建立失败：' + tErr(e));
             setLiveEnded(true);
           }
         });
         handle = h;
       } catch (e) {
         if (!disposed) {
-          setLiveError(errText(e));
+          setLiveError(tErr(e));
           setLiveEnded(true);
         }
       }
@@ -1564,8 +1575,8 @@ function PrimaryChatPane({
     try {
       await api.call(identity, 'abort', { botId: bot.botId });
     } catch (e) {
-      setLiveError('停止失败：' + errText(e));
-      api.reportError(e);
+      setLiveError('停止失败：' + tErr(e));
+      reportUnlessTargetOffline(api, e);
     } finally {
       if (mountedRef.current) setStopping(false);
     }
@@ -1643,7 +1654,7 @@ function PrimaryChatPane({
   void avatarVersion; // 头像保存后 bump：重新计算 key 下各 GrokBotAvatar preset
 
   const statusText = !online
-    ? '离线：显示最后读取的数据'
+    ? `目标 ${deviceName}（${bot.role}）离线：显示最后读取的数据`
     : liveError
       ? liveError
       : liveEnded
@@ -1897,6 +1908,13 @@ function PrimaryChatPane({
       ) : null}
       {liveError && online ? (
         <div className="error-banner" role="alert">{liveError}</div>
+      ) : null}
+      {!online ? (
+        <div className="status" role="status">
+          {identity
+            ? `目标 ${deviceName}（${bot.role}）离线：显示最后读取的内容（只读），草稿保留；恢复在线后可继续发送。`
+            : '连接已断开：显示最后读取的内容（只读），草稿保留。'}
+        </div>
       ) : null}
 
       <ChatTranscript
@@ -2179,13 +2197,16 @@ export function BotChats({ api, pageActive = true }: { api: DesktopPanelApi; pag
       setBotsError(
         directory.errors.length
           ? directory.errors
-              .map((e) => `${e.deviceId}: ${e.code}${e.message ? ' ' + e.message : ''}`)
+              .map((e) => `${directory.devices.find((d) => d.deviceId === e.deviceId)?.displayName || e.deviceId}: ${e.code}${e.message ? ' ' + e.message : ''}`)
               .join('；')
           : null,
       );
     } catch (e) {
       if (seq.current === n && sessionRef.current === localSess) {
         setBotsError(`目录读取失败：${errText(e)}`);
+        // 整体目录失败：旧缓存不得继续冒充在线，绿点全部熄灭；下次成功刷新自然恢复。
+        setBots((old) => old.map((b) => ({ ...b, online: false })));
+        setDevices((old) => old.map((d) => ({ ...d, online: false })));
       }
     } finally {
       inFlight.current = false;
@@ -2422,8 +2443,8 @@ export function BotChats({ api, pageActive = true }: { api: DesktopPanelApi; pag
                 size={56}
               />
               <span className="hub-hero-name">{b.role}</span>
-              <span className={`hub-hero-node${b.online ? '' : ' offline'}`}>
-                {deviceNameOf(b.deviceId)}
+              <span className={`hub-hero-node${b.online && online ? '' : ' offline'}`}>
+                {b.online && online ? deviceNameOf(b.deviceId) : `${deviceNameOf(b.deviceId)} · 离线`}
               </span>
             </button>
           ))}
