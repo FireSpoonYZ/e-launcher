@@ -156,10 +156,12 @@ node host-core/cli.js create   --data-root '/path/to/data-root'   --request-id r
 
 ## 模块 2：Durable 长期主私聊
 
-依赖固定为 `@earendil-works/pi-durable`、`@earendil-works/pi-ai`、`@earendil-works/chord` 1.3.0。先在仓库根执行：
+依赖为固定上游 main SHA（`scripts/pi-main.json`）构建的 `@earendil-works/pi-durable`、`pi-ai`、`chord`、`pi-codemode`、`pi-mcp`、`pi-telemetry` 六包 `build/pi-main/*.tgz`（file: 依赖）。先在仓库根生成 tgz，再安装：
 
 ```bash
-npm --prefix host-core ci --ignore-scripts --no-audit --no-fund
+npm run prepare:pi-main   # 构建固定 SHA 的六包到 build/pi-main/（幂等，可用 --source-dir 指向同 SHA 干净 git checkout）
+npm --prefix host-core install --ignore-scripts --no-audit --no-fund   # file: 依赖首次生成 lock（ci 不生成新 lock）
+# 已有 lock 后复现：npm --prefix host-core ci --ignore-scripts --no-audit --no-fund
 ```
 
 模块 1 的同步 API、创建幂等语义和 `host.sqlite` schema v1 均保留。Bot 的公开主私聊 UUID 与 Durable 内部数字会话 ID 在同一 Durable commit 中建立映射；不是把旧 SDK 的 Session 或运行检查点直接导入。

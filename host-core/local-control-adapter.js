@@ -69,6 +69,8 @@ const LOCAL_DOMAIN_CODES = new Set([
   'HINDSIGHT_BINDING_MISMATCH',
   'EXTENSION_DISABLED',
   'EXTENSION_READ_ONLY',
+  'ATTACHMENT_NOT_FOUND',
+  'MODEL_NO_VISION',
   ...SHOWER_ERROR_CODES,
 ]);
 
@@ -221,7 +223,23 @@ const METHOD_HANDLERS = new Map([
   ['getBot', (control, params, signal) => control.getBot(params.botId, { signal })],
   ['findByRequest', (control, params, signal) => control.findByRequest(params.requestId, { signal })],
   ['submit', (control, params, signal) =>
-    control.submit(params.botId, { requestId: params.requestId, text: params.text }, { signal })],
+    control.submit(
+      params.botId,
+      {
+        requestId: params.requestId,
+        text: params.text,
+        ...(params.attachments !== undefined ? { attachments: params.attachments } : {}),
+      },
+      { signal },
+    )],
+  ['uploadAttachment', (control, params, signal) =>
+    control.uploadAttachment(
+      params.botId,
+      { name: params.name, mimeType: params.mimeType, data: params.data },
+      { signal },
+    )],
+  ['getAttachment', (control, params, signal) =>
+    control.getAttachment(params.botId, params.attachmentId, { signal })],
   ['getSubmission', (control, params, signal) =>
     control.getSubmission(params.botId, params.requestId, { signal })],
   ['history', (control, params, signal) => control.history(params.botId, { ...pageOptions(params, signal), chunked: params.chunked })],

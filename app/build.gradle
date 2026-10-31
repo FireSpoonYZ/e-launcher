@@ -11,9 +11,23 @@ def sharedWebInputs = rootProject.files(
         rootProject.fileTree('desktop/web/src'),
         rootProject.fileTree('host-core') { include '*.js', '*.d.ts' })
 
+// The six @earendil-works packages are file: tarballs under build/pi-main,
+// built from the pinned upstream main commit by scripts/prepare-pi-main.mjs.
+// They must exist before npm ci resolves host-core/package.json.
+def preparePiMain = tasks.register('preparePiMain', Exec) {
+    workingDir rootProject.projectDir
+    commandLine 'node', 'scripts/prepare-pi-main.mjs'
+    inputs.files rootProject.file('scripts/prepare-pi-main.mjs'),
+            rootProject.file('scripts/pi-main.json')
+    outputs.dir rootProject.file('build/pi-main')
+}
 def installHostDependencies = tasks.register('installHostDependencies', Exec) {
+    dependsOn preparePiMain
     workingDir rootProject.file('host-core')
-    commandLine npmCommand + ['ci']
+    // file: tarball deps need `install` to write the lockfile on first run
+    // (npm ci never generates a lock); subsequent runs reuse it via ci.
+    def hostLockExists = rootProject.file('host-core/package-lock.json').exists()
+    commandLine npmCommand + (hostLockExists ? ['ci'] : ['install'])
     inputs.files rootProject.file('host-core/package.json'), rootProject.file('host-core/package-lock.json'),
             rootProject.fileTree('host-core') { include '.npmrc' }, rootProject.fileTree('.') { include '.npmrc' }
     outputs.dir rootProject.file('host-core/node_modules')

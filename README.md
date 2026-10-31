@@ -130,7 +130,7 @@ Android 应用内集成 Host 核心：在受监督的独立 Node Mobile 子进�
 
 JDK 21、Gradle 8.14.3（仓库内 `gradlew`）、Node **≥ 22.19**、SDK Platform 36、AGP 8.13.0 / NDK 28.2.13676358，最低支持 Android 13（minSdk33）、targetSdk36；Android 10–12 不再支持。运行时网络使用 OkHttp 3.14.9。首次构建需下载 Gradle 发行包与构建依赖并接受 SDK 许可。先运行 `scripts/prepare-pi-runtime.ps1` 准备 Node Mobile、SDK 资源和锁定完整性的官方 npm 11.6.2 payload；JavaScript 改动后运行 `npm --prefix pi-runtime test` 重建并测试 bundle。Gradle 从 `shower-server/` 的固定来源构建精简 Binder-only APK，并以 `shower-server.jar` 生成到 App assets；不需要 Python、Lamda payload 或外部部署脚本。构建还会把真实 arm64 Node executable 以 `libnode_launcher.so` 打入 APK 的 native library 目录；npm 的完整目录保存在版本化 asset 中并仅在版本首次使用时原子展开。
 
-首次构建或修改前端后，先安装依赖、构建并同步 Web 资源：
+首次构建或修改前端后，先安装依赖、构建并同步 Web 资源。Host 核心的六个 `@earendil-works/*` 包固定为上游 main SHA（`scripts/pi-main.json`）构建的 `build/pi-main/*.tgz`；`installHostDependencies` Gradle 任务已在 `npm ci` 前自动运行 `scripts/prepare-pi-main.mjs` 生成它们，手动准备可用 `npm run prepare:pi-main`：
 
 ```powershell
 npm ci

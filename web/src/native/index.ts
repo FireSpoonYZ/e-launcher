@@ -88,6 +88,11 @@ export type HostVoiceSettings = { sttEngine: HostVoiceEngine; ttsEngine: HostVoi
 export type HostVoiceSaveInput = { sttEngine?: HostVoiceEngine; ttsEngine?: HostVoiceEngine; language?: string; speechRate?: number; stt?: HostVoiceRemote & {apiKey?: string}; tts?: HostVoiceRemote & {apiKey?: string} };
 export type HostVoiceEvent = { type: 'partial'|'submitted'|'error'; botId: string; requestId: string; text?: string; receipt?: Record<string, unknown>; code?: string; outcome?: string; message?: string };
 
+/** 系统选图/拍照返回的单张图片：data 为纯 base64（不含 dataURL），mimeType 限定 JPEG/PNG。 */
+export type BotHostImage = { name: string; mimeType: 'image/jpeg'|'image/png'; data: string; size: number; width: number; height: number };
+/** 最多 4 张，每张最长边 ≤1600 且 ≤512KB；取消返回 {images:[],cancelled:true}；失败 reject。 */
+export type BotHostPickImagesResult = { images: BotHostImage[]; cancelled?: boolean };
+
 export interface BotHostPlugin {
   snapshot(): Promise<HostSnapshot>;
   status(): Promise<HostStatus>;
@@ -107,7 +112,8 @@ export interface BotHostPlugin {
   startVoice(options: {botId: string; requestId: string}): Promise<Record<string, never>>;
   finishVoice(): Promise<Record<string, never>>;
   cancelVoice(): Promise<Record<string, never>>;
-  addListener(event: 'voiceEvent', listener: (event: HostVoiceEvent) => void): ListenerPromise;}
+  addListener(event: 'voiceEvent', listener: (event: HostVoiceEvent) => void): ListenerPromise;
+  pickImages(options: {source: 'photos'|'camera'}): Promise<BotHostPickImagesResult>;}
 export const BotHost: BotHostPlugin = createTauriBotHost();
 
 export async function openCenterUrl(url: string): Promise<void> {

@@ -78,7 +78,7 @@ export function createRuntimeHindsight({ host, getHarness, getWorkContexts, getW
   let dirty = false;
   let runCursor = 0;
   let listenerInstalled = false;
-  let unsubscribeCommits = null;
+  let commitObservation = null;
   let quiescePromise = null;
   let closePromise = null;
   const inflight = new Set();
@@ -139,11 +139,18 @@ export function createRuntimeHindsight({ host, getHarness, getWorkContexts, getW
     const harness = getHarness();
     if (!harness) return;
     try {
-      unsubscribeCommits = harness.subscribeCommits((publication) => {
-        // 提交监听内不允许 Session 调用，只对 submission 变化调度微任务唤醒 pump。
-        if (publication && Array.isArray(publication.changes) && publication.changes.some((c) => c?.type === 'submission')) {
-          queueMicrotask(() => nudge());
-        }
+      // advance 内不允许 Session 调用/阻塞，只对 submission 变化调度微任务唤醒 pump。
+      // end 只复位安装标记（detach 自身不会触发 end）：Session 关闭/失败后 activatePump 会重试安装。
+      commitObservation = harness.observeCommits({
+        advance: (publication) => {
+          if (publication && Array.isArray(publication.changes) && publication.changes.some((c) => c?.type === 'submission')) {
+            queueMicrotask(() => nudge());
+          }
+        },
+        end: () => {
+          commitObservation = null;
+          listenerInstalled = false;
+        },
       });
       listenerInstalled = true;
     } catch {
@@ -550,13 +557,13 @@ export function createRuntimeHindsight({ host, getHarness, getWorkContexts, getW
         clearInterval(timer);
         timer = null;
       }
-      if (unsubscribeCommits) {
+      if (commitObservation) {
         try {
-          unsubscribeCommits();
+          commitObservation.detach();
         } catch {
           // listener 已失效
         }
-        unsubscribeCommits = null;
+        commitObservation = null;
       }
       listenerInstalled = false;
       quiescePromise = (async () => {

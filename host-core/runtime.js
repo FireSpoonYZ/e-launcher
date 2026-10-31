@@ -42,6 +42,11 @@ import { createShowerTools } from './shower-tools.js';
 import { createRuntimeShower } from './runtime-shower.js';
 import { createScheduleManager } from './host-schedules.js';
 import { createScheduleTools } from './schedule-tools.js';
+import {
+  loadAttachment,
+  removeBotAttachments,
+  uploadAttachment,
+} from './attachments.js';
 
 const CTX = BACKGROUND_CONTEXT;
 const BOTS_SYNC_THROTTLE_MS = 1000;
@@ -480,6 +485,7 @@ export async function openRuntime(options) {
     harness,
     models,
     defaultModel,
+    dataRoot: host.dataRoot,
     releaseOwner,
     cleanupEnvs,
     live,
@@ -552,7 +558,7 @@ function parseBindingKey(key) {
   }
 }
 
-function createRuntime({ host, harness, models, defaultModel, releaseOwner, cleanupEnvs, live, workContexts, decisions, plugins, coreExtensions, codemodeExtension, finalBudgetExtension, centerRuntime, setOnline, setBotModels, getBotModels, setWatermarkReader, botAdmissions, collaboration, onBotsChanged, onBotsSync, shower, schedules }) {
+function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseOwner, cleanupEnvs, live, workContexts, decisions, plugins, coreExtensions, codemodeExtension, finalBudgetExtension, centerRuntime, setOnline, setBotModels, getBotModels, setWatermarkReader, botAdmissions, collaboration, onBotsChanged, onBotsSync, shower, schedules }) {
   let closePromise = null;
   let closing = false;
   let centerOnline = false;
@@ -684,17 +690,17 @@ function createRuntime({ host, harness, models, defaultModel, releaseOwner, clea
     })();
   }
 
-  let unsubscribeCommits = null;
-  try {
-    unsubscribeCommits = harness.subscribeCommits((publication) => {
+  // SDK main：observeCommits({advance,end}) 取代旧 subscribeCommits(fn)。
+  // advance 必须同步快速返回、不得调用 Session：只记录需要检查，实际检查由 microtask 做。
+  const commitObservation = harness.observeCommits({
+    advance(publication) {
       if (closing || trackedSubmissions.size === 0) return;
       if (publication && Array.isArray(publication.changes) && publication.changes.some((c) => c?.type === 'submission')) {
         queueMicrotask(() => checkTrackedSubmissions());
       }
-    });
-  } catch {
-    /* ignore if harness does not support subscribeCommits */
-  }
+    },
+    end() { /* Session 关闭时观察自然结束；无需动作 */ },
+  });
 
   // 14 天归档自动删除定时器（每 6 小时检查一次）。
   let archivePurgeTimer = setInterval(() => {
@@ -715,10 +721,7 @@ function createRuntime({ host, harness, models, defaultModel, releaseOwner, clea
       clearInterval(archivePurgeTimer);
       archivePurgeTimer = null;
     }
-    if (unsubscribeCommits) {
-      try { unsubscribeCommits(); } catch { /* ignore */ }
-      unsubscribeCommits = null;
-    }
+    try { commitObservation?.detach(); } catch { /* ignore */ }
     botAdmissions.suspend();
     plugins.suspend();
     plugins.abortActions();
@@ -768,6 +771,14 @@ function createRuntime({ host, harness, models, defaultModel, releaseOwner, clea
 
   const profileFor = (botId, workMeta) => botProfile(host, plugins, getBotModels(), coreExtensions, codemodeExtension, finalBudgetExtension, botId, workMeta);
 
+  // 图片附件落盘：dataRoot/attachments/<botId>/<sha256>，随 Bot 删除清理（deleteBot/purge）。
+  // 附件在 Bot lane 外也可上传（本地已鉴权动作），但归属校验先于任何写盘。
+  const attachmentStore = {
+    upload: (botId, input) => uploadAttachment(dataRoot, botId, input),
+    load: (botId, attachmentId) => loadAttachment(dataRoot, botId, attachmentId),
+    removeBot: (botId) => removeBotAttachments(dataRoot, botId),
+  };
+
   // 每轮准入：持久队列先于原生提交；泵在 Bot 准入 lane 内做
   // prepare→原子切换→confirm→pin→submit(whenBusy:'reject')。
   const turns = createTurnAdmission({
@@ -792,6 +803,7 @@ function createRuntime({ host, harness, models, defaultModel, releaseOwner, clea
     },
     recordCompletedSubmission,
     initializeBot,
+    attachments: attachmentStore,
   });
   decisions.setTurnGate(turns.admitWorkDecision, turns.pump);
 
@@ -965,6 +977,7 @@ function createRuntime({ host, harness, models, defaultModel, releaseOwner, clea
     await assertBotIdle(bot);
     await schedules.deleteBot(bot);
     host.deleteBot({ botId });
+    await attachmentStore.removeBot(botId);
     initializedBots.delete(botId);
     return true;
   }
@@ -1343,6 +1356,7 @@ function createRuntime({ host, harness, models, defaultModel, releaseOwner, clea
       await assertBotIdle(bot);
       await schedules.deleteBot(bot);
       const res = host.deleteBot({ botId });
+      await attachmentStore.removeBot(botId);
       initializedBots.delete(botId);
       if (onBotsSync) await onBotsSync();
       else scheduleBotsSync();
@@ -1382,9 +1396,25 @@ function createRuntime({ host, harness, models, defaultModel, releaseOwner, clea
 
     setBotModel() { throw errWithCode('models are managed by the center', 'INVALID_STATE'); },
 
+    // 附件：先落盘再引用。上传幂等（内容定址），getAttachment 只回该 Bot 归属的图。
+    // 与 deleteBot 同 lane：上传在校验期间 Bot 不会被删，绝不留下孤立附件目录。
+    uploadAttachment: (botId, input) => admitBot(botId, async () => {
+      const bot = await requireBot(botId);
+      if (bot.archivedAt !== null && bot.archivedAt !== undefined) {
+        throw errWithCode('bot is archived and read-only', 'BOT_ARCHIVED');
+      }
+      return attachmentStore.upload(botId, input);
+    }),
+
+    async getAttachment(botId, attachmentId) {
+      await requireBot(botId);
+      return attachmentStore.load(botId, attachmentId);
+    },
+
     // 每轮准入：先把用户输入持久化进 Host 队列并立即返回 queued 回执；
     // 实际 prepare→原子切换→confirm→pin→原生提交由准入泵异步完成。
     // 同 requestId 重复调用返回同一条受理（绝不产生第二条消息），不同正文冲突。
+    // 附件仅传 id 数组；图片-only 消息允许空文本。
     submit: async (botId, input) => {
       assertNonBlank(botId, 'botId');
       // 离线或恢复未完成：准入 lane 挂起，泵不可能在飞——直接持久化受理（已鉴权本地动作）。
@@ -1622,7 +1652,7 @@ function createRuntime({ host, harness, models, defaultModel, releaseOwner, clea
   // 离线/恢复暂停只放行本地已鉴权动作：持久 enqueue、被动回执/状态与取消。
   // 这些路径只用 Harness snapshot/commit/abortTask，不隐式 resume 调度器；
   // 模型、工具、问卷等执行路径仍受 Center 门禁（运行时本就对 SDK 抛离线错）。
-  const offlineMethods = new Set(['submit', 'getSubmission', 'wait', 'abort', 'turns', 'inspect', 'history', 'watch']);
+  const offlineMethods = new Set(['submit', 'getSubmission', 'wait', 'abort', 'turns', 'inspect', 'history', 'watch', 'uploadAttachment', 'getAttachment']);
   return new Proxy(runtime, {
     get(target, key) {
       const value = target[key];

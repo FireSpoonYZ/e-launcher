@@ -14,6 +14,8 @@ const OWNER_DB = 'pending-owner.sqlite';
 const STATES = new Set(['pending', 'sending', 'unconfirmed', 'accepted', 'rejected']);
 const MAX_TEXT_BYTES = 262144;
 const MAX_RECEIPT_BYTES = 1048576; // 1 MiB
+const MAX_ATTACHMENTS = 4;
+const SHA256_HEX_RE = /^[0-9a-f]{64}$/;
 const DEFAULT_LIMIT = 20;
 const MAX_LIMIT = 200;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -54,7 +56,7 @@ const REQUIRED_COLUMNS = {
   pending_identity: ['id', 'device_id'],
   pending_rows: ['id', 'device_id', 'kind', 'target_device_id', 'bot_id', 'scope_id', 'request_id',
     'message_id', 'text', 'reply_to', 'fingerprint', 'state', 'receipt_json', 'last_error_json',
-    'created_at', 'updated_at'],
+    'created_at', 'updated_at', 'attachments_json'],
 };
 const REQUIRED_UNIQUE_INDEXES = ['idx_pending_primary_key', 'idx_pending_room_key'];
 
@@ -76,15 +78,34 @@ function rejectUnknownFields(input, allowed, label) {
   }
 }
 
-function assertPendingText(value) {
+function assertPendingText(value, attachments) {
+  const hasAttachments = Array.isArray(attachments) && attachments.length > 0;
   if (
     typeof value !== 'string' ||
     !value.isWellFormed() ||
-    value.trim() === '' ||
+    (!hasAttachments && value.trim() === '') ||
     Buffer.byteLength(value, 'utf8') > MAX_TEXT_BYTES
   ) {
-    throw messageError('INVALID_ARGUMENT', 'text must be a well-formed non-blank string of at most 262144 UTF-8 bytes');
+    throw messageError(
+      'INVALID_ARGUMENT',
+      hasAttachments
+        ? 'text must be a well-formed string of at most 262144 UTF-8 bytes'
+        : 'text must be a well-formed non-blank string of at most 262144 UTF-8 bytes'
+    );
   }
+}
+
+// 附件只按 ID 有序保留（最多 4 个 64hex SHA-256）；内容归属由 Host runtime 校验。
+function normalizeAttachments(value) {
+  if (!Array.isArray(value) || value.length < 1 || value.length > MAX_ATTACHMENTS) {
+    throw messageError('INVALID_ARGUMENT', `attachments must be an array of 1-${MAX_ATTACHMENTS} attachment IDs`);
+  }
+  for (const id of value) {
+    if (typeof id !== 'string' || !SHA256_HEX_RE.test(id)) {
+      throw messageError('INVALID_ARGUMENT', 'attachments[] must be lowercase 64-character hex SHA-256 IDs');
+    }
+  }
+  return [...value];
 }
 
 function parseJson(value) {
@@ -112,6 +133,8 @@ function toRecord(row) {
   if (row.kind === 'primary') {
     record.botId = row.bot_id;
     record.requestId = row.request_id;
+    const attachments = parseJson(row.attachments_json);
+    if (attachments !== null) record.attachments = attachments;
   } else {
     record.scopeId = row.scope_id;
     record.messageId = row.message_id;
@@ -125,25 +148,28 @@ function normalizeEnqueue(input) {
     throw messageError('INVALID_ARGUMENT', 'enqueue input must be an object');
   }
   if (input.kind === 'primary') {
-    rejectUnknownFields(input, new Set(['kind', 'targetDeviceId', 'botId', 'requestId', 'text']), 'enqueue input');
+    rejectUnknownFields(input, new Set(['kind', 'targetDeviceId', 'botId', 'requestId', 'text', 'attachments']), 'enqueue input');
     assertId(input.targetDeviceId, 'targetDeviceId');
     assertId(input.botId, 'botId');
     assertId(input.requestId, 'requestId');
-    assertPendingText(input.text);
-    return {
+    const attachments = input.attachments === undefined ? null : normalizeAttachments(input.attachments);
+    assertPendingText(input.text, attachments);
+    const normalized = {
       kind: 'primary',
       targetDeviceId: input.targetDeviceId,
       botId: input.botId,
       requestId: input.requestId,
       text: input.text,
     };
+    if (attachments !== null) normalized.attachments = attachments;
+    return normalized;
   }
   if (input.kind === 'room') {
     rejectUnknownFields(input, new Set(['kind', 'targetDeviceId', 'scopeId', 'messageId', 'text', 'replyTo']), 'enqueue input');
     assertId(input.targetDeviceId, 'targetDeviceId');
     assertId(input.scopeId, 'scopeId');
     assertId(input.messageId, 'messageId');
-    assertPendingText(input.text);
+    assertPendingText(input.text, null);
     let replyTo = null;
     if (input.replyTo !== undefined && input.replyTo !== null) {
       assertId(input.replyTo, 'replyTo');
@@ -170,6 +196,7 @@ function fingerprintFor(normalized) {
         botId: normalized.botId,
         requestId: normalized.requestId,
         text: normalized.text,
+        ...(normalized.attachments !== undefined ? { attachments: normalized.attachments } : {}),
       }
     : {
         kind: 'room',
@@ -223,7 +250,14 @@ function initSchema(db, deviceId) {
       db.exec(SCHEMA_SQL);
       db.prepare('INSERT INTO pending_identity (id, device_id) VALUES (1, ?)').run(deviceId);
       db.exec('PRAGMA user_version = ' + SCHEMA_VERSION);
+      // 新建库即含附件列；既有 schema v1 库走下方平滑迁移。
+      db.exec('ALTER TABLE pending_rows ADD COLUMN attachments_json TEXT');
     } else {
+      // schema v1 平滑迁移：旧库没有附件列时补列；assertInventory 只要求列存在。
+      const columns = new Set(db.prepare('PRAGMA table_info(pending_rows)').all().map((row) => row.name));
+      if (!columns.has('attachments_json')) {
+        db.exec('ALTER TABLE pending_rows ADD COLUMN attachments_json TEXT');
+      }
       // 既有库先校验准确 inventory 与设备绑定，再恢复；失败不重置。
       assertInventory(db);
       const row = db.prepare('SELECT device_id FROM pending_identity WHERE id = 1').get();
@@ -355,8 +389,8 @@ export function openPendingStore(dataRoot, deviceId) {
     const stmtInsert = db.prepare(
       `INSERT INTO pending_rows (id, device_id, kind, target_device_id, bot_id, scope_id, request_id,
                                  message_id, text, reply_to, fingerprint, state, receipt_json,
-                                 last_error_json, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, ?, ?)`
+                                 last_error_json, created_at, updated_at, attachments_json)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, ?, ?, ?)`
     );
     const stmtFindPrimary = db.prepare(
       "SELECT * FROM pending_rows WHERE target_device_id = ? AND kind = 'primary' AND bot_id = ? AND request_id = ?"
@@ -385,7 +419,7 @@ export function openPendingStore(dataRoot, deviceId) {
           throw messageError(
             'REQUEST_CONFLICT',
             existing.kind === 'primary'
-              ? 'requestId already used with different text'
+              ? 'requestId already used with different text or attachments'
               : 'messageId already used with different text or replyTo'
           );
         }
@@ -404,7 +438,10 @@ export function openPendingStore(dataRoot, deviceId) {
           normalized.kind === 'room' ? normalized.replyTo : null,
           fingerprint,
           timestamp,
-          timestamp
+          timestamp,
+          normalized.kind === 'primary' && normalized.attachments !== undefined
+            ? JSON.stringify(normalized.attachments)
+            : null
         );
         db.exec('COMMIT');
         committed = true;

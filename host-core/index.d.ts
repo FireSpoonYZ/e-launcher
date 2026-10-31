@@ -108,13 +108,40 @@ export interface PrimarySubmission {
   status: 'queued' | 'placed' | 'done' | 'unanswered';
   /** Present on a Host-queued receipt while the turn is being admitted; absent after native submission. */
   admission?: TurnAdmissionStatus | null;
+  /** Metadata only (no base64) echoing the submitted image attachments; lets UI render attachment-only pending turns. */
+  attachments?: ImageAttachment[];
   answerText: string | null;
   reason: string | null;
 }
 
 export interface SubmissionInput {
   requestId: string;
+  /** With attachments present this may be an empty/blank string; text-only submits still require non-empty text. */
   text: string;
+  /** Ordered previously-uploaded image attachment IDs (lowercase hex SHA-256), at most 4. */
+  attachments?: string[];
+}
+
+/** Uploaded image attachment record; `id` is the decoded bytes' lowercase hex SHA-256. */
+export interface ImageAttachment {
+  id: string;
+  name: string;
+  mimeType: 'image/jpeg' | 'image/png';
+  size: number;
+  width: number;
+  height: number;
+}
+
+export interface AttachmentUploadInput {
+  name: string;
+  mimeType: 'image/jpeg' | 'image/png';
+  /** Canonical base64 of one image <= 512 KiB decoded, max edge 1600px. */
+  data: string;
+}
+
+/** Attachment metadata plus the canonical base64 payload. */
+export interface ImageAttachmentData extends ImageAttachment {
+  data: string;
 }
 
 export interface HistoryOptions {
@@ -566,6 +593,10 @@ export interface Runtime {
   submit(botId: string, input: SubmissionInput): Promise<PrimarySubmission>;
   wait(botId: string, requestId: string): Promise<PrimarySubmission>;
   getSubmission(botId: string, requestId: string): Promise<PrimarySubmission | null>;
+  /** Persist one validated image into the Bot's private attachment dir; resolves the content-addressed record. */
+  uploadAttachment(botId: string, input: AttachmentUploadInput): Promise<ImageAttachment>;
+  /** Rejects ATTACHMENT_NOT_FOUND when the ID is unknown to this Bot. */
+  getAttachment(botId: string, attachmentId: string): Promise<ImageAttachmentData>;
   history(botId: string, options?: HistoryOptions): Promise<HistoryPage>;
   /** /clear：清空主私聊可见历史并重置模型上下文（pi.reset，不新建 conversationId）。 */
   clearHistory(botId: string): Promise<ClearHistoryResult>;
@@ -758,6 +789,8 @@ export interface LiveMessage {
   toolCalls?: LiveMessageToolCall[];
   /** Whitelist projection of the toolResult details.presentation; read-only. */
   presentation?: ToolPresentation;
+  /** Metadata only (no base64) on user messages carrying image attachments. */
+  attachments?: ImageAttachment[];
 }
 
 export interface LiveHistoryItem {
@@ -948,6 +981,8 @@ export interface ControlClient {
   findByRequest(requestId: string, options?: ControlClientCallOptions): Promise<BotRecord>;
   submit(botId: string, input: SubmissionInput, options?: ControlClientCallOptions): Promise<PrimarySubmission>;
   getSubmission(botId: string, requestId: string, options?: ControlClientCallOptions): Promise<PrimarySubmission>;
+  uploadAttachment(botId: string, input: AttachmentUploadInput, options?: ControlClientCallOptions): Promise<ImageAttachment>;
+  getAttachment(botId: string, attachmentId: string, options?: ControlClientCallOptions): Promise<ImageAttachmentData>;
   history(botId: string, options?: HistoryOptions & ControlClientCallOptions): Promise<HistoryPage>;
   clearHistory(botId: string, options?: ControlClientCallOptions): Promise<ClearHistoryResult>;
   compact(botId: string, options?: ControlClientCallOptions): Promise<CompactResult>;
@@ -1793,7 +1828,7 @@ export interface RemoteControlMethodMap {
   deleteBot: { params: { botId: string }; result: DeleteBotResult };
   getBot: { params: { botId: string }; result: BotRecord };
   findByRequest: { params: { requestId: string }; result: BotRecord };
-  submit: { params: { botId: string; requestId: string; text: string }; result: PrimarySubmission };
+  submit: { params: { botId: string; requestId: string; text: string; attachments?: string[] }; result: PrimarySubmission };
   getSubmission: { params: { botId: string; requestId: string }; result: PrimarySubmission };
   history: { params: HistoryOptions & { botId: string }; result: HistoryPage };
   clearHistory: { params: { botId: string }; result: ClearHistoryResult };
@@ -1854,6 +1889,9 @@ export interface RemoteControlMethodMap {
   setBotCwd: { params: { botId: string; input: { cwd: string } }; result: BotRecord };
   setBotModel: { params: { botId: string; input: { modelRef?: string | null } }; result: BotRecord };
   scheduleTask: { params: { botId: string; input: Record<string, unknown> }; result: Record<string, unknown> };
+  /* Image attachments: upload is per-Bot and content-addressed; read returns metadata + base64 data. */
+  uploadAttachment: { params: AttachmentUploadInput & { botId: string }; result: ImageAttachment };
+  getAttachment: { params: { botId: string; attachmentId: string }; result: ImageAttachmentData };
   validateCenterProvider: { params: CenterProviderProbe; result: ProviderCheckResult };
   discoverCenterProviderModels: { params: CenterProviderProbe; result: DiscoveryResult };
   callCapabilityAction: { params: CenterActionCall; result: ActionResult };
@@ -1996,7 +2034,16 @@ export interface LocalControlAdapter {
 export type PendingState = 'pending' | 'sending' | 'unconfirmed' | 'accepted' | 'rejected';
 
 export type PendingEnqueueInput =
-  | { kind: 'primary'; targetDeviceId: string; botId: string; requestId: string; text: string }
+  | {
+      kind: 'primary';
+      targetDeviceId: string;
+      botId: string;
+      requestId: string;
+      /** Blank text is allowed only together with a non-empty attachments list. */
+      text: string;
+      /** Ordered previously-uploaded image attachment IDs (lowercase hex SHA-256), at most 4. */
+      attachments?: string[];
+    }
   | { kind: 'room'; targetDeviceId: string; scopeId: string; messageId: string; text: string; replyTo?: string | null };
 
 export interface PendingRecordBase {
@@ -2012,7 +2059,7 @@ export interface PendingRecordBase {
 }
 
 export type PendingRecord =
-  | (PendingRecordBase & { kind: 'primary'; botId: string; requestId: string })
+  | (PendingRecordBase & { kind: 'primary'; botId: string; requestId: string; attachments?: string[] })
   | (PendingRecordBase & { kind: 'room'; scopeId: string; messageId: string; replyTo: string | null });
 
 export interface PendingCursor {
@@ -2034,7 +2081,7 @@ export interface PendingListPage {
 
 /** Fixed injected transport: four business operations only, never an arbitrary proxy. */
 export interface PendingCall {
-  (targetDeviceId: string, method: 'submit', params: { botId: string; requestId: string; text: string }, options?: { signal?: AbortSignal }): Promise<PrimarySubmission>;
+  (targetDeviceId: string, method: 'submit', params: { botId: string; requestId: string; text: string; attachments?: string[] }, options?: { signal?: AbortSignal }): Promise<PrimarySubmission>;
   (targetDeviceId: string, method: 'getSubmission', params: { botId: string; requestId: string }, options?: { signal?: AbortSignal }): Promise<PrimarySubmission | null>;
   (targetDeviceId: string, method: 'publishUserMessage', params: { scopeId: string; input: UserMessageInput }, options?: { signal?: AbortSignal }): Promise<StoredMessage>;
   (targetDeviceId: string, method: 'getScopeMessage', params: { scopeId: string; messageId: string }, options?: { signal?: AbortSignal }): Promise<StoredMessage | null>;

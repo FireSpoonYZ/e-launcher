@@ -16,7 +16,7 @@ import {
 } from './control-http.js';
 import { serveBotLive, serveWorkLive } from './control-live.js';
 import { resolveRuntimeExtensions } from './extension-manager.js';
-import { MEMORY_HTTP_INACTIVITY_MS } from './remote-control-protocol.js';
+import { MEMORY_HTTP_INACTIVITY_MS, normalizeControlCall } from './remote-control-protocol.js';
 import {
   normalizeShowerCreate,
   normalizeShowerFrameLimits,
@@ -36,6 +36,8 @@ const EXTRA_ERROR_STATUS = Object.freeze({
   PRIMARY_BOT_PROTECTED: 409,
   BOT_ARCHIVED: 409,
   INVALID_STATE: 409,
+  ATTACHMENT_NOT_FOUND: 404,
+  MODEL_NO_VISION: 409,
 });
 
 const routes = [
@@ -54,6 +56,8 @@ const routes = [
   { method: 'GET', key: '/v1/bots/:botId/live', pattern: /^\/v1\/bots\/([^/]+)\/live\/?$/, params: ['botId'], hasBody: false, handler: live },
   { method: 'GET', key: '/v1/bot-requests/:requestId', pattern: /^\/v1\/bot-requests\/([^/]+)\/?$/, params: ['requestId'], hasBody: false, handler: findByRequest },
   { method: 'POST', key: '/v1/bots/:botId/submissions', pattern: /^\/v1\/bots\/([^/]+)\/submissions\/?$/, params: ['botId'], hasBody: true, handler: submit },
+  { method: 'POST', key: '/v1/bots/:botId/attachments', pattern: /^\/v1\/bots\/([^/]+)\/attachments\/?$/, params: ['botId'], hasBody: true, handler: uploadAttachment },
+  { method: 'GET', key: '/v1/bots/:botId/attachments/:attachmentId', pattern: /^\/v1\/bots\/([^/]+)\/attachments\/([^/]+)\/?$/, params: ['botId', 'attachmentId'], hasBody: false, handler: getAttachment },
   { method: 'GET', key: '/v1/bots/:botId/submissions/:requestId', pattern: /^\/v1\/bots\/([^/]+)\/submissions\/([^/]+)\/?$/, params: ['botId', 'requestId'], hasBody: false, handler: getSubmission },
   { method: 'GET', key: '/v1/bots/:botId/history', pattern: /^\/v1\/bots\/([^/]+)\/history\/?$/, params: ['botId'], hasBody: false, handler: history },
   { method: 'POST', key: '/v1/bots/:botId/abort', pattern: /^\/v1\/bots\/([^/]+)\/abort\/?$/, params: ['botId'], hasBody: true, handler: abort },
@@ -298,6 +302,8 @@ async function dispatch(host, runtime, authorize, req, res, ctx) {
     '/v1/host', '/v1/settings', '/v1/service',
     '/v1/bots/:botId/submissions', '/v1/bots/:botId/submissions/:requestId', '/v1/bots/:botId/abort',
     '/v1/bot-requests/:requestId', '/v1/bots/:botId/history', '/v1/bots/:botId/live',
+    // 只读读取已上传图片：中心离线时草稿/历史仍可展示既有附件。
+    '/v1/bots/:botId/attachments/:attachmentId',
   ]);
   if (centerStatus && centerStatus.state !== 'ready' && !OFFLINE_ALLOWED.has(match.route.key)) {
     throw new ControlHttpError(503, 'CENTER_OFFLINE', 'center is not ready');
@@ -398,6 +404,23 @@ async function submit(host, runtime, params, body, req, res) {
   // 只等待受理，不等待模型回答。
   const submission = await runtime.submit(params.botId, body);
   writeControlJson(res, 202, submission);
+}
+
+// body 恰为远端 v2 参数 {botId?,name,mimeType,data}；botId 以路径为准，
+// 与远端 submit 一样由 normalizeControlCall 校验大小/字段/编码。
+async function uploadAttachment(host, runtime, params, body, req, res) {
+  const { params: input } = normalizeControlCall('uploadAttachment', { ...body, botId: params.botId });
+  writeControlJson(res, 200, await runtime.uploadAttachment(params.botId, {
+    name: input.name,
+    mimeType: input.mimeType,
+    data: input.data,
+  }));
+}
+
+async function getAttachment(host, runtime, params, body, req, res) {
+  assertNoQuery(req);
+  const { params: input } = normalizeControlCall('getAttachment', params);
+  writeControlJson(res, 200, await runtime.getAttachment(params.botId, input.attachmentId));
 }
 
 async function getSubmission(host, runtime, params, body, req, res) {

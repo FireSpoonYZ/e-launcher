@@ -6,6 +6,7 @@
 import { createHash } from 'node:crypto';
 import { ConversationBusy } from '@earendil-works/pi-durable';
 import { TurnQueue, TurnPin, toTurnAdmissionStatus, toQueuedReceipt } from './runtime-turns-docs.js';
+import { normalizeAttachmentIds } from './attachments.js';
 import { PrimaryIndex, getPrimaryConversation, applyAgentProfile, RequestKeys } from './runtime-docs.js';
 import { formatPrimarySubmission } from './runtime-history.js';
 import { parseModelRef } from './runtime-models.js';
@@ -41,14 +42,14 @@ function boundedTurnError(err) {
  *  live（protocol lane 补 setTurnAdmission；缺席时静默跳过）, admitBot,
  *  getEpoch()（断线 epoch，网络 await 期间变更即放弃提交）,
  *  trackSubmission(submissionId, info), recordCompletedSubmission(botId, formatted),
- *  initializeBot(botId).
+ *  initializeBot(botId), attachments({upload,load,removeBot}).
  */
 export function createTurnAdmission(deps) {
   const {
     host, getHarness, context, centerRuntime, plugins, models,
     getBotModels, setBotModels, profileFor, botExecutionFingerprint,
     setBotAppliedRevision, setBotFingerprint, live, admitBot, getEpoch,
-    trackSubmission, recordCompletedSubmission, initializeBot,
+    trackSubmission, recordCompletedSubmission, initializeBot, attachments,
   } = deps;
 
   const harness = () => getHarness();
@@ -358,13 +359,57 @@ export function createTurnAdmission(deps) {
     }
     const agent = await conversation.agent(context);
     const convModel = agent.model;
-    if (!convModel || !models.getModel(convModel.provider, convModel.modelId)) {
+    const convModelRecord = convModel ? models.getModel(convModel.provider, convModel.modelId) : null;
+    if (!convModel || !convModelRecord) {
       throw errWithCode('model is required', 'TURN_SYNC_FAILED');
+    }
+    // 带图提交前明确校验模型视觉能力与 provider inputLimits（无声明时按 Host 上限已满足）。
+    const attachmentMeta = Array.isArray(item.attachments) ? item.attachments : [];
+    if (attachmentMeta.length > 0) {
+      const modalities = Array.isArray(convModelRecord.input) ? convModelRecord.input : ['text'];
+      if (!modalities.includes('image')) {
+        throw errWithCode('model does not accept image input', 'MODEL_NO_VISION');
+      }
+      const imageLimits = convModelRecord.inputLimits?.images ?? null;
+      if (imageLimits) {
+        const maxPerMessage = imageLimits.maxPerMessage;
+        if (Number.isSafeInteger(maxPerMessage) && attachmentMeta.length > maxPerMessage) {
+          throw errWithCode('model accepts at most ' + maxPerMessage + ' images per message', 'INVALID_ARGUMENT');
+        }
+        const resize = imageLimits.resize;
+        // provider maxBytes 按 base64 编码长度计（resize profile 语义），不能拿解码后 size 比。
+        const maxBytes = resize?.maxBytes;
+        const maxWidth = resize?.maxWidth;
+        const maxHeight = resize?.maxHeight;
+        for (const meta of attachmentMeta) {
+          if (Number.isSafeInteger(maxBytes) && 4 * Math.ceil(meta.size / 3) > maxBytes) {
+            throw errWithCode('attachment exceeds model image byte limit', 'INVALID_ARGUMENT');
+          }
+          if (Number.isSafeInteger(maxWidth) && meta.width > maxWidth) {
+            throw errWithCode('attachment exceeds model image width limit', 'INVALID_ARGUMENT');
+          }
+          if (Number.isSafeInteger(maxHeight) && meta.height > maxHeight) {
+            throw errWithCode('attachment exceeds model image height limit', 'INVALID_ARGUMENT');
+          }
+        }
+      }
+    }
+    let content = item.text;
+    let entry;
+    if (attachmentMeta.length > 0) {
+      const blocks = [];
+      if (item.text.trim() !== '') blocks.push({ type: 'text', text: item.text });
+      for (const meta of attachmentMeta) {
+        const loaded = await attachments.load(bot.botId, meta.id);
+        blocks.push({ type: 'image', data: loaded.data, mimeType: meta.mimeType });
+      }
+      content = blocks;
+      entry = { kind: 'host.user-message', data: { attachments: attachmentMeta } };
     }
     let submission;
     try {
       submission = await conversation.submit(
-        { type: 'input', content: item.text, requestId: item.requestId, whenBusy: 'reject' },
+        { type: 'input', content, requestId: item.requestId, whenBusy: 'reject', ...(entry ? { entry } : {}) },
         context,
       );
     } catch (err) {
@@ -456,9 +501,15 @@ export function createTurnAdmission(deps) {
     if (typeof requestId !== 'string' || requestId.trim() === '') {
       throw errWithCode('requestId must be a non-empty string', 'INVALID_ARGUMENT');
     }
-    if (typeof text !== 'string' || text.trim() === '') {
+    const attachmentIds = normalizeAttachmentIds(input?.attachments);
+    if (typeof text !== 'string' || (text.trim() === '' && attachmentIds.length === 0)) {
       throw errWithCode('text must be a non-empty string', 'INVALID_ARGUMENT');
     }
+    // 无附件沿用旧版 SHA256(text) 摘要：升级前排队的旧请求仍能按原摘要幂等/冲突。
+    // 有附件则覆盖 text 与有序 id（同 id 不同 name 仍同摘要，重传幂等）。
+    const turnDigest = attachmentIds.length === 0
+      ? createHash('sha256').update(text).digest('hex')
+      : createHash('sha256').update(JSON.stringify({ text, attachments: attachmentIds })).digest('hex');
     const bot = host.getBot(botId);
     if (!bot) throw errWithCode('bot not found: ' + botId, 'BOT_NOT_FOUND');
     if (bot.archivedAt !== null && bot.archivedAt !== undefined) {
@@ -472,7 +523,7 @@ export function createTurnAdmission(deps) {
         if (record === undefined) return undefined;
         // 同 requestId 不同正文必须冲突，不能静默返回原回执。
         const keys = await tx.doc(RequestKeys, conversation0.id);
-        const want = createHash('sha256').update(text).digest('hex');
+        const want = turnDigest;
         const got = keys.digests['r:' + requestId];
         if (got !== undefined && got !== want) {
           throw errWithCode('requestId already used with different text: ' + requestId, 'REQUEST_CONFLICT');
@@ -488,7 +539,13 @@ export function createTurnAdmission(deps) {
         return formatted;
       }
     }
-    const digest = createHash('sha256').update(text).digest('hex');
+    const digest = turnDigest;
+    // 队列只存 id+展示元数据；提交时从盘读字节，重启/重试不丢附件、不重新产生 requestId。
+    const attachmentMeta = [];
+    for (const id of attachmentIds) {
+      const meta = await attachments.load(botId, id);
+      attachmentMeta.push({ id: meta.id, name: meta.name, mimeType: meta.mimeType, size: meta.size, width: meta.width, height: meta.height });
+    }
     const now = new Date().toISOString();
     const item = await harness().commit(async (tx) => {
       const doc = await queueDoc(tx, bot.primaryConversationId);
@@ -521,6 +578,7 @@ export function createTurnAdmission(deps) {
         primaryConversationId: bot.primaryConversationId,
         digest,
         text,
+        ...(attachmentMeta.length > 0 ? { attachments: attachmentMeta } : {}),
         phase: 'queued',
         error: null,
         admissionId: null,

@@ -13,6 +13,11 @@
 `center-contract/` 一起存在。构建不使用宿主机的 node_modules。中心服务
 只通过现有 relay 源码使用 Host 模块，Host/Android 不安装中心服务器依赖。
 构建包含本地的中心 Web 输出 `center-web/dist`，不访问 Host 的 Web 输出。
+`host-core` 与 `center-server` 的六个 `@earendil-works/*` 依赖是固定上游 SHA 的
+`build/pi-main/*.tgz`（file:），而 `.dockerignore` 排除 `build/`；根 Dockerfile 的
+build 阶段会在容器内先 `COPY` `scripts/pi-main.json` 与 `prepare-pi-main.mjs` 并
+`RUN node scripts/prepare-pi-main.mjs`，按同一 pin 生成 tgz 后再 `npm ci` 两组依赖，
+不需要宿主机先跑 prepare，也不把本机 `build/` 加入镜像上下文。
 
 在仓库根目录执行（此命令也可用于无 Compose 的镜像构建）：
 

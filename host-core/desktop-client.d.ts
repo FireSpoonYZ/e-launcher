@@ -13,6 +13,7 @@ import type {
   HostServiceStatus,
   PendingEnqueueInput,
   PendingRecord,
+  ImageAttachment,
   PendingListOptions,
   PendingListPage,
   LiveTarget,
@@ -101,6 +102,8 @@ export interface DesktopDraftFileRef {
 export interface DesktopDraftEntry {
   text: string;
   files: DesktopDraftFileRef[];
+  /** Previously-uploaded image attachment metadata; sending uses the `id` list only. */
+  attachments?: ImageAttachment[];
 }
 
 export type DesktopIntentMethod =

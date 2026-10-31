@@ -181,13 +181,18 @@ const DYNAMIC_ASSET_RE = /(?:require\s*\.\s*resolve|createRequire\s*\([^)]*\)\s*
 // licenses/standardwebhooks-1.1.1-LICENSE.txt -- that text is NOT an MIT copy.
 // `declared` is the manifest license to match, `license` the in-repo text file; a
 // package@version outside this map still fails the missing-license check.
+// The six @earendil-works packages are built from the pinned upstream main
+// commit (scripts/pi-main.json, scripts/prepare-pi-main.mjs) and installed via
+// file: tarballs from build/pi-main/; their installed version is the
+// deterministic 1.4.0-main.35dfa757378b, not the npm 1.4.0 release.
+const PI_MAIN_VERSION = '1.4.0-main.35dfa757378b';
 const UPSTREAM_LICENSE_ALLOWLIST = new Map([
-  ['@earendil-works/chord', { version: '1.4.0', declared: 'MIT', license: 'pi-v1.3.0-MIT.txt' }],
-  ['@earendil-works/pi-ai', { version: '1.4.0', declared: 'MIT', license: 'pi-v1.3.0-MIT.txt' }],
-  ['@earendil-works/pi-codemode', { version: '1.4.0', declared: 'MIT', license: 'pi-v1.3.0-MIT.txt' }],
-  ['@earendil-works/pi-durable', { version: '1.4.0', declared: 'MIT', license: 'pi-v1.3.0-MIT.txt' }],
-  ['@earendil-works/pi-mcp', { version: '1.4.0', declared: 'MIT', license: 'pi-v1.3.0-MIT.txt' }],
-  ['@earendil-works/pi-telemetry', { version: '1.4.0', declared: 'MIT', license: 'pi-v1.3.0-MIT.txt' }],
+  ['@earendil-works/chord', { version: PI_MAIN_VERSION, declared: 'MIT', license: 'pi-v1.3.0-MIT.txt' }],
+  ['@earendil-works/pi-ai', { version: PI_MAIN_VERSION, declared: 'MIT', license: 'pi-v1.3.0-MIT.txt' }],
+  ['@earendil-works/pi-codemode', { version: PI_MAIN_VERSION, declared: 'MIT', license: 'pi-v1.3.0-MIT.txt' }],
+  ['@earendil-works/pi-durable', { version: PI_MAIN_VERSION, declared: 'MIT', license: 'pi-v1.3.0-MIT.txt' }],
+  ['@earendil-works/pi-mcp', { version: PI_MAIN_VERSION, declared: 'MIT', license: 'pi-v1.3.0-MIT.txt' }],
+  ['@earendil-works/pi-telemetry', { version: PI_MAIN_VERSION, declared: 'MIT', license: 'pi-v1.3.0-MIT.txt' }],
   ['@vectorize-io/hindsight-client', { version: '0.9.2', declared: 'MIT', license: 'hindsight-client-0.9.2-MIT.txt' }],
   ['standardwebhooks', { version: '1.1.1', declared: 'MIT', license: 'standardwebhooks-1.1.1-LICENSE.txt' }],
   // Desktop UI packages (consumed through UI_NPM_PACKAGES, not the broker
@@ -590,7 +595,12 @@ async function assertInstalledHostDependencies() {
     } catch (err) {
       throw fail(`host-core dependency ${name} package.json is invalid: ${err.message}`);
     }
-    if (pkg.name !== name || pkg.version !== expected) {
+    // file: deps pin a tarball path, not a semver. For the six pinned
+    // @earendil-works packages the installed package.json version must equal
+    // the deterministic PI_MAIN_VERSION; every other dependency keeps the
+    // strict name+version match below.
+    const versionOk = expected.startsWith('file:') ? pkg.version === PI_MAIN_VERSION : pkg.version === expected;
+    if (pkg.name !== name || !versionOk) {
       throw fail(`host-core dependency ${name} installed ${pkg.name ?? 'unknown'}@${pkg.version ?? 'unknown'} does not match pinned ${expected}`);
     }
   }
@@ -959,6 +969,9 @@ async function writeThirdPartyNotices(nodeInfo, metafile) {
 }
 
 export async function prepareDesktop() {
+  // Ensure the six pinned @earendil-works file: tarballs exist before
+  // bundleDesktopClient's host-dependency check runs.
+  await runExec(process.execPath, [path.join(ROOT, 'scripts', 'prepare-pi-main.mjs')], { cwd: ROOT });
   await mkdir(DESKTOP_BUILD, { recursive: true });
   const nodeInfo = await prepareNodeSidecar();
   const iconsInfo = await prepareIcons();

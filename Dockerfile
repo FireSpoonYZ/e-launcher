@@ -5,8 +5,14 @@ COPY center-contract/ center-contract/
 COPY center-web/ center-web/
 RUN npm ci --prefix center-web && npm run --prefix center-web build
 COPY center-server/ center-server/
-RUN npm ci --prefix center-server --omit=dev
 COPY host-core/ host-core/
+# The six @earendil-works deps are file:../build/pi-main/<tgz> built from the
+# pinned upstream SHA (scripts/pi-main.json); .dockerignore excludes build/,
+# so generate them inside the builder before installing either manifest.
+COPY scripts/pi-main.json scripts/pi-main.json
+COPY scripts/prepare-pi-main.mjs scripts/prepare-pi-main.mjs
+RUN node scripts/prepare-pi-main.mjs
+RUN npm ci --prefix center-server --omit=dev
 RUN npm ci --prefix host-core --omit=dev
 
 FROM node:22-bookworm

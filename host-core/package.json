@@ -21,10 +21,12 @@
     }
   },
   "dependencies": {
-    "@earendil-works/chord": "1.4.0",
-    "@earendil-works/pi-ai": "1.4.0",
-    "@earendil-works/pi-durable": "1.4.0",
-    "@earendil-works/pi-mcp": "1.4.0",
+    "@earendil-works/chord": "file:../build/pi-main/earendil-works-chord-1.4.0-main.35dfa757378b.tgz",
+    "@earendil-works/pi-ai": "file:../build/pi-main/earendil-works-pi-ai-1.4.0-main.35dfa757378b.tgz",
+    "@earendil-works/pi-codemode": "file:../build/pi-main/earendil-works-pi-codemode-1.4.0-main.35dfa757378b.tgz",
+    "@earendil-works/pi-durable": "file:../build/pi-main/earendil-works-pi-durable-1.4.0-main.35dfa757378b.tgz",
+    "@earendil-works/pi-mcp": "file:../build/pi-main/earendil-works-pi-mcp-1.4.0-main.35dfa757378b.tgz",
+    "@earendil-works/pi-telemetry": "file:../build/pi-main/earendil-works-pi-telemetry-1.4.0-main.35dfa757378b.tgz",
     "@vectorize-io/hindsight-client": "0.9.2",
     "ajv": "8.17.1",
     "npm": "11.6.2",

@@ -24,8 +24,11 @@ export const MAX_UI_PROFILES = 16;
 export const MAX_UI_INTENTS = 128;
 const MAX_DRAFT_TARGETS = 256;
 const MAX_DRAFT_FILES = 64;
+const MAX_DRAFT_ATTACHMENTS = 4;
 const MAX_DRAFT_TEXT_BYTES = 262144;
 const MAX_TITLE_BYTES = 256;
+const SHA256_HEX_RE = /^[0-9a-f]{64}$/;
+const IMAGE_MIME_TYPES = new Set(['image/jpeg', 'image/png']);
 const MAX_PATH_BYTES = 4096;
 const MAX_ERROR_MESSAGE_BYTES = 512;
 const LOOPBACK_HOSTNAMES = new Set(['127.0.0.1', '[::1]']);
@@ -183,6 +186,25 @@ function normalizeDraftFile(raw) {
   return { name, path: filePath, size: raw.size };
 }
 
+// 草稿附件是已上传图片的元数据（提交时只发 id）；与 files 本地路径引用无关。
+function normalizeDraftAttachment(raw) {
+  if (!isPlainObject(raw)) throw invalid('draft attachment must be a plain object');
+  rejectUnknownFields(raw, new Set(['id', 'name', 'mimeType', 'size', 'width', 'height']), 'draft attachment');
+  if (typeof raw.id !== 'string' || !SHA256_HEX_RE.test(raw.id)) {
+    throw invalid('draft attachment.id must be a lowercase 64-character hex SHA-256');
+  }
+  const name = assertNonBlankText(raw.name, 'draft attachment.name', MAX_TITLE_BYTES);
+  if (typeof raw.mimeType !== 'string' || !IMAGE_MIME_TYPES.has(raw.mimeType)) {
+    throw invalid('draft attachment.mimeType must be image/jpeg or image/png');
+  }
+  for (const field of ['size', 'width', 'height']) {
+    if (!Number.isSafeInteger(raw[field]) || raw[field] < 0) {
+      throw invalid(`draft attachment.${field} must be a non-negative safe integer`);
+    }
+  }
+  return { id: raw.id, name, mimeType: raw.mimeType, size: raw.size, width: raw.width, height: raw.height };
+}
+
 function normalizeDrafts(raw) {
   if (!isPlainObject(raw)) throw invalid('drafts must be a plain object');
   const keys = Object.keys(raw);
@@ -196,13 +218,21 @@ function normalizeDrafts(raw) {
     assertId(key, 'draft target key');
     const entry = raw[key];
     if (!isPlainObject(entry)) throw invalid('draft entry must be a plain object');
-    rejectUnknownFields(entry, new Set(['text', 'files']), 'draft entry');
+    rejectUnknownFields(entry, new Set(['text', 'files', 'attachments']), 'draft entry');
     const text = assertBoundedText(entry.text, 'draft.text', MAX_DRAFT_TEXT_BYTES);
     if (!Array.isArray(entry.files) || entry.files.length > MAX_DRAFT_FILES) {
       throw invalid(`draft.files must be an array of at most ${MAX_DRAFT_FILES} items`);
     }
     const files = entry.files.map(normalizeDraftFile);
-    out[key] = { text, files };
+    const outEntry = { text, files };
+    // 旧草稿无 attachments 字段保持有效；只在新字段出现时校验。
+    if (entry.attachments !== undefined) {
+      if (!Array.isArray(entry.attachments) || entry.attachments.length > MAX_DRAFT_ATTACHMENTS) {
+        throw invalid(`draft.attachments must be an array of at most ${MAX_DRAFT_ATTACHMENTS} items`);
+      }
+      outEntry.attachments = entry.attachments.map(normalizeDraftAttachment);
+    }
+    out[key] = outEntry;
   }
   return out;
 }

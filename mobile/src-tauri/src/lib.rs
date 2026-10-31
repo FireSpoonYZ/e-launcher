@@ -45,6 +45,8 @@ const ALLOWED_METHODS: &[&str] = &[
   "reconnect",
   "clientLaunchTarget",
   "hide",
+  // 系统选图/拍照：Kotlin 侧 UI-local 原生能力（返回限尺寸 base64 图片，不进 bridge 服务）
+  "pickImages",
   // Bot 屏幕：Kotlin 侧 UI-local 原生覆盖层（只观看/接管已有屏幕，不进 bridge 服务）
   "screenOpen",
   "screenLayout",

@@ -49,7 +49,8 @@ export function toTurnAdmissionStatus(item) {
 }
 
 /** 队列条目的受理回执：status 恒为 'queued'；原生提交后由 submission 记录接管。
-    字段与 PrimarySubmission 对齐（answerText/reason 为 null），另附 admission。
+    字段与 PrimarySubmission 对齐（answerText/reason 为 null），另附 admission 与附件
+    展示元数据（绝不带 base64 字节，图片-only 受理因此仍可渲染出待发送缩略信息）。
     phase 'cancelled' 的条目生成终态 unanswered 回执：受理被撤销，但记录仍存在、
     getSubmission/wait/findByRequest 不因唯一的 Host 记录被删而误报不存在。 */
 export function toQueuedReceipt(item) {
@@ -62,6 +63,9 @@ export function toQueuedReceipt(item) {
     status: cancelled ? 'unanswered' : 'queued',
     answerText: null,
     reason: cancelled ? 'cancelled' : null,
+    ...(Array.isArray(item.attachments) && item.attachments.length > 0
+      ? { attachments: item.attachments.map(({ id, name, mimeType, size, width, height }) => ({ id, name, mimeType, size, width, height })) }
+      : {}),
     admission: cancelled ? null : toTurnAdmissionStatus(item),
   };
 }

@@ -4,6 +4,9 @@ import type {
   UpdateBotProfileInput,
   PrimarySubmission,
   SubmissionInput,
+  AttachmentUploadInput,
+  ImageAttachment,
+  ImageAttachmentData,
   HistoryOptions,
   HistoryPage,
   ClearHistoryResult,
@@ -123,6 +126,8 @@ export interface ControlClient {
   findByRequest(requestId: string, options?: ControlClientCallOptions): Promise<BotRecord>;
   submit(botId: string, input: SubmissionInput, options?: ControlClientCallOptions): Promise<PrimarySubmission>;
   getSubmission(botId: string, requestId: string, options?: ControlClientCallOptions): Promise<PrimarySubmission>;
+  uploadAttachment(botId: string, input: AttachmentUploadInput, options?: ControlClientCallOptions): Promise<ImageAttachment>;
+  getAttachment(botId: string, attachmentId: string, options?: ControlClientCallOptions): Promise<ImageAttachmentData>;
   history(botId: string, options?: HistoryClientOptions): Promise<HistoryPage>;
   clearHistory(botId: string, options?: ControlClientCallOptions): Promise<ClearHistoryResult>;
   compact(botId: string, options?: ControlClientCallOptions): Promise<CompactResult>;

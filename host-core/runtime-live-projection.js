@@ -84,8 +84,9 @@ function toolCallsFromBlocks(content) {
   return calls;
 }
 
-/** 投影一条消息；跳过 system/未知角色与无内容消息，只带文本和工具安全字段与时间戳。 */
-function projectMessage(message, budget) {
+/** 投影一条消息；跳过 system/未知角色与无内容消息，只带文本和工具安全字段与时间戳。
+    user 消息可携带附件展示元数据（不含 base64），图片-only 消息因此不会被空文本过滤掉。 */
+function projectMessage(message, budget, entry) {
   const role = message?.role;
   if (role !== 'user' && role !== 'assistant' && role !== 'toolResult') return null;
   const { text, truncated } = textFromBlocks(message.content, MAX_MESSAGE_UNITS);
@@ -98,9 +99,15 @@ function projectMessage(message, budget) {
     role === 'assistant' &&
     (message.stopReason === 'error' || (typeof message.errorMessage === 'string' && message.errorMessage.trim() !== ''));
 
-  if (text === '' && toolCalls.length === 0 && !hasToolResultIdentity && !isAssistantError) return null;
+  const attachments = role === 'user' && entry?.kind === 'host.user-message' &&
+    Array.isArray(entry?.data?.attachments) && entry.data.attachments.length > 0
+    ? entry.data.attachments.map(({ id, name, mimeType, size, width, height }) => ({ id, name, mimeType, size, width, height }))
+    : null;
+
+  if (text === '' && toolCalls.length === 0 && !hasToolResultIdentity && !isAssistantError && !attachments) return null;
 
   const projected = { role, text, truncated };
+  if (attachments) projected.attachments = attachments;
   if (role === 'toolResult') {
     if (typeof message.toolName === 'string') projected.toolName = message.toolName;
     if (typeof message.toolCallId === 'string') projected.toolCallId = message.toolCallId;
@@ -141,7 +148,7 @@ function projectEntry(entry, budget) {
   let seenMessages = 0;
   let messagesDropped = false;
   for (let i = model.length - 1; i >= 0; i--) {
-    const projected = projectMessage(model[i], budget);
+    const projected = projectMessage(model[i], budget, entry);
     if (!projected) continue;
     seenMessages++;
     if (seenMessages > MAX_MESSAGES_PER_ENTRY) {

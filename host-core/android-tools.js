@@ -1,3 +1,4 @@
+import { Type } from '@earendil-works/pi-ai';
 import { defineTool } from '@earendil-works/pi-durable';
 import { DEFAULT_IMAGE_LIMITS } from '@earendil-works/pi-durable/tools';
 import { resolveBotIdentity } from './bot-identity.js';
@@ -19,6 +20,25 @@ const SHOWER_KEYS = [
 const SHOWER_MODIFIERS = ['SHIFT', 'ALT', 'CTRL', 'META'];
 const COORDINATE = { type: 'integer', minimum: 0 };
 const INTEGER_ACTION = (minimum, maximum) => ({ type: 'integer', minimum, maximum });
+
+// codemode 只对声明了 structuredOutputSchema 的工具回传 structuredOutput（无 schema
+// 时脚本只见拼接文本、图片被丢弃）；declare 后嵌套结果解析为 {content, isError}。
+// 与 shower-tools/cua-tools 同一契约的本文件私有副本。
+const TOOL_RESULT_SCHEMA = Type.Object({
+  content: Type.Array(Type.Union([
+    Type.Object({ type: Type.Literal('text'), text: Type.String() }),
+    Type.Object({ type: Type.Literal('image'), data: Type.String(), mimeType: Type.String() }),
+  ])),
+  isError: Type.Boolean(),
+});
+
+/** 成功结果把同一批已限额/校验块附作 structuredOutput 供 codemode 嵌套调用；
+    错误结果保持 {output,isError} 不附 structuredOutput：SDK 将其转为 error diagnostic 拒绝脚本调用，
+    而不是让脚本 resolve 成功。 */
+function toolResult(bounded) {
+  if (bounded.isError === true) return bounded;
+  return { ...bounded, structuredOutput: { content: bounded.output ?? [], isError: false } };
+}
 
 function textOutput(text) {
   return { output: [{ type: 'text', text }] };
@@ -201,7 +221,9 @@ export function createAndroidTools({ host, getHarness, nativeBridge }) {
         + '失败会报错，不产生截图对象。text 通过系统剪贴板粘贴中文等 Unicode 文本并全选替换，空字符串或 clear 清空输入框；'
         + 'copy(text) 把文字写入系统剪贴板，paste 在光标处粘贴；key A 配合 CTRL 全选。剪贴板与主屏共享，'
         + 'text/copy 会覆盖；按键被系统接受不代表输入框已改变，必须截图确认。服务断开或屏幕空闲超时后先 create，'
-        + '再 launch 并截图重新定位，不要盲目重放旧坐标或动作。',
+        + '再 launch 并截图重新定位，不要盲目重放旧坐标或动作。'
+        + '返回 {content:[{type:"text",text}|{type:"image",data,mimeType}], isError}；'
+        + '在 codemode 中须显式 text(block.text)/image(block) 将各块传给模型，勿把图片 base64 打印成文本。',
       parameters: {
         type: 'object',
         anyOf: [
@@ -300,6 +322,7 @@ export function createAndroidTools({ host, getHarness, nativeBridge }) {
           },
         ],
       },
+      structuredOutputSchema: TOOL_RESULT_SCHEMA,
       replay: 'unsafe',
       async execute(args, api, context) {
         const identity = await resolveIdentity(host, getHarness, api, context);
@@ -313,13 +336,13 @@ export function createAndroidTools({ host, getHarness, nativeBridge }) {
           if (!result || typeof result !== 'object' || Array.isArray(result)) {
             throw new Error('Shower 原生响应无效');
           }
-          return screenshotResult(result, shot.limits);
+          return toolResult(screenshotResult(result, shot.limits));
         }
         const result = await nativeCall(nativeBridge, 'android_shower', identity, args, api, context);
         if (!result || typeof result !== 'object' || Array.isArray(result)) {
           throw new Error('Shower 原生响应无效');
         }
-        return checkedTextOutput(JSON.stringify(result), 'RESPONSE_TOO_LARGE', 'Shower 原生响应文本超过 50 KiB；未发送完整内容');
+        return toolResult(checkedTextOutput(JSON.stringify(result), 'RESPONSE_TOO_LARGE', 'Shower 原生响应文本超过 50 KiB；未发送完整内容'));
       },
     }),
     defineTool({

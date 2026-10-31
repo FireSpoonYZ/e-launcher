@@ -5,7 +5,7 @@
 // 注入 call 契约：
 //   call(targetDeviceId, method, params, { signal }) -> Promise<any>
 // 允许的方法（固定业务协议，不可扩展）：
-//   'submit'              params {botId, requestId, text}                   -> 受理回执
+//   'submit'              params {botId, requestId, text, attachments?}     -> 受理回执
 //   'getSubmission'       params {botId, requestId}                         -> 回执 | null
 //   'publishUserMessage'  params {scopeId, input:{messageId,text,replyTo}}   -> 消息信封
 //   'getScopeMessage'     params {scopeId, messageId}                       -> 信封 | null
@@ -85,6 +85,23 @@ function textValid(value) {
   return typeof value === 'string' && value.isWellFormed();
 }
 
+// Host queued receipt 可回显附件元数据（无 base64）；缺失合法，形状坏使整条回执畸形。
+const ATTACHMENT_MIME_TYPES = new Set(['image/jpeg', 'image/png']);
+function attachmentMetaValid(value) {
+  if (!isPlainObject(value)) return false;
+  if (typeof value.id !== 'string' || !/^[0-9a-f]{64}$/.test(value.id)) return false;
+  if (!textValid(value.name)) return false;
+  if (!ATTACHMENT_MIME_TYPES.has(value.mimeType)) return false;
+  for (const field of ['size', 'width', 'height']) {
+    if (!Number.isSafeInteger(value[field]) || value[field] < 0) return false;
+  }
+  return true;
+}
+function attachmentsValid(value) {
+  if (value === undefined || value === null) return true;
+  return Array.isArray(value) && value.length <= 4 && value.every(attachmentMetaValid);
+}
+
 // Host-queued turn admission on the receipt: id/phase/可选 error 的严格形状，
 // 不带文本或凭据。缺失/形状坏使整条回执畸形（读路径保留 unconfirmed，不永久拒绝）。
 function admissionValid(value) {
@@ -112,6 +129,7 @@ function validatePrimaryReceipt(result, record) {
         result.submissionId >= 1)) ||
     !PRIMARY_STATUSES.has(result.status) ||
     (result.admission !== undefined && result.admission !== null && !admissionValid(result.admission)) ||
+    !attachmentsValid(result.attachments) ||
     !(result.answerText === null || textValid(result.answerText)) ||
     !(result.reason === null || textValid(result.reason))
   ) {
@@ -129,6 +147,7 @@ function validatePrimaryReceipt(result, record) {
       submissionId: result.submissionId,
       status: result.status,
       ...(result.admission !== undefined && result.admission !== null ? { admission: result.admission } : {}),
+      ...(result.attachments !== undefined && result.attachments !== null ? { attachments: result.attachments } : {}),
       answerText: result.answerText,
       reason: result.reason,
     },
@@ -320,7 +339,12 @@ export function openPendingClient({ dataRoot, deviceId, call }) {
         dispatched = await call(
           record.targetDeviceId,
           'submit',
-          { botId: record.botId, requestId: record.requestId, text: record.text },
+          {
+            botId: record.botId,
+            requestId: record.requestId,
+            text: record.text,
+            ...(record.attachments !== undefined ? { attachments: record.attachments } : {}),
+          },
           { signal }
         );
       } else {

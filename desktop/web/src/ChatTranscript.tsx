@@ -23,6 +23,7 @@ import {
   resolveBotAvatarPreset,
 } from '../../../web/src/GrokBotAvatar';
 import { ErrorNotice, useText } from '../../../web/src/ui';
+import { SentAttachments, type AttachmentFetcher } from '../../../web/src/imageAttachments';
 import './ChatTranscript.css';
 
 export interface ChatTranscriptEntry {
@@ -45,6 +46,8 @@ export interface ChatTranscriptProps {
   search: string;
   archived: boolean;
   onSubmitQuestionnaire: (installationId: string, input: QuestionnaireSubmitPayload) => Promise<unknown>;
+  /** 按 attachmentId 取图显示；null 表示当前不可读取附件（离线/无权限）。 */
+  attachmentFetcher?: AttachmentFetcher | null;
   loading?: boolean;
   error?: string | null;
   hasMore?: boolean;
@@ -72,6 +75,7 @@ export function ChatTranscript({
   search,
   archived,
   onSubmitQuestionnaire,
+  attachmentFetcher = null,
   loading = false,
   error = null,
   hasMore = false,
@@ -265,6 +269,9 @@ export function ChatTranscript({
                     );
                   })}
                 </div>
+              ) : null}
+              {turn.role === 'user' && turn.attachments && turn.attachments.length > 0 ? (
+                <SentAttachments attachments={turn.attachments} fetcher={attachmentFetcher} />
               ) : null}
               {turn.text ? <Markdown text={turn.text} onOpenLink={openLink} /> : null}
               <ErrorNotice

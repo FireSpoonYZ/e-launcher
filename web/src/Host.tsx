@@ -90,6 +90,20 @@ import {
   ToolPresentationCard,
   type QuestionnaireSubmitPayload,
 } from './ToolPresentation';
+import {
+  IMAGE_MAX_COUNT,
+  ImageAttachmentThumb,
+  ImagePickError,
+  SentAttachments,
+  attachmentFileName,
+  attachmentIdOf,
+  normalizeImageFile,
+  pickImagesFromInput,
+  type AttachmentFetcher,
+  type ImageAttachmentData,
+  type PickedImageSource,
+} from './imageAttachments';
+import type { ImageAttachment } from '../../host-core/index.js';
 import { ErrorNotice, FloatingPillToast, array, errorText, record, useAction, useText } from './ui';
 
 const uuid = () =>
@@ -367,6 +381,8 @@ interface ChatPending {
   scopeKey: string;
   requestId: string;
   text: string;
+  /** 已上传图片附件 ID（有序）；图片-only 提交时 text 可为空。 */
+  attachments?: string[];
   afterEntryId: number;
   submittedAt?: number;
   pendingId?: string;
@@ -392,6 +408,44 @@ function readChatDraft(key: string): string {
 function writeChatDraft(key: string, text: string): boolean {
   try { if (text) localStorage.setItem(`${key}:draft`, text); else localStorage.removeItem(`${key}:draft`); return true; }
   catch { return false; }
+}
+
+/** 本机草稿附件引用只存 ImageAttachment 元数据；base64 绝不进 localStorage/pending。 */
+function readChatDraftAttachments(key: string): ImageAttachment[] {
+  try {
+    const raw = localStorage.getItem(`${key}:draft-attachments`);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    const out: ImageAttachment[] = [];
+    for (const item of parsed) {
+      const att = item as Record<string, unknown> | null;
+      if (!att || typeof att.id !== 'string' || !att.id) continue;
+      const mime = att.mimeType === 'image/jpeg' || att.mimeType === 'image/png' ? att.mimeType : 'image/jpeg';
+      const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
+      out.push({
+        id: att.id,
+        name: typeof att.name === 'string' ? att.name : '',
+        mimeType: mime,
+        size: num(att.size),
+        width: num(att.width),
+        height: num(att.height),
+      });
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+function writeChatDraftAttachments(key: string, attachments: ImageAttachment[]): boolean {
+  try {
+    if (attachments.length) localStorage.setItem(`${key}:draft-attachments`, JSON.stringify(attachments));
+    else localStorage.removeItem(`${key}:draft-attachments`);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function readBotMetaMap(): Record<string, BotPreviewMeta> {
@@ -1135,6 +1189,12 @@ export function HostPage({
   const [chatResumeEpoch, setChatResumeEpoch] = useState(0);
   const chatSubmissionRef = useRef<{ botKey: string; requestId: string; afterEntryId: number } | undefined>(undefined);
   const [chatDraft, setChatDraft] = useState('');
+  /** 本机 composer 已上传附件引用（仅元数据）；未选择时为空。 */
+  const [chatDraftAttachments, setChatDraftAttachments] = useState<ImageAttachment[]>([]);
+  /** 上传中/选图失败的可见错误；不走 localStorage。 */
+  const [composerImageError, setComposerImageError] = useState('');
+  /** 本机图片上传在途：禁重复选择与发送（state 驱动 UI disabled；归属冻结到发起时 scope/bot）。 */
+  const [imageUploading, setImageUploading] = useState(false);
   const [composerMenuOpen, setComposerMenuOpen] = useState(false);
   const [chatTopMenuOpen, setChatTopMenuOpen] = useState(false);
   const [chatSearchOpen, setChatSearchOpen] = useState(false);
@@ -1565,6 +1625,8 @@ export function HostPage({
     setChatPending(entry?.pending);
     setChatReceipt(entry?.receipt);
     setChatDraft(readChatDraft(activeChatScope));
+    setChatDraftAttachments(readChatDraftAttachments(activeChatScope));
+    setComposerImageError('');
   }, [activeChatScope, activeBot?.key, screen]);
 
   useEffect(() => {
@@ -2055,6 +2117,8 @@ export function HostPage({
     setChatPending(saved?.pending);
     setChatReceipt(saved?.receipt);
     setChatDraft(scopeKey ? readChatDraft(scopeKey) : '');
+    setChatDraftAttachments(scopeKey ? readChatDraftAttachments(scopeKey) : []);
+    setComposerImageError('');
     setComposerMenuOpen(false);
     setChatTopMenuOpen(false);
     setChatSearchOpen(false);
@@ -2232,7 +2296,9 @@ export function HostPage({
         setChatHistoryError('');
         setChatReceipt(undefined);
         setChatDraft('');
+        setChatDraftAttachments([]);
         writeChatDraft(scopeKey, '');
+        writeChatDraftAttachments(scopeKey, []);
         updateBotMeta(bot.key, { lastText: t('对话已清空', 'History cleared'), updatedAt: Date.now(), unread: false });
         setClearNotice(t('已清空当前对话并重置上下文', 'Conversation cleared and context reset'));
       } else {
@@ -2268,25 +2334,32 @@ export function HostPage({
       }
       if (chatPending?.botKey === bot.key && chatPending.phase !== 'accepted') throw new Error(t('原请求尚未确认，请勿重复发送。', 'Original request is unconfirmed; do not resend.'));
       if (bot.archivedAt) throw new Error(t('该智能体已归档，请先恢复后再发送消息', 'This bot is archived. Unarchive it first.'));
+      if (imageUploading) return;
       const draftSnapshot = chatDraft;
       const trimmed = draftSnapshot.trim();
-      if (!trimmed) return;
+      const draftAttachmentMetas = [...chatDraftAttachments];
+      if (!trimmed && draftAttachmentMetas.length === 0) return;
       const command = parseSlashCommand(trimmed);
-      if (command) { await runSlashCommand(command); return; }
+      if (command && draftAttachmentMetas.length === 0) { await runSlashCommand(command); return; }
       if (!centerConn.ready || centerConn.status?.state === 'disconnected') {
         setOfflineNotice({ botKey: bot.key, text: t('中心离线，草稿已保留。', 'Center offline; draft retained.') });
         return;
       }
       const scopeKey = scopeForBot(bot);
       if (!scopeKey) throw new Error(t('目标身份尚未就绪，草稿已保留。', 'Target identity unavailable; draft retained.'));
+      const attachmentIds = draftAttachmentMetas.map((a) => a.id);
       const submission = {
-        botKey: bot.key, scopeKey, requestId: uuid(), text: trimmed, phase: 'sending' as const,
+        botKey: bot.key, scopeKey, requestId: uuid(), text: trimmed,
+        ...(attachmentIds.length ? { attachments: attachmentIds } : {}),
+        phase: 'sending' as const,
         submittedAt: Date.now(),
         afterEntryId: Math.max(maxHistoryEntryId(chatHistory), Number(chatLive?.state?.lastEntryId) || 0, clearedMap[bot.key] ?? 0),
       };
       chatSubmissionRef.current = submission;
       updatePending({ pending: submission }, false);
       setChatDraft('');
+      setChatDraftAttachments([]);
+      setComposerImageError('');
       setComposerMenuOpen(false);
       setChatTopMenuOpen(false);
       localInFlight.current.add(submission.requestId);
@@ -2296,12 +2369,14 @@ export function HostPage({
         const newer = readChatDraft(scopeKey);
         const restored = newer && newer !== draftSnapshot ? `${draftSnapshot}
 ${newer}` : draftSnapshot;
-        const saved = writeChatDraft(scopeKey, restored);
-        if (saved) removePending(scopeKey, submission.requestId);
+        const savedText = writeChatDraft(scopeKey, restored);
+        const savedAtt = writeChatDraftAttachments(scopeKey, draftAttachmentMetas);
+        if (savedText && savedAtt) removePending(scopeKey, submission.requestId);
         else updatePending({ pending: { ...submission, phase: 'recovering' } }, false);
         if (currentChatScope.current === scopeKey) {
           setChatDraft(restored);
-          if (!saved) setClearNotice(t('草稿未能保存，请保持页面打开。', 'Draft could not be saved; keep this page open.'));
+          setChatDraftAttachments(draftAttachmentMetas);
+          if (!savedText || !savedAtt) setClearNotice(t('草稿未能保存，请保持页面打开。', 'Draft could not be saved; keep this page open.'));
         }
       };
       try {
@@ -2310,6 +2385,7 @@ ${newer}` : draftSnapshot;
         if (!stillOwned()) return;
         if (!updatePending({ pending: submission })) { restore(); if (currentChatScope.current === scopeKey) throw new Error(t('无法保存请求，未发送。', 'Cannot save request; not sent.')); return; }
         if (readChatDraft(scopeKey) === draftSnapshot) writeChatDraft(scopeKey, '');
+        writeChatDraftAttachments(scopeKey, []);
         const snap = await ensureLocalHostRunning();
         const center = centerConnectionRef.current;
         if (!snap || snap.phase !== 'running' || !snap.deviceId || !center.ready || center.status?.state === 'disconnected' || chatStorageKey(center.saved?.url || center.url || '', snap.deviceId, bot.botId) !== scopeKey) {
@@ -2320,7 +2396,7 @@ ${newer}` : draftSnapshot;
         updateBotMeta(bot.key, { lastText: trimmed, updatedAt: Date.now(), unread: false });
         let receipt: HostSubmission;
         try {
-          const result = await BotHost.call({ method: 'submit', params: { botId: bot.botId, requestId: submission.requestId, text: trimmed } });
+          const result = await BotHost.call({ method: 'submit', params: { botId: bot.botId, requestId: submission.requestId, text: trimmed, ...(attachmentIds.length ? { attachments: attachmentIds } : {}) } });
           receipt = result.result as HostSubmission;
         } catch (error) {
           if (stillOwned()) {
@@ -2391,7 +2467,7 @@ ${newer}` : draftSnapshot;
         return;
       }
       try {
-        const result = await remoteClientRef.current.api.call(bot.remoteIdentity, 'submit', { botId: bot.botId, requestId, text });
+        const result = await remoteClientRef.current.api.call(bot.remoteIdentity, 'submit', { botId: bot.botId, requestId, text, ...(entry.pending.attachments?.length ? { attachments: entry.pending.attachments } : {}) });
         const receipt = result as HostSubmission & TurnAdmissionCarrier;
         if (!stillOwned()) return;
         updatePending({ pending: { ...entry.pending, phase: 'accepted', admission: receipt?.admission ?? null }, receipt });
@@ -3022,6 +3098,7 @@ ${newer}` : draftSnapshot;
             {
               role: 'user',
               content: chatPending.text,
+              ...(chatPending.attachments?.length ? { attachments: chatPending.attachments.map((id) => ({ id })) } : {}),
               ...(typeof chatPending.submittedAt === 'number' ? { timestamp: chatPending.submittedAt } : {}),
             },
           ],
@@ -3294,6 +3371,100 @@ ${newer}` : draftSnapshot;
       el.style.height = `${Math.min(el.scrollHeight, 110)}px`;
     }
   }, [chatDraft, screen]);
+
+  /** 本机历史/发送后附件按需取图：统一走 BotHost.call getAttachment。 */
+  const localAttachmentFetcher = useMemo<AttachmentFetcher | null>(() => {
+    const bot = activeBot;
+    if (!bot || bot.hostKind !== 'local') return null;
+    return async (attachmentId) => {
+      const env = await BotHost.call({
+        method: 'getAttachment',
+        params: { botId: bot.botId, attachmentId },
+      });
+      return env.result as ImageAttachmentData;
+    };
+  }, [activeBot]);
+
+  /** 远端（手机远端页）历史附件按需取图：走 remote api.call 到目标 Host。 */
+  const remoteAttachmentFetcher = useCallback((api: DesktopPanelApi, identity: DesktopIdentity, botId: string): AttachmentFetcher => {
+    return async (attachmentId) => {
+      return api.call(identity, 'getAttachment', { botId, attachmentId }) as Promise<ImageAttachmentData>;
+    };
+  }, []);
+
+  /** Tauri（Android ）界面才有原生选图/拍照；浏览器走 input type=file。 */
+  const inTauriUi = (globalThis as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ !== undefined;
+
+  /** 本机：上传走 BotHost.call uploadAttachment；归属冻结在发起时的 scope/botId——
+   *  切换聊天后完成的上传仍只写原 scope 磁盘草稿，不回填当前 React state。
+   *  相同图片 id（content SHA-256，与 backend id 一致）去重，避免 backend duplicate 拒绝。 */
+  const uploadLocalImages = useCallback(async (botId: string, scope: string, sources: PickedImageSource[]) => {
+    const existing = new Set(readChatDraftAttachments(scope).map((a) => a.id));
+    const queued: PickedImageSource[] = [];
+    for (const source of sources) {
+      const id = await attachmentIdOf(source.data);
+      if (existing.has(id)) continue; // 同图重选：附件已在草稿中，跳过上传
+      existing.add(id);
+      queued.push(source);
+    }
+    // 去重后总数上限校验：超限整体拒绝，保留原草稿（不静默丢最早附件）。
+    if (readChatDraftAttachments(scope).length + queued.length > IMAGE_MAX_COUNT) {
+      throw new ImagePickError('IMAGE_TOO_MANY', t(`最多 ${IMAGE_MAX_COUNT} 张图片，本次未上传。`, `At most ${IMAGE_MAX_COUNT} images; nothing uploaded.`));
+    }
+    for (const source of queued) {
+      const env = await BotHost.call({
+        method: 'uploadAttachment',
+        params: {
+          botId,
+          name: attachmentFileName(source.name, source.mimeType),
+          mimeType: source.mimeType,
+          data: source.data,
+        },
+      });
+      const att = env.result as ImageAttachment;
+      const next = [...readChatDraftAttachments(scope), att];
+      writeChatDraftAttachments(scope, next);
+      if (currentChatScope.current === scope) setChatDraftAttachments(next);
+    }
+  }, [t]);
+
+  const pickLocalImages = useCallback((source: 'photos' | 'camera') => {
+    if (imageUploading) return;
+    setComposerImageError('');
+    const bot = activeBot;
+    if (!bot || bot.hostKind !== 'local') return;
+    const botId = bot.botId;
+    const botKey = bot.key;
+    const scope = currentChatScope.current;
+    if (!scope) { setComposerImageError(t('目标身份尚未就绪，草稿已保留。', 'Target identity unavailable; draft retained.')); return; }
+    const handleSources = async (sources: PickedImageSource[]) => {
+      if (sources.length === 0) return;
+      try {
+        await uploadLocalImages(botId, scope, sources);
+        if (activeBot?.key === botKey) setComposerImageError('');
+      } catch (error) {
+        if (activeBot?.key === botKey) setComposerImageError(errorText(error));
+      } finally {
+        setImageUploading(false);
+      }
+    };
+    setImageUploading(true);
+    const release = () => setImageUploading(false);
+    if (inTauriUi) {
+      void BotHost.pickImages({ source }).then(
+        (result) => void handleSources(result.cancelled ? [] : result.images).finally(release),
+        (error) => { release(); if (activeBot?.key === botKey) setComposerImageError(errorText(error)); },
+      );
+      return;
+    }
+    pickImagesFromInput({
+      onPicked: async (files) => {
+        const normalized = await Promise.all(files.map((file) => normalizeImageFile(file, file.name)));
+        await handleSources(normalized);
+      },
+      onSettled: release,
+    });
+  }, [activeBot, imageUploading, inTauriUi, uploadLocalImages, t]);
 
   const slash = useSlashAutocomplete({
     text: chatDraft,
@@ -3951,6 +4122,14 @@ ${newer}` : draftSnapshot;
                         t={t}
                       />
                     )}
+                    {turn.role === 'user' && turn.attachments && turn.attachments.length > 0 ? (
+                      <SentAttachments
+                        attachments={turn.attachments}
+                        fetcher={activeBot?.hostKind === 'remote' && activeBot.remoteIdentity && remoteClientRef.current
+                          ? remoteAttachmentFetcher(remoteClientRef.current.api, activeBot.remoteIdentity, activeBot.botId)
+                          : localAttachmentFetcher}
+                      />
+                    ) : null}
                     {turn.text && <Markdown text={turn.text} />}
                     <ErrorNotice
                       compact
@@ -4074,7 +4253,15 @@ ${newer}` : draftSnapshot;
                 }
                 pending={chatPending?.scopeKey === activeChatScope ? chatPending : undefined}
                 fallbackDraft={chatDraft}
-                onFallbackTransferred={() => { if (currentChatScope.current === activeChatScope) setChatDraft(''); writeChatDraft(activeChatScope, ''); }}
+                onFallbackTransferred={() => {
+                  if (currentChatScope.current === activeChatScope) {
+                    setChatDraft('');
+                    setChatDraftAttachments([]);
+                    setComposerImageError('');
+                  }
+                  writeChatDraft(activeChatScope, '');
+                  writeChatDraftAttachments(activeChatScope, []);
+                }}
                 blocked={chatPending?.scopeKey === activeChatScope && chatPending.phase === 'recovering'}
                 onStarted={(requestId, text, draft) => {
                   const old = pendingByBot.current.get(activeChatScope)?.pending;
@@ -4137,12 +4324,65 @@ ${newer}` : draftSnapshot;
                   <User size={18} />
                   <span>{t('查看 Bot 资料与设定', 'View Bot Profile & Settings')}</span>
                 </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  disabled={!activeChatScope || chatDraftAttachments.length >= IMAGE_MAX_COUNT || imageUploading}
+                  onClick={() => {
+                    setComposerMenuOpen(false);
+                    pickLocalImages('photos');
+                  }}
+                >
+                  <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    <rect x="3" y="5" width="18" height="14" rx="2" />
+                    <circle cx="8.5" cy="10.5" r="1.5" />
+                    <path d="m21 15-4.5-4.5L9 18" />
+                  </svg>
+                  <span>{t('选择图片', 'Choose image')}</span>
+                </button>
+                {inTauriUi && (
+                  <button
+                    type="button"
+                    role="menuitem"
+                    disabled={!activeChatScope || chatDraftAttachments.length >= IMAGE_MAX_COUNT || imageUploading}
+                    onClick={() => {
+                      setComposerMenuOpen(false);
+                      pickLocalImages('camera');
+                    }}
+                  >
+                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                      <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" />
+                      <circle cx="12" cy="13" r="4" />
+                    </svg>
+                    <span>{t('拍照', 'Camera')}</span>
+                  </button>
+                )}
                 <button type="button" role="menuitem" className="danger" onClick={() => void action.run(() => runSlashCommand('/clear'))}>
                   <Trash2 size={18} />
                   <span>{t('清空当前对话历史 (/clear)', 'Clear conversation history (/clear)')}</span>
                 </button>
               </div>
             )}
+
+            {composerImageError ? <ErrorNotice compact error={composerImageError} onDismiss={() => setComposerImageError('')} /> : null}
+            {chatDraftAttachments.length > 0 ? (
+              <div className="attachments" role="group" aria-label={t('附件', 'Attachments')}>
+                {chatDraftAttachments.map((att, index) => (
+                  <ImageAttachmentThumb
+                    key={att.id}
+                    attachment={att}
+                    fetcher={localAttachmentFetcher}
+                    disabled={!activeChatScope || Boolean(slashBusy)}
+                    onRemove={() => {
+                      const next = chatDraftAttachments.filter((_, i) => i !== index);
+                      setChatDraftAttachments(next);
+                      if (currentChatScope.current && !writeChatDraftAttachments(currentChatScope.current, next)) setClearNotice(t('草稿未能保存，请保持页面打开。', 'Draft could not be saved; keep this page open.'));
+                    }}
+                    t={t}
+                  />
+                ))}
+              </div>
+            ) : null}
 
             <div className="grok-composer-row">
               <button
@@ -4215,7 +4455,7 @@ ${newer}` : draftSnapshot;
                   </button>
                 )}
 
-                {isBotBusy && !chatDraft.trim() ? (
+                {isBotBusy && !chatDraft.trim() && chatDraftAttachments.length === 0 ? (
                   <button
                     type="button"
                     className="grok-composer-action-pill stop"
@@ -4234,12 +4474,12 @@ ${newer}` : draftSnapshot;
                   >
                     <Square size={15} />
                   </button>
-                ) : chatDraft.trim() ? (
+                ) : chatDraft.trim() || chatDraftAttachments.length > 0 ? (
                   <button
                     type="button"
                     className="grok-composer-action-pill send"
                     aria-label={t('发送', 'Send')}
-                    disabled={action.busy || Boolean(slashBusy) || (chatPending?.botKey === activeBot.key && chatPending.phase === 'recovering')}
+                    disabled={action.busy || Boolean(slashBusy) || imageUploading || (chatPending?.botKey === activeBot.key && chatPending.phase === 'recovering')}
                     onClick={() => void sendMessage()}
                   >
                     <ArrowUp size={18} />
@@ -5874,6 +6114,74 @@ function RemotePendingComposer({
   const target = useMemo(() => ({ kind: 'primary' as const, id: botId }), [botId]);
   const drafts = useDrafts({ api, identity, target });
   const [notice, setNotice] = useState('');
+  const [imageError, setImageError] = useState('');
+  /** 选图/上传在途：禁重复选择与发送（state 驱动 UI disabled）；归属冻结到发起时的 identity/botId/draftKey。 */
+  const [imageUploading, setImageUploading] = useState(false);
+  const remoteFetcher = useMemo<AttachmentFetcher>(() => {
+    return async (attachmentId) => api.call(identity, 'getAttachment', { botId, attachmentId }) as Promise<ImageAttachmentData>;
+  }, [api, identity, botId]);
+
+  /** Tauri（Android）界面才有原生选图/拍照；浏览器走 input type=file。 */
+  const inTauriUi = (globalThis as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ !== undefined;
+
+  /** 上传选图到目标 Host 并把元数据加入草稿；归属冻结在发起时 identity/botId/draftKey。
+   *  addAttachment 的 expectedKey 是原子 guard（keyRef 实时比较）：切换 Bot/身份后未完成批次中止，
+   *  已上传结果不写新 scope 草稿。相同图片 id（content SHA-256）去重；去重后总数 ≤4，超限整体拒绝。 */
+  const uploadRemoteImages = useCallback(async (sources: PickedImageSource[]) => {
+    const draftKey = drafts.key;
+    if (!draftKey || sources.length === 0) return;
+    const frozenIdentity = { ...identity };
+    const existing = new Set(drafts.attachments.map((a) => a.id));
+    const queued: { source: PickedImageSource; id: string }[] = [];
+    for (const source of sources) {
+      const id = await attachmentIdOf(source.data);
+      if (existing.has(id)) continue;
+      existing.add(id);
+      queued.push({ source, id });
+    }
+    if (drafts.attachments.length + queued.length > IMAGE_MAX_COUNT) {
+      throw new ImagePickError('IMAGE_TOO_MANY', t(`最多 ${IMAGE_MAX_COUNT} 张图片，本次未上传。`, `At most ${IMAGE_MAX_COUNT} images; nothing uploaded.`));
+    }
+    for (const item of queued) {
+      const att = await api.call(frozenIdentity, 'uploadAttachment', {
+        botId,
+        name: attachmentFileName(item.source.name, item.source.mimeType),
+        mimeType: item.source.mimeType,
+        data: item.source.data,
+      });
+      // expectedKey 原子校验：当前 key 已切换（新 Bot/重连/换代）时拒绝，中止剩余批次。
+      if (!drafts.addAttachment(att as ImageAttachment, draftKey)) return;
+    }
+  }, [api, identity, botId, drafts, t]);
+
+  const pickRemoteImages = useCallback((source: 'photos' | 'camera') => {
+    if (imageUploading || !drafts.key || Boolean(drafts.attempt) || blocked || Boolean(commandBusy)) return;
+    setImageError('');
+    const handleSources = async (sources: PickedImageSource[]) => {
+      if (sources.length === 0) return;
+      try {
+        await uploadRemoteImages(sources);
+      } catch (error) {
+        setImageError(errorText(error));
+      }
+    };
+    setImageUploading(true);
+    const release = () => setImageUploading(false);
+    if (inTauriUi) {
+      void BotHost.pickImages({ source }).then(
+        (result) => void handleSources(result.cancelled ? [] : result.images).finally(release),
+        (error) => { release(); setImageError(errorText(error)); },
+      );
+      return;
+    }
+    pickImagesFromInput({
+      onPicked: async (files) => {
+        const normalized = await Promise.all(files.map((file) => normalizeImageFile(file, file.name)));
+        await handleSources(normalized);
+      },
+      onSettled: release,
+    });
+  }, [imageUploading, drafts.key, drafts.attempt, blocked, commandBusy, inTauriUi, uploadRemoteImages]);
   const [recoveryTick, setRecoveryTick] = useState(0);
   const [confirmedConflict, setConfirmedConflict] = useState<{ requestId: string; pendingId: string; original: DesktopDraftEntry; handle?: { key: string; attemptId: string } }>();
   const [resolvingConflict, setResolvingConflict] = useState(false);
@@ -5933,8 +6241,9 @@ function RemotePendingComposer({
           if (!alive) return;
           if (pending?.state === 'rejected' && pending.lastError?.code === 'CANCELLED' && pending.lastError.outcome === 'not-sent') {
             const newer = drafts.conflict ?? api.snapshot?.state.drafts[handle.key];
-            const matches = (draft: DesktopDraftEntry) => Boolean(newer && newer.text === draft.text && JSON.stringify(newer.files) === JSON.stringify(draft.files));
-            const changed = newer && (attempt.cleared ? Boolean(newer.text || newer.files.length) && !matches(attempt.draft) : !matches(attempt.draft) && !matches(attempt.baseDraft));
+            const attEqual = (a: DesktopDraftEntry, b: DesktopDraftEntry) => JSON.stringify(a.attachments ?? []) === JSON.stringify(b.attachments ?? []);
+            const matches = (draft: DesktopDraftEntry) => Boolean(newer && newer.text === draft.text && JSON.stringify(newer.files) === JSON.stringify(draft.files) && attEqual(newer, draft));
+            const changed = newer && (attempt.cleared ? Boolean(newer.text || newer.files.length || (newer.attachments?.length)) && !matches(attempt.draft) : !matches(attempt.draft) && !matches(attempt.baseDraft));
             if (drafts.conflict || changed) {
               setConfirmedConflict({ requestId: input.requestId, pendingId: pending.id, original: attempt.draft, handle });
               return;
@@ -5942,7 +6251,7 @@ function RemotePendingComposer({
             if (attempt.cleared) {
               await api.queueWrite(state => {
                 const current = state.drafts[handle.key];
-                if (current && (current.text || current.files.length) && (current.text !== attempt.draft.text || JSON.stringify(current.files) !== JSON.stringify(attempt.draft.files))) throw new Error('草稿已更新，不能覆盖。');
+                if (current && (current.text || current.files.length || (current.attachments?.length)) && (current.text !== attempt.draft.text || JSON.stringify(current.files) !== JSON.stringify(attempt.draft.files) || JSON.stringify(current.attachments ?? []) !== JSON.stringify(attempt.draft.attachments ?? []))) throw new Error('草稿已更新，不能覆盖。');
                 return { ...state, drafts: { ...state.drafts, [handle.key]: attempt.draft } };
               });
               if (!alive) return;
@@ -5951,6 +6260,7 @@ function RemotePendingComposer({
             if (attempt.cleared) {
               drafts.editText(attempt.draft.text);
               attempt.draft.files.forEach(file => drafts.addFile(file));
+              (attempt.draft.attachments ?? []).forEach(att => drafts.addAttachment(att));
             }
             onNotSent(input.requestId);
             setNotice(t('请求未发送，草稿已恢复。', 'Request not sent; draft restored.'));
@@ -6002,18 +6312,20 @@ function RemotePendingComposer({
         const currentText = drafts.text;
         const newer = api.snapshot?.state.drafts[drafts.key!];
         if ((currentText && currentText !== draft.text) || (drafts.files.length && JSON.stringify(drafts.files) !== JSON.stringify(draft.files)) ||
-          (newer && (newer.text || newer.files.length) && (newer.text !== draft.text || JSON.stringify(newer.files) !== JSON.stringify(draft.files)))) {
+          (drafts.attachments.length && JSON.stringify(drafts.attachments) !== JSON.stringify(draft.attachments ?? [])) ||
+          (newer && (newer.text || newer.files.length || (newer.attachments?.length)) && (newer.text !== draft.text || JSON.stringify(newer.files) !== JSON.stringify(draft.files) || JSON.stringify(newer.attachments ?? []) !== JSON.stringify(draft.attachments ?? [])))) {
           setConfirmedConflict({ requestId: pending.requestId, pendingId: record.id, original: draft });
           return;
         }
         await api.queueWrite(state => {
           const existing = state.drafts[drafts.key!];
-          if (existing && (existing.text || existing.files.length) && (existing.text !== draft.text || JSON.stringify(existing.files) !== JSON.stringify(draft.files))) throw new Error('草稿已更新，不能覆盖。');
+          if (existing && (existing.text || existing.files.length || (existing.attachments?.length)) && (existing.text !== draft.text || JSON.stringify(existing.files) !== JSON.stringify(draft.files) || JSON.stringify(existing.attachments ?? []) !== JSON.stringify(draft.attachments ?? []))) throw new Error('草稿已更新，不能覆盖。');
           return { ...state, drafts: { ...state.drafts, [drafts.key!]: draft } };
         });
         if (!alive) return;
         drafts.editText(draft.text);
         if (!drafts.files.length) draft.files.forEach(file => drafts.addFile(file));
+        (draft.attachments ?? []).forEach(att => drafts.addAttachment(att));
         onNotSent(pending.requestId);
         setNotice(t('请求未发送，草稿已恢复。', 'Request not sent; draft restored.'));
       } catch { /* preserve the original request when reconciliation fails */ }
@@ -6096,10 +6408,12 @@ function RemotePendingComposer({
   });
 
   const send = async () => {
-    if (sending.current || commandLocked || blocked || fallbackDraft || !drafts.text.trim()) return;
+    if (sending.current || commandLocked || blocked || fallbackDraft || imageUploading) return;
     const trimmed = drafts.text.trim();
+    const attachmentIds = drafts.attachments.map((a) => a.id);
+    if (!trimmed && attachmentIds.length === 0) return;
     const command = parseSlashCommand(trimmed);
-    if (command) {
+    if (command && attachmentIds.length === 0) {
       await runCommand(command);
       return;
     }
@@ -6118,6 +6432,7 @@ function RemotePendingComposer({
       botId,
       requestId: uuid(),
       text,
+      ...(attachmentIds.length ? { attachments: attachmentIds } : {}),
     });
     if (!started) return;
     sending.current = true;
@@ -6281,6 +6596,39 @@ function RemotePendingComposer({
           <button
             type="button"
             role="menuitem"
+            disabled={drafts.attachments.length >= IMAGE_MAX_COUNT || imageUploading || Boolean(drafts.attempt) || blocked || commandLocked}
+            onClick={() => {
+              onToggleComposerMenu();
+              pickRemoteImages('photos');
+            }}
+          >
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <rect x="3" y="5" width="18" height="14" rx="2" />
+              <circle cx="8.5" cy="10.5" r="1.5" />
+              <path d="m21 15-4.5-4.5L9 18" />
+            </svg>
+            <span>{t('选择图片', 'Choose image')}</span>
+          </button>
+          {inTauriUi && (
+            <button
+              type="button"
+              role="menuitem"
+              disabled={drafts.attachments.length >= IMAGE_MAX_COUNT || imageUploading || Boolean(drafts.attempt) || blocked || commandLocked}
+              onClick={() => {
+                onToggleComposerMenu();
+                pickRemoteImages('camera');
+              }}
+            >
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" />
+                <circle cx="12" cy="13" r="4" />
+              </svg>
+              <span>{t('拍照', 'Camera')}</span>
+            </button>
+          )}
+          <button
+            type="button"
+            role="menuitem"
             className="danger"
             onClick={() => void runCommand('/clear')}
           >
@@ -6289,6 +6637,22 @@ function RemotePendingComposer({
           </button>
         </div>
       )}
+
+      {imageError ? <ErrorNotice compact error={imageError} onDismiss={() => setImageError('')} /> : null}
+      {drafts.attachments.length > 0 ? (
+        <div className="attachments" role="group" aria-label={t('附件', 'Attachments')}>
+          {drafts.attachments.map((att, index) => (
+            <ImageAttachmentThumb
+              key={att.id}
+              attachment={att}
+              fetcher={remoteFetcher}
+              disabled={Boolean(drafts.attempt) || blocked || commandLocked}
+              onRemove={() => drafts.removeAttachment(index)}
+              t={t}
+            />
+          ))}
+        </div>
+      ) : null}
 
       <div className="grok-composer-row">
         <button
@@ -6326,7 +6690,7 @@ function RemotePendingComposer({
             }}
           />
 
-          {isBotBusy && !drafts.text.trim() ? (
+          {isBotBusy && !drafts.text.trim() && drafts.attachments.length === 0 ? (
             <button
               type="button"
               className="grok-composer-action-pill stop"
@@ -6335,11 +6699,11 @@ function RemotePendingComposer({
             >
               <Square size={15} />
             </button>
-          ) : drafts.text.trim() ? (
+          ) : drafts.text.trim() || drafts.attachments.length > 0 ? (
             <button
               type="button"
               className="grok-composer-action-pill send"
-              disabled={!drafts.text.trim() || Boolean(drafts.attempt) || blocked || Boolean(fallbackDraft) || commandLocked}
+              disabled={(!drafts.text.trim() && drafts.attachments.length === 0) || imageUploading || Boolean(drafts.attempt) || blocked || Boolean(fallbackDraft) || commandLocked}
               onClick={() => void send()}
               aria-label={t('发送', 'Send')}
             >

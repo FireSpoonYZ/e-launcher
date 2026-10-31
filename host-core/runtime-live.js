@@ -306,7 +306,8 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext }) {
         kick();
       }
       try {
-        native.start((view) => { onView(view); });
+        // Durable 保证视图 watch 只发 value 调用：直接解构，onView 同步执行。
+        native.start(({ value }) => { onView(value); });
       } catch (err) {
         await stopNative().catch(() => {});
         end('listener_error', err);
@@ -314,7 +315,10 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext }) {
       }
       native.closed.then((nativeEnd) => {
         if (state.endReason !== null) return;
-        end(nativeEnd.reason, nativeEnd.error);
+        // 新 WatchEnd.kind 映射回宿主既有 reason 词汇：control-live 的 END_REASONS 不变，
+        // failed→session_failed、aborted→cancelled；stopped/ended/listener_error 原名透传。
+        const kind = nativeEnd.kind;
+        end(kind === 'failed' ? 'session_failed' : kind === 'aborted' ? 'cancelled' : kind, nativeEnd.error);
       }, () => {});
     }
 

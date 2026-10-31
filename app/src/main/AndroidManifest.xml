@@ -96,6 +96,17 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <!-- 拍照输出：:tauri_ui 私有 cache 的 FileProvider，仅本次相机 Intent 按包名授权读写。 -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.imagepicker"
+            android:exported="false"
+            android:grantUriPermissions="true"
+            android:process=":tauri_ui">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/image_picker_paths" />
+        </provider>
         <!-- M18 Tauri 界面：独立进程，SDK 退出只影响本进程；仅由 MainActivity/通知入口内部启动。 -->
         <activity
             android:name=".TauriMainActivity"

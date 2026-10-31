@@ -21,6 +21,18 @@ import {
   Trash2,
   X,
 } from 'lucide-react';
+import {
+  IMAGE_MAX_COUNT,
+  ImageAttachmentThumb,
+  attachmentFileName,
+  attachmentIdOf,
+  normalizeImageFile,
+  pickImagesFromInput,
+  type AttachmentFetcher,
+  type ImageAttachmentData,
+  type PickedImageSource,
+} from '../../../web/src/imageAttachments';
+import type { ImageAttachment } from '../../../host-core/index.js';
 import type { DesktopIdentity, DesktopPanelApi, DesktopViewApi } from './types';
 import type { DesktopObservationEvent } from './types';
 import { useText } from '../../../web/src/ui';
@@ -523,12 +535,17 @@ function parseSlashCommand(text: string): SlashCommandName | null {
   return SLASH_COMMANDS.find((c) => c.command === trimmed)?.command ?? null;
 }
 
-function Composer({ text, onChangeText, files, onAddFile, onRemoveFile, canPick, onPick, draftError, draftHint, draftConflict, sendState, sendError, sendNotice, onSend, canSend, disabled, onRetryDraft, attempt, recOutcome, onReconcile, onReleaseNotSent, onRetryClearVerified, onAdoptNewerDraft, turnAdmission, onRetryTurnAdmission, onInsertSlash }: {
+function Composer({ text, onChangeText, files, onAddFile, onRemoveFile, attachments, onAddAttachment, onRemoveAttachment, attachmentFetcher, onPickImage, canPick, onPick, draftError, draftHint, draftConflict, sendState, sendError, sendNotice, onSend, canSend, disabled, onRetryDraft, attempt, recOutcome, onReconcile, onReleaseNotSent, onRetryClearVerified, onAdoptNewerDraft, turnAdmission, onRetryTurnAdmission, onInsertSlash }: {
   text: string;
   onChangeText: (v: string) => void;
   files: { name: string; path: string; size: number }[];
   onAddFile: (ref: { name: string; path: string; size: number }) => void;
   onRemoveFile: (i: number) => void;
+  attachments: ImageAttachment[];
+  onAddAttachment: (att: ImageAttachment) => void;
+  onRemoveAttachment: (i: number) => void;
+  attachmentFetcher: AttachmentFetcher | null;
+  onPickImage: () => void;
   canPick: boolean;
   onPick: () => void;
   draftError: string | null;
@@ -699,6 +716,20 @@ function Composer({ text, onChangeText, files, onAddFile, onRemoveFile, canPick,
           ))}
         </div>
       ) : null}
+      {attachments.length > 0 ? (
+        <div className="attachments" role="group" aria-label="图片附件">
+          {attachments.map((att, i) => (
+            <ImageAttachmentThumb
+              key={att.id}
+              attachment={att}
+              fetcher={attachmentFetcher}
+              disabled={disabled}
+              onRemove={() => onRemoveAttachment(i)}
+              t={(zh, en) => zh}
+            />
+          ))}
+        </div>
+      ) : null}
       <div className="composer-input-wrap">
         {slashOpen ? (
           <div className="slash-popover" role="listbox" aria-label="斜杠命令">
@@ -745,11 +776,23 @@ function Composer({ text, onChangeText, files, onAddFile, onRemoveFile, canPick,
                   >
                     <FileText size={14} /> 添加本地路径引用
                   </button>
-                ) : (
+                ) : null}
+                <button
+                  type="button"
+                  role="menuitem"
+                  disabled={disabled || attachments.length >= IMAGE_MAX_COUNT}
+                  onClick={() => {
+                    setMoreOpen(false);
+                    onPickImage();
+                  }}
+                >
+                  <FileText size={14} /> 添加图片
+                </button>
+                {!canPick ? (
                   <p className="composer-plus-note" role="note">
                     Relay 模式不可选本机文件；可将目标 Host 上已存在的路径作为普通文本引用。
                   </p>
-                )}
+                ) : null}
                 {SLASH_COMMANDS.map((c) => (
                   <button
                     key={c.command}
@@ -1104,6 +1147,19 @@ function PrimaryChatPane({
     drafts.removeFile(i);
   }
 
+  function addAttachment(att: ImageAttachment) {
+    drafts.addAttachment(att);
+  }
+
+  function removeAttachment(i: number) {
+    drafts.removeAttachment(i);
+  }
+
+  const attachmentFetcher = useMemo<AttachmentFetcher | null>(() => {
+    if (!identity) return null;
+    return async (attachmentId) => api.call(identity, 'getAttachment', { botId: bot.botId, attachmentId }) as Promise<ImageAttachmentData>;
+  }, [api, identity, bot.botId]);
+
   async function pickFile() {
     if (!identity || lockedRef.current || isArchived) return;
     try {
@@ -1113,6 +1169,52 @@ function PrimaryChatPane({
       api.reportError(e);
       setSendError('选择文件失败：' + errText(e));
     }
+  }
+
+  const [imageUploading, setImageUploading] = useState(false);
+
+  /** 桌面只选图（无原生相机）；上传归属冻结在发起时的 identity/botId/draftKey。
+   *  addAttachment 的 expectedKey 是原子 guard（useDrafts 内部 keyRef 实时比较）：
+   *  切换 Bot/身份后未完成批次中止，已上传结果不写新 scope 草稿。
+   *  相同图片 id 去重；去重后总数 ≤4，超限整体拒绝保留原草稿。 */
+  function pickImage() {
+    const frozenIdentity = identity;
+    const draftKey = drafts.key;
+    if (!frozenIdentity || lockedRef.current || isArchived || !draftKey || imageUploading) return;
+    setImageUploading(true);
+    pickImagesFromInput({
+      onPicked: async (files) => {
+        try {
+          const normalized = await Promise.all(files.map((file) => normalizeImageFile(file, file.name)));
+          const existing = new Set(drafts.attachments.map((a) => a.id));
+          const queued: PickedImageSource[] = [];
+          for (const source of normalized) {
+            const id = await attachmentIdOf(source.data);
+            if (existing.has(id)) continue;
+            existing.add(id);
+            queued.push(source);
+          }
+          if (drafts.attachments.length + queued.length > IMAGE_MAX_COUNT) {
+            setSendError(`最多 ${IMAGE_MAX_COUNT} 张图片，本次未上传。`);
+            return;
+          }
+          for (const source of queued) {
+            const att = await api.call(frozenIdentity, 'uploadAttachment', {
+              botId: bot.botId,
+              name: attachmentFileName(source.name, source.mimeType),
+              mimeType: source.mimeType,
+              data: source.data,
+            });
+            if (!drafts.addAttachment(att, draftKey)) return; // key 已切换：中止剩余批次
+          }
+          setSendError(null);
+        } catch (e) {
+          api.reportError(e);
+          setSendError('选择图片失败：' + errText(e));
+        }
+      },
+      onSettled: () => setImageUploading(false),
+    });
   }
 
   /**
@@ -1174,10 +1276,12 @@ function PrimaryChatPane({
 
   async function handleSend() {
     if (!identity || sendState !== 'idle' || lockedRef.current || isArchived) return;
+    if (imageUploading) return;
     const msg = drafts.text.trim();
-    if (!msg) return;
+    const attachmentIds = drafts.attachments.map((a) => a.id);
+    if (!msg && attachmentIds.length === 0) return;
     const command = parseSlashCommand(msg);
-    if (command) {
+    if (command && attachmentIds.length === 0) {
       if (live?.busy || drafts.attempt || drafts.savePaused || drafts.files.length > 0) {
         setSendError('请等待当前任务结束、处理未确认的发送，并移除路径引用后再执行命令。');
         return;
@@ -1200,6 +1304,7 @@ function PrimaryChatPane({
       botId: bot.botId,
       requestId,
       text: composed,
+      ...(attachmentIds.length ? { attachments: attachmentIds } : {}),
     };
     const started = drafts.beginSend(input);
     if (!started) return;
@@ -1926,6 +2031,7 @@ function PrimaryChatPane({
         search={chatSearch}
         archived={isArchived}
         onSubmitQuestionnaire={submitQuestionnaire}
+        attachmentFetcher={attachmentFetcher}
         loading={rawLoading}
         error={rawError}
         hasMore={false}
@@ -1952,6 +2058,11 @@ function PrimaryChatPane({
         files={drafts.files}
         onAddFile={addFile}
         onRemoveFile={removeFile}
+        attachments={drafts.attachments}
+        onAddAttachment={addAttachment}
+        onRemoveAttachment={removeAttachment}
+        attachmentFetcher={attachmentFetcher}
+        onPickImage={pickImage}
         canPick={!isArchived && identity?.kind === 'local'}
         onPick={pickFile}
         draftError={drafts.error}
@@ -1965,9 +2076,10 @@ function PrimaryChatPane({
           !isArchived &&
           !!identity &&
           !!drafts.key &&
-          drafts.text.trim().length > 0 &&
+          (drafts.text.trim().length > 0 || drafts.attachments.length > 0) &&
           !drafts.attempt &&
-          !drafts.savePaused
+          !drafts.savePaused &&
+          !imageUploading
         }
         disabled={disabled}
         onRetryDraft={drafts.retrySave}

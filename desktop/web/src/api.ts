@@ -80,16 +80,24 @@ const REMOTE_BROKER_OPS = new Set<string>([
 ]);
 
 function isEmptyDraft(draft: DesktopDraftEntry): boolean {
-  return draft.text === '' && draft.files.length === 0;
+  return draft.text === '' && draft.files.length === 0 && !(draft.attachments?.length);
 }
 
-/** 按 text、files 的 name/path/size 与元素顺序比较；不依赖 JSON 键顺序。 */
+/** 按 text、files 的 name/path/size、attachments 元数据与元素顺序比较；不依赖 JSON 键顺序。 */
 function sameDraftContent(a: DesktopDraftEntry, b: DesktopDraftEntry): boolean {
   if (a.text !== b.text || a.files.length !== b.files.length) return false;
   for (let i = 0; i < a.files.length; i += 1) {
     const x = a.files[i];
     const y = b.files[i];
     if (x.name !== y.name || x.path !== y.path || x.size !== y.size) return false;
+  }
+  const aAtt = a.attachments ?? [];
+  const bAtt = b.attachments ?? [];
+  if (aAtt.length !== bAtt.length) return false;
+  for (let i = 0; i < aAtt.length; i += 1) {
+    const x = aAtt[i];
+    const y = bAtt[i];
+    if (x.id !== y.id || x.name !== y.name || x.mimeType !== y.mimeType || x.size !== y.size || x.width !== y.width || x.height !== y.height) return false;
   }
   return true;
 }

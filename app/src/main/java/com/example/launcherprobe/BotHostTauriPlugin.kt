@@ -7,7 +7,9 @@ import android.content.pm.PackageManager
 import android.os.Handler
 import android.os.Looper
 import android.webkit.WebView
+import androidx.activity.result.ActivityResult
 import androidx.appcompat.app.AppCompatActivity
+import app.tauri.annotation.ActivityCallback
 import app.tauri.annotation.Command
 import app.tauri.annotation.InvokeArg
 import app.tauri.annotation.Permission
@@ -80,6 +82,8 @@ class BotHostTauriPlugin(private val hostActivity: Activity) : Plugin(hostActivi
     private var pendingVoiceGranted = false
     /** Bot 屏幕原生覆盖层（懒创建）；只观看/接管已有屏幕，与 Host 事件流无关。 */
     private var screenOverlay: BotScreenOverlay? = null
+    /** 系统选图/拍照：同进程序列化在 BotImagePicker 内（单会话）。 */
+    private var imagePicker: BotImagePicker? = null
 
     override fun load(webView: WebView) {
         mainWebView = webView
@@ -210,6 +214,7 @@ class BotHostTauriPlugin(private val hostActivity: Activity) : Plugin(hostActivi
                 reply.put("result", target ?: JSONObject.NULL)
                 send(invoke, reply)
             }
+            "pickImages" -> pickImages(invoke, params)
             "screenOpen" -> screenOpen(invoke, params)
             "screenLayout" -> screenLayout(invoke, params)
             "screenStatus" -> {
@@ -589,6 +594,53 @@ class BotHostTauriPlugin(private val hostActivity: Activity) : Plugin(hostActivi
         }
     }
 
+    // ---------- 系统选图/拍照（UI 本地动作，不经 Host 桥） ----------
+
+    private fun pickImages(invoke: Invoke, params: JSONObject) {
+        val source = params.optString("source")
+        if (source != "photos" && source != "camera") {
+            replyInvalid(invoke, "INVALID_ARGS", "source 必须是 photos 或 camera")
+            return
+        }
+        if (!foregroundUi()) {
+            replyInvalid(invoke, "NOT_FOREGROUND", "仅可在前台选择图片")
+            return
+        }
+        val picker = imagePicker ?: BotImagePicker(hostActivity).also { imagePicker = it }
+        val intent = try {
+            picker.begin(source) { outcome ->
+                // begin/deliver 在主线程同步回调、process 完成后 post 回主线程；两者都先记归属再回执，
+                // 与 destroyed=true 后的同步收尾天然互斥（launch 后旧 invoke 已在 SDK 等待表中作废）。
+                resolveImagePick(invoke, outcome)
+            }
+        } catch (e: BotImagePicker.PickerException) {
+            replyInvalid(invoke, e.code, e.message ?: "无法打开图片选择")
+            return
+        }
+        try {
+            // SDK 官方管线：registerForActivityResult 由 PluginManager 持有，结果回到下方 @ActivityCallback。
+            startActivityForResult(invoke, intent, "onPickImagesResult")
+        } catch (t: Throwable) {
+            picker.abort()
+            replyInvalid(invoke, "NOT_AVAILABLE", "无法打开图片选择")
+        }
+    }
+
+    /** 系统选择/相机 result 回调：分发到当前会话；已取消/销毁的旧会话分发无害。 */
+    @ActivityCallback
+    private fun onPickImagesResult(invoke: Invoke, result: ActivityResult) {
+        onMain(invoke) { imagePicker?.deliver(result) }
+    }
+
+    private fun resolveImagePick(invoke: Invoke, outcome: BotImagePicker.Outcome) {
+        when (outcome) {
+            is BotImagePicker.Outcome.Images -> replyOk(invoke, objectOf("images" to outcome.images))
+            is BotImagePicker.Outcome.Cancelled ->
+                replyOk(invoke, objectOf("images" to org.json.JSONArray(), "cancelled" to true))
+            is BotImagePicker.Outcome.Failed -> replyInvalid(invoke, outcome.code, outcome.message)
+        }
+    }
+
     // ---------- Bot 屏幕（UI 本地动作，不经 Host 桥） ----------
 
     private fun screenOpen(invoke: Invoke, params: JSONObject) {
@@ -705,6 +757,9 @@ class BotHostTauriPlugin(private val hostActivity: Activity) : Plugin(hostActivi
         discardFrames()
         streamFailure = null
         failedDeliveryId = null
+        // destroyed 置位后同步收尾：CANCELLED NativeReply 在主线程立即发出，不遗留悬挂 Promise。
+        imagePicker?.destroy()
+        imagePicker = null
         screenOverlay?.destroy()
         screenOverlay = null
         mainWebView = null

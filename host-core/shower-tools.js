@@ -1,3 +1,4 @@
+import { Type } from '@earendil-works/pi-ai';
 import { defineTool } from '@earendil-works/pi-durable';
 import { DEFAULT_IMAGE_LIMITS } from '@earendil-works/pi-durable/tools';
 import { resolveBotIdentity } from './bot-identity.js';
@@ -108,6 +109,25 @@ const LAUNCH_SCHEMA = {
     },
   ],
 };
+
+// codemode 只对声明了 structuredOutputSchema 的工具回传 structuredOutput（无 schema
+// 时脚本只见拼接文本、图片被丢弃）；declare 后嵌套结果解析为 {content, isError}。
+// cua-tools 声明同一契约；android-tools 有自己的同形副本。
+const TOOL_RESULT_SCHEMA = Type.Object({
+  content: Type.Array(Type.Union([
+    Type.Object({ type: Type.Literal('text'), text: Type.String() }),
+    Type.Object({ type: Type.Literal('image'), data: Type.String(), mimeType: Type.String() }),
+  ])),
+  isError: Type.Boolean(),
+});
+
+/** 成功结果把同一批已限额/校验块附作 structuredOutput 供 codemode 嵌套调用；
+    错误结果保持 {output,isError} 不附 structuredOutput：SDK 将其转为 error diagnostic 拒绝脚本调用，
+    而不是让脚本 resolve 成功。 */
+function toolResult(bounded) {
+  if (bounded.isError === true) return bounded;
+  return { ...bounded, structuredOutput: { content: bounded.output ?? [], isError: false } };
+}
 
 function textOutput(text) {
   return { output: [{ type: 'text', text }] };
@@ -280,6 +300,8 @@ export function createShowerTools({ host, getHarness, manager }) {
         + 'screenshot 只在当前模型支持图片输入时执行；非视觉模型会返回错误，此时应先切换模型或不截图。'
         + 'sessionId 省略时自动使用当前聊天的环境；不要传入其他会话的 sessionId。'
         + 'scroll 的 deltaX/deltaY 是整数滚轮格数（-20..20，正 Y 向下、正 X 向右），不是像素。'
+        + '返回 {content:[{type:"text",text}|{type:"image",data,mimeType}], isError}；'
+        + '在 codemode 中须显式 text(block.text)/image(block) 将各块传给模型，勿把图片 base64 打印成文本。'
         + '错误码：SHOWER_UNAVAILABLE/SHOWER_NOT_READY/SHOWER_BUSY/SHOWER_SESSION_NOT_FOUND/'
         + 'SHOWER_SESSION_MISMATCH/SHOWER_UNSUPPORTED/SHOWER_AUTH_REQUIRED/SHOWER_PERMISSION_REQUIRED/'
         + 'SHOWER_INPUT_FAILED/SHOWER_FRAME_TOO_LARGE/SHOWER_BACKEND_FAILED。',
@@ -308,6 +330,7 @@ export function createShowerTools({ host, getHarness, manager }) {
         required: ['action'],
         additionalProperties: false,
       },
+      structuredOutputSchema: TOOL_RESULT_SCHEMA,
       replay: 'unsafe',
       executionMode: 'sequential',
       async execute(args, api, context) {
@@ -316,13 +339,13 @@ export function createShowerTools({ host, getHarness, manager }) {
         const options = { taskId: api.taskId, callId: api.callId, signal: context.abortSignal, source: 'agent' };
         switch (args.action) {
           case 'status':
-            return checkedTextOutput(JSON.stringify(await manager.status(identity, options)));
+            return toolResult(checkedTextOutput(JSON.stringify(await manager.status(identity, options))));
           case 'create':
-            return checkedTextOutput(JSON.stringify(await manager.ensure(identity, args.options ?? {}, options)));
+            return toolResult(checkedTextOutput(JSON.stringify(await manager.ensure(identity, args.options ?? {}, options))));
           case 'release': {
             const sessionId = await resolveSessionId(manager, identity, args, options);
             if (!sessionId) return errorOutput('SHOWER_SESSION_NOT_FOUND', '当前聊天没有图形环境会话');
-            return checkedTextOutput(JSON.stringify(await manager.release(identity, sessionId, options)));
+            return toolResult(checkedTextOutput(JSON.stringify(await manager.release(identity, sessionId, options))));
           }
           case 'launch': {
             if (!args.target || typeof args.target !== 'object') {
@@ -330,9 +353,9 @@ export function createShowerTools({ host, getHarness, manager }) {
             }
             const sessionId = await resolveSessionId(manager, identity, args, options);
             if (!sessionId) return errorOutput('SHOWER_SESSION_NOT_FOUND', '当前聊天没有图形环境会话；请先 create');
-            return checkedTextOutput(
+            return toolResult(checkedTextOutput(
               JSON.stringify(await manager.launch(identity, sessionId, args.target, options)),
-            );
+            ));
           }
           case 'input': {
             if (!args.input || typeof args.input !== 'object') {
@@ -340,9 +363,9 @@ export function createShowerTools({ host, getHarness, manager }) {
             }
             const sessionId = await resolveSessionId(manager, identity, args, options);
             if (!sessionId) return errorOutput('SHOWER_SESSION_NOT_FOUND', '当前聊天没有图形环境会话；请先 create');
-            return checkedTextOutput(
+            return toolResult(checkedTextOutput(
               JSON.stringify(await manager.input(identity, sessionId, args.input, options)),
-            );
+            ));
           }
           case 'screenshot': {
             // 先解决当前模型再发起截图：未知/非视觉模型直接返回明确错误。
@@ -357,7 +380,7 @@ export function createShowerTools({ host, getHarness, manager }) {
             if (!frame || typeof frame !== 'object' || Array.isArray(frame)) {
               throw new Error('Shower 截图响应无效');
             }
-            return screenshotResult(frame, limits);
+            return toolResult(screenshotResult(frame, limits));
           }
           default:
             return errorOutput('INVALID_ARGUMENT', 'action 必须是 status/create/launch/screenshot/input/release');

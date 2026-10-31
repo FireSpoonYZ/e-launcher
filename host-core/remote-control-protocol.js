@@ -38,6 +38,10 @@ const INVALID_ARGUMENT = 'INVALID_ARGUMENT';
 const SHA256_HEX_RE = /^[0-9a-f]{64}$/;
 const MAX_SOUL_BYTES = 65536; // 64 KiB public SOUL.md text limit
 const EXTENSION_MODES = new Set(['read-write', 'read-only']);
+const MAX_SUBMIT_ATTACHMENTS = 4;
+const MAX_ATTACHMENT_NAME_BYTES = 256;
+const MAX_ATTACHMENT_BYTES = 524288; // 512 KiB decoded image payload
+const IMAGE_MIME_TYPES = new Set(['image/jpeg', 'image/png']);
 
 export const MAX_CONTROL_JSON_BYTES = 1048576; // 1 MiB, params/result JSON UTF-8 bytes
 export const CONTROL_TIMEOUT_MS = 20000;
@@ -161,6 +165,9 @@ const CONTROL_V2_METHODS = Object.freeze([
   'clearHistory',
   'compact',
   'scheduleTask',
+  // 图片附件：上传与读取是 additive v2；submit 通过 attachments 引用已上传 ID。
+  'uploadAttachment',
+  'getAttachment',
 ]);
 
 export const CONTROL_METHODS = Object.freeze([...CONTROL_V1_METHODS, ...CONTROL_V2_METHODS]);
@@ -242,6 +249,8 @@ export const CONTROL_ERROR_CODES = new Set([
   'HINDSIGHT_BINDING_MISMATCH',
   'EXTENSION_DISABLED',
   'EXTENSION_READ_ONLY',
+  'ATTACHMENT_NOT_FOUND',
+  'MODEL_NO_VISION',
   // Per-turn Center admission failures (contract §7 wire errors).
   'TURN_SET_CHANGED',
   'TURN_SYNC_FAILED',
@@ -272,6 +281,32 @@ function assertNonEmptyString(value, name) {
   if (typeof value !== 'string' || !value.isWellFormed() || value.trim() === '') {
     throw invalid(`${name} must be a well-formed non-empty string`);
   }
+}
+
+// 附件 ID 是解码图像字节的小写 hex SHA-256；与通用 assertId 不同，严格 64hex。
+function assertAttachmentId(value, name) {
+  if (typeof value !== 'string' || !SHA256_HEX_RE.test(value)) {
+    throw invalid(`${name} must be a lowercase 64-character hex SHA-256`);
+  }
+}
+
+function assertBase64(value, name) {
+  if (typeof value !== 'string' || !/^[A-Za-z0-9+/]*={0,2}$/.test(value) || value.length % 4 !== 0) {
+    throw invalid(`${name} must be canonical base64`);
+  }
+}
+
+// submit 附件引用：至多 4 个有序 64hex ID。
+function normalizeAttachmentIds(value) {
+  if (!Array.isArray(value) || value.length < 1 || value.length > MAX_SUBMIT_ATTACHMENTS) {
+    throw invalid(`attachments must be an array of 1-${MAX_SUBMIT_ATTACHMENTS} attachment IDs`);
+  }
+  const out = [];
+  for (const item of value) {
+    assertAttachmentId(item, 'attachments[]');
+    out.push(item);
+  }
+  return out;
 }
 
 // Strict BotExtensions wire shape. Kept local (instead of importing the manager's
@@ -354,11 +389,20 @@ function normalizeControlParams(method, params) {
       return { requestId: params.requestId };
     }
     case 'submit': {
-      rejectUnknownFields(params, new Set(['botId', 'requestId', 'text']), 'params');
+      rejectUnknownFields(params, new Set(['botId', 'requestId', 'text', 'attachments']), 'params');
       assertId(params.botId, 'botId');
       assertId(params.requestId, 'requestId');
-      assertNonEmptyString(params.text, 'text');
-      return { botId: params.botId, requestId: params.requestId, text: params.text };
+      const attachments = params.attachments === undefined
+        ? null
+        : normalizeAttachmentIds(params.attachments);
+      // 纯文本提交要求非空文本；带附件时允许空文本（UI 的只发图片消息）。
+      if (attachments === null) assertNonEmptyString(params.text, 'text');
+      else if (typeof params.text !== 'string' || !params.text.isWellFormed()) {
+        throw invalid('text must be a well-formed string');
+      }
+      const normalized = { botId: params.botId, requestId: params.requestId, text: params.text };
+      if (attachments !== null) normalized.attachments = attachments;
+      return normalized;
     }
     case 'getSubmission': {
       rejectUnknownFields(params, new Set(['botId', 'requestId']), 'params');
@@ -648,6 +692,29 @@ function normalizeControlParams(method, params) {
     }
     case 'scheduleTask': {
       return normalizeScheduleControlParams(params);
+    }
+    case 'uploadAttachment': {
+      rejectUnknownFields(params, new Set(['botId', 'name', 'mimeType', 'data']), 'params');
+      assertId(params.botId, 'botId');
+      assertNonEmptyString(params.name, 'name');
+      if (Buffer.byteLength(params.name, 'utf8') > MAX_ATTACHMENT_NAME_BYTES) {
+        throw invalid('name must be at most 256 UTF-8 bytes');
+      }
+      if (typeof params.mimeType !== 'string' || !IMAGE_MIME_TYPES.has(params.mimeType)) {
+        throw invalid('mimeType must be image/jpeg or image/png');
+      }
+      assertBase64(params.data, 'data');
+      // base64 严格编码使解码长度可由长度推出；解码上限 512 KiB。
+      if (Math.floor(params.data.length / 4) * 3 - (params.data.endsWith('==') ? 2 : params.data.endsWith('=') ? 1 : 0) > MAX_ATTACHMENT_BYTES) {
+        throw invalid('data exceeds the 512 KiB decoded image limit');
+      }
+      return { botId: params.botId, name: params.name, mimeType: params.mimeType, data: params.data };
+    }
+    case 'getAttachment': {
+      rejectUnknownFields(params, new Set(['botId', 'attachmentId']), 'params');
+      assertId(params.botId, 'botId');
+      assertAttachmentId(params.attachmentId, 'attachmentId');
+      return { botId: params.botId, attachmentId: params.attachmentId };
     }
     default:
       throw invalid('unknown control method');

@@ -56,11 +56,13 @@
 
 ## 构建与开发命令
 
-首次构建前在仓库根目录与 `host-core/` 安装锁定的 npm 依赖：
+首次构建前在仓库根目录与 `host-core/` 安装锁定的 npm 依赖。`host-core` 的六个 `@earendil-works/*` 包是固定上游 main SHA（`scripts/pi-main.json`）构建的 `build/pi-main/*.tgz`，须先由 `scripts/prepare-pi-main.mjs` 生成。file: tarball 依赖首次须用 `npm install`（而非 `ci`，`ci` 不生成新 lock）写入 lockfile，之后才可用 `ci` 复现：
 
 ```bash
 npm ci
-npm --prefix host-core ci --ignore-scripts --no-audit --no-fund
+npm run prepare:pi-main   # 构建固定 SHA 的六包 tgz 到 build/pi-main/
+npm --prefix host-core install --ignore-scripts --no-audit --no-fund   # 首次生成 lock
+# 已有 lock 后复现：npm --prefix host-core ci --ignore-scripts --no-audit --no-fund
 ```
 
 在仓库根目录执行桌面端脚本（`package.json` 中的 `desktop:*`）：

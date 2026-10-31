@@ -71,7 +71,11 @@ export async function readPrimaryHistory(conversation, options = {}, context, { 
     const resetId = afterReset ? await latestResetEntryId(conversation, context) : 0;
     const query = resetId > 0 ? { order: 'ascending', minEntryId: resetId + 1 } : { order: 'ascending' };
     const read = (count) => conversation.entries(query, count, position, context);
-    let page = await read(continuation ? 1 : limit);
+    const rawPage = await read(continuation ? 1 : limit);
+    // 一次投影：host.user-message 剥掉 image.data 后，后续预算/序列化/返回都用投影结果；
+    // durable 存储原内容不动，绝不把图片字节放进传输/日志。
+    const items = rawPage.items.map(stripAttachmentData);
+    const page = { items, next: rawPage.next };
     if (!chunked) return { items: page.items, nextCursor: page.next ?? null };
 
     if (continuation && page.items[0]?.id !== continuation.entryId) {
@@ -87,10 +91,19 @@ export async function readPrimaryHistory(conversation, options = {}, context, { 
       }
       if (count > 0 || page.items.length === 0) {
         // 重读实际返回的前缀，取得 SDK 的精确游标，不跳过放不下的条目。
-        if (count < page.items.length) page = await read(count);
+        if (count < page.items.length) {
+          const prefix = await read(count);
+          return { items: prefix.items.map(stripAttachmentData), nextCursor: prefix.next ?? null };
+        }
         return { items: page.items, nextCursor: page.next ?? null };
       }
-      if (page.items.length > 1) page = await read(1);
+      if (page.items.length > 1) {
+        // 只装得下第一条：重读精确前缀并同步 next 游标，否则 complete 分支会拿整页
+        // 游标跳过中间历史。continuation position 语义不变（仍是原分页位置）。
+        const first = await read(1);
+        page.items = [stripAttachmentData(first.items[0])];
+        page.next = first.next;
+      }
     }
     const entry = page.items[0];
     const json = JSON.stringify(entry);
@@ -154,4 +167,26 @@ function assistantText(entry) {
     }
   }
   return texts.join('\n');
+}
+
+/**
+ * host.user-message 条目投影：剥掉 user 消息 image 块的 base64 data，
+ * 保留 entry.data.attachments 展示元数据与 text 块。durable 存储原内容不动；
+ * 非 chunked 与 chunked 历史都先经此函数再序列化/返回，绝不把图片字节放进
+ * UI 历史/日志/inspect 传输。
+ */
+export function stripAttachmentData(entry) {
+  if (entry?.kind !== 'host.user-message' || !Array.isArray(entry?.model)) return entry;
+  let changed = false;
+  const model = entry.model.map((message) => {
+    if (message?.role !== 'user' || !Array.isArray(message?.content)) return message;
+    const content = message.content.map((block) => {
+      if (block?.type !== 'image') return block;
+      changed = true;
+      const { data: _dropped, ...rest } = block;
+      return rest;
+    });
+    return changed ? { ...message, content } : message;
+  });
+  return changed ? { ...entry, model } : entry;
 }

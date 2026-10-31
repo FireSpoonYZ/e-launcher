@@ -11,9 +11,9 @@ import { Channel, invoke } from '@tauri-apps/api/core';
 import type { DesktopObservationEvent } from '../../../host-core/desktop-client.js';
 import type { LiveTarget } from '../../../host-core/index.js';
 import type {
-  BotHostPlugin, CenterSettings, HostCallResult, HostFrameEvent, HostSettings,
-  HostSettingsPayload, HostSnapshot, HostStatus, HostVoiceEvent, HostVoiceSaveInput,
-  HostVoiceSettings, PluginListenerHandle,
+  BotHostPickImagesResult, BotHostPlugin, CenterSettings, HostCallResult, HostFrameEvent,
+  HostSettings, HostSettingsPayload, HostSnapshot, HostStatus, HostVoiceEvent,
+  HostVoiceSaveInput, HostVoiceSettings, PluginListenerHandle,
 } from './index';
 
 // clientFrame 只给手机远端页内部使用。
@@ -199,6 +199,10 @@ class MobileBotHost implements BotHostPlugin {
     }
   }
   finishVoice(): Promise<Record<string, never>> { return request('finishVoice'); }
+  /** UI-local：系统选图/拍照，原生端限为单会话、限尺寸/字节后返回 base64。 */
+  pickImages(options: {source: 'photos'|'camera'}): Promise<BotHostPickImagesResult> {
+    return request('pickImages', options);
+  }
   async cancelVoice(): Promise<Record<string, never>> {
     // 记录本条的归属：完成回调只清自己那一次，绝不擦掉期间新建的 capture。
     const owner = this.capture;

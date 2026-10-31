@@ -1,3 +1,5 @@
+import type { ImageAttachment } from '../../host-core/index.js';
+
 export interface ChatToolCallItem {
   id: string;
   name: string;
@@ -22,6 +24,8 @@ export interface ChatTurn {
   role: 'user' | 'assistant';
   text: string;
   entryId: number;
+  /** 用户消息已上传图片附件（host.user-message 的 data.attachments / live user message 的 attachments）。 */
+  attachments?: ImageAttachment[];
   error?: string;
   thinking?: string;
   toolSummary?: string[];
@@ -46,6 +50,27 @@ function asRecord(value: unknown): Record<string, unknown> {
 
 function asArray<T = unknown>(value: unknown): T[] {
   return Array.isArray(value) ? (value as T[]) : [];
+}
+
+/** 从历史/实时 user 消息的 attachments 数组提取展示所需的元数据；字段非法逐项丢弃。 */
+function readMessageAttachments(value: unknown): ImageAttachment[] {
+  const list = asArray<unknown>(value);
+  const out: ImageAttachment[] = [];
+  for (const raw of list) {
+    const item = asRecord(raw);
+    if (typeof item.id !== 'string' || !item.id) continue;
+    const mime = item.mimeType === 'image/jpeg' || item.mimeType === 'image/png' ? item.mimeType : 'image/jpeg';
+    const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
+    out.push({
+      id: item.id,
+      name: typeof item.name === 'string' ? item.name : '',
+      mimeType: mime,
+      size: num(item.size),
+      width: num(item.width),
+      height: num(item.height),
+    });
+  }
+  return out;
 }
 
 function compactSingleLine(value: string, maxLen = 56): string {
@@ -274,6 +299,8 @@ export function parseHistoryEntries(
       continue;
     }
     // raw 条目用 model 块（含工具/思考）；Host live 投影条目有 messages:[{role,text,truncated,toolCalls,timestamp,durationMs}]。
+    // host.user-message 的图片附件元数据在条目级 data.attachments（不在单个 message 上）。
+    const entryAttachments = readMessageAttachments(asRecord(item.data).attachments);
     const model = asArray<unknown>(item.model);
     const blocks = model.length > 0 ? model : asArray<unknown>(item.messages);
     for (let mIdx = 0; mIdx < blocks.length; mIdx++) {
@@ -292,6 +319,8 @@ export function parseHistoryEntries(
 
       if (role === 'user') {
         const content = entry.content;
+        const msgAttachments = readMessageAttachments(entry.attachments);
+        const attachments = msgAttachments.length > 0 ? msgAttachments : entryAttachments;
         const textParts: string[] = [];
         if (typeof content === 'string') {
           textParts.push(content);
@@ -310,7 +339,7 @@ export function parseHistoryEntries(
           }
         }
         const joinedText = textParts.join('\n').trim();
-        if (!joinedText) continue;
+        if (!joinedText && attachments.length === 0) continue;
 
         finalizeCurrentAssistant(false);
         activeUserStartMs = msgTimestamp;
@@ -319,6 +348,7 @@ export function parseHistoryEntries(
           role: 'user',
           entryId: Number.isFinite(numericId) ? numericId : 0,
           text: joinedText,
+          ...(attachments.length > 0 ? { attachments } : {}),
           startedAt: msgTimestamp,
         });
         continue;
