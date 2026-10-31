@@ -225,7 +225,11 @@ namespace ELauncher.Shower
                 return true;
             }
             uint child = (uint)state.OwnedChildSessionId;
-            if (!BootstrapNative.SessionLoggedOn(child))
+            BootstrapLog.Write(dir, "归属清理 session=" + child.ToString(CultureInfo.InvariantCulture) + "：SessionLoggedOn 开始");
+            bool loggedOn = BootstrapNative.SessionLoggedOn(child);
+            BootstrapLog.Write(dir, "归属清理 session=" + child.ToString(CultureInfo.InvariantCulture)
+                + "：SessionLoggedOn 结束 loggedOn=" + loggedOn);
+            if (!loggedOn)
             {
                 BootstrapLog.Write(dir, "归属子会话 " + state.OwnedChildSessionId.ToString(CultureInfo.InvariantCulture) + " 已不在登录态，无需注销");
                 return true;
@@ -241,16 +245,32 @@ namespace ELauncher.Shower
                 return false;
             }
             uint actualChild;
-            if (!BootstrapNative.TryGetChildSessionId(out actualChild) || actualChild != child)
+            BootstrapLog.Write(dir, "归属清理 session=" + child.ToString(CultureInfo.InvariantCulture) + "：TryGetChildSessionId 开始");
+            bool gotChild = BootstrapNative.TryGetChildSessionId(out actualChild);
+            BootstrapLog.Write(dir, "归属清理 session=" + child.ToString(CultureInfo.InvariantCulture)
+                + "：TryGetChildSessionId 结束 ok=" + gotChild + " actual=" + actualChild.ToString(CultureInfo.InvariantCulture));
+            if (!gotChild || actualChild != child)
             {
                 BootstrapLog.Write(dir, "当前子会话与记录不一致(记录=" + child.ToString(CultureInfo.InvariantCulture)
                     + " 实际=" + actualChild.ToString(CultureInfo.InvariantCulture) + ")，拒绝注销会话");
                 return false;
             }
             string childUserSid;
-            string parentUserSid;
-            if (!BootstrapNative.TrySessionUserSid(child, out childUserSid)
-                || !BootstrapNative.TrySessionUserSid((uint)state.ParentSessionId, out parentUserSid))
+            BootstrapLog.Write(dir, "归属清理 session=" + child.ToString(CultureInfo.InvariantCulture) + "：TrySessionUserSid(child) 开始");
+            bool childSidOk = BootstrapNative.TrySessionUserSid(child, out childUserSid);
+            BootstrapLog.Write(dir, "归属清理 session=" + child.ToString(CultureInfo.InvariantCulture)
+                + "：TrySessionUserSid(child) 结束 ok=" + childSidOk);
+            string parentUserSid = null;
+            bool parentSidOk = false;
+            if (childSidOk)
+            {
+                BootstrapLog.Write(dir, "归属清理 parent=" + state.ParentSessionId.ToString(CultureInfo.InvariantCulture)
+                    + "：TrySessionUserSid(parent) 开始");
+                parentSidOk = BootstrapNative.TrySessionUserSid((uint)state.ParentSessionId, out parentUserSid);
+                BootstrapLog.Write(dir, "归属清理 parent=" + state.ParentSessionId.ToString(CultureInfo.InvariantCulture)
+                    + "：TrySessionUserSid(parent) 结束 ok=" + parentSidOk);
+            }
+            if (!childSidOk || !parentSidOk)
             {
                 BootstrapLog.Write(dir, "无法读取子会话/parent 会话用户，拒绝注销会话");
                 return false;
@@ -266,7 +286,10 @@ namespace ELauncher.Shower
             {
                 try
                 {
+                    BootstrapLog.Write(dir, "归属清理 session=" + child.ToString(CultureInfo.InvariantCulture)
+                        + "：LogoffSession 开始 attempt=" + (attempt + 1).ToString(CultureInfo.InvariantCulture));
                     BootstrapNative.LogoffSession(child);
+                    BootstrapLog.Write(dir, "归属清理 session=" + child.ToString(CultureInfo.InvariantCulture) + "：LogoffSession 返回");
                 }
                 catch (Exception e)
                 {

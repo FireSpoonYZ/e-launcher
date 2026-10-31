@@ -3341,7 +3341,16 @@ ${newer}` : draftSnapshot;
       params: Record<string, unknown>,
     ) => Promise<unknown>;
     return (method, params) => call(showerIdentity, method, params);
-  }, [showerHostKind, showerRemoteReady, showerIdentity]);
+    // 远程目录每 2s 刷新会让 remoteIdentity 整体换新对象；call 只按真实身份字段稳定，换代时字段已变。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    showerHostKind,
+    showerRemoteReady,
+    showerIdentity?.profileId,
+    showerIdentity?.targetDeviceId,
+    showerIdentity?.generation,
+    showerIdentity?.kind,
+  ]);
   const showerConnected =
     showerHostKind === 'local' ? localHost?.phase === 'running' : showerRemoteReady;
   // 换主机/档案/设备/代/Bot 就换 key：旧画面与旧会话随卸载丢弃，不跨设备复用帧。

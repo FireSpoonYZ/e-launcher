@@ -29,12 +29,18 @@ namespace ELauncher.Shower
         {
             string dir = BootstrapFile.NormalizeDir(stateDir, true);
             BootstrapNative.EnsureStateDirAcl(dir, null);
-            BootstrapGuardian.RestoreAbandoned(dir);
 
             Process host = Process.GetCurrentProcess();
             int hostPid = host.Id;
             long hostStart = HostStartTicks(host);
             string hostSid = BootstrapNative.CurrentUserSid();
+
+            // 遗留恢复的特权操作只发生在已提权上下文；普通宿主把恢复交给 elevated worker，
+            // 不在 UAC 之前尝试需要权限的注销/系统还原（会在远端阻塞且无 consent 可点）。
+            if (BootstrapNative.CanActAsSystem() || BootstrapNative.IsElevated())
+            {
+                BootstrapGuardian.RestoreAbandoned(dir);
+            }
 
             bool enabled;
             bool known = BootstrapNative.TryIsChildSessionsEnabled(out enabled);
@@ -89,7 +95,8 @@ namespace ELauncher.Shower
 
         /// <summary>
         /// 在已登录的子会话里启动本程序 agent 模式。固定 exe、固定参数，不接受任意命令或任意会话。
-        /// 非提权宿主需要用户对 UAC 授权一次，授权后由提权助手登记一次性 SYSTEM 任务完成启动。
+        /// 非提权宿主复用启动时 prepare 授权的提权 guardian；guardian 缺失时明确失败，
+        /// 要求重启 Host 重新授权，绝不在会话创建路径上再次发起 UAC。
         /// </summary>
         public static void LaunchAgent(int childSessionId, int parentSessionId, string pipeName, string stateDir, string exePath)
         {
@@ -159,8 +166,9 @@ namespace ELauncher.Shower
                 }
                 else
                 {
-                    // UAC 对话框由用户决定时长，不能阻塞宿主消息循环；结果通过 bootstrap.log 与 pipe 握手体现。
-                    StartElevatedAsync(dir, "bootstrap-launch", arguments);
+                    // 不静默重新提权：缺失的启动授权只由下一次 Host 启动时的 prepare 恢复。
+                    BootstrapLog.Write(dir, "启动授权 guardian 不可用，拒绝在会话中重新 UAC；重启 Host 以重新授权");
+                    throw new Win32Exception(5, "Windows 虚拟屏的启动授权已失效；请重启 Host 后重试");
                 }
             }
             catch (Exception)
@@ -808,29 +816,6 @@ namespace ELauncher.Shower
                 }
                 BootstrapLog.Write(dir, mode + " 提权助手退出码 "
                     + helper.ExitCode.ToString(CultureInfo.InvariantCulture));
-            }
-        }
-
-        private static void StartElevatedAsync(string dir, string mode, string arguments)
-        {
-            ProcessStartInfo info = new ProcessStartInfo(SelfExePath(), mode + " " + arguments);
-            info.UseShellExecute = true;
-            info.Verb = "runas";
-            info.WindowStyle = ProcessWindowStyle.Hidden;
-            try
-            {
-                Process helper = Process.Start(info);
-                if (helper != null)
-                {
-                    BootstrapLog.Write(dir, "已请求管理员授权启动 " + mode
-                        + " pid=" + helper.Id.ToString(CultureInfo.InvariantCulture));
-                    helper.Dispose();
-                }
-            }
-            catch (Win32Exception e)
-            {
-                BootstrapLog.Write(dir, "请求管理员授权失败: " + e.Message);
-                throw new Win32Exception(e.NativeErrorCode, "需要管理员授权: " + e.Message);
             }
         }
 

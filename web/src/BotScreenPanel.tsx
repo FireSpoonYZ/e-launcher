@@ -83,6 +83,8 @@ export function BotScreenPanel({
   const [state, setState] = useState<ScreenViewState | null>(null);
   const [rpcState, setRpcState] = useState<RpcStatusSnapshot | null>(null);
   const [rpcFrameSrc, setRpcFrameSrc] = useState('');
+  const rpcGenRef = useRef(0);
+  const rpcInFlightRef = useRef(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [helpOpen, setHelpOpen] = useState(false);
@@ -145,18 +147,29 @@ export function BotScreenPanel({
   const lastSessionIdRef = useRef<string>('');
   const takeoverSessionIdRef = useRef<string>('');
 
-  // RPC 画面回退模式（远程节点或非 Tauri WebView）：轮询 getShowerStatus 与 getShowerFrame
-  const refreshRpcStatus = useCallback(async () => {
+  // RPC 画面回退模式（远程节点或非 Tauri WebView）：轮询 getShowerStatus 与 getShowerFrame。
+  // 单飞 + 世代围栏：在途请求未完成时新 tick 直接跳过；effect 清理后旧轮询结果不得覆盖新状态。
+  // force（显式控制/输入后的刷新）推进世代使旧在途返回失效，不被单飞跳过。
+  const refreshRpcStatus = useCallback(async (force = false) => {
     if (!canUseRpcFallback || !rpcCall || !baseParams) return;
+    if (force) rpcGenRef.current += 1;
+    else if (rpcInFlightRef.current) return;
+    const gen = rpcGenRef.current;
+    rpcInFlightRef.current = true;
     try {
       const raw = (await rpcCall('getShowerStatus', baseParams)) as Record<string, unknown> | null;
       const sessPhase = typeof raw?.phase === 'string' ? raw.phase : '';
       const sessionId = typeof raw?.sessionId === 'string' ? raw.sessionId : '';
-      if (sessionId) lastSessionIdRef.current = sessionId;
+      if (rpcGenRef.current !== gen) return;
+      // 会话结束或换了 sessionId 时先清掉旧帧与旧会话引用，避免短暂显示上一会话画面。
+      const sessionChanged = sessionId !== lastSessionIdRef.current;
+      const live = sessPhase === 'ready';
+      if (!live || sessionChanged) setRpcFrameSrc('');
+      if (sessionChanged) takeoverSessionIdRef.current = '';
+      lastSessionIdRef.current = sessionId;
       const width = typeof raw?.width === 'number' && raw.width > 0 ? raw.width : DEFAULT_WIDTH;
       const height = typeof raw?.height === 'number' && raw.height > 0 ? raw.height : DEFAULT_HEIGHT;
       const userControl = Boolean(sessionId && takeoverSessionIdRef.current === sessionId);
-      const live = sessPhase === 'ready';
       const phase: RpcStatusSnapshot['phase'] =
         sessPhase === 'ready'
           ? 'live'
@@ -180,12 +193,29 @@ export function BotScreenPanel({
           ...baseParams,
           sessionId,
         })) as Record<string, unknown> | null;
+        if (rpcGenRef.current !== gen) return;
         if (frameRes && typeof frameRes.data === 'string' && frameRes.data) {
           const mime = typeof frameRes.mimeType === 'string' && frameRes.mimeType ? frameRes.mimeType : 'image/png';
           setRpcFrameSrc(`data:${mime};base64,${frameRes.data}`);
         }
       }
     } catch (failure) {
+      if (rpcGenRef.current !== gen) return;
+      // 会话到期被 manager 释放后，已排队的 getFrame 会返回该码：视为正常空闲，不显示红字错误。
+      if ((failure as { code?: string })?.code === 'SHOWER_SESSION_NOT_FOUND') {
+        lastSessionIdRef.current = '';
+        takeoverSessionIdRef.current = '';
+        setRpcFrameSrc('');
+        setRpcState(prev => ({
+          live: false,
+          userControl: false,
+          width: prev?.width ?? DEFAULT_WIDTH,
+          height: prev?.height ?? DEFAULT_HEIGHT,
+          sessionId: '',
+          phase: 'none',
+        }));
+        return;
+      }
       setRpcState(prev => ({
         live: false,
         userControl: false,
@@ -195,10 +225,15 @@ export function BotScreenPanel({
         phase: 'error',
         message: errorText(failure),
       }));
+    } finally {
+      // 世代已变（effect 重跑或 force 刷新）时本趟返回已失效，不得解除新一趟的单飞。
+      if (rpcGenRef.current === gen) rpcInFlightRef.current = false;
     }
   }, [canUseRpcFallback, rpcCall, baseParams]);
 
   useEffect(() => {
+    rpcGenRef.current += 1;
+    rpcInFlightRef.current = false;
     setRpcState(null);
     setRpcFrameSrc('');
     if (!open || !canUseRpcFallback) return;
@@ -206,7 +241,10 @@ export function BotScreenPanel({
     const poll = window.setInterval(() => {
       void refreshRpcStatus();
     }, POLL_MS);
-    return () => window.clearInterval(poll);
+    return () => {
+      rpcGenRef.current += 1;
+      window.clearInterval(poll);
+    };
   }, [open, canUseRpcFallback, refreshRpcStatus]);
 
   // 动画期间隐藏原生画面，稳定后再按占位元素位置贴上。
@@ -272,7 +310,7 @@ export function BotScreenPanel({
           sessionId: sid,
         });
         takeoverSessionIdRef.current = sid;
-        await refreshRpcStatus();
+        await refreshRpcStatus(true);
       }
     } catch (failure) {
       setError(errorText(failure));
@@ -309,7 +347,7 @@ export function BotScreenPanel({
         }
         pushLayout();
       } else {
-        await refreshRpcStatus();
+        await refreshRpcStatus(true);
       }
       setHelpOpen(false);
     } catch (failure) {
@@ -342,7 +380,7 @@ export function BotScreenPanel({
         }
         pushLayout();
       } else {
-        await refreshRpcStatus();
+        await refreshRpcStatus(true);
       }
       setHelpOpen(false);
     } catch (failure) {
@@ -412,7 +450,7 @@ export function BotScreenPanel({
             },
           });
         }
-        await refreshRpcStatus();
+        await refreshRpcStatus(true);
       } catch (failure) {
         setError(errorText(failure));
       }
@@ -522,7 +560,7 @@ export function BotScreenPanel({
                     disabled={busy}
                     onClick={() => {
                       if (isNativeClient) pushLayout();
-                      else void refreshRpcStatus();
+                      else void refreshRpcStatus(true);
                       setHelpOpen(false);
                     }}
                   >

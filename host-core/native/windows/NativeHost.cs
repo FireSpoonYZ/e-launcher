@@ -126,11 +126,12 @@ namespace ELauncher.Shower
             }
         }
 
+        /// <summary>只发起注销（wait:false），同步等待可能无界阻塞；完成由调用方核验。</summary>
         internal static bool LogoffSession(int sessionId)
         {
             try
             {
-                return WTSLogoffSession(IntPtr.Zero, sessionId, true);
+                return WTSLogoffSession(IntPtr.Zero, sessionId, false);
             }
             catch (EntryPointNotFoundException)
             {

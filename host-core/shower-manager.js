@@ -4,7 +4,10 @@
 // execution, and cancel() that drops that owner's queued work and aborts its
 // in-flight signal instead of queueing behind it. Backends own the real
 // environments; this module never creates one for status, never invents a session
-// on the backend's behalf, and never replays input.
+// on the backend's behalf, and never replays input. Windows/Linux sessions are
+// released after 300 s of inactivity on their own FIFO; status and human frames
+// do not renew the timer, in-flight operations are never preempted, and a failed
+// idle release keeps ownership so status/release can still settle it.
 import { randomUUID } from 'node:crypto';
 import { assertId, messageError } from './message-protocol.js';
 import { createAndroidShowerBackend } from './shower-android.js';
@@ -31,6 +34,8 @@ const PHASES = new Set([
   'error',
 ]);
 const BACKEND_METHODS = ['status', 'ensure', 'frame', 'input', 'launch', 'release', 'close'];
+// Windows/Linux 每会话空闲回收固定 5 分钟；Android 保留其原生服务端既有策略。
+const IDLE_RELEASE_MS = 300_000;
 // Windows 全机只有一块子会话，因此所有归属共用一条串行队列；取消仍按 owner 区分。
 const MACHINE_QUEUE = '\u0000shower-machine';
 
@@ -254,6 +259,8 @@ export function createShowerManager({ dataRoot, nativeBridge, backend } = {}) {
   const ownerRecords = new Map();
   const sessionOwners = new Map();
   const gates = new Map();
+  // 会话级空闲计时：所有权属于该 sessionId 的 record，到期沿同一归属 FIFO 释放。
+  const idleTimers = new Map();
   // 已接纳操作计数：close 先取消再等它们收尾，之后才关闭后端，避免在飞结果丢失归属。
   let accepted = 0;
   const idleWaiters = [];
@@ -325,6 +332,11 @@ export function createShowerManager({ dataRoot, nativeBridge, backend } = {}) {
   }
 
   function forget(sessionId) {
+    const timer = idleTimers.get(sessionId);
+    if (timer !== undefined) {
+      clearTimeout(timer);
+      idleTimers.delete(sessionId);
+    }
     const key = sessionOwners.get(sessionId);
     if (key === undefined) return;
     sessionOwners.delete(sessionId);
@@ -343,6 +355,76 @@ export function createShowerManager({ dataRoot, nativeBridge, backend } = {}) {
       throw messageError('SHOWER_SESSION_NOT_FOUND', 'Shower 会话已被替换；先 create 取新会话');
     }
     return record;
+  }
+
+  /** 到期沿该会话归属的 FIFO 排队释放；begin/end 让 close 等在途释放收尾后再关后端。 */
+  function idleExpire(record, timer) {
+    begin();
+    run(record.actor, undefined, async () => {
+      // 执行时复核：续期已更换计时句柄的视为未到期，归属仍须是同一 sessionId。
+      if (idleTimers.get(record.sessionId) !== timer) {
+        return { sessionId: record.sessionId, released: false, phase: 'closed', expired: true };
+      }
+      idleTimers.delete(record.sessionId);
+      const key = ownerKey(record.actor);
+      const current = ownerRecords.get(key);
+      if (!current || current !== record || current.sessionId !== record.sessionId) {
+        return { sessionId: record.sessionId, released: false, phase: 'closed', expired: true };
+      }
+      const manager = await liveBackend();
+      let result;
+      try {
+        result = await manager.release(record, { source: 'agent' });
+      } catch (error) {
+        // 后端明确说会话已不存在时同步忘记；其他失败保留绑定与计时器，允许显式收尾。
+        if (error?.code === 'SHOWER_SESSION_NOT_FOUND') forget(record.sessionId);
+        else armIdleTimer(record);
+        throw error;
+      }
+      forget(record.sessionId);
+      return result;
+    })
+      .catch(() => {
+        // 空闲释放失败不冒充成功；归属保留，status/release 可观察并显式收尾。
+      })
+      .finally(() => end());
+  }
+
+  /** Windows/Linux 每会话固定计时；句柄即到期令牌，续期换句柄使旧到期作废。 */
+  function armIdleTimer(record) {
+    if (closed) return;
+    if (resolvedBackend?.platform !== 'windows' && resolvedBackend?.platform !== 'linux') return;
+    clearTimeout(idleTimers.get(record.sessionId));
+    const timer = setTimeout(() => idleExpire(record, timer), IDLE_RELEASE_MS);
+    timer.unref?.();
+    idleTimers.set(record.sessionId, timer);
+  }
+
+  function clearIdleTimer(sessionId) {
+    const timer = idleTimers.get(sessionId);
+    if (timer === undefined) return;
+    clearTimeout(timer);
+    idleTimers.delete(sessionId);
+  }
+
+  /** 活动只发生在该归属串行操作完成后：在途操作不被打断，完成后统一续期。 */
+  function touchSession(record) {
+    const key = ownerKey(record.actor);
+    const current = ownerRecords.get(key);
+    if (!current || current !== record || current.sessionId !== record.sessionId) return;
+    armIdleTimer(record);
+  }
+
+  /** 仅 Windows 需要启动授权准备；Linux/Android 无 prepare，保持惰性无资源。 */
+  async function prepare(options = {}) {
+    if (!isPlainObject(options)) throw invalid('Shower options must be a plain object');
+    begin();
+    try {
+      const manager = await liveBackend();
+      if (typeof manager.prepare === 'function') await manager.prepare({ signal: options.signal });
+    } finally {
+      end();
+    }
   }
 
   async function status(actor, options = {}) {
@@ -376,9 +458,14 @@ export function createShowerManager({ dataRoot, nativeBridge, backend } = {}) {
         }
         const existing = ownerRecords.get(key);
         if (existing) {
-          const snapshot = await manager.ensure(existing, create, callOptions(options, source, signal));
-          assertSameSessionId(existing, snapshot);
-          return sessionFrom(existing, snapshot, manager.platform);
+          clearIdleTimer(existing.sessionId);
+          try {
+            const snapshot = await manager.ensure(existing, create, callOptions(options, source, signal));
+            assertSameSessionId(existing, snapshot);
+            return sessionFrom(existing, snapshot, manager.platform);
+          } finally {
+            touchSession(existing);
+          }
         }
         // 新会话 ID 由 manager 预留，后端只使用它；ensure 前即绑定，失败结果也能被 status/release 看到。
         const record = {
@@ -390,10 +477,12 @@ export function createShowerManager({ dataRoot, nativeBridge, backend } = {}) {
         try {
           const snapshot = await manager.ensure(record, create, callOptions(options, source, signal));
           assertSameSessionId(record, snapshot);
+          touchSession(record);
           return sessionFrom(record, snapshot, manager.platform);
         } catch (error) {
-          // 只有明确未发送才撤回预留；不明/已开始的结果保留归属，交给 status/release 收尾。
+          // 只有明确未发送才撤回预留；不明/已开始的结果保留归属并计时收尾。
           if (error?.outcome === 'not-sent') forget(record.sessionId);
+          else armIdleTimer(record);
           throw error;
         }
       });
@@ -411,12 +500,17 @@ export function createShowerManager({ dataRoot, nativeBridge, backend } = {}) {
       const manager = await liveBackend();
       return await run(bound, options.signal, async (signal) => {
         const record = resolveSession(bound, sessionId);
-        const result = await manager.frame(record, normalized, callOptions(options, source, signal));
-        if (!isPlainObject(result)) throw backendFailure('Shower backend returned an invalid frame');
-        if (result.sessionId !== record.sessionId) {
-          throw messageError('SHOWER_SESSION_MISMATCH', 'Shower 帧不属于当前会话');
+        try {
+          const result = await manager.frame(record, normalized, callOptions(options, source, signal));
+          if (!isPlainObject(result)) throw backendFailure('Shower backend returned an invalid frame');
+          if (result.sessionId !== record.sessionId) {
+            throw messageError('SHOWER_SESSION_MISMATCH', 'Shower 帧不属于当前会话');
+          }
+          return result;
+        } finally {
+          // Agent 主动取帧算活动；人工预览（source:'human'）不续期，轮询也阻止不了到期。
+          if (source === 'agent') touchSession(record);
         }
-        return result;
       });
     } finally {
       end();
@@ -432,9 +526,13 @@ export function createShowerManager({ dataRoot, nativeBridge, backend } = {}) {
       const manager = await liveBackend();
       return await run(bound, options.signal, async (signal) => {
         const record = resolveSession(bound, sessionId);
-        const result = await manager.input(record, normalized, callOptions(options, source, signal));
-        if (!isPlainObject(result)) throw backendFailure('Shower backend returned an invalid input receipt');
-        return result;
+        try {
+          const result = await manager.input(record, normalized, callOptions(options, source, signal));
+          if (!isPlainObject(result)) throw backendFailure('Shower backend returned an invalid input receipt');
+          return result;
+        } finally {
+          touchSession(record);
+        }
       });
     } finally {
       end();
@@ -450,9 +548,13 @@ export function createShowerManager({ dataRoot, nativeBridge, backend } = {}) {
       const manager = await liveBackend();
       return await run(bound, options.signal, async (signal) => {
         const record = resolveSession(bound, sessionId);
-        const result = await manager.launch(record, normalized, callOptions(options, source, signal));
-        if (!isPlainObject(result)) throw backendFailure('Shower backend returned an invalid launch receipt');
-        return result;
+        try {
+          const result = await manager.launch(record, normalized, callOptions(options, source, signal));
+          if (!isPlainObject(result)) throw backendFailure('Shower backend returned an invalid launch receipt');
+          return result;
+        } finally {
+          touchSession(record);
+        }
       });
     } finally {
       end();
@@ -490,8 +592,10 @@ export function createShowerManager({ dataRoot, nativeBridge, backend } = {}) {
    */
   function cancel(actor, sessionId) {
     const bound = normalizeActor(actor);
-    resolveSession(bound, sessionId);
+    const record = resolveSession(bound, sessionId);
     cancelOwner(gates, queueKey(bound), ownerKey(bound));
+    // 人类接管本身算活动：取消后同归属 5 分钟内不再被空闲回收。
+    touchSession(record);
   }
 
   function close() {
@@ -509,9 +613,11 @@ export function createShowerManager({ dataRoot, nativeBridge, backend } = {}) {
       gates.clear();
       ownerRecords.clear();
       sessionOwners.clear();
+      for (const timer of idleTimers.values()) clearTimeout(timer);
+      idleTimers.clear();
     })();
     return closePromise;
   }
 
-  return { status, ensure, frame, input, launch, release, cancel, close };
+  return { status, ensure, frame, input, launch, release, cancel, close, prepare };
 }

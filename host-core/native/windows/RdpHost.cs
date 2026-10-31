@@ -46,6 +46,8 @@ namespace ELauncher.Shower
         private const int AgentConnectTimeoutMs = 60000;
         private const int RelayTimeoutMs = 25000;
         private const int SessionCloseTimeoutMs = 5000;
+        // 注销核验上限：给总 15 s release 留出 agent 释放与断连空间，仅查询本机 WTS 状态。
+        private const int LogoffVerifyTimeoutMs = 8000;
 
         private static readonly string[] WindowsKeys = new string[]
         {
@@ -61,6 +63,7 @@ namespace ELauncher.Shower
         // Trusted metadata the manager forwards with any call; never guessed, never model supplied. The agent
         // only receives source/taskId, because its own schema rejects anything else.
         private static readonly string[] TrustedFields = new string[] { "source", "taskId", "callId" };
+        private static readonly string[] PrepareFields = WithTrusted(new string[0]);
         private static readonly string[] StatusFields = WithTrusted(new string[] { "sessionId" });
         private static readonly string[] EnsureFields = WithTrusted(new string[] { "sessionId", "options" });
         private static readonly string[] CreateOptionFields = new string[] { "width", "height" };
@@ -106,6 +109,9 @@ namespace ELauncher.Shower
         private DateTime updatedAt = DateTime.UtcNow;
         private int generation;
         private long frameSerial;
+        // 仅本次进程内 prepare 成功的授权宿主才能创建子会话；启动失败不假装已授权。
+        private bool prepared;
+        private readonly object prepareLock = new object();
 
         private RdpHost(string stateDir)
         {
@@ -341,6 +347,9 @@ namespace ELauncher.Shower
                 object result;
                 switch (request.Method)
                 {
+                    case "prepare":
+                        result = Prepare(request.Params);
+                        break;
                     case "status":
                         result = Status(request.Params);
                         break;
@@ -378,7 +387,7 @@ namespace ELauncher.Shower
                         result = Cancel(request.Params);
                         break;
                     default:
-                        throw new HostFault(HostErrorCodes.Unsupported, "unknown method: " + request.Method + "; expected status, ensure, frame, input, launch, preview, release or cancel");
+                        throw new HostFault(HostErrorCodes.Unsupported, "unknown method: " + request.Method + "; expected prepare, status, ensure, frame, input, launch, preview, release or cancel");
                 }
                 wire.Result(request.Id, result);
             }
@@ -401,6 +410,40 @@ namespace ELauncher.Shower
                     }
                 }
             }
+        }
+
+        // ---------------------------------------------------------------------------------- prepare
+
+        /// <summary>Startup authorization only: enables child sessions and the guardian; never creates a desktop.</summary>
+        private object Prepare(Dictionary<string, object> parameters)
+        {
+            CheckFields(parameters, PrepareFields, "prepare");
+            lock (prepareLock)
+            {
+                if (prepared) return PreparedResult();
+                try
+                {
+                    RunBounded("child session enablement", delegate { SessionBootstrap.EnsureEnabled(stateDir); }, BootstrapTimeoutMs);
+                }
+                catch (HostFault)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    throw new HostFault(HostErrorCodes.PermissionRequired, "startup authorization failed: " + ex.Message);
+                }
+                prepared = true;
+                HostLog.Info("child session enablement prepared for this host");
+                return PreparedResult();
+            }
+        }
+
+        private static Dictionary<string, object> PreparedResult()
+        {
+            var result = new Dictionary<string, object>();
+            result["prepared"] = true;
+            return result;
         }
 
         // ---------------------------------------------------------------------------------- status
@@ -593,6 +636,15 @@ namespace ELauncher.Shower
             CheckFields(options, CreateOptionFields, "options");
             int width = OptionDimension(options, "width");
             int height = OptionDimension(options, "height");
+            lock (prepareLock)
+            {
+                if (!prepared)
+                {
+                    throw new HostFault(
+                        HostErrorCodes.PermissionRequired,
+                        "this host has no startup authorization; restart the Host and approve the administrator prompt");
+                }
+            }
             int expectedGeneration;
             lock (stateLock)
             {
@@ -637,7 +689,7 @@ namespace ELauncher.Shower
                 }
                 if (before > 0) throw new HostFault(HostErrorCodes.Busy, "another child session already exists; it will not be adopted");
                 HostLog.Info("child session before connect: " + before.ToString(CultureInfo.InvariantCulture));
-                RunBounded("child session enablement", delegate { SessionBootstrap.EnsureEnabled(stateDir); }, BootstrapTimeoutMs);
+                // 启动授权只来自本次 Host 启动时的 prepare；会话创建路径不触发新的 UAC。
                 RequireCurrent(expectedGeneration);
                 link = new AgentLink();
                 AgentLink pending = link;
@@ -1321,15 +1373,32 @@ namespace ELauncher.Shower
             }
         }
 
-        /// <summary>Only a child session this host created is logged off; a pre-existing one is left alone.</summary>
+        /// <summary>
+        /// Only a child session this host created is logged off; a pre-existing one is left alone.
+        /// Logoff is fire-and-forget (wait:false does not wait for the system logoff); release is
+        /// confirmed only after the child id is no longer reported AND the session left the
+        /// logged-on state, within a bounded poll. A refused send or a timed-out child is a
+        /// failure, never a released report.
+        /// </summary>
         private void LogOffChild(int child, bool owned)
         {
             if (!owned || child <= 0 || child == parentSessionId) return;
             HostLog.Info("logging off the owned child session " + child.ToString(CultureInfo.InvariantCulture));
             if (!HostNative.LogoffSession(child))
             {
-                HostLog.Warn("logoff of child session " + child.ToString(CultureInfo.InvariantCulture) + " was refused; it ends with the connection");
+                throw new HostFault(HostErrorCodes.BackendFailed, "logoff of child session " + child.ToString(CultureInfo.InvariantCulture) + " was refused");
             }
+            var deadline = Stopwatch.StartNew();
+            while (deadline.ElapsedMilliseconds < LogoffVerifyTimeoutMs)
+            {
+                int current = HostNative.ChildSessionId();
+                bool idGone = current != HostNative.UnsupportedChildSessions && current != child;
+                bool loggedOff = !BootstrapNative.SessionLoggedOn((uint)child);
+                if (idGone && loggedOff) return;
+                Thread.Sleep(250);
+            }
+            HostLog.Warn("child session " + child.ToString(CultureInfo.InvariantCulture) + " was still logged on after the logoff request");
+            throw new HostFault(HostErrorCodes.BackendFailed, "child session " + child.ToString(CultureInfo.InvariantCulture) + " did not finish logging off within " + LogoffVerifyTimeoutMs.ToString(CultureInfo.InvariantCulture) + " ms");
         }
     }
 }

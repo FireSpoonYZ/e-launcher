@@ -19,11 +19,21 @@ not run acceptance checks.
   `SHOWER_ERROR_CODES`. Public data never carries platform handles or credentials.
 - Backends: `shower-android.js`, `shower-windows.js`, `shower-linux.js` export
   `create*ShowerBackend` and implement the same `status/ensure/frame/input/launch/
-  release/close` Promise methods. Backends depend on no Host or harness.
+  release/close` Promise methods. The Windows backend additionally exposes
+  `prepare()`, the startup-only authorization entry: called once during Windows
+  Host startup, it never creates a desktop. Other backends have no `prepare` and
+  stay fully lazy — nothing instantiates them at startup. Backends depend on no
+  Host or harness.
 - Manager: `shower-manager.js` owns Actor binding, the random session id allocated
   before the first `ensure`, per-session serialization, cancellation that bypasses
-  the queue, and lazy native process start. A second owner on Windows gets
-  `SHOWER_BUSY`.
+  the queue, startup `prepare()`, and lazy native process start. A second owner on
+  Windows gets `SHOWER_BUSY`. On Windows and Linux each session is released after
+  a fixed 300 s of inactivity along that owner's FIFO: create/re-ensure, input,
+  launch, human takeover cancel and agent frames renew the timer, while status and
+  human preview frames do not. In-flight operations are never preempted (the
+  release runs behind them and re-arms on completion), release/forget/close clear
+  it, and a failed idle release keeps ownership so status or an explicit release
+  can still settle it.
 - Model surface: the durable extension `host.shower` exposes exactly six tool
   actions (`status`, `create`, `launch`, `screenshot`, `input`, `release`) from
   `shower-tools.js`, sequential, with `source:'agent'` and `taskId` attached by the
@@ -148,11 +158,13 @@ JSONL framing on stdin/stdout, with logs on stderr only and no input text or
 passwords in logs. Internal invocations are `agent --pipe <name> --session-id <N>`
 (run as `SessionAgent` on the child desktop) and `bootstrap-*` (handled by
 `SessionBootstrap.Run`). Requests are
-`{id,method:'ensure'|'status'|'frame'|'input'|'launch'|'release'|'preview'|'cancel',
+`{id,method:'prepare'|'ensure'|'status'|'frame'|'input'|'launch'|'release'|'preview'|'cancel',
 params}` and responses `{id,ok:true,result}` or `{id,ok:false,error:{code,message,
 outcome?}}`; an unsolicited `{event:'status',status}` is allowed. The native side
 caps a frame at 2 MiB and receives the image base64 cap from the request. EOF
-releases the owned session.
+releases the owned session. `prepare` only runs `SessionBootstrap.EnsureEnabled`
+(administrator approval plus the elevated guardian); `ensure` refuses to start a
+session on a host that was not prepared during this process lifetime.
 
 The control connects to localhost with CredSSP, `AuthenticationLevel=0` and
 `ConnectToChildSession=true`; the child session id is validated before and after
@@ -166,18 +178,31 @@ window's minimize button is disabled.
 
 ### Bootstrap and cleanup
 
-The first Windows screen in a Host lifetime requests administrator approval to
-enable child sessions and start an elevated guardian. The guardian accepts only
-fixed executor-launch requests for its own Host PID/start time, parent/child
-session and user. The existing temporary SYSTEM task performs token validation
-and starts the child's **non-elevated** executor. `WTSQueryUserToken` remains in
-that SYSTEM step; an administrator token alone is insufficient.
+Windows startup authorization happens once per Host lifetime, at Host startup
+(`manager.prepare()`), not on the first screen. The native `prepare` command runs
+`SessionBootstrap.EnsureEnabled`: the single administrator approval enables child
+sessions, starts TermService if needed, records the restore baseline and starts an
+elevated guardian. A cancelled or failed preparation aborts Host startup and the
+native host exits, so nothing pretends the remote screen is ready. The guardian
+accepts only fixed executor-launch requests for its own Host PID/start time,
+parent/child session and user. The existing temporary SYSTEM task performs token
+validation and starts the child's **non-elevated** executor. `WTSQueryUserToken`
+remains in that SYSTEM step; an administrator token alone is insufficient.
 
-Successful `release` logs off the owned child synchronously and retains the native
-Host, ActiveX control and guardian. Subsequent creation reuses administrator
-approval. A failed release or Host shutdown terminates the native process; the
-guardian restores the original child-enabled and TermService state. NLA, Windows
-Hello, firewall and `RDP-Tcp` settings are not changed.
+Session creation never elevates: the remote-UAC call was removed from the RDP
+session start, and if the authorized host or guardian is lost (host restarted,
+guardian exited) `ensure`/launch fails explicitly asking for a Host restart —
+input or clicks never trigger a hidden re-elevation.
+
+Successful `release` (explicit or idle expiry) sends a non-blocking
+`WTSLogoffSession` for the owned child and confirms the child id disappears (or
+leaves the logged-on state) within a bounded ~8 s poll — it never reports
+released while the child may still exist, and retains the native Host, ActiveX
+control and guardian, so subsequent creation within the same Host needs no new
+approval. A failed release
+or Host shutdown terminates the native process; the guardian restores the
+original child-enabled and TermService state. NLA, Windows Hello, firewall and
+`RDP-Tcp` settings are not changed.
 
 ### Local Windows credential enrollment
 
@@ -260,10 +285,11 @@ passwords or tokens for it in the repository.
 
 ## Lifecycle and errors
 
-`release` (explicit end-session or owning Host shutdown) tears down only the record
-it owns; `backend.close()` is idempotent and cleans up only resources the backend
-created. Closing a preview, an AI abort or a new turn never destroys the
-environment, and a screenshot never silently resizes or recreates a desktop.
+`release` (explicit end-session, 300 s idle expiry on Windows/Linux or owning Host
+shutdown) tears down only the record it owns; `backend.close()` is idempotent and
+cleans up only resources the backend created. Closing a preview, an AI abort or a
+new turn never destroys the environment, and a screenshot never silently resizes
+or recreates a desktop.
 
 Error codes are the shared set: `SHOWER_UNAVAILABLE`, `SHOWER_UNSUPPORTED`,
 `SHOWER_BUSY`, `SHOWER_AUTH_REQUIRED`, `SHOWER_PERMISSION_REQUIRED`,

@@ -687,9 +687,10 @@ namespace ELauncher.Shower
             }
         }
 
+        /// <summary>只发起注销（wait:false），同步等待可能无界阻塞；完成由调用方的 SessionLoggedOn 轮询确认。</summary>
         internal static void LogoffSession(uint sessionId)
         {
-            if (!WTSLogoffSession(IntPtr.Zero, sessionId, true))
+            if (!WTSLogoffSession(IntPtr.Zero, sessionId, false))
             {
                 throw new Win32Exception(Marshal.GetLastWin32Error(), "WTSLogoffSession 失败(session=" + sessionId.ToString(CultureInfo.InvariantCulture) + ")");
             }

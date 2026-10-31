@@ -421,6 +421,10 @@ export async function openRuntime(options) {
   const coreExtensions = registry.snapshot().installed().filter((extension) => extension !== finalBudgetExtension && extension !== codemodeExtension);
   try {
     releaseOwner = acquireRuntimeOwner(host.dataRoot);
+    // 仅 Windows 桌面后端在启动时完成一次性管理员授权；Linux/Android/无 Shower 的
+    // Host 保持原有惰性，不在此实例化后端。失败/取消即中止启动，catch 里 shower.close
+    // 负责回收宿主与 guardian，不留下未授权却假装可用的虚拟屏入口。
+    if (process.platform === 'win32' && !nativeBridge) await shower.prepare();
     storage = await openNodeSqliteStorage(join(host.dataRoot, 'durable.sqlite'));
     harness = await Harness.open(storage, {
       models,

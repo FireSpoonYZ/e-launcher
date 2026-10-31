@@ -29,6 +29,8 @@ const MIN_DIMENSION = 160;
 const MAX_DIMENSION = 4096;
 // 原生宿主自己等 agent 25 s；这里更早失败，好在 20 s 的控制 RPC 之前报告“未确认”。
 const REQUEST_TIMEOUT_MS = 15_000;
+// 启动授权与 native bootstrap 共用有界上限，包含一次可能的 UAC 等待。
+const PREPARE_TIMEOUT_MS = 300_000;
 const CANCEL_TIMEOUT_MS = 5_000;
 // 给同步注销留出时间；超时后由强制关闭和 guardian 完成清理。
 const RELEASE_TIMEOUT_MS = 15_000;
@@ -570,6 +572,9 @@ export function createWindowsShowerBackend({ dataRoot } = {}) {
 
   let host = null;
   let starting = null;
+  // 仅本次启动 prepare 成功的宿主拥有子会话授权；重启/换进程后必须重新 prepare。
+  let authorizedHost = null;
+  let preparing = null;
   let activeSessionId = null;
   // 原生宿主意外退出后保留失败快照，status 报告 error 而不是假装空闲。
   let hostFailure = null;
@@ -599,6 +604,7 @@ export function createWindowsShowerBackend({ dataRoot } = {}) {
   function shutdownHost() {
     const current = host;
     host = null;
+    authorizedHost = null;
     if (!current) return Promise.resolve();
     let done;
     try {
@@ -664,6 +670,54 @@ export function createWindowsShowerBackend({ dataRoot } = {}) {
     return promise;
   }
 
+  /** 启动准备：开启并保留原生宿主，在本机完成一次管理员授权；不创建桌面。 */
+  function prepareHost({ signal } = {}) {
+    if (authorizedHost !== null && authorizedHost === host && !host.closed && !host.exitError) {
+      return Promise.resolve();
+    }
+    if (preparing) return preparing;
+    const run = (async () => {
+      checkAborted(signal);
+      const client = await acquireHost(signal);
+      checkAborted(signal);
+      try {
+        await client.request('prepare', {}, { signal, timeoutMs: PREPARE_TIMEOUT_MS });
+      } catch (error) {
+        // 取消/超时/失败都不保留半个授权状态；授权丢失后只有重启 Host 才能重新准备。
+        await shutdownHost();
+        throw error;
+      }
+      authorizedHost = client;
+    })();
+    const tracked = run.then(
+      (value) => {
+        if (preparing === tracked) preparing = null;
+        return value;
+      },
+      (error) => {
+        if (preparing === tracked) preparing = null;
+        throw error;
+      },
+    );
+    preparing = tracked;
+    return tracked;
+  }
+
+  /** ensure 只能使用本次启动已 prepare 的宿主；授权丢失明确要求重启 Host。 */
+  function authorizedClient() {
+    if (closed) throw showerError('SHOWER_UNAVAILABLE', 'Shower Windows 后端已关闭', 'not-sent');
+    if (host && host.exitError) markHostFailure(host);
+    if (authorizedHost === null || authorizedHost !== host || host.closed || host.exitError) {
+      authorizedHost = null;
+      throw showerError(
+        'SHOWER_UNAVAILABLE',
+        'Windows Shower 尚未完成启动管理员授权或已失效；请重启 Host 后重试',
+        'not-sent',
+      );
+    }
+    return authorizedHost;
+  }
+
   /** 已就绪的会话才接受 frame/input/launch/preview；绝不为它们隐式创建环境。 */
   function requireHost(sessionId) {
     if (closed) throw showerError('SHOWER_UNAVAILABLE', 'Shower Windows 后端已关闭', 'not-sent');
@@ -727,7 +781,7 @@ export function createWindowsShowerBackend({ dataRoot } = {}) {
     if (closed) throw showerError('SHOWER_UNAVAILABLE', 'Shower Windows 后端已关闭', 'not-sent');
     const sessionId = requireRecordSessionId(record);
     const options = createParam(createOptions);
-    const client = await acquireHost(signal);
+    const client = authorizedClient();
     checkAborted(signal);
     let snapshot;
     try {
@@ -865,6 +919,7 @@ export function createWindowsShowerBackend({ dataRoot } = {}) {
       hostFailure = null;
       activeSessionId = null;
       teardownSessionId = null;
+      authorizedHost = null;
     }
   }
 
@@ -879,5 +934,6 @@ export function createWindowsShowerBackend({ dataRoot } = {}) {
     preview,
     release,
     close,
+    prepare: prepareHost,
   };
 }
