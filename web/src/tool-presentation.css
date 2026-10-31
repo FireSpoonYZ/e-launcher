@@ -1,5 +1,5 @@
 /* 工具交互呈现卡片：todo 列表与问卷；两条聊天 UI 共用，视觉对齐现有气泡/卡片变量。 */
-.bot-chat-tool-wrap { display: grid; gap: 4px; min-width: 0; max-width: 100%; }
+.bot-chat-tool-wrap { display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; min-width: 0; max-width: 100%; }
 .tp-card { display: grid; gap: 8px; padding: 10px 12px; border-radius: 14px; background: color-mix(in srgb, var(--bg, #fff) 70%, transparent); border: 1px solid color-mix(in srgb, var(--line, #d0d7de) 80%, transparent); font-size: .85rem; line-height: 1.45; color: var(--text, #1f2328); max-width: 100%; overflow-x: auto; }
 .tp-card-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .tp-card-title { font-weight: 600; font-size: .82rem; }
