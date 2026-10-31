@@ -285,6 +285,16 @@ namespace ELauncher.Shower
 
         internal Dictionary<string, object> Call(string method, Dictionary<string, object> parameters, int timeoutMs, WireRelay relay)
         {
+            return Call(method, parameters, timeoutMs, relay, 0);
+        }
+
+        /// <summary>
+        /// cancelSettleMs: after the timeout fires and cancel reaches the agent, keep waiting that bounded
+        /// window for the real reply. cua needs it so the agent's driver kill + held-input release finishes
+        /// (or is confirmed failed) before the host reports the call to Node.
+        /// </summary>
+        internal Dictionary<string, object> Call(string method, Dictionary<string, object> parameters, int timeoutMs, WireRelay relay, int cancelSettleMs)
+        {
             var call = new AgentCall();
             string id = Guid.NewGuid().ToString("N");
             string failureCode = method == "input" ? HostErrorCodes.InputFailed : HostErrorCodes.BackendFailed;
@@ -307,6 +317,12 @@ namespace ELauncher.Shower
                 {
                     // The agent may still be injecting; stop it and report the input as unconfirmed, never resent.
                     CancelRemote(id);
+                    if (cancelSettleMs > 0 && call.Done.Wait(cancelSettleMs))
+                    {
+                        // Agent finished its cleanup and answered inside the settle window.
+                        if (call.FaultCode != null) throw new HostFault(call.FaultCode, call.FaultMessage, call.FaultOutcome);
+                        return call.Result;
+                    }
                     throw new HostFault(failureCode, "the child session agent did not answer " + method + " within " + timeoutMs.ToString(CultureInfo.InvariantCulture) + " ms", "unconfirmed");
                 }
                 if (call.FaultCode != null) throw new HostFault(call.FaultCode, call.FaultMessage, call.FaultOutcome);

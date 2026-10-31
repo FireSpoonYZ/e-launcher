@@ -45,6 +45,12 @@ namespace ELauncher.Shower
         private const int BootstrapTimeoutMs = 300000;
         private const int AgentConnectTimeoutMs = 60000;
         private const int RelayTimeoutMs = 25000;
+        // Agent-side tools/call budget is 30 s; the relay gives it bounded room so a timeout still comes
+        // from the agent (driver killed, result unconfirmed), not from a premature host give-up.
+        private const int CuaRelayTimeoutMs = 34000;
+        // After a relay timeout the agent gets this bounded window to finish its own cleanup (driver kill
+        // + held-input release) and answer; only then does the host report the call to Node.
+        private const int CuaCancelSettleMs = 10000;
         private const int SessionCloseTimeoutMs = 5000;
         // 注销核验上限：给总 15 s release 留出 agent 释放与断连空间，仅查询本机 WTS 状态。
         private const int LogoffVerifyTimeoutMs = 8000;
@@ -74,6 +80,10 @@ namespace ELauncher.Shower
         private static readonly string[] PreviewFields = WithTrusted(new string[] { "sessionId", "preview", "mode" });
         private static readonly string[] ReleaseFields = WithTrusted(new string[] { "sessionId" });
         private static readonly string[] CancelFields = WithTrusted(new string[] { "requestId" });
+        private static readonly string[] CuaFields = WithTrusted(new string[] { "sessionId", "driverPath", "request" });
+        private static readonly string[] CuaRequestFields = new string[] { "method", "params" };
+        private static readonly string[] CuaParamFields = new string[] { "name", "arguments" };
+        private const int MaxCuaDriverPathChars = 512;
 
         private readonly string stateDir;
         private readonly string exePath;
@@ -332,7 +342,7 @@ namespace ELauncher.Shower
 
         private void Handle(WireRequest request)
         {
-            bool tracked = request.Method == "frame" || request.Method == "input" || request.Method == "launch";
+            bool tracked = request.Method == "frame" || request.Method == "input" || request.Method == "launch" || request.Method == "cua";
             WireRelay relay = null;
             if (tracked)
             {
@@ -374,6 +384,12 @@ namespace ELauncher.Shower
                             result = Forward(request.Params, relay, true);
                         }
                         break;
+                    case "cua":
+                        lock (opLock)
+                        {
+                            result = Cua(request.Params, relay);
+                        }
+                        break;
                     case "preview":
                         lock (opLock)
                         {
@@ -387,7 +403,7 @@ namespace ELauncher.Shower
                         result = Cancel(request.Params);
                         break;
                     default:
-                        throw new HostFault(HostErrorCodes.Unsupported, "unknown method: " + request.Method + "; expected prepare, status, ensure, frame, input, launch, preview, release or cancel");
+                        throw new HostFault(HostErrorCodes.Unsupported, "unknown method: " + request.Method + "; expected prepare, status, ensure, frame, input, launch, cua, preview, release or cancel");
                 }
                 wire.Result(request.Id, result);
             }
@@ -1176,6 +1192,76 @@ namespace ELauncher.Shower
             Dictionary<string, object> result = link.Call(field, forwarded, RelayTimeoutMs, relay);
             if (result == null) result = new Dictionary<string, object>();
             return result;
+        }
+
+        /// <summary>
+        /// Relays one bounded Cua MCP request to the session agent. The driver path is the trusted absolute
+        /// path the Node backend resolved and pinned; the agent runs it inside the child session, so the
+        /// driver only ever sees that session's desktop.
+        /// </summary>
+        private object Cua(Dictionary<string, object> parameters, WireRelay relay)
+        {
+            CheckFields(parameters, CuaFields, "cua");
+            RequireSession(parameters);
+            string driverPath = WireJson.GetString(parameters, "driverPath");
+            if (string.IsNullOrEmpty(driverPath) || driverPath.Length > MaxCuaDriverPathChars)
+            {
+                throw new HostFault(HostErrorCodes.InvalidArgument, "params.driverPath must be a non-empty string");
+            }
+            Dictionary<string, object> cuaRequest = WireJson.GetObject(parameters, "request");
+            if (cuaRequest == null) throw new HostFault(HostErrorCodes.InvalidArgument, "params.request must be an object");
+            string unknown;
+            if (WireJson.HasUnexpectedField(cuaRequest, CuaRequestFields, out unknown))
+            {
+                throw new HostFault(HostErrorCodes.InvalidArgument, "unknown cua request field: " + unknown);
+            }
+            string mcpMethod = WireJson.GetString(cuaRequest, "method");
+            if (mcpMethod != "tools/list" && mcpMethod != "tools/call")
+            {
+                throw new HostFault(HostErrorCodes.InvalidArgument, "cua request.method must be tools/list or tools/call");
+            }
+            if (mcpMethod == "tools/call")
+            {
+                Dictionary<string, object> mcpParams = WireJson.GetObject(cuaRequest, "params");
+                if (mcpParams == null || string.IsNullOrEmpty(WireJson.GetString(mcpParams, "name")))
+                {
+                    throw new HostFault(HostErrorCodes.InvalidArgument, "tools/call params.name must be a non-empty string");
+                }
+                if (WireJson.HasUnexpectedField(mcpParams, CuaParamFields, out unknown))
+                {
+                    throw new HostFault(HostErrorCodes.InvalidArgument, "unknown tools/call params field: " + unknown);
+                }
+                object rawArguments = WireJson.Get(mcpParams, "arguments");
+                if (rawArguments != null && !(rawArguments is Dictionary<string, object>))
+                {
+                    throw new HostFault(HostErrorCodes.InvalidArgument, "tools/call params.arguments must be an object");
+                }
+            }
+            RequireReady();
+            AgentLink link;
+            int child;
+            lock (stateLock)
+            {
+                link = agent;
+                child = childSession;
+            }
+            if (link == null || child <= 0) throw new HostFault(HostErrorCodes.NotReady, "the child session agent is not connected");
+            ThrowIfCancelled(relay);
+            var forwarded = new Dictionary<string, object>();
+            forwarded["sessionId"] = child;
+            forwarded["driverPath"] = driverPath;
+            forwarded["request"] = cuaRequest;
+            string source = WireJson.GetString(parameters, "source");
+            if (source != null) forwarded["source"] = source;
+            string taskId = WireJson.GetString(parameters, "taskId");
+            if (taskId != null) forwarded["taskId"] = taskId;
+            // A cancelled or timed-out call kills the driver in the agent; the result stays unconfirmed and
+            // nothing is replayed. The agent response is already the raw MCP result object.
+            Dictionary<string, object> result = link.Call("cua", forwarded, CuaRelayTimeoutMs, relay, CuaCancelSettleMs);
+            if (result == null) throw new HostFault(HostErrorCodes.BackendFailed, "the child session agent returned no cua result");
+            Dictionary<string, object> mcpResult = WireJson.GetObject(result, "result");
+            if (mcpResult == null) throw new HostFault(HostErrorCodes.BackendFailed, "the child session agent returned an invalid cua result");
+            return mcpResult;
         }
 
         private static void ThrowIfCancelled(WireRelay relay)

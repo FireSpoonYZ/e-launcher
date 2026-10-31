@@ -7,7 +7,8 @@
     "node": ">=22.19.0"
   },
   "scripts": {
-    "build:shower-windows": "node build-shower-windows.js"
+    "build:shower-windows": "node build-shower-windows.js",
+    "build:cua-driver": "node build-cua-driver.js"
   },
   "exports": {
     ".": {

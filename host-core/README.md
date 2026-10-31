@@ -137,6 +137,15 @@ node host-core/cli.js create   --data-root '/path/to/data-root'   --request-id r
 - `remote-control-client.js`：模块 9 Node 控制客户端（`openRemoteControl`/`RemoteControlError`）。
 - `remote-control-cli.js`：模块 9 一次性控制 CLI；模块 14 起按 `CONTROL_METHODS` 动态列出现行方法表（现共 40 个），另有保留命令 `listDevices`/`live`（非 Host JSON 方法），`--input` 经 `normalizeControlCall`/`normalizeDevicesOptions`/`normalizeLiveTarget` 校验；SIGINT/SIGTERM 退出 130/143，EPIPE 取消观察正常退 0，任何取消不发送 abort 控制方法。
 
+### Cua driver（内置计算机控制驱动）
+
+- `cua-driver.js`：导出 `resolveCuaDriverPath()`，同步返回当前平台已存在的 `cua-driver`/`cua-driver.exe` 绝对路径；供 Linux/Windows Shower 后端在其私有图形会话内以 `['mcp','--direct']` 启动。解析顺序：环境变量 `E_LAUNCHER_CUA_DRIVER`（仅接受已存在的绝对路径）→ 模块旁的已准备目录 `host-core/cua-driver/<platform-arch>/`。Linux 下额外校验可执行权限。不支持的平台/架构、缺失或不可执行均抛 `code = 'SHOWER_UNAVAILABLE'`。运行时只按 `process.platform` 决定文件名，不读取版本清单、不查 PATH、不下载、不回退主桌面。同文件还导出 `loadCuaToolInventory()`：Host 启动时对已解析的固定二进制执行只读 CLI metadata（`list-tools` 取名字、`describe <name>` 取完整 description/inputSchema，与私有子会话内 MCP tools/list 同源），`DO_NOT_TRACK=1`、`windowsHide`、有界输出与超时、并发 ≤4、进程内一次缓存；失败抛 `SHOWER_UNAVAILABLE` 且不缓存。它只查询 metadata，不启动 `mcp --direct`、不运行安装/更新/自启、不 ensure 虚拟屏、不扫描 PATH。cua-tools 按该 inventory 逐项注册 `cua_<remoteName>` 内置工具，description/inputSchema 保留上游内容（仅附加 Shower 约束提示），不写死名单、不按数量裁剪、无包装器；参数由框架按上游 schema 校验，无调用前 tools/list + Ajv 二次校验。每个 cua_* 声明 `structuredOutputSchema` 返回 `{content, isError}`：无 schema 时 pi-durable codemode 只拼接文本、图片块在交给脚本前被过滤；`structuredOutput` 复用同一批已限额/校验的 output 块，不透传未限额 raw MCP。模型直接调用时 output 渲染不变；codemode 脚本须显式 `text(block.text)`/`image(block)` 将各块传给模型。
+- `build-cua-driver.js`：一次性准备命令 `node host-core/build-cua-driver.js`（npm 脚本 `build:cua-driver`）。下载固定版本 `cua-driver-rs-v0.38.0`（上游 tag commit `85e2b1318bd77ccf3cfa88ccdf875a4bb7eaed19`）的官方 binary 归档，SHA-256 校验后解压（`.tar.gz` 用仓库内 `tar` 依赖，`.zip` 用 Windows `System32/tar.exe`），核对必需文件集与 PE/ELF 头、补 `LICENSE`、Linux 置可执行位，再原子安装到 `host-core/cua-driver/<platform-arch>/`。该目录被 `host-core/.gitignore` 忽略，不入库。缓存命中要求整组必需文件齐全且驱动哈希匹配，缺任一文件即重新准备。不运行上游安装脚本、不注册开机项、不写 PATH。
+- `cua-driver-release.json`：随源码入库的固定版本清单（版本、上游 commit、两平台归档 URL/SHA-256/期望文件集）。仅 `build-cua-driver.js` 使用。
+- `licenses/cua/`：归档未附带许可文本，`LICENSE-MIT.txt` 为逐字复制的上游 `LICENSE.md`（同 commit），`README.md` 记录来源。
+
+部署：Cua driver 属于 Host 运行资源而非客户端包。按现有 host-core 分发方式（源码/手工部署），在 Host 所在机器上执行 `node host-core/build-cua-driver.js` 生成 `host-core/cua-driver/<platform-arch>/`，随 host-core 目录一起部署即可；若部署环境不能在该机准备，则把已构建的 `cua-driver` 目录复制到 host-core 下，或用 `E_LAUNCHER_CUA_DRIVER` 指向已安装的可执行文件绝对路径。当前仅支持 Windows/Linux x64。
+
 ## 本次模块验收
 
 父助手在 Windows / Git Bash 下以 Node 26.8.2 和最低版本 Node 22.19.0 执行了真实 CLI 跨进程验证：创建、列举、两种查询、重启后身份与记录稳定、重复请求、请求冲突和输入错误均通过。8 个进程并发首次建库及提交同一请求，最终只保留一个 Bot；不同请求并发也能完整保存。

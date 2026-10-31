@@ -299,6 +299,155 @@ existing `INVALID_ARGUMENT`/`CANCELLED`. Input keeps the existing not-sent /
 unconfirmed / responded outcome semantics and is never retried automatically; a
 session id from another session or Actor is rejected instead of acted on.
 
+## Built-in Cua
+
+Cua is a built-in tool family on Windows and Linux only (Android keeps its
+native surface and does not register it). The Host registers exactly one
+`cua_<remoteName>` tool per entry of the upstream driver's own inventory —
+one-to-one, no wrapper, no whitelist — so the model-facing surface mirrors what
+`mcp --direct` would offer (window/desktop observation and input, run_steps,
+run_script, browser, clipboard, launch_app, and the rest of the pinned
+inventory). It adds computer-use on top of the existing Shower environment
+instead of a plugin or a central-MCP route: `shower` status/create/launch/
+release still owns the environment, while the cua tools act inside the
+already-bound, `ready` session. They never create a screen and never fall back
+to the physical desktop; upstream's own `launch_app` may start apps inside the
+session, so not every launch goes through `shower.launch`.
+
+The inventory is loaded once per Host process at startup, before the registry
+snapshot and Harness open, by `loadCuaToolInventory()` in `cua-driver.js`. It
+execFiles the pinned driver binary's read-only CLI metadata (`list-tools` for
+names, `describe <name>` for the full description and inputSchema — the same
+source as the session driver's MCP tools/list) with `DO_NOT_TRACK=1`, bounded
+output, a timeout, and concurrency ≤4. It never spawns `mcp --direct` on the
+primary desktop, never ensures a Shower screen, and never runs installer or
+update commands. A missing resource or malformed metadata fails the open
+loudly — there is no silent empty set and no wrapper fallback.
+
+Each Shower session owns one persistent Cua Driver, started lazily on the first
+call as `cua-driver mcp --direct` — never the shared global daemon, and always in
+the session's own private graphics session (the RDP child session or the private
+Xvnc display), with `DO_NOT_TRACK=1`. `manager.cua` runs inside the same
+owner binding and FIFO as the other Shower operations; cancel drops queued work
+and the in-flight backend abort stops driver input. Releasing or rebuilding the
+session tears down its driver and invalidates old `capture_id`s; a normal model
+turn end does not close the driver.
+
+The protocol models only `tools/list` and `tools/call` (no JSON-RPC id/envelope
+at this layer) after a fixed `initialize` handshake (protocol `2024-11-05`,
+client `e-launcher`); driver notifications are not results and timed-out or
+cancelled input is never replayed. Requests are capped at 128 KiB and single
+driver responses at 2 MiB; each call runs with the backend's bounded call
+timeout, and timeout or cancellation reports the real outcome without retrying
+the input. Tool parameters come from the upstream `inputSchema`, so the
+framework validates model arguments directly; there is no per-call tools/list +
+Ajv re-validation — the host does not re-declare control parameter protocols.
+
+Every upstream tool is exposed under its upstream semantics, one built-in tool
+per inventory entry — no whitelist and no count-based trimming. Arguments the
+upstream schema itself allows — including Driver-internal parameters such as
+`session` and `screenshot_out_file` — pass through; they select Driver-side
+behaviour, not the Shower route. The model cannot pick a Host/system session:
+trusted actor and Shower sessionId still come from `resolveIdentity` plus
+`manager.status`, and no schema-grown sessionId/action/name/arguments fields
+exist. The driver instance stays bound to its own Shower session, and the only
+desktop target is `primary`. Window targets come from driver values (`pid`,
+`window_id`, `element_token`, `capture_id`); the session is already the
+Bot's dedicated graphics session, so foreground delivery is allowed inside it.
+Single model requests stay under the 128 KiB arguments bound.
+
+Observation tools return images only when the current model accepts image
+input; a `get_window_state` call with `include_screenshot:false` is a pure
+control-tree read and needs no vision model. Any other tool whose result
+carries an image is checked against the model's vision support at response
+time — images are never returned to a non-vision model. When the model omits
+`max_image_dimension` the host injects a default of 1024 capped by the current
+model's inline image bounds; explicit values the upstream schema allows
+(including 0/full size and larger caps) pass through to the driver — the host
+does not re-declare upstream parameter ranges, never re-encodes pixels, and the
+driver still registers the same `capture_id`. An oversized result is refused by
+the output budgets below, not by rewriting the request.
+Image output stays under the existing Shower frame budget and the model's inline
+limits (decoded PNG/JPEG dimensions and base64 size are both checked). Oversized
+output fails explicitly asking the model to retry with a smaller size or
+narrower read; input is never retried. `structuredContent` stays attached
+(bounded) so the model keeps `capture_id`/snapshot metadata.
+
+Driver binaries come from the pinned upstream `cua-driver-rs-v0.38.0`
+(commit `85e2b1318bd77ccf3cfa88ccdf875a4bb7eaed19`); packaging resolves them via
+`resolveCuaDriverPath()` in `cua-driver.js`. Prepare Host resources with
+`node host-core/build-cua-driver.js`; the pure Tauri client does not ship or
+start this driver.
+
+### Windows Cua execution-path acceptance — 2026-10-31 (early stage)
+
+This section records the earlier execution-path check only; the deployed
+real-model acceptance below is the current state. The parent ran the real
+Shower manager, native RDP host/session agent and pinned Cua Driver against a
+WinForms app in Windows child session 33, using a temporary Node control
+adapter outside the repository. This exercised the execution path; it did not
+run a model turn or the model-facing tool wrapper.
+
+- MCP handshake, inventory, 1280x800 desktop capture returned as 1024x640 PNG,
+  per-window capture and UI Automation trees passed.
+- UIA set_value wrote `CUA_WINDOWS_中文_20261031`; the app's own state file
+  confirmed the text. A button invocation incremented the app counter once.
+- A capture-bound foreground click mapped screenshot coordinates (150,160) to
+  native coordinates (188,201); foreground keyboard input reached the app.
+  Sampled primary-desktop cursor coordinates, foreground HWND and focus HWND
+  were identical before and after these actions.
+- The WinForms background PostMessage text route returned an unverifiable
+  receipt and did not change the field. Foreground input was separately verified;
+  callers must observe the application before retrying an unverified action.
+- A foreign Bot was refused. Cancelling a ten-second drag after one second
+  returned CANCELLED/unconfirmed, stopped the Driver and retained the same
+  desktop. Human input then succeeded; the next Cua observation started a new
+  Driver and read the human-entered text.
+- The old capture_id was refused after Driver restart. Release removed the
+  app, Driver and child session; reuse of the released Shower ID was refused.
+  Immediate recreation and another Driver call passed, followed by release.
+- Windows C# 5 native build, Host bundling/import, resource preparation/cache
+  and recovery from a missing companion DLL passed. Linux resource extraction,
+  cache and binary version checks passed in a temporary directory; Linux GUI
+  operations were deferred because its Bot was working.
+- The original Windows Host release was restored after verification. Its
+  control endpoint was listening, center ready and relay online. No development
+  version was deployed to that running service.
+
+Artifacts are outside the repository in a local temporary directory.
+A real-model task, Linux GUI execution and the 300-second idle-expiry path were
+outside this run and are covered by the deployment acceptance below.
+
+### Deployed Cua real-model acceptance — 2026-10-31
+
+`20261031-cua-native-tools` is deployed on both the Windows and Linux Hosts.
+The pinned Driver v0.38.0 inventory resolved to 63 tools on Windows and 66 on
+Linux, with zero inputSchema drift between each platform's upstream inventory
+and its registered tools.
+
+On each production Host a temporary standalone Bot ran the existing default
+`antigravity/gemini-4-argon-high` under `codemodeOnly` (the model's only direct
+tool is `codemode`). Progressive discovery surfaced all 63/66 tools. Cua
+launched the app, UIA/AT-SPI reads and Chinese input passed; a Windows button
+reported `clicks=1`, and on Linux a terminal GUI command's file marker and the
+private `DISPLAY=:100`/Xauthority were read back.
+
+This round fixed image delivery through codemode: schema-less nested results
+had their image blocks filtered by codemode's text-only mapping. Each `cua_*`
+tool now declares `structuredOutputSchema` returning `{content, isError}`; the
+script must emit each block explicitly (`text(block.text)` / `image(block)`),
+and the upstream inputSchema is unchanged. Both models used only
+`cua_get_desktop_state` plus `image(block)` to read a random captcha from the
+PNG — a value never written into the model prompt — and the history shows the
+real image block.
+
+Manual takeover on both ends kept the session `ready`, human TAB input and the
+next frame succeeded, `release` closed the screen, a stale session's frame was
+refused 404, and the Driver (and Linux Xvnc) were cleaned up. Temporary Bots
+were deleted; the services stayed running with relay online and center ready.
+Android only checked the nativeBridge registration gate — it does not register
+Cua — and no new APK or on-device check ran this round.
+
 ## Android retention
 
 The legacy server still reclaims an idle display after 300 seconds. A successful

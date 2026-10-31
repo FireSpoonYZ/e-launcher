@@ -13,6 +13,7 @@ import { assertId, messageError } from './message-protocol.js';
 import { createAndroidShowerBackend } from './shower-android.js';
 import { createLinuxShowerBackend } from './shower-linux.js';
 import { createWindowsShowerBackend } from './shower-windows.js';
+import { normalizeCuaRequest } from './cua-protocol.js';
 import {
   normalizeShowerCreate,
   normalizeShowerFrameLimits,
@@ -539,6 +540,37 @@ export function createShowerManager({ dataRoot, nativeBridge, backend } = {}) {
     }
   }
 
+  /**
+   * 内置 Cua：在归属/队列内转发 tools/list 与 tools/call 到该会话自己的持久 Driver。
+   * 后端方法可选——Android/未实现的旧注入后端明确报 SHOWER_UNSUPPORTED；操作同样要求
+   * ready 会话、走同一 FIFO 与 abort，活动续期与 input/launch 一致。取消在途由
+   * 后端 abort 终止输入，manager 不为 Cua 另造队列。
+   */
+  async function cua(actor, sessionId, request, options = {}) {
+    const bound = normalizeActor(actor);
+    const normalized = normalizeCuaRequest(request);
+    const source = sourceOf(options);
+    begin();
+    try {
+      const manager = await liveBackend();
+      if (typeof manager.cua !== 'function') {
+        throw messageError('SHOWER_UNSUPPORTED', 'Shower backend does not support Cua on this platform');
+      }
+      return await run(bound, options.signal, async (signal) => {
+        const record = resolveSession(bound, sessionId);
+        try {
+          const result = await manager.cua(record, normalized, callOptions(options, source, signal));
+          if (!isPlainObject(result)) throw backendFailure('Shower backend returned an invalid Cua result');
+          return result;
+        } finally {
+          touchSession(record);
+        }
+      });
+    } finally {
+      end();
+    }
+  }
+
   async function launch(actor, sessionId, value, options = {}) {
     const bound = normalizeActor(actor);
     const normalized = normalizeShowerLaunch(value);
@@ -619,5 +651,5 @@ export function createShowerManager({ dataRoot, nativeBridge, backend } = {}) {
     return closePromise;
   }
 
-  return { status, ensure, frame, input, launch, release, cancel, close, prepare };
+  return { status, ensure, frame, input, launch, release, cua, cancel, close, prepare };
 }

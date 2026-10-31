@@ -123,7 +123,14 @@ namespace ELauncher.Shower
         private const ushort VkShift = 0x10;
         private const ushort VkControl = 0x11;
         private const ushort VkMenu = 0x12;
+        private const ushort VkLeftShift = 0xA0;
+        private const ushort VkRightShift = 0xA1;
+        private const ushort VkLeftControl = 0xA2;
+        private const ushort VkRightControl = 0xA3;
+        private const ushort VkLeftMenu = 0xA4;
+        private const ushort VkRightMenu = 0xA5;
         private const ushort VkLeftWindows = 0x5B;
+        private const ushort VkRightWindows = 0x5C;
         private const ushort VkReturn = 0x0D;
         private const ushort VkTab = 0x09;
 
@@ -171,14 +178,25 @@ namespace ELauncher.Shower
             return null;
         }
 
+        /// <summary>
+        /// Releases every generic and left/right modifier plus the three mouse buttons; keys that were
+        /// never pressed are harmless to release. Cua cancel calls this only after the driver tree is
+        /// confirmed dead, so a killed driver cannot press again afterwards.
+        /// </summary>
         public static void ReleaseHeldInput()
         {
-            // Releasing keys that were never pressed is harmless; this clears anything left by a cancelled drag.
             AgentFailure ignored;
             SendKey(VkShift, false, true, out ignored);
             SendKey(VkControl, false, true, out ignored);
             SendKey(VkMenu, false, true, out ignored);
+            SendKey(VkLeftShift, false, true, out ignored);
+            SendKey(VkRightShift, false, true, out ignored);
+            SendKey(VkLeftControl, false, true, out ignored);
+            SendKey(VkRightControl, false, true, out ignored);
+            SendKey(VkLeftMenu, false, true, out ignored);
+            SendKey(VkRightMenu, false, true, out ignored);
             SendKey(VkLeftWindows, false, true, out ignored);
+            SendKey(VkRightWindows, false, true, out ignored);
             SendMouse(0, 0, 0u, MouseLeftUp, out ignored);
             SendMouse(0, 0, 0u, MouseRightUp, out ignored);
             SendMouse(0, 0, 0u, MouseMiddleUp, out ignored);

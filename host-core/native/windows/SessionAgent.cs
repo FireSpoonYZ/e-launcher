@@ -314,6 +314,10 @@ namespace ELauncher.Shower
         private const int MaxRequestChars = 1024 * 1024;
         private const int MaxLaunchArgs = 64;
         private const int MaxLaunchArgChars = 4096;
+        private const int MaxDriverPathChars = 512;
+        private static readonly string[] CuaMethods = new string[] { "tools/list", "tools/call" };
+        private static readonly string[] CuaRequestFields = new string[] { "method", "params" };
+        private static readonly string[] CuaCallParamFields = new string[] { "name", "arguments" };
 
         private readonly PipeStream pipe;
         private readonly StreamReader reader;
@@ -323,6 +327,11 @@ namespace ELauncher.Shower
         private readonly Queue<AgentRequest> queue = new Queue<AgentRequest>();
         private readonly int sessionId;
         private AgentRequest current;
+        private AgentCuaDriver cua;
+        private string cuaDriverPath;
+        // A driver kill that could not be confirmed poisons the session: no further input may run while
+        // a possibly-live driver still owns the keyboard and mouse.
+        private bool cuaDoomed;
         private bool stopping;
 
         public AgentLoop(PipeStream pipe, int sessionId)
@@ -432,9 +441,9 @@ namespace ELauncher.Shower
                 CancelOperation(id, parameters);
                 return;
             }
-            if (method != "frame" && method != "input" && method != "launch" && method != "release")
+            if (method != "frame" && method != "input" && method != "launch" && method != "release" && method != "cua")
             {
-                SendError(id, new AgentFailure(CodeInvalidArgument, "unknown method: " + method + "; expected frame, input, launch, cancel or release"));
+                SendError(id, new AgentFailure(CodeInvalidArgument, "unknown method: " + method + "; expected frame, input, launch, cua, cancel or release"));
                 return;
             }
             if (!CheckCommonFields(id, parameters)) return;
@@ -568,9 +577,16 @@ namespace ELauncher.Shower
                 SendError(request.Id, mismatch);
                 return;
             }
+            if (cuaDoomed && request.Method != "release")
+            {
+                SendError(request.Id, new AgentFailure(CodeBackendFailed,
+                    "a cua driver could not be confirmed stopped; this session no longer accepts input"));
+                return;
+            }
             if (request.Method == "frame") ExecuteFrame(request);
             else if (request.Method == "input") ExecuteInput(request);
             else if (request.Method == "launch") ExecuteLaunch(request);
+            else if (request.Method == "cua") ExecuteCua(request);
             else ExecuteRelease(request);
         }
 
@@ -839,10 +855,168 @@ namespace ELauncher.Shower
                 return;
             }
             // The host owns the session lifecycle; the agent only guarantees no key or button stays pressed.
+            StopCua();
             AgentInput.ReleaseHeldInput();
             var result = new Dictionary<string, object>();
             result["released"] = true;
             SendResult(request.Id, result);
+        }
+
+        private void ExecuteCua(AgentRequest request)
+        {
+            string unknown;
+            if (AgentJson.HasUnexpectedField(request.Parameters, WithCommon("driverPath", "request"), out unknown))
+            {
+                SendError(request.Id, new AgentFailure(CodeInvalidArgument, "unknown cua field: " + unknown));
+                return;
+            }
+            string driverPath;
+            if (!AgentJson.TryGetString(AgentJson.Get(request.Parameters, "driverPath"), out driverPath) || driverPath.Length == 0)
+            {
+                SendError(request.Id, new AgentFailure(CodeInvalidArgument, "cua.driverPath must be a non-empty string"));
+                return;
+            }
+            if (driverPath.Length > MaxDriverPathChars)
+            {
+                SendError(request.Id, new AgentFailure(CodeInvalidArgument, "cua.driverPath is too long"));
+                return;
+            }
+            string fullPath;
+            try
+            {
+                fullPath = Path.GetFullPath(driverPath);
+            }
+            catch (Exception)
+            {
+                SendError(request.Id, new AgentFailure(CodeInvalidArgument, "cua.driverPath is not a usable absolute path"));
+                return;
+            }
+            Dictionary<string, object> cuaRequest;
+            if (!AgentJson.TryGetObject(AgentJson.Get(request.Parameters, "request"), out cuaRequest))
+            {
+                SendError(request.Id, new AgentFailure(CodeInvalidArgument, "cua.request must be an object"));
+                return;
+            }
+            if (AgentJson.HasUnexpectedField(cuaRequest, CuaRequestFields, out unknown))
+            {
+                SendError(request.Id, new AgentFailure(CodeInvalidArgument, "unknown cua request field: " + unknown));
+                return;
+            }
+            string mcpMethod;
+            if (!AgentJson.TryGetString(AgentJson.Get(cuaRequest, "method"), out mcpMethod)
+                || (mcpMethod != CuaMethods[0] && mcpMethod != CuaMethods[1]))
+            {
+                SendError(request.Id, new AgentFailure(CodeInvalidArgument, "cua.request.method must be tools/list or tools/call"));
+                return;
+            }
+            if (mcpMethod == CuaMethods[1])
+            {
+                Dictionary<string, object> mcpParams;
+                if (!AgentJson.TryGetObject(AgentJson.Get(cuaRequest, "params"), out mcpParams)
+                    || AgentJson.Get(mcpParams, "name") == null || !(AgentJson.Get(mcpParams, "name") is string)
+                    || ((string)AgentJson.Get(mcpParams, "name")).Length == 0)
+                {
+                    SendError(request.Id, new AgentFailure(CodeInvalidArgument, "tools/call params.name must be a non-empty string"));
+                    return;
+                }
+                if (AgentJson.HasUnexpectedField(mcpParams, CuaCallParamFields, out unknown))
+                {
+                    SendError(request.Id, new AgentFailure(CodeInvalidArgument, "unknown tools/call params field: " + unknown));
+                    return;
+                }
+                object rawArguments = AgentJson.Get(mcpParams, "arguments");
+                if (rawArguments != null && !(rawArguments is Dictionary<string, object>))
+                {
+                    SendError(request.Id, new AgentFailure(CodeInvalidArgument, "tools/call params.arguments must be an object"));
+                    return;
+                }
+            }
+            AgentCuaDriver driver = EnsureCua(fullPath, request.Id, request.Cancel);
+            if (driver == null) return;
+            AgentFailure failure;
+            Dictionary<string, object> result = driver.Call(cuaRequest, request.Cancel, out failure);
+            if (result == null)
+            {
+                if (!driver.Alive)
+                {
+                    // Synchronous, confirmed kill first; held input is released only after the whole
+                    // driver tree is provably dead, never while it might still press keys.
+                    if (driver.ConfirmedStopped())
+                    {
+                        AgentInput.ReleaseHeldInput();
+                    }
+                    else
+                    {
+                        cuaDoomed = true;
+                        SendError(request.Id, new AgentFailure(CodeBackendFailed,
+                            "the cua driver could not be confirmed stopped; held input was not released and this session no longer accepts input",
+                            "unconfirmed"));
+                        return;
+                    }
+                }
+                SendError(request.Id, failure ?? new AgentFailure(CodeBackendFailed, "cua request failed"));
+                return;
+            }
+            SendResult(request.Id, result);
+        }
+
+        /// <summary>
+        /// One driver per agent, lazily started inside this child session with the exact path the trusted
+        /// host pinned. A different path is never swapped into a running driver; a dead driver may restart
+        /// only for the same path.
+        /// </summary>
+        private AgentCuaDriver EnsureCua(string driverPath, string requestId, AgentOpCancel cancel)
+        {
+            // Once pinned, a session never swaps to another program; a dead driver may only restart for
+            // the same absolute path.
+            if (cuaDriverPath != null && !string.Equals(cuaDriverPath, driverPath, StringComparison.OrdinalIgnoreCase))
+            {
+                SendError(requestId, new AgentFailure(CodeInvalidArgument, "the cua driver path for this session is already pinned"));
+                return null;
+            }
+            if (cua != null && cua.Alive) return cua;
+            if (!StopCua())
+            {
+                SendError(requestId, new AgentFailure(CodeBackendFailed,
+                    "the previous cua driver could not be confirmed stopped; this session no longer accepts input",
+                    "unconfirmed"));
+                return null;
+            }
+            AgentFailure failure;
+            AgentCuaDriver started = AgentCuaDriver.Start(driverPath, cancel, out failure);
+            if (started == null)
+            {
+                SendError(requestId, failure ?? new AgentFailure(CodeBackendFailed, "the cua driver did not start"));
+                return null;
+            }
+            cua = started;
+            cuaDriverPath = driverPath;
+            SessionAgent.Log("agent: cua driver started");
+            return started;
+        }
+
+        /// <summary>
+        /// Synchronously kills the whole driver tree, then — only when the kill was confirmed — releases
+        /// the modifiers/buttons it may have held. Returns false when the process could not be proven
+        /// dead; the agent then refuses further input instead of pretending the driver stopped.
+        /// </summary>
+        private bool StopCua()
+        {
+            AgentCuaDriver driver = cua;
+            cua = null;
+            if (driver == null) return true;
+            driver.TerminateNow();
+            if (!driver.ConfirmedStopped())
+            {
+                cuaDoomed = true;
+                try { driver.Dispose(); } catch (Exception) { }
+                return false;
+            }
+            try { driver.Dispose(); } catch (Exception) { }
+            // The driver injects through its own input path; releasing known modifiers/buttons here is the
+            // only session-local guarantee we have once it is gone.
+            AgentInput.ReleaseHeldInput();
+            return true;
         }
 
         private static string[] WithCommon(params string[] methodFields)
@@ -926,6 +1100,7 @@ namespace ELauncher.Shower
             catch (Exception)
             {
             }
+            StopCua();
         }
     }
 }

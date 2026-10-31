@@ -36,6 +36,7 @@ import { normalizeUserMessage } from './scope-protocol.js';
 import { createCommunicationTools } from './communication-tools.js';
 import { createCollaborationService } from './collaboration-service.js';
 import { renderCollaborationPrompt } from './collaboration-prompt.js';
+import { createCuaTools } from './cua-tools.js';
 import { createShowerManager } from './shower-manager.js';
 import { createShowerTools } from './shower-tools.js';
 import { createRuntimeShower } from './runtime-shower.js';
@@ -194,6 +195,7 @@ export async function openRuntime(options) {
   let storage = null;
   let harness = null;
   let workContexts = null;
+  let coreExtensions = [];
   let online = false;
   let botModels = {};
   let getBotEntryWatermark;
@@ -314,6 +316,9 @@ export async function openRuntime(options) {
       tools: createShowerTools({ host, getHarness: () => harness, manager: shower }),
     }));
   }
+  // 内置 Cua 只在有桌面后端的 Windows/Linux 注册；Android 保留原生路径不注册。
+  // 与上游 inventory 一对一，注册先于 coreExtensions 快照与 Harness 打开。
+  const hasCuaDesktop = !nativeBridge && (process.platform === 'win32' || process.platform === 'linux');
   let plugins;
   const services = {
     host, models, getHarness: () => harness, context: CTX, getWorkContexts: () => workContexts,
@@ -418,9 +423,18 @@ export async function openRuntime(options) {
   const codemodeExtension = createCodemodeExtension({ sandbox: createHostCodemodeSandbox() });
   registry.install(codemodeExtension);
   registry.install(finalBudgetExtension);
-  const coreExtensions = registry.snapshot().installed().filter((extension) => extension !== finalBudgetExtension && extension !== codemodeExtension);
   try {
     releaseOwner = acquireRuntimeOwner(host.dataRoot);
+    // Cua inventory：对固定 Driver 二进制跑一次只读 CLI metadata（list-tools +
+    // describe），不启动 mcp --direct、不 ensure 虚拟屏、不申请管理员。资源缺失或
+    // metadata 不合法在此明确失败，本 catch 负责清理已开的 host/owner。
+    if (hasCuaDesktop) {
+      registry.install(defineExtension({
+        name: 'host.cua',
+        tools: await createCuaTools({ host, getHarness: () => harness, manager: shower }),
+      }));
+    }
+    coreExtensions = registry.snapshot().installed().filter((extension) => extension !== finalBudgetExtension && extension !== codemodeExtension);
     // 仅 Windows 桌面后端在启动时完成一次性管理员授权；Linux/Android/无 Shower 的
     // Host 保持原有惰性，不在此实例化后端。失败/取消即中止启动，catch 里 shower.close
     // 负责回收宿主与 guardian，不留下未授权却假装可用的虚拟屏入口。

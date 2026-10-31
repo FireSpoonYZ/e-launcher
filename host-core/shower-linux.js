@@ -24,6 +24,8 @@ import {
 import net from 'node:net';
 import path from 'node:path';
 import { messageError } from './message-protocol.js';
+import { CuaMcpClient, validateCuaRequest } from './cua-mcp.js';
+import { resolveCuaDriverPath } from './cua-driver.js';
 import { SHOWER_MAX_FRAME_BASE64_BYTES } from './shower-protocol.js';
 
 const DEFAULT_WIDTH = 1280;
@@ -48,6 +50,13 @@ const MIN_DRAG_MS = 50;
 const MAX_DRAG_MS = 3000;
 const MAX_TEXT_LENGTH = 1000;
 const MAX_WHEEL_NOTCHES = 20;
+// Keysyms the driver may leave latched on the private display when it is killed
+// mid-call: every left/right modifier variant plus X11 pointer buttons 1-5.
+const CUA_RELEASE_KEYSYMS = [
+  'Control_L', 'Control_R', 'Alt_L', 'Alt_R', 'Shift_L', 'Shift_R',
+  'Super_L', 'Super_R', 'Meta_L', 'Meta_R',
+];
+const CUA_RELEASE_BUTTONS = ['1', '2', '3', '4', '5'];
 
 const REQUIREMENTS = [
   { key: 'server', label: 'Xvnc or Xtigervnc', candidates: ['Xtigervnc', 'Xvnc'] },
@@ -767,6 +776,8 @@ export function createLinuxShowerBackend({ dataRoot } = {}) {
     state.updatedAt = new Date().toISOString();
     if (state.released) return;
     state.released = true;
+    // The driver goes first so it cannot inject input while the display dies.
+    await stopCuaDriver(state);
     // Only children this backend spawned: their own process groups, nothing else.
     for (const app of [...state.apps]) await stopChild(app);
     state.apps.clear();
@@ -813,6 +824,9 @@ export function createLinuxShowerBackend({ dataRoot } = {}) {
       busLog: null,
       dbusAddress: null,
       apps: new Set(),
+      // Persistent per-session cua driver handle: { client, dead, starting } or null.
+      // Lazily created on the first backend.cua call; recycled on cancel/timeout/death.
+      cua: null,
       startedAt: Date.now(),
       updatedAt: new Date().toISOString(),
       error: null,
@@ -1023,6 +1037,166 @@ export function createLinuxShowerBackend({ dataRoot } = {}) {
     });
   }
 
+  /**
+   * Drop the session's cua driver. Idempotent; marks the handle dead first so a
+   * close-triggered 'exit' cannot be mistaken for a usable client. The driver runs
+   * on this session's private display only, so anything it was typing dies with it.
+   * A close() failure means the process may still be injecting input: mark the
+   * session broken so nothing else can drive it until teardown.
+   */
+  async function stopCuaDriver(state) {
+    const cua = state.cua;
+    state.cua = null;
+    if (!cua) return;
+    cua.dead = true;
+    const client = cua.starting ? await cua.starting.catch(() => null) : cua.client;
+    if (client) await client.close();
+  }
+
+  /**
+   * Lazily start the per-session driver on the private display. Requires a ready
+   * session with its private D-Bus address known; the env comes from sessionEnv
+   * (WAYLAND_DISPLAY and the host session bus already removed) plus DO_NOT_TRACK.
+   * The driver connects only via stdin/stdout JSONL, never a shared daemon.
+   */
+  async function ensureCuaDriver(state, signal) {
+    const cua = state.cua;
+    // Live, connected client: reuse it.
+    if (cua && !cua.dead && cua.client && !cua.client.closed) return cua.client;
+    // A start still in flight shares its driver; a dead one is retired below.
+    if (cua?.starting && !cua.dead) {
+      try {
+        return await cua.starting;
+      } catch {
+        // fell through: the start died, recycle below
+      }
+    }
+    // Retire a dead or closed instance before creating a fresh entry.
+    if (cua && (cua.dead || (cua.client && cua.client.closed))) {
+      await stopCuaDriver(state);
+    }
+    if (!state.dbusAddress) {
+      throw messageError('SHOWER_NOT_READY', 'the private D-Bus session bus is not ready for the cua driver');
+    }
+    // Aborted before a driver is spawned or written to: nothing was sent.
+    checkAborted(signal);
+    const entry = { client: null, dead: false, starting: null };
+    entry.starting = (async () => {
+      try {
+        const driverPath = resolveCuaDriverPath();
+        const client = new CuaMcpClient({
+          command: driverPath,
+          args: ['mcp', '--direct'],
+          env: { ...sessionEnv(state), DO_NOT_TRACK: '1' },
+        });
+        client.onClose = () => { entry.dead = true; };
+        await client.connect({ signal });
+        entry.client = client;
+        return client;
+      } finally {
+        // starting must clear on success AND failure: a stale promise would pin
+        // a dead client and block every future restart for this session.
+        entry.starting = null;
+      }
+    })();
+    state.cua = entry;
+    const starting = entry.starting;
+    try {
+      return await starting;
+    } catch (error) {
+      // A failed start never leaves a half-open client behind.
+      if (state.cua === entry) await stopCuaDriver(state);
+      throw error;
+    }
+  }
+
+  /**
+   * Best-effort release of anything the driver may have held down on the private
+   * display before it was killed. Uses the session's own xdotool/DISPLAY; failure
+   * here must not block recycling (the whole Xvnc dies on release anyway).
+   */
+  async function releaseCuaInput(state) {
+    // One xdotool chain for all keys+buttons: no per-command process delay, and a
+    // failure on one step does not abort the rest of the release sequence.
+    // xdotool commands have fixed arity, so they chain without separators.
+    const chain = [
+      ...CUA_RELEASE_KEYSYMS.flatMap((k) => ['keyup', k]),
+      ...CUA_RELEASE_BUTTONS.flatMap((b) => ['mouseup', b]),
+    ];
+    try {
+      await runCommand(
+        state.programs.xdotool,
+        chain,
+        { env: sessionEnv(state), timeoutMs: COMMAND_TIMEOUT_MS },
+      );
+    } catch {
+      // best effort only
+    }
+    // Fallback: release each button individually so one bad step can't skip them.
+    for (const button of CUA_RELEASE_BUTTONS) {
+      try {
+        await runCommand(
+          state.programs.xdotool,
+          ['mouseup', button],
+          { env: sessionEnv(state), timeoutMs: PROBE_TIMEOUT_MS },
+        );
+      } catch {
+        // keep releasing the rest
+      }
+    }
+  }
+
+  /**
+   * backend.cua(record, request, options): forward one canonical {method,params}
+   * MCP request to this session's persistent driver and return the raw result.
+   * The shape is re-validated here because this is the process boundary.
+   * Cancel/timeout: the in-flight request is never replayed and never answered
+   * after the fact — the driver is killed (whole process group), held keys are
+   * released on the same private display, and a fresh driver starts next call.
+   */
+  async function cua(record, request, options = {}) {
+    const { signal } = options;
+    checkAborted(signal);
+    const state = requireReady(requireSession(record));
+    const clean = validateCuaRequest(request);
+    checkAborted(signal);
+    const entry = state.cua;
+    const client = await ensureCuaDriver(state, signal);
+    try {
+      return await client.call(clean, { signal });
+    } catch (error) {
+      // Cancel/timeout/death/corrupt stream: kill the driver BEFORE releasing
+      // keys (releasing first would re-press on a live driver), then release on
+      // the same private display, and only then fail the request. Cleanup is
+      // awaited so the manager queue cannot advance while input is still live.
+      const needsRecycle =
+        error?.code === 'CANCELLED' ||
+        error?.code === 'SHOWER_TIMEOUT' ||
+        error?.driverExited ||
+        error?.protocolFatal;
+      if (needsRecycle) {
+        // Only drop a driver that is still THIS call's instance; a concurrent
+        // teardown or a failed start may already have replaced state.cua.
+        if (state.cua?.client === client || (entry && state.cua === entry)) {
+          await stopCuaDriver(state).catch((closeError) => {
+            // Unconfirmed process kill: the driver may still be injecting on
+            // this display, so the session must refuse further input until it
+            // is torn down entirely. The caller also sees it on this request.
+            state.phase = 'error';
+            state.error = {
+              code: 'SHOWER_BACKEND_FAILED',
+              message: 'cua driver cleanup failed; the session can no longer be used safely: ' + closeError.message,
+            };
+            state.updatedAt = new Date().toISOString();
+            error.cuaCleanup = closeError.message;
+          });
+        }
+        await releaseCuaInput(state);
+      }
+      throw error;
+    }
+  }
+
   async function status(record, { signal } = {}) {
     checkAborted(signal);
     const sessionId = typeof record?.sessionId === 'string' ? record.sessionId : null;
@@ -1173,5 +1347,5 @@ export function createLinuxShowerBackend({ dataRoot } = {}) {
     }
   }
 
-  return { platform: 'linux', status, ensure, frame, input, launch, release, close };
+  return { platform: 'linux', status, ensure, frame, input, launch, cua, release, close };
 }

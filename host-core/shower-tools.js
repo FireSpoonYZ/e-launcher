@@ -113,20 +113,21 @@ function textOutput(text) {
   return { output: [{ type: 'text', text }] };
 }
 
-function errorOutput(code, message) {
+/** cua-tools 同包复用。 */
+export function errorOutput(code, message) {
   return { ...textOutput(JSON.stringify({ code, message })), isError: true };
 }
 
-/** 文本输出统一限制在 50 KiB；超限返回明确错误而不是发送截断/超大文本。 */
-function checkedTextOutput(text) {
+/** 文本输出统一限制在 50 KiB；超限返回明确错误而不是发送截断/超大文本。cua-tools 同包复用。 */
+export function checkedTextOutput(text) {
   if (Buffer.byteLength(text, 'utf8') > MAX_TEXT_OUTPUT_BYTES) {
     return errorOutput('RESPONSE_TOO_LARGE', 'Shower 响应文本超过 50 KiB；未发送完整内容');
   }
   return textOutput(text);
 }
 
-/** 只使用持久会话归属解析身份；不采信模型参数里的任何归属。 */
-function resolveIdentity(host, getHarness, api, context) {
+/** 只使用持久会话归属解析身份；不采信模型参数里的任何归属。cua-tools 同包复用。 */
+export function resolveIdentity(host, getHarness, api, context) {
   return resolveBotIdentity(host, getHarness(), api.conversationId, context);
 }
 
@@ -134,7 +135,7 @@ function resolveIdentity(host, getHarness, api, context) {
  * 当前模型的截图能力与内联图片上限：`DEFAULT_IMAGE_LIMITS` 被模型 `inputLimits.images.resize` 覆盖，
  * 与 pi-durable read 工具及 android_shower 一致。模型解析错误直接向上抛，绝不把未知模型当作支持视觉。
  */
-async function screenshotModel(api, context) {
+export async function screenshotModel(api, context) {
   const agent = await api.agent(context);
   const ref = agent?.model;
   if (!ref || typeof ref.provider !== 'string' || typeof ref.modelId !== 'string') {
@@ -164,7 +165,8 @@ function effectiveLimits(requested, modelLimits) {
   };
 }
 
-function decodeBase64(data) {
+/** cua-tools 同包复用，不复制解析器。 */
+export function decodeBase64(data) {
   if (typeof data !== 'string' || data.length === 0 || data.length % 4 !== 0 || !BASE64_RE.test(data)) {
     throw new Error('Shower 截图响应无效');
   }
@@ -211,7 +213,8 @@ function jpegSize(buffer) {
   throw new Error('Shower 截图响应无效');
 }
 
-function frameSize(buffer, mimeType) {
+/** cua-tools 同包复用，不复制解析器。 */
+export function frameSize(buffer, mimeType) {
   if (mimeType === 'image/png') return pngSize(buffer);
   if (mimeType === 'image/jpeg') return jpegSize(buffer);
   throw new Error('Shower 截图响应无效');

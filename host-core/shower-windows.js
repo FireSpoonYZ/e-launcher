@@ -15,6 +15,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { messageError } from './message-protocol.js';
 import { SHOWER_ERROR_CODES, SHOWER_MAX_FRAME_BASE64_BYTES } from './shower-protocol.js';
+import { resolveCuaDriverPath } from './cua-driver.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_EXE = path.join(HERE, 'native', 'windows', 'build', 'shower-windows.exe');
@@ -40,6 +41,12 @@ const MAX_REQUEST_BYTES = 1024 * 1024;
 // contract：原生整行 base64 帧上限 2 MiB。
 const MAX_LINE_BYTES = 2 * 1024 * 1024;
 const MAX_PENDING = 16;
+// Cua 固定上游 cua-driver-rs 的 MCP 直连预算：请求与单条应答都不会撑爆既有管道上限。
+const CUA_REQUEST_TIMEOUT_MS = 35_000;
+const MAX_CUA_REQUEST_BYTES = 128 * 1024;
+// 取消 cua 后多等一个有界窗口：原生先杀 driver 并释放按键才回包，绝不能让 manager 在清理未
+// 完成时就把人工输入放进会话。
+const CUA_CANCEL_SETTLE_MS = 15_000;
 const MAX_STDERR_LINE = 512;
 const STDERR_KEEP = 10;
 const BASE64_RE = /^[A-Za-z0-9+/]*={0,2}$/;
@@ -227,6 +234,36 @@ function limitsParam(limits) {
   return requested;
 }
 
+/** 对外只允许 tools/list 与 tools/call；其余 MCP 方法一律拒绝，request 原样透传不进 JSON-RPC 信封。 */
+function cuaRequestParam(request) {
+  if (!isPlainObject(request)) throw invalid('Cua request 必须是对象');
+  for (const key of Object.keys(request)) {
+    if (key !== 'method' && key !== 'params') throw invalid('Cua request 不允许字段 ' + key);
+  }
+  const method = request.method;
+  if (method !== 'tools/list' && method !== 'tools/call') {
+    throw invalid('Cua request.method 必须是 tools/list 或 tools/call');
+  }
+  if (request.params !== undefined && !isPlainObject(request.params)) throw invalid('Cua request.params 必须是对象');
+  if (method === 'tools/call') {
+    const params = request.params;
+    if (!params || typeof params.name !== 'string' || params.name === '') {
+      throw invalid('tools/call 的 params.name 必须是非空字符串');
+    }
+    if (params.arguments !== undefined && !isPlainObject(params.arguments)) {
+      throw invalid('tools/call 的 params.arguments 必须是对象');
+    }
+  }
+  const wire = { method };
+  // params 原样透传（含 tools/list 的 cursor/_meta 等分页字段），外层键已限定 method/params。
+  if (request.params !== undefined) wire.params = request.params;
+  const line = JSON.stringify(wire);
+  if (Buffer.byteLength(line, 'utf8') > MAX_CUA_REQUEST_BYTES) {
+    throw invalid('Cua request 超过 ' + MAX_CUA_REQUEST_BYTES + ' 字节上限');
+  }
+  return wire;
+}
+
 /** source/taskId/callId 只从可信 options 转发，模型参数无法设置。 */
 function trustedFields(source, taskId, callId) {
   const fields = {};
@@ -407,6 +444,12 @@ function openNativeHost(child) {
     const entry = pending.get(message.id);
     // 超时/取消后的迟到应答直接丢弃：绝不把它当成重放的机会。
     if (!entry) return;
+    // 已取消请求在 settle 窗口内收到的应答只能证明收尾结果：成功应答必须仍按取消报告
+    // unconfirmed，绝不向调用方冒充一次成功的控制。
+    if (entry.aborting && message.ok === true) {
+      finish(entry, cancelled('Shower 操作已取消；迟到应答不代表成功，不会自动重发', 'unconfirmed'));
+      return;
+    }
     if (message.ok === true) finish(entry, null, message.result);
     else finish(entry, wireError(message.error));
   }
@@ -448,7 +491,7 @@ function openNativeHost(child) {
   }
 
   function request(method, params, options = {}) {
-    const { signal, timeoutMs = REQUEST_TIMEOUT_MS } = options;
+    const { signal, timeoutMs = REQUEST_TIMEOUT_MS, cancelSettleMs = 0 } = options;
     if (exitError) return Promise.reject(showerError(exitError.code, exitError.message, 'not-sent'));
     if (closed) return Promise.reject(showerError('SHOWER_UNAVAILABLE', 'Windows Shower 原生宿主已关闭', 'not-sent'));
     checkAborted(signal);
@@ -474,6 +517,8 @@ function openNativeHost(child) {
         timer: null,
         written: false,
         settled: false,
+        cancelSettleMs,
+        aborting: false,
         resolve,
         reject,
       };
@@ -481,12 +526,26 @@ function openNativeHost(child) {
       entry.timer = setTimeout(() => {
         const current = pending.get(id);
         if (!current) return;
+        if (current.method !== 'cancel') requestCancel(id);
+        // cancel-settle：先请求原生收尾，窗口内继续等真应答；原生清理完成后自己回包。
+        // 窗口到期仍无应答意味着清理未确认，会话标记为破坏，后续控制一律拒绝。
+        if (current.cancelSettleMs > 0 && !current.aborting) {
+          const settle = Math.min(current.cancelSettleMs, CUA_CANCEL_SETTLE_MS);
+          current.cancelSettleMs = 0;
+          current.aborting = true;
+          entry.timer = setTimeout(() => {
+            const again = pending.get(id);
+            if (!again) return;
+            fatal('Windows Shower 原生宿主在取消收尾窗口内没有应答，会话控制状态未确认');
+          }, settle);
+          entry.timer.unref?.();
+          return;
+        }
         finish(current, showerError(
           'SHOWER_BACKEND_FAILED',
           `Windows Shower 原生宿主在 ${timeoutMs} ms 内没有应答，结果未确认`,
           'unconfirmed',
         ));
-        if (current.method !== 'cancel') requestCancel(id);
       }, timeoutMs);
       entry.timer.unref?.();
       if (signal) {
@@ -494,6 +553,21 @@ function openNativeHost(child) {
           const current = pending.get(id);
           if (!current) return;
           const outcome = current.written ? 'unconfirmed' : 'not-sent';
+          // cancel-settle：取消先发往原生，但在原生确认收尾（杀 driver + 释放按键后回包）或窗口
+          // 到期前保持挂起；人工接管绝不能抢在 driver 清理之前被放行。
+          if (outcome === 'unconfirmed' && current.cancelSettleMs > 0 && !current.aborting) {
+            current.aborting = true;
+            if (current.method !== 'cancel') requestCancel(id);
+            const settle = Math.min(current.cancelSettleMs, CUA_CANCEL_SETTLE_MS);
+            if (current.timer) clearTimeout(current.timer);
+            current.timer = setTimeout(() => {
+              const again = pending.get(id);
+              if (!again) return;
+              fatal('Windows Shower 原生宿主在取消收尾窗口内没有应答，会话控制状态未确认');
+            }, settle);
+            current.timer.unref?.();
+            return;
+          }
           finish(current, cancelled(
             outcome === 'unconfirmed' ? 'Shower 操作已取消；结果未确认，不会自动重发' : 'Shower 操作已取消，且未发送',
             outcome,
@@ -576,6 +650,8 @@ export function createWindowsShowerBackend({ dataRoot } = {}) {
   let authorizedHost = null;
   let preparing = null;
   let activeSessionId = null;
+  // 首次 cua 调用才解析 driver；之后该路径对本后端固定，任何调用方都不能替换。
+  let cuaDriverPath = null;
   // 原生宿主意外退出后保留失败快照，status 报告 error 而不是假装空闲。
   let hostFailure = null;
   let closed = false;
@@ -839,6 +915,30 @@ export function createWindowsShowerBackend({ dataRoot } = {}) {
     };
   }
 
+  /** 固定 driver 绝对路径：只在首个 cua 调用解析，缺失即 SHOWER_UNAVAILABLE，绝不退到主桌面。 */
+  function pinnedCuaDriver() {
+    if (cuaDriverPath !== null) return cuaDriverPath;
+    cuaDriverPath = resolveCuaDriverPath();
+    return cuaDriverPath;
+  }
+
+  /** 返回原样 MCP result 对象（原生已解开 { result } 包装），不套 JSON-RPC 信封。 */
+  async function cua(record, request, { signal, source, taskId, callId } = {}) {
+    checkAborted(signal);
+    const sessionId = requireRecordSessionId(record);
+    const wire = cuaRequestParam(request);
+    const driverPath = pinnedCuaDriver();
+    const client = requireHost(sessionId);
+    checkAborted(signal);
+    const params = { sessionId, driverPath, request: wire, ...trustedFields(source, taskId, callId) };
+    // cancelSettle：信号取消后等原生确认 driver 已杀、按键已释放，人工接管才不会遇上还活着的旧 driver。
+    const raw = await client.request('cua', params, { signal, timeoutMs: CUA_REQUEST_TIMEOUT_MS, cancelSettleMs: CUA_CANCEL_SETTLE_MS });
+    if (!isPlainObject(raw)) {
+      throw showerError('SHOWER_BACKEND_FAILED', 'Windows Shower 原生宿主返回了无效 Cua 结果', 'unconfirmed');
+    }
+    return raw;
+  }
+
   /** 原生预览窗口只影响子会话窗口本身；隐藏不会断开连接或销毁桌面。 */
   async function preview(record, mode, { signal } = {}) {
     checkAborted(signal);
@@ -933,6 +1033,7 @@ export function createWindowsShowerBackend({ dataRoot } = {}) {
     launch,
     preview,
     release,
+    cua,
     close,
     prepare: prepareHost,
   };
