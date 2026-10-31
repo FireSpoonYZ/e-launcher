@@ -5,9 +5,14 @@
 // 工具 details 只经 tool-presentation.js 白名单投影 presentation；其他 details 字段
 // （diagnostics、参数、凭据等）永不跨越此边界。
 // 性能：历史/消息均从最新向前扫描，找到上限即停止，不遍历/暂存全部原文。
+//
+// 统一会话：host.scope-message 只渲染对端原文（不渲染 Host 包装 JSON），
+// host.work-trigger 是内部触发标记不是人类气泡，一律隐藏；来源经
+// deriveEntryAttribution（byTaskId 精确归属，缺失时回退 data.attribution）投影。
 
 import { projectToolPresentation, toolPresentationBytes } from './tool-presentation.js';
 import { MAX_LIVE_JSON_BYTES } from './remote-live-protocol.js';
+import { deriveEntryAttribution } from './bot-session-context.js';
 
 const MAX_HISTORY_ENTRIES = 50; // 最新可显示条目数
 const MAX_MESSAGES_PER_ENTRY = 8; // 每条目最多消息数（保留最新）
@@ -16,6 +21,8 @@ const MAX_TOTAL_TEXT_UNITS = 65536; // 历史窗口文本总上限，超限丢�
 const MAX_GENERATION_UNITS = 32768; // 当前生成文本上限
 const MAX_TOOLS = 32; // 工具槽总数上限（tools + nestedTools）
 const MAX_TOOL_OUTPUT_UNITS = 4096; // 工具运行输出保留尾部上限
+// Attribution 只由 Host 端冻结 turn/信封生成，字段小而固定；仍留字符上限防伪造放大帧。
+const MAX_ATTRIBUTION_TEXT_UNITS = 256;
 // 快照/更新帧整体不超过 MAX_LIVE_JSON_BYTES（1MiB UTF-8）。presentation 预算按
 // 帧余量计算：外层 envelope 与 id 上限合计 <8KiB，先按该常量扣减，再按 state
 // 实际 JSON 字节收紧，保证任何有界投影（含最坏转义）都装得进一帧。
@@ -137,12 +144,62 @@ function projectMessage(message, budget, entry) {
   return projected;
 }
 
+/** 冻结 turn/信封里的字符串字段整体截断到上限；非字符串字段原样保留。 */
+function boundAttributionString(value) {
+  if (typeof value !== 'string' || value.length <= MAX_ATTRIBUTION_TEXT_UNITS) return value;
+  return value.slice(0, MAX_ATTRIBUTION_TEXT_UNITS);
+}
+
+/**
+ * 把 deriveEntryAttribution 的安全归属投影为线框可验证形状：只复制白名单字段，
+ * 字符串字段截断，其余字段类型不符即丢弃（不抛错、不阻断投影）。
+ */
+function projectAttribution(raw) {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const kind = raw.kind;
+  if (kind !== 'user' && kind !== 'bot' && kind !== 'host') return null;
+  const channel = raw.channel;
+  if (channel !== 'primary' && channel !== 'dm' && channel !== 'room') return null;
+  const out = { kind, channel };
+  for (const key of ['botId', 'deviceId', 'name', 'scopeId', 'messageId', 'replyTo', 'rootId', 'createdAt']) {
+    const value = raw[key];
+    if (typeof value === 'string') out[key] = boundAttributionString(value);
+  }
+  if (raw.category === 'public' || raw.category === 'notice' || raw.category === 'request' || raw.category === 'reply') {
+    out.category = raw.category;
+  }
+  if (raw.direction === 'incoming' || raw.direction === 'outgoing') out.direction = raw.direction;
+  return out;
+}
+
+/** scope-message 的原始对端正文：信封 text 是有界字符串，缺失时此条目无可见内容。 */
+function peerBodyFromScopeMessage(entry) {
+  const text = entry?.data?.message?.text;
+  return typeof text === 'string' ? text : null;
+}
+
 /**
  * 投影一条条目：从最新向前保留最多 8 条可显示消息，遇到第 9 条即判定丢消息并停止，
  * 不遍历/暂存更旧消息。messagesDropped 由调用方置 historyTruncated 标示窗口不完整。
  * 无可显示消息则整条不可显示，返回 null。
+ * host.work-trigger 永不渲染为气泡；host.scope-message 只显示对端原文，不显示 Host 包装。
  */
-function projectEntry(entry, budget) {
+function projectEntry(entry, sessionState, budget) {
+  if (entry?.kind === 'host.work-trigger') return null;
+  const attribution = projectAttribution(deriveEntryAttribution(entry, sessionState));
+  if (entry?.kind === 'host.scope-message') {
+    const text = peerBodyFromScopeMessage(entry);
+    if (text === null) return null;
+    const bounded = text.length > MAX_MESSAGE_UNITS
+      ? { text: truncatePrefix(text, MAX_MESSAGE_UNITS).text, truncated: true }
+      : { text, truncated: false };
+    const message = { role: 'user', ...bounded };
+    const createdAt = Date.parse(entry?.data?.message?.createdAt ?? '');
+    if (Number.isSafeInteger(createdAt) && createdAt >= 0) message.timestamp = createdAt;
+    const item = { id: entry.id, kind: entry.kind, messages: [message] };
+    if (attribution !== null) item.attribution = attribution;
+    return { item, messagesDropped: false };
+  }
   const model = entry?.model ?? [];
   const messages = [];
   let seenMessages = 0;
@@ -158,7 +215,9 @@ function projectEntry(entry, budget) {
     messages.unshift(projected);
   }
   if (messages.length === 0) return null;
-  return { item: { id: entry.id, kind: entry.kind, messages }, messagesDropped };
+  const item = { id: entry.id, kind: entry.kind, messages };
+  if (attribution !== null) item.attribution = attribution;
+  return { item, messagesDropped };
 }
 
 function entryTextUnits(entry) {
@@ -202,11 +261,21 @@ function projectTool(slot, budget) {
 
 /**
  * 投影当前生成：从 pi.live.generation.message 取文本块，限制 32768 单元。
- * 无 generation/message 时为 null。
+ * 无 generation/message 时为 null。归属按 pi.live.run.taskId 经
+ * deriveEntryAttribution 精确解析（合成 {kind:'pi.assistant',byTaskId} 查询
+ * turnByTask 归属；执行 Bot + replyTarget + direction outgoing），避免把协作轮的
+ * 流式草稿误标为对用户的回复；索引缺失时不带 attribution。
  */
-function projectGeneration(message) {
+function projectGeneration(message, sessionState, runTaskId) {
   const { text, truncated } = textFromBlocks(message.content, MAX_GENERATION_UNITS);
-  return { text, truncated };
+  const generation = { text, truncated };
+  const attribution = runTaskId === null || runTaskId === undefined
+    ? null
+    : projectAttribution(
+      deriveEntryAttribution({ kind: 'pi.assistant', byTaskId: runTaskId }, sessionState),
+    );
+  if (attribution !== null) generation.attribution = attribution;
+  return generation;
 }
 
 /** 初始空状态。 */
@@ -228,7 +297,7 @@ export function emptyLiveState() {
  * 总文本超 65536 单元丢弃最旧整条并立即 break，保证窗口是连续最新段。工具仅映射
  * tools/nestedTools 前 32 个。busy 由 pi.live.run 存在决定，queuedCount 取 pi.inbox.items 长度。
  */
-export function projectLiveState(view) {
+export function projectLiveState(view, sessionState = null) {
   const live = view.docs?.['pi.live'] ?? null;
   const inbox = view.docs?.['pi.inbox'] ?? null;
 
@@ -257,7 +326,7 @@ export function projectLiveState(view) {
   for (let i = 0; i < nestedCount; i++) tools.push(projectTool(nestedTools[i], budget));
 
   for (let i = entries.length - 1; i >= 0; i--) {
-    const projected = projectEntry(entries[i], budget);
+    const projected = projectEntry(entries[i], sessionState, budget);
     if (!projected) continue;
     seenDisplayable++;
     if (seenDisplayable > MAX_HISTORY_ENTRIES) {
@@ -275,7 +344,9 @@ export function projectLiveState(view) {
     history.unshift(projected.item);
   }
 
-  const generation = live?.generation?.message ? projectGeneration(live.generation.message) : null;
+  const generation = live?.generation?.message
+    ? projectGeneration(live.generation.message, sessionState, live?.run?.taskId ?? null)
+    : null;
 
   const state = {
     history,
@@ -349,14 +420,14 @@ function fitPresentationBudget(state) {
     }
   }
 
-  // 4) 生成文本：压到 4096 单元再清空。
+  // 4) 生成文本：压到 4096 单元再清空。绝不只删 attribution 留正文——
+  // 无来源的协作草稿会被误认为对用户的答复；正文清空后整条置 null。
   if (state.generation !== null && utf8JsonBytes(state) > FIT_FRAME_LIMIT) {
     const gen = state.generation;
     gen.text = truncateTail(gen.text, 4096).text;
     gen.truncated = true;
     if (utf8JsonBytes(state) > FIT_FRAME_LIMIT) {
-      gen.text = '';
-      gen.truncated = true;
+      state.generation = null;
     }
   }
 

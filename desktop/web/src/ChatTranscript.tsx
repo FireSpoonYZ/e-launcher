@@ -10,8 +10,10 @@ import {
   parseHistoryEntries,
   resolveActiveTurnStartedAt,
   formatTurnDuration,
+  normalizeAttribution,
   type ChatTurn,
 } from '../../../web/src/chatTurnModel';
+import { MessageAttribution as MessageAttributionBadge } from '../../../web/src/MessageAttribution';
 import {
   readToolPresentation,
   ToolPresentationCard,
@@ -97,6 +99,16 @@ export function ChatTranscript({
     });
   }, []);
 
+  // LiveGeneration.attribution（同 id 的 raw data.attribution 已由 raw 覆盖）；
+  // 仍在生成的活轮用它标记协作来源/方向，不混同普通用户答案。
+  const liveAttribution = useMemo(
+    () => normalizeAttribution((live?.generation as { attribution?: unknown } | null | undefined)?.attribution),
+    [live?.generation],
+  );
+  // dm/room 触发的流式生成是协作过程：文本走 is-collab 块，不混进普通回答气泡。
+  const liveIsCollaborative =
+    liveAttribution !== undefined && liveAttribution.channel !== 'primary';
+
   const allTurns = useMemo<ChatTurn[]>(() => {
     // 与手机端 Host.tsx 相同：live 投影窗口先放，raw 分页后放（同 id 覆盖，细节更全）。
     const byId = new Map<string, Record<string, unknown>>();
@@ -108,9 +120,11 @@ export function ChatTranscript({
     return parseHistoryEntries(sorted, 0, {
       liveTools: asArray<Record<string, unknown>>(live?.tools),
       isBusy,
-      liveGeneratingText,
+      liveGeneratingText: liveIsCollaborative ? '' : liveGeneratingText,
+      selfBotId: bot.botId,
+      liveAttribution,
     });
-  }, [entries, live, isBusy, liveGeneratingText]);
+  }, [entries, live, isBusy, liveGeneratingText, liveIsCollaborative, liveAttribution, bot.botId]);
 
   const activeLiveToolName = useMemo(() => {
     const tools = asArray<LiveTool>(live?.tools);
@@ -190,7 +204,7 @@ export function ChatTranscript({
         </div>
       ) : null}
 
-      {visibleTurns.length === 0 && !liveGeneratingText ? (
+      {visibleTurns.length === 0 && !liveGeneratingText && !liveIsCollaborative ? (
         <div className="desktop-transcript-empty bot-chat-empty">
           <GrokBotAvatar preset={avatarPreset} isPrimary={bot.isPrimary} starBadge={bot.isPrimary} platformBadge={platformBadge} size={84} />
           <h2>{bot.role}</h2>
@@ -208,11 +222,22 @@ export function ChatTranscript({
             typeof turn.durationMs === 'number' &&
             turn.durationMs > 0 &&
             !(isLastAssistantTurn && isBusy);
+          const turnAttr = turn.attribution;
+          // Host 触发器不是人类消息：user-role 的 kind=host 来源（工作触发/内部调度）
+          // 不显示来源徽标，避免误认作用户发言；其余真实来源（用户/对端 Bot）照常标记。
+          const showAttribution =
+            Boolean(turnAttr) && !(turn.role === 'user' && turnAttr?.kind === 'host');
           return (
             <article
               key={turn.id}
-              className={`bot-chat-bubble ${turn.role}${turn.isStreaming ? ' streaming' : ''}`}
+              className={`bot-chat-bubble ${turn.role}${turn.isStreaming ? ' streaming' : ''}${turn.collaborative ? ' is-collab' : ''}`}
             >
+              {turn.collaborative ? (
+                <div className="bot-chat-collab-label">{t('协作过程', 'Collaboration')}</div>
+              ) : null}
+              {showAttribution && turnAttr ? (
+                <MessageAttributionBadge attribution={turnAttr} />
+              ) : null}
               {turn.thinking ? (
                 <details className="bot-chat-thinking">
                   <summary>{t('思考过程', 'Thinking')}</summary>
@@ -296,6 +321,13 @@ export function ChatTranscript({
         })
       )}
 
+      {liveIsCollaborative ? (
+        <div className="bot-chat-collab" role="status">
+          <div className="bot-chat-collab-label">{t('协作过程', 'Collaboration')}</div>
+          {liveAttribution ? <MessageAttributionBadge attribution={liveAttribution} /> : null}
+          {liveGeneratingText ? <Markdown text={liveGeneratingText} onOpenLink={openLink} /> : null}
+        </div>
+      ) : null}
       <GrokBotWorkingSlot
         key={botKey}
         botKey={botKey}

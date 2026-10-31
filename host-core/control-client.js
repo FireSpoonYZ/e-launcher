@@ -321,6 +321,7 @@ export function createControlClient({ url, token, fetch: fetchImpl = globalThis.
       const query = new URLSearchParams();
       if (options && options.limit != null) query.set('limit', String(options.limit));
       if (options && options.cursor != null) query.set('cursor', JSON.stringify(options.cursor));
+      if (options && options.order != null) query.set('order', options.order);
       return request('GET', ['v1', 'scopes', '~' + scopeId, 'history'], { signal: options && options.signal, query });
     },
     getScopeMessage(scopeId, messageId, options) {

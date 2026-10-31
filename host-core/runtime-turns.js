@@ -42,15 +42,71 @@ function boundedTurnError(err) {
  *  live（protocol lane 补 setTurnAdmission；缺席时静默跳过）, admitBot,
  *  getEpoch()（断线 epoch，网络 await 期间变更即放弃提交）,
  *  trackSubmission(submissionId, info), recordCompletedSubmission(botId, formatted),
- *  initializeBot(botId), attachments({upload,load,removeBot}).
+ *  initializeBot(botId), attachments({upload,load,removeBot}),
+ *  sessions（可选；统一 Bot 主会话的收件导入运行时，缺席时跳过统一导入）.
  */
 export function createTurnAdmission(deps) {
   const {
     host, getHarness, context, centerRuntime, plugins, models,
     getBotModels, setBotModels, profileFor, botExecutionFingerprint,
     setBotAppliedRevision, setBotFingerprint, live, admitBot, getEpoch,
-    trackSubmission, recordCompletedSubmission, initializeBot, attachments,
+    trackSubmission, recordCompletedSubmission, initializeBot, attachments, sessions,
   } = deps;
+
+  // 可信的发送方来源：只接受 Runtime 传入的结构化标记，deviceId 恒为本机，绝不采信正文。
+  function normalizeUserOrigin(origin) {
+    if (origin === undefined || origin === null) return null;
+    if (typeof origin !== 'object' || Array.isArray(origin)) {
+      throw errWithCode('origin must be an object', 'INVALID_ARGUMENT');
+    }
+    const kind = origin.sender?.kind;
+    if (kind !== 'user' && kind !== 'host') {
+      throw errWithCode('origin sender kind must be user or host', 'INVALID_ARGUMENT');
+    }
+    const name = typeof origin.sender?.name === 'string' ? origin.sender.name.slice(0, 200) : null;
+    const replyTo = typeof origin.replyTo === 'string' ? origin.replyTo : null;
+    return { sender: { kind, ...(name !== null ? { name } : {}) }, replyTo };
+  }
+
+  /** 受理条目在原生提交时附带的可信入口：entry.data 携带发送方归属与
+      冻结轮次路由，正文仍走 content。每个实际输入（用户与计划任务等 Host
+      来源）都有稳定 requestId/turn；缺席 origin 的遗留队列条目按 Host 记。
+      wire 上的任意 origin/author 字段绝不采信——origin 只由可信本机边界
+      （已鉴权 HTTP/control submit 记 user、计划任务记 host）注入。 */
+  function sourceMessageEntry(item) {
+    const kind = item.origin?.sender?.kind === 'user' ? 'user' : 'host';
+    const name = typeof item.origin?.sender?.name === 'string' ? item.origin.sender.name : null;
+    const replyTo = typeof item.origin?.replyTo === 'string' ? item.origin.replyTo : null;
+    return {
+      kind: 'host.user-message',
+      data: {
+        version: 1,
+        source: 'host',
+        requestId: item.requestId,
+        botId: item.botId,
+        attribution: {
+          kind,
+          deviceId: host.deviceId,
+          channel: 'primary',
+          messageId: item.requestId,
+          direction: 'incoming',
+          createdAt: item.enqueuedAt,
+          ...(name !== null ? { name } : {}),
+          ...(replyTo !== null ? { replyTo } : {}),
+        },
+        turn: {
+          requestId: item.requestId,
+          taskId: null,
+          kind: 'primary',
+          scopeId: null,
+          triggerMessageId: item.requestId,
+          replyTo,
+          sender: { kind, deviceId: host.deviceId },
+          replyTarget: { kind: 'primary' },
+        },
+      },
+    };
+  }
 
   const harness = () => getHarness();
   const pumpInFlight = new Set();   // botId：每会话同时至多一个泵
@@ -111,11 +167,9 @@ export function createTurnAdmission(deps) {
     return found && found.phase !== 'cancelled' ? found : null;
   }
 
-  /** 该 Bot 全部映射会话上的原生未完结任务/提交（含 work 会话）。
-      withPluginOps=false 时不把插件自身贡献调用算作忙：同 set 的排队轮
-      不解除绑定，不需要等插件调用排空。 */
-  async function botNativeBusy(bot, { withPluginOps = true } = {}) {
-    if (withPluginOps && plugins.hasActiveExecutions(bot.botId)) return true;
+  /** 该 Bot 已映射的全部原生会话 ID：primary + 每个 work 绑定（协调/遗留存储目标，
+      不展开统一执行目标——统一执行落在 primary，本身已在列表内）。 */
+  async function mappedNativeIds(bot) {
     const h = harness();
     const nativeIds = [];
     const primaryIndex = await h.snapshot(PrimaryIndex, context);
@@ -127,11 +181,40 @@ export function createTurnAdmission(deps) {
       try { pair = JSON.parse(key); } catch { pair = null; }
       if (Array.isArray(pair) && pair[0] === bot.botId) nativeIds.push(binding.nativeId);
     }
+    return nativeIds;
+  }
+
+  /** 单个原生会话上是否有未完结任务/提交。 */
+  async function nativeConversationBusy(nativeId) {
+    const inspection = await harness().inspect(context);
+    return inspection.submissions.some((s) => s.conversationId === nativeId) ||
+           inspection.tasks.some((t) => t.record.conversationId === nativeId);
+  }
+
+  /** 该 Bot 全部映射会话上的原生未完结任务/提交（含 work 会话）。
+      withPluginOps=false 时不把插件自身贡献调用算作忙：同 set 的排队轮
+      不解除绑定，不需要等插件调用排空。 */
+  async function botNativeBusy(bot, { withPluginOps = true } = {}) {
+    if (withPluginOps && plugins.hasActiveExecutions(bot.botId)) return true;
+    const nativeIds = await mappedNativeIds(bot);
     if (nativeIds.length === 0) return false;
     const known = new Set(nativeIds);
-    const inspection = await h.inspect(context);
+    const inspection = await harness().inspect(context);
     return inspection.submissions.some((s) => known.has(s.conversationId)) ||
            inspection.tasks.some((t) => known.has(t.record.conversationId));
+  }
+
+  /** 驱动层新工作授予 gate：排队的用户轮优先于后台工作（queued 即为显式
+      用户优先，无需检查 phase），且本 Bot 任一原生会话仍忙（含遗留 work
+      会话上的旧执行）时不得再发 grant。仅存在 background pending 记录本身
+      不算忙/死锁——本函数只看原生活动与 Host 队列。 */
+  async function canRunWork(botId) {
+    if (closing) return false;
+    const bot = host.getBot(botId);
+    if (!bot) return false;
+    if ((await readQueue(bot.primaryConversationId))
+        .some((entry) => entry.phase !== 'cancelled')) return false;
+    return !(await botNativeBusy(bot));
   }
 
   /** 目标 set 与原子的 set 切换边界：不同 set 需全 Bot 原生空闲（含插件执行），
@@ -395,7 +478,6 @@ export function createTurnAdmission(deps) {
       }
     }
     let content = item.text;
-    let entry;
     if (attachmentMeta.length > 0) {
       const blocks = [];
       if (item.text.trim() !== '') blocks.push({ type: 'text', text: item.text });
@@ -404,12 +486,22 @@ export function createTurnAdmission(deps) {
         blocks.push({ type: 'image', data: loaded.data, mimeType: meta.mimeType });
       }
       content = blocks;
-      entry = { kind: 'host.user-message', data: { attachments: attachmentMeta } };
     }
+    // 安全轮边界：提交前把该 Bot 全部收件 scope 增量导入统一主会话，
+    // 迟到回复/群消息进入本轮上下文；导入水位在 sessions 内原子提交。
+    if (sessions) await sessions.sync(bot.botId);
+    // sync 的多个 await 期间后台工作可能已占会话：提交是最后一个 grant，
+    // 提交前必须复核会话仍空闲，busy 则保持 queued 等下次泵（提交拒忙兜底）。
+    if (await botNativeBusy(bot, { withPluginOps: false })) {
+      await setPhase(bot, item.requestId, 'queued');
+      return null;
+    }
+    const entry = sourceMessageEntry(item);
+    if (attachmentMeta.length > 0) entry.data.attachments = attachmentMeta;
     let submission;
     try {
       submission = await conversation.submit(
-        { type: 'input', content, requestId: item.requestId, whenBusy: 'reject', ...(entry ? { entry } : {}) },
+        { type: 'input', content, requestId: item.requestId, whenBusy: 'reject', entry },
         context,
       );
     } catch (err) {
@@ -539,6 +631,7 @@ export function createTurnAdmission(deps) {
         return formatted;
       }
     }
+    const origin = normalizeUserOrigin(input.origin);
     const digest = turnDigest;
     // 队列只存 id+展示元数据；提交时从盘读字节，重启/重试不丢附件、不重新产生 requestId。
     const attachmentMeta = [];
@@ -555,13 +648,14 @@ export function createTurnAdmission(deps) {
           throw errWithCode('requestId already used with different text: ' + requestId, 'REQUEST_CONFLICT');
         }
         // 已取消的受理允许同 requestId/同文显式重新受理：复活为新的 queued 条目，
-        // 旧的 cancelled 记录在同 commit 内被同一条目覆盖（身份/摘要不变）。
+        // 旧的 cancelled 记录在同 commit 内被同一条目覆盖（身份/摘要/来源随之刷新）。
         if (existing.phase === 'cancelled') {
           existing.phase = 'queued';
           existing.error = null;
           existing.admissionId = null;
           existing.setId = null;
           existing.submissionId = null;
+          existing.origin = origin;
           existing.updatedAt = now;
         } else if (existing.phase === 'failed') {
           // 同 requestId 的显式重试重新武装自动重试：耗尽的退避计数在重试时清零，
@@ -578,6 +672,7 @@ export function createTurnAdmission(deps) {
         primaryConversationId: bot.primaryConversationId,
         digest,
         text,
+        origin,
         ...(attachmentMeta.length > 0 ? { attachments: attachmentMeta } : {}),
         phase: 'queued',
         error: null,
@@ -767,11 +862,19 @@ export function createTurnAdmission(deps) {
     if (closing) return null;
     const now = Date.now();
     if ((workBackoff.get(binding.nativeId) ?? 0) > now) return null;
+    // 任何新 grant 之前先看真实 gate：排队用户轮优先、本 Bot 原生全忙
+    // （含遗留 work 会话）不发 grant；仅存在 background pending 不拦。
+    if (!(await canRunWork(bot.botId))) return null;
     const h = harness();
     const meta = await h.snapshot(WorkContextState, binding.nativeId, context);
     const state = await h.snapshot(WorkDecisionState, binding.nativeId, context);
     if (!state?.pending || state.pending.requestId !== input.requestId) return null;
     const scopeKey = 'work:' + meta.scopeId;
+    // 协调状态恒在 binding.nativeId；执行目标为 pending 记录的统一会话（缺省即遗留
+    // work 会话本体，旧 pending 在结算/取消前保持原执行目标，绝不双执行）。
+    const executionNativeId = state.pending.executionNativeId ?? binding.nativeId;
+    const unifiedExecution = state.pending.executionNativeId !== undefined &&
+                             state.pending.executionNativeId !== null;
     // Deterministic structural digest of the decision input: String(content) would collapse every
     // structured content/entry payload into '[object Object]' and void request-identity conflicts.
     const inputDigest = createHash('sha256').update(JSON.stringify({
@@ -781,6 +884,9 @@ export function createTurnAdmission(deps) {
     try {
       const admissionId = state.pending.admissionId ?? null;
       if (!admissionId) {
+        // grant 写盘前再复核 gate：snapshot 读与 prepare/confirm 之间已隔多个
+        // await，排队用户/其他原生工作可能刚好到达——发给工作的授权绝不插队。
+        if (!(await canRunWork(bot.botId))) return null;
         // 不传 knownSetId：appliedSetIds 本地缓存不证明权威就绪，且
         // prepare 快路的持久化 grant 会在忙碌等待期间钉住旧 set。
         const preparation = await centerRuntime.prepareTurn({
@@ -789,7 +895,8 @@ export function createTurnAdmission(deps) {
           scopeKey,
           inputDigest,
         });
-        if (appliedSetIds.get(bot.botId) !== preparation.setId && (await botNativeBusy(bot))) {
+        const needsSwitch = appliedSetIds.get(bot.botId) !== preparation.setId;
+        if (needsSwitch ? await botNativeBusy(bot) : await nativeConversationBusy(executionNativeId)) {
           return null; // 本 Bot 有旧 set 的原生工作在跑：保持 pending，下轮 poll 再试。
         }
         await applyPreparation(bot, preparation);
@@ -812,12 +919,26 @@ export function createTurnAdmission(deps) {
         }, context);
       } else {
         const preparation = await centerRuntime.restoreTurn({ botId: bot.botId, admissionId });
-        if (appliedSetIds.get(bot.botId) !== preparation.setId && (await botNativeBusy(bot))) {
+        if (appliedSetIds.get(bot.botId) !== preparation.setId
+            ? await botNativeBusy(bot)
+            : await nativeConversationBusy(executionNativeId)) {
           return null;
         }
         await applyPreparation(bot, preparation);
       }
-      const conversation = await h.conversation(binding.nativeId, context);
+      // 统一执行目标（primary）的提交前同步该 Bot 收件到主会话；遗留目标不导入，
+      // 保持旧 work 会话的既有上下文边界。导入失败按暂不可达退避，保持 pending。
+      if (unifiedExecution && sessions) {
+        try { await sessions.sync(bot.botId); }
+        catch {
+          workBackoff.set(binding.nativeId, Date.now() + RETRY_BASE_MS);
+          return null;
+        }
+      }
+      // 提交前最后一次 gate 复核：上述 sync/restore 全部 await 之后，排队用户
+      // 输入或原生工作可能已先到；忙即保持 pending，绝不在 grant 后硬塞 submit。
+      if (!(await canRunWork(bot.botId))) return null;
+      const conversation = await h.conversation(executionNativeId, context);
       if (!conversation) throw new Error('work conversation is missing');
       const submission = await conversation.submit(input, context);
       workBackoff.delete(binding.nativeId);
@@ -851,6 +972,7 @@ export function createTurnAdmission(deps) {
     /** 冷恢复未完成时恒为 true：禁用隐式 resume 的 SDK 路径直到下一轮成功恢复。 */
     isRecoveryPending: () => recoveryPending,
     admitWorkDecision,
+    canRunWork,
     appliedSetIds,
     close,
   };

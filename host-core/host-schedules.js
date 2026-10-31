@@ -772,7 +772,13 @@ export function createScheduleManager({ host, getRuntime, isOnline, nativeBridge
     try {
       promise =
         step.kind === 'submit'
-          ? rt.submit(botId, { requestId, text: `${SOURCE_PREFIX} ${step.run.prompt}` })
+          ? rt.submit(botId, {
+              requestId,
+              text: `${SOURCE_PREFIX} ${step.run.prompt}`,
+              // 内部计划任务是可信 host 来源输入：稳定 requestId + host 归属，
+              // 与用户私聊轮共享准入但不冒名 user。
+              origin: { sender: { kind: 'host' }, replyTo: null },
+            })
           : rt.getSubmission(botId, requestId);
     } catch (err) {
       settle(step, null, err);

@@ -11,8 +11,12 @@ function isPlainObject(value) {
   return prototype === Object.prototype || prototype === null;
 }
 
-/** 被动工作上下文：只读取定向账本、追加原文，不提交输入或启动生成。 */
-export function createWorkContextRuntime({ host, harness, context, onBound, getProfile }) {
+/** 被动工作上下文：读取定向账本，协调库只追加原文不提交输入。
+    统一主会话的全局收件导入在 runtime-bot-session（sessions.sync）做；
+    本运行时的 scope 导入只服务协调/旧执行历史，绝不推进主会话水位。 */
+export function createWorkContextRuntime({ host, harness, context, onBound, getProfile, sessions }) {
+  // sessions 依赖仅为装配对称保留；本模块不调用其主会话导入/寻源接口。
+  void sessions;
   let log = null;
   let closing = false;
   let closed = false;
@@ -109,10 +113,13 @@ export function createWorkContextRuntime({ host, harness, context, onBound, getP
       }, context);
       // 提交成功后（事务外）通知 live 附着等待中的 work watch；观察失败只停止受影响
       // watch，绝不失败/回滚已提交导入。用 Promise.resolve().then 隔离 onBound 的
-      // 同步/异步异常，仅传 {nativeId, conversationId}。
+      // 同步/异步异常，只传协调 binding {nativeId, conversationId}（公开绑定不变）。
       if (binding) {
         void Promise.resolve()
-          .then(() => onBound?.(botId, scopeId, { nativeId: binding.nativeId, conversationId: binding.conversationId }))
+          .then(() => onBound?.(botId, scopeId, {
+            nativeId: binding.nativeId,
+            conversationId: binding.conversationId,
+          }))
           .catch(() => {});
       }
       return result;

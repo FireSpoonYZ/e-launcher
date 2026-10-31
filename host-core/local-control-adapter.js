@@ -266,7 +266,10 @@ const METHOD_HANDLERS = new Map([
   ['listScopeReplicas', (control, params, signal) =>
     control.listScopeReplicas(params.scopeId, pageOptions(params, signal))],
   ['scopeHistory', (control, params, signal) =>
-    control.scopeHistory(params.scopeId, pageOptions(params, signal))],
+    control.scopeHistory(params.scopeId, {
+      ...pageOptions(params, signal),
+      ...(params.order !== undefined ? { order: params.order } : {}),
+    })],
   ['getScopeMessage', (control, params, signal) => control.getScopeMessage(params.scopeId, params.messageId, { signal })],
   ['getScopeMessageDelivery', (control, params, signal) =>
     control.getScopeMessageDelivery(params.scopeId, params.messageId, { signal })],

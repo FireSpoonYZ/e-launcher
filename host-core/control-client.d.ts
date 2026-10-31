@@ -45,7 +45,8 @@ import type {
   MemoryCorrectionReceipt,
   MemoryRetryInput,
   MemoryReceipt,
-  MessageCursor,
+  MessageHistoryCursor,
+  ScopeHistoryOptions,
   MessageHistoryPage,
   MessageDeliveryStatus,
   ModelCatalog,
@@ -109,10 +110,7 @@ export interface ReplicaListClientOptions extends ReplicaListOptions {
   signal?: AbortSignal;
 }
 
-export interface ScopeHistoryClientOptions extends ControlClientCallOptions {
-  limit?: number;
-  cursor?: MessageCursor | null;
-}
+export interface ScopeHistoryClientOptions extends ControlClientCallOptions, ScopeHistoryOptions {}
 
 export interface ControlClient {
   validateCenterProvider(input: CenterProviderProbe, options?: ControlClientCallOptions): Promise<import('../center-contract/index.js').ProviderCheckResult>;

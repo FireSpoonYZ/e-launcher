@@ -7,7 +7,7 @@
 // The unified Shower six (status/create/frame/input/takeover/release) are also
 // additive v2 and normalize through shower-protocol so every platform agrees.
 
-import { messageError, assertId, normalizePageOptions } from './message-protocol.js';
+import { messageError, assertId, normalizeScopeHistoryOptions } from './message-protocol.js';
 import {
   normalizeScopeListOptions,
   normalizeScopeCreate,
@@ -521,9 +521,12 @@ function normalizeControlParams(method, params) {
       return { scopeId: params.scopeId, ...normalizeReplicaListOptions({ limit: params.limit, cursor: params.cursor }) };
     }
     case 'scopeHistory': {
-      rejectUnknownFields(params, new Set(['scopeId', 'limit', 'cursor']), 'params');
+      rejectUnknownFields(params, new Set(['scopeId', 'limit', 'cursor', 'order']), 'params');
       assertId(params.scopeId, 'scopeId');
-      return { scopeId: params.scopeId, ...normalizePageOptions({ limit: params.limit, cursor: params.cursor }) };
+      return {
+        scopeId: params.scopeId,
+        ...normalizeScopeHistoryOptions({ limit: params.limit, cursor: params.cursor, order: params.order }),
+      };
     }
     case 'getScopeMessage':
     case 'getScopeMessageDelivery': {

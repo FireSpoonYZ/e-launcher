@@ -43,7 +43,55 @@ const STATE_KEYS = new Set([
   'queuedCount',
   'turnAdmission',
 ]);
-const HISTORY_ITEM_KEYS = new Set(['id', 'kind', 'messages']);
+const HISTORY_ITEM_KEYS = new Set(['id', 'kind', 'messages', 'attribution']);
+// Live attribution is already a safe projection (Host-side whitelist + bounds in
+// runtime-live-projection); validate the exact shape here so a forged Host cannot
+// attach arbitrary metadata to history items.
+const ATTRIBUTION_KEYS = new Set([
+  'kind', 'botId', 'deviceId', 'name', 'channel', 'scopeId',
+  'messageId', 'replyTo', 'rootId', 'category', 'direction', 'createdAt',
+]);
+const ATTRIBUTION_KINDS = new Set(['user', 'bot', 'host']);
+const ATTRIBUTION_CHANNELS = new Set(['primary', 'dm', 'room']);
+const ATTRIBUTION_CATEGORIES = new Set(['public', 'notice', 'request', 'reply']);
+const ATTRIBUTION_DIRECTIONS = new Set(['incoming', 'outgoing']);
+const ATTRIBUTION_STRING_KEYS = new Set([
+  'botId', 'deviceId', 'name', 'scopeId', 'messageId', 'replyTo', 'rootId', 'createdAt',
+]);
+const MAX_ATTRIBUTION_CHARS = 256;
+
+function normalizeLiveAttribution(value) {
+  if (!isPlainObject(value)) throw invalid('history item attribution must be a plain object');
+  rejectUnknownFields(value, ATTRIBUTION_KEYS, 'history item attribution');
+  if (!ATTRIBUTION_KINDS.has(value.kind)) {
+    throw invalid("attribution kind must be 'user', 'bot' or 'host'");
+  }
+  if (!ATTRIBUTION_CHANNELS.has(value.channel)) {
+    throw invalid("attribution channel must be 'primary', 'dm' or 'room'");
+  }
+  const out = { kind: value.kind, channel: value.channel };
+  for (const key of ATTRIBUTION_STRING_KEYS) {
+    if (value[key] === undefined) continue;
+    assertText(value[key], 'attribution ' + key);
+    if (value[key].length > MAX_ATTRIBUTION_CHARS) {
+      throw invalid('attribution ' + key + ' exceeds the bound');
+    }
+    out[key] = value[key];
+  }
+  if (value.category !== undefined) {
+    if (!ATTRIBUTION_CATEGORIES.has(value.category)) {
+      throw invalid("attribution category must be 'public', 'notice', 'request' or 'reply'");
+    }
+    out.category = value.category;
+  }
+  if (value.direction !== undefined) {
+    if (!ATTRIBUTION_DIRECTIONS.has(value.direction)) {
+      throw invalid("attribution direction must be 'incoming' or 'outgoing'");
+    }
+    out.direction = value.direction;
+  }
+  return out;
+}
 const MESSAGE_KEYS = new Set([
   'role',
   'text',
@@ -160,6 +208,9 @@ function normalizeLiveState(state) {
     rejectUnknownFields(item, HISTORY_ITEM_KEYS, 'history item');
     assertNonNegativeSafeInteger(item.id, 'history item id');
     assertText(item.kind, 'history item kind');
+    if (item.attribution !== undefined && item.attribution !== null) {
+      item.attribution = normalizeLiveAttribution(item.attribution);
+    }
     if (!Array.isArray(item.messages)) throw invalid('history item messages must be an array');
     for (const message of item.messages) {
       if (!isPlainObject(message)) throw invalid('history messages must be plain objects');
@@ -196,9 +247,12 @@ function normalizeLiveState(state) {
   if (state.lastEntryId !== null) assertNonNegativeSafeInteger(state.lastEntryId, 'state.lastEntryId');
   if (state.generation !== null) {
     if (!isPlainObject(state.generation)) throw invalid('state.generation must be null or a plain object');
-    rejectUnknownFields(state.generation, new Set(['text', 'truncated']), 'generation');
+    rejectUnknownFields(state.generation, new Set(['text', 'truncated', 'attribution']), 'generation');
     assertText(state.generation.text, 'generation text');
     if (typeof state.generation.truncated !== 'boolean') throw invalid('generation truncated must be a boolean');
+    if (state.generation.attribution !== undefined && state.generation.attribution !== null) {
+      state.generation.attribution = normalizeLiveAttribution(state.generation.attribution);
+    }
   }
   if (!Array.isArray(state.tools)) throw invalid('state.tools must be an array');
   for (const tool of state.tools) {

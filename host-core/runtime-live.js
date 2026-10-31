@@ -5,6 +5,7 @@
 // 中间不 await，避免漏掉此间的 commit。
 import { BACKGROUND_CONTEXT, withAbortSignal } from '@earendil-works/chord/context';
 import { getPrimaryConversation } from './runtime-docs.js';
+import { BotSessionState } from './bot-session-context.js';
 import { emptyLiveState, projectLiveState, diffLiveState } from './runtime-live-projection.js';
 
 const CTX = BACKGROUND_CONTEXT;
@@ -139,6 +140,14 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext }) {
       removeAbort: null,
       forceFrame: false, // work 绑定后即使状态未变化也强制发一帧快照
       conversationId: work ? null : bot.primaryConversationId,
+      // 该 watch 绑定的 native 会话 id（装载归属 doc 用）；与公开 conversationId 区分。
+      nativeId: null,
+      // 归属快照与待投影视图：单飞行装载循环只对最新 pendingView 取已提交
+      // BotSessionState 快照后投影；首个快照落地前不发布任何帧——
+      // 不先把无来源的 peer 正文当作用户消息推给客户端。
+      sessionState: null,
+      pendingView: null,
+      attributionLoad: null,
     };
     state.closed = new Promise((resolve) => { state.settleEnd = resolve; });
 
@@ -241,12 +250,51 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext }) {
       return shutdown('stopped');
     }
 
-    // 原生 watcher 回调：同步投影+入队，立即返回，不调用 Session API/commit。
+    // 原生 watcher 回调：只保存最新 view 并保证有且仅有一个归属装载在飞；
+    // 同步返回，不调用 Session API/commit。attach 的 native.value/start 之间不 await。
     function onView(view) {
       if (state.endReason !== null) return;
+      state.pendingView = view;
+      if (state.attributionLoad === null) {
+        const task = processAttribution();
+        state.attributionLoad = task;
+        track(task);
+      }
+    }
+
+    // 单飞行归属装载：对最新 pendingView 先取已提交的 BotSessionState 快照再投影，
+    // 保证生成/peer 条目的归属索引覆盖被投影的 view。快照期间到达的新 view 只保留
+    // 最新一份，loop 再取一次快照覆盖它（新快照可归属旧帧，反向不行）。
+    // 快照失败停在原地——下一次 view 重新进入装载；不在 finally 里立即重试。
+    async function processAttribution() {
+      try {
+        while (state.endReason === null) {
+          const view = state.pendingView;
+          if (view === null || state.nativeId === null) return;
+          let doc;
+          try {
+            doc = await getHarness().snapshot(BotSessionState, state.nativeId, CTX);
+          } catch {
+            return; // 等下一次 view 重试；Session 失败由 native.closed 收尾
+          }
+          if (state.endReason !== null) return;
+          state.sessionState = doc ?? null;
+          if (state.pendingView === view) {
+            state.pendingView = null;
+            publishView(view);
+          }
+          // pendingView 在 await 期间被替换：回到循环为最新 view 重取快照。
+        }
+      } finally {
+        state.attributionLoad = null;
+      }
+    }
+
+    // 用已装载的归属快照投影并投递一帧（diff 与原串行泵一致）。
+    function publishView(view) {
       let next;
       try {
-        next = projectLiveState(view);
+        next = projectLiveState(view, state.sessionState);
         state.inboxQueued = next.queuedCount;
         if (!work) next = withTurnAdmission(next, admissionByBot.get(botId) ?? null);
       } catch (err) {
@@ -299,7 +347,8 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext }) {
         state.seq++;
         state.forceFrame = true;
       }
-      // SDK start 不投初始值：先同步投影 native.value 再立即 start，中间不 await，不漏 commit。
+      // SDK start 不投初始值：登记归属装载（异步）后立即 start，中间不 await，不漏 commit。
+      state.nativeId = conversation.id;
       onView(native.value);
       if (work && state.forceFrame) {
         state.dirty = true;

@@ -63,6 +63,10 @@ interface AppState {
   identity: DesktopIdentity | null;
   transportConnected: boolean;
   view: 'chat' | 'scopes' | 'pending';
+  /** 「Bot 通信」导航预填：App 保留选择并传给 Scopes（initialBotId/initialScopeId）。 */
+  commsNav: { botId: string; scopeId?: string; deviceId: string } | null;
+  /** Scopes onOpenBot → chats 导航目标：稳定 botId + deviceId（同名 Bot 靠 ID 区分）。 */
+  chatsNav: { botId: string; deviceId: string } | null;
   token: string;
   ca: string;
   form: ProfileFormState;
@@ -199,6 +203,8 @@ class App extends Component<AppProps, AppState> {
       identity: null,
       transportConnected: false,
       view: 'chat',
+      commsNav: null,
+      chatsNav: null,
       token: '',
       ca: '',
       form: { title: '', kind: 'local', url: '', expectedDeviceId: '', deviceId: '' },
@@ -550,7 +556,7 @@ class App extends Component<AppProps, AppState> {
             {(
               [
                 { key: 'chat', label: '对话', Icon: MessageSquare },
-                { key: 'scopes', label: '群聊', Icon: Users },
+                { key: 'scopes', label: 'Bot 通信', Icon: Users },
                 { key: 'pending', label: '待发', Icon: FolderInput },
               ] as const
             ).map(({ key, label, Icon }) => (
@@ -558,7 +564,7 @@ class App extends Component<AppProps, AppState> {
                 key={key}
                 type="button"
                 className={'rail-item' + (this.state.view === key ? ' active' : '')}
-                onClick={() => this.setState({ view: key })}
+                onClick={() => this.setState({ view: key, commsNav: null, chatsNav: null })}
                 aria-pressed={this.state.view === key}
               >
                 <Icon size={18} aria-hidden />
@@ -712,6 +718,26 @@ class App extends Component<AppProps, AppState> {
     );
   }
 
+  private openCommunications = (botId: string, scopeId?: string, deviceId?: string): void => {
+    if (!deviceId) return;
+    this.setState({
+      view: 'scopes',
+      selectedDeviceId: deviceId,
+      commsNav: { botId, scopeId, deviceId },
+      chatsNav: null,
+    });
+  };
+
+  /** Scopes 面板的「打开 Bot 主聊」：导航回 chats 视图并定位到稳定 botId/deviceId。 */
+  private openBotChat = (botId: string, deviceId: string): void => {
+    this.setState({
+      view: 'chat',
+      selectedDeviceId: deviceId,
+      chatsNav: { botId, deviceId },
+      commsNav: null,
+    });
+  };
+
   private renderWorkspace(): ReactNode {
     const view = this.state.view;
     const api = this.props.api;
@@ -720,8 +746,23 @@ class App extends Component<AppProps, AppState> {
     const pageActive = this.props.pageActive !== false;
     const snapshot = api.snapshot;
     if (!identity || !snapshot) return <div className="empty-state">请先连接 Host 或中继（左下角「设置」）。</div>;
-    if (view === 'chat') return <BotChats api={api} pageActive={pageActive} />;
-    const deviceId = this.state.selectedDeviceId;
+    if (view === 'chat') {
+      const nav = this.state.chatsNav;
+      return (
+        <BotChats
+          api={api}
+          pageActive={pageActive}
+          onOpenCommunications={this.openCommunications}
+          initialBotId={nav?.botId}
+          initialDeviceId={nav?.deviceId}
+        />
+      );
+    }
+    const deviceId =
+      view === 'scopes' && this.state.commsNav?.deviceId
+        ? this.state.commsNav.deviceId
+        : this.state.selectedDeviceId;
+    const commsNav = view === 'scopes' ? this.state.commsNav : null;
     if (!deviceId) return <div className="empty-state">请选择目标设备。</div>;
     const key = identity.profileId + '|' + identity.kind + '|' + identity.generation + '|' + deviceId;
     if (this.scopedKey !== key) {
@@ -733,7 +774,14 @@ class App extends Component<AppProps, AppState> {
         {view === 'pending' ? (
           <PendingPanel key={key} api={api} identity={this.scopedApi!.identity} transportConnected={transportConnected} />
         ) : (
-          <Scopes key={key} api={this.scopedApi!} pageActive={pageActive} />
+          <Scopes
+            key={key}
+            api={this.scopedApi!}
+            pageActive={pageActive}
+            initialBotId={commsNav?.botId}
+            initialScopeId={commsNav?.scopeId}
+            onOpenBot={this.openBotChat}
+          />
         )}
       </div>
     );

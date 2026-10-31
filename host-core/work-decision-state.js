@@ -10,6 +10,31 @@ export function initialDecisionState() {
   };
 }
 
+// 冻结轮来源（data.turn 同一形状）：executionNativeId 指向统一主会话执行目标；
+// binding.nativeId 仍是协调/旧历史 ID，绝不互相替换。缺省字段兼容旧 pending。
+export function toFrozenTurn(turn) {
+  if (typeof turn !== 'object' || turn === null) return null;
+  return {
+    requestId: turn.requestId,
+    taskId: turn.taskId ?? null,
+    kind: turn.kind,
+    scopeId: turn.scopeId ?? null,
+    ...(turn.botId !== undefined ? { botId: turn.botId } : {}),
+    ...(turn.deviceId !== undefined ? { deviceId: turn.deviceId } : {}),
+    ...(turn.workNativeId !== undefined ? { workNativeId: turn.workNativeId } : {}),
+    ...(turn.triggerMessageId !== undefined ? { triggerMessageId: turn.triggerMessageId } : {}),
+    // 同批全部触发消息 ID（多请求合并时不止最后一个），供 codec/UI 归属。
+    ...(Array.isArray(turn.triggerMessageIds) ? { triggerMessageIds: [...turn.triggerMessageIds] } : {}),
+    ...(turn.replyTo !== undefined ? { replyTo: turn.replyTo } : {}),
+    ...(turn.rootId !== undefined ? { rootId: turn.rootId } : {}),
+    // 迟到回复恢复时的原始请求 messageId；与 codec 的 turn.originRequestId 同字段。
+    ...(turn.originRequestId !== undefined ? { originRequestId: turn.originRequestId } : {}),
+    sender: turn.sender ?? null,
+    replyTarget: turn.replyTarget ?? null,
+    frozenAt: turn.frozenAt ?? new Date().toISOString(),
+  };
+}
+
 export const WorkDecisionState = defineDoc({
   kind: 'host.work-decision',
   version: 1,
@@ -19,6 +44,9 @@ export const WorkDecisionState = defineDoc({
   initial: initialDecisionState,
   checkpointWhen: () => false,
 });
+
+// 已删除的 host.work-stop 代次文档：作用域取消只靠 pending requestId/submissionId 精准
+// 中止（abortRequestFamily），不需要会话级额外文档，绝不中止无关共享轮。
 
 /** 传入 tx.doc 草稿时须在 commit 内调用，逐字段复制，不能带出已结算的 overlay。 */
 export function toWorkActivity(botId, scopeId, meta, state, isMember) {
@@ -48,6 +76,10 @@ export function toWorkActivity(botId, scopeId, meta, state, isMember) {
       submissionId: pending.submissionId,
       startedAt: pending.startedAt,
       preparedThroughLocalId: pending.prepared?.throughLocalId ?? null,
+      // 统一执行的会话指针是内部实现细节，不在活动对外输出中暴露。
+      ...(pending.executionConversationId !== undefined && pending.executionConversationId !== null
+        ? { executionConversationId: pending.executionConversationId }
+        : {}),
     },
     lastDecision: lastDecision === null ? null : {
       requestId: lastDecision.requestId,

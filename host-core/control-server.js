@@ -304,6 +304,12 @@ async function dispatch(host, runtime, authorize, req, res, ctx) {
     '/v1/bot-requests/:requestId', '/v1/bots/:botId/history', '/v1/bots/:botId/live',
     // 只读读取已上传图片：中心离线时草稿/历史仍可展示既有附件。
     '/v1/bots/:botId/attachments/:attachmentId',
+    // 被动 scope 只读浏览：与 runtime proxy offlineMethods 同一批纯账本读，
+    // 不写、不推理（createScope/updateScopeMembers/publishUserMessage 仍受 Center 门禁）。
+    '/v1/scopes', '/v1/scopes/:scopeKey', '/v1/scopes/:scopeKey/history',
+    '/v1/scopes/:scopeKey/messages/:messageKey',
+    '/v1/scopes/:scopeKey/messages/:messageKey/delivery',
+    '/v1/scopes/:scopeKey/replicas',
   ]);
   if (centerStatus && centerStatus.state !== 'ready' && !OFFLINE_ALLOWED.has(match.route.key)) {
     throw new ControlHttpError(503, 'CENTER_OFFLINE', 'center is not ready');
@@ -628,7 +634,17 @@ async function workLive(host, runtime, params, body, req, res) {
 }
 
 async function scopeHistory(host, runtime, params, body, req, res) {
-  const options = parseScopeQuery(new URL(req.url, 'http://' + BIND_HOST).searchParams, ['limit', 'cursor']);
+  const options = parseScopeQuery(
+    new URL(req.url, 'http://' + BIND_HOST).searchParams,
+    ['limit', 'cursor', 'order']
+  );
+  if (options.order !== undefined) {
+    if (options.order !== 'ascending' && options.order !== 'descending') {
+      throw new ControlHttpError(400, 'INVALID_ARGUMENT', "order must be 'ascending' or 'descending'");
+    }
+  } else {
+    delete options.order;
+  }
   writeControlJson(res, 200, await runtime.scopeHistory(workScopeId(params.scopeKey), options));
 }
 
@@ -807,6 +823,8 @@ function parseScopeQuery(searchParams, allowed) {
         throw new ControlHttpError(400, 'INVALID_ARGUMENT', 'limit must be a positive decimal integer');
       }
       options.limit = Number(value);
+    } else if (key === 'order') {
+      options.order = value;
     } else {
       try {
         options.cursor = JSON.parse(value);

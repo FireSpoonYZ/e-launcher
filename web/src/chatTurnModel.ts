@@ -1,5 +1,25 @@
 import type { ImageAttachment } from '../../host-core/index.js';
 
+/**
+ * Unified Bot session UI attribution (contract: safe projection of backend
+ * data.attribution / live item.attribution). Names are display only; IDs are
+ * the stable identity. Never carry native control IDs, tool params or credentials.
+ */
+export interface MessageAttribution {
+  kind: 'user' | 'bot' | 'host';
+  botId?: string;
+  deviceId?: string;
+  name?: string;
+  channel: 'primary' | 'dm' | 'room';
+  scopeId?: string;
+  messageId?: string;
+  replyTo?: string;
+  rootId?: string;
+  category?: 'public' | 'notice' | 'request' | 'reply';
+  direction?: 'incoming' | 'outgoing';
+  createdAt?: string;
+}
+
 export interface ChatToolCallItem {
   id: string;
   name: string;
@@ -34,12 +54,20 @@ export interface ChatTurn {
   durationMs?: number;
   isStreaming?: boolean;
   createdAt?: string;
+  /** 该轮真实来源（用户/对端 Bot/Host 触发器、DM/群聊/主聊、原始 messageId/replyTo）。 */
+  attribution?: MessageAttribution;
+  /** assistant 轮：本轮生成源自 dm/room 触发（协作过程文本，不是投递给用户的消息）。 */
+  collaborative?: boolean;
 }
 
 export interface ParseHistoryOptions {
   liveTools?: Array<Record<string, unknown>>;
   isBusy?: boolean;
   liveGeneratingText?: string;
+  /** 当前 Bot 的 botId：用于区分 self echo（outgoing）与对端消息（incoming）。 */
+  selfBotId?: string;
+  /** 仍在生成的 live 轮的 attribution（LiveGeneration.attribution），仅套用到流式活轮。 */
+  liveAttribution?: MessageAttribution;
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -222,6 +250,9 @@ export function formatWorkingElapsed(seconds: number): string {
 }
 
 interface AssistantTurnAccumulator {
+  /** 该累积轮所属来源（attribution 身份序列化）；同一轮工具链跨条目只认同来源，
+   *  不同触发/频道的生成绝不合并。无归属条目同为 ''，沿用原有连续合并。 */
+  originKey: string;
   turn: ChatTurn;
   textParts: string[];
   thinkingParts: string[];
@@ -230,6 +261,138 @@ interface AssistantTurnAccumulator {
   startMs?: number;
   endMs?: number;
   sumDurationMs: number;
+}
+
+const ATTRIBUTION_KINDS = new Set(['user', 'bot', 'host']);
+const ATTRIBUTION_CHANNELS = new Set(['primary', 'dm', 'room']);
+const ATTRIBUTION_CATEGORIES = new Set(['public', 'notice', 'request', 'reply']);
+const ATTRIBUTION_DIRECTIONS = new Set(['incoming', 'outgoing']);
+
+function readString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() !== '' ? value : undefined;
+}
+
+/**
+ * 宽容读取共享 UI attribution schema：未知/非法值返回 undefined（不渲染徽标），
+ * 绝不从文本推断来源，也不读取信封之外的字段。
+ */
+export function normalizeAttribution(value: unknown): MessageAttribution | undefined {
+  const raw = asRecord(value);
+  const kind = typeof raw.kind === 'string' ? raw.kind : '';
+  const channel = typeof raw.channel === 'string' ? raw.channel : '';
+  if (!ATTRIBUTION_KINDS.has(kind) || !ATTRIBUTION_CHANNELS.has(channel)) return undefined;
+  const out: MessageAttribution = {
+    kind: kind as MessageAttribution['kind'],
+    channel: channel as MessageAttribution['channel'],
+  };
+  const botId = readString(raw.botId);
+  if (botId !== undefined) out.botId = botId;
+  const deviceId = readString(raw.deviceId);
+  if (deviceId !== undefined) out.deviceId = deviceId;
+  const name = readString(raw.name);
+  if (name !== undefined) out.name = name;
+  const scopeId = readString(raw.scopeId);
+  if (scopeId !== undefined) out.scopeId = scopeId;
+  const messageId = readString(raw.messageId);
+  if (messageId !== undefined) out.messageId = messageId;
+  const replyTo = readString(raw.replyTo);
+  if (replyTo !== undefined) out.replyTo = replyTo;
+  const rootId = readString(raw.rootId);
+  if (rootId !== undefined) out.rootId = rootId;
+  const category = typeof raw.category === 'string' && ATTRIBUTION_CATEGORIES.has(raw.category)
+    ? (raw.category as MessageAttribution['category'])
+    : undefined;
+  if (category !== undefined) out.category = category;
+  const direction = typeof raw.direction === 'string' && ATTRIBUTION_DIRECTIONS.has(raw.direction)
+    ? (raw.direction as MessageAttribution['direction'])
+    : undefined;
+  if (direction !== undefined) out.direction = direction;
+  const createdAt = readString(raw.createdAt);
+  if (createdAt !== undefined) out.createdAt = createdAt;
+  return out;
+}
+
+/**
+ * 从 ledger 信封推导 attribution（host.scope-message 等导入条目的 data.message）。
+ * 方向相对本 Bot：author.kind === 'bot' 且 botId === selfBotId 视为 outgoing（self echo），
+ * 否则 incoming；author.kind === 'user' 是用户消息（普通群聊人类发言），kind 'user'。
+ * 无法确定方向时省略 direction（显示层按 incoming 处理）。
+ */
+function attributionFromEnvelope(
+  envelope: Record<string, unknown>,
+  scopeKind: string,
+  selfBotId: string | undefined,
+): MessageAttribution | undefined {
+  const author = asRecord(envelope.author);
+  const authorKind = typeof author.kind === 'string' ? author.kind : '';
+  const channel = ATTRIBUTION_CHANNELS.has(scopeKind) ? (scopeKind as MessageAttribution['channel']) : undefined;
+  if (!channel) return undefined;
+  const kind: MessageAttribution['kind'] =
+    authorKind === 'user' ? 'user' : authorKind === 'bot' ? 'bot' : 'host';
+  const botId = kind === 'bot' ? readString(author.botId) : undefined;
+  const sourceDeviceId = readString(envelope.sourceDeviceId);
+  const scopeId = readString(envelope.scopeId);
+  const messageId = readString(envelope.messageId);
+  const replyTo = readString(envelope.replyTo);
+  const rootId = readString(envelope.rootId);
+  const createdAt = readString(envelope.createdAt);
+  const category = typeof envelope.category === 'string' && ATTRIBUTION_CATEGORIES.has(envelope.category)
+    ? (envelope.category as MessageAttribution['category'])
+    : undefined;
+  return {
+    kind,
+    channel,
+    ...(botId !== undefined ? { botId } : {}),
+    ...(sourceDeviceId !== undefined ? { deviceId: sourceDeviceId } : {}),
+    ...(scopeId !== undefined ? { scopeId } : {}),
+    ...(messageId !== undefined ? { messageId } : {}),
+    ...(replyTo !== undefined ? { replyTo } : {}),
+    ...(rootId !== undefined ? { rootId } : {}),
+    ...(category !== undefined ? { category } : {}),
+    direction: selfBotId !== undefined && botId !== undefined && botId === selfBotId ? 'outgoing' : 'incoming',
+    ...(createdAt !== undefined ? { createdAt } : {}),
+  };
+}
+
+/**
+ * 轮次归属的稳定身份键：kind/channel/scopeId/botId/deviceId/replyTo。
+ * 同一触发生成跨条目（工具/续写）的归属完全相同；不同触发的 replyTo
+ * （triggerMessageId）不同，天然分轮。name/messageId/createdAt 不参与，
+ * 避免同轮内次要字段差异拆轮。
+ */
+function attributionKey(a: MessageAttribution): string {
+  return [a.kind, a.channel, a.scopeId ?? '', a.botId ?? '', a.deviceId ?? '', a.replyTo ?? ''].join('|');
+}
+
+/**
+ * 单条目的安全 attribution：优先使用后端已规范化的 data.attribution；
+ * 缺失时从 data.message（host.scope-message 的信封）派生，二者合并时
+ * data.attribution 的显式字段优先，信封补齐缺失字段，不丢元数据。
+ * selfBotId 传入当前 Bot 的 botId 以区分方向（self echo → outgoing）。
+ */
+export function entryAttribution(
+  item: Record<string, unknown>,
+  selfBotId?: string,
+): MessageAttribution | undefined {
+  const data = asRecord(item.data);
+  // raw 历史条目：data.attribution；live 投影条目：item.attribution（同 schema）。
+  // raw 覆盖 live（外层同 id 去重已做），这里只认该条目自身携带的一份。
+  const projected =
+    normalizeAttribution(data.attribution) ?? normalizeAttribution(item.attribution);
+  const envelope = asRecord(data.message);
+  // host.scope-message 条目 data.scopeKind 为 'dm'|'room'；其它 kind 下无信封。
+  const scopeKind = readString(data.scopeKind);
+  const derived =
+    Object.keys(envelope).length > 0
+      ? attributionFromEnvelope(envelope, scopeKind ?? '', selfBotId)
+      : undefined;
+  if (projected && derived) {
+    // 合并：后端投影显式给出的字段优先；信封仅补其缺失字段。
+    const merged: MessageAttribution = { ...derived, ...projected };
+    return merged;
+  }
+  const single = projected ?? derived;
+  return single;
 }
 
 export function parseHistoryEntries(
@@ -241,7 +404,18 @@ export function parseHistoryEntries(
   let activeUserStartMs: number | undefined;
   let currentAssistant: AssistantTurnAccumulator | null = null;
 
-  const ensureAssistant = (id: string, numericId: number, fallbackStartMs?: number): AssistantTurnAccumulator => {
+  const ensureAssistant = (id: string, numericId: number, fallbackStartMs?: number, attribution?: MessageAttribution): AssistantTurnAccumulator => {
+    // 来源检查在此处闭合内完成：仅当新旧条目都带实际归属且归属不同时才终结上轮，
+    // 缺归属（''）的条目继续并入当前轮，同一轮工具链跨条目不拆。
+    const nextOrigin = attribution ? attributionKey(attribution) : '';
+    if (
+      currentAssistant &&
+      nextOrigin !== '' &&
+      currentAssistant.originKey !== '' &&
+      nextOrigin !== currentAssistant.originKey
+    ) {
+      finalizeCurrentAssistant(false);
+    }
     if (currentAssistant) return currentAssistant;
     const startMs = activeUserStartMs ?? fallbackStartMs;
     const turn: ChatTurn = {
@@ -250,9 +424,11 @@ export function parseHistoryEntries(
       entryId: Number.isFinite(numericId) ? numericId : 0,
       text: '',
       startedAt: startMs,
+      ...(attribution ? { attribution } : {}),
     };
     turns.push(turn);
     currentAssistant = {
+      originKey: attribution ? attributionKey(attribution) : '',
       turn,
       textParts: [],
       thinkingParts: [],
@@ -292,12 +468,26 @@ export function parseHistoryEntries(
     acc.turn.toolSummary = acc.tools.length > 0 ? acc.tools.map((tool) => tool.name) : undefined;
   };
 
+  const selfBotId = typeof options?.selfBotId === 'string' ? options.selfBotId : undefined;
+
   for (let i = 0; i < items.length; i++) {
     const item = items[i];
     const numericId = typeof item.id === 'number' ? item.id : Number(item.id);
+    const itemAttr = entryAttribution(item, selfBotId);
     if (clearedAfterEntryId > 0 && Number.isFinite(numericId) && numericId <= clearedAfterEntryId) {
       continue;
     }
+    // Host 工作触发器是内部触发记录，不是人类气泡：不渲染为轮次，但它是
+    // 明确的轮边界——此前的助手累积轮在此终结，下一轮触发（不同 requestId/来源）
+    // 产生的生成文本绝不并入上一条回答。
+    if (item.kind === 'host.work-trigger') {
+      finalizeCurrentAssistant(false);
+      continue;
+    }
+    // host.scope-message 导入条目的 model 文本是 JSON 序列化来源标签；
+    // 渲染用保留的原始信封正文，来源信息由 attribution 徽标呈现。
+    const envelope = item.kind === 'host.scope-message' ? asRecord(asRecord(item.data).message) : {};
+    const envelopeText = typeof envelope.text === 'string' ? envelope.text : '';
     // raw 条目用 model 块（含工具/思考）；Host live 投影条目有 messages:[{role,text,truncated,toolCalls,timestamp,durationMs}]。
     // host.user-message 的图片附件元数据在条目级 data.attachments（不在单个 message 上）。
     const entryAttachments = readMessageAttachments(asRecord(item.data).attachments);
@@ -338,7 +528,7 @@ export function parseHistoryEntries(
             }
           }
         }
-        const joinedText = textParts.join('\n').trim();
+        const joinedText = (envelopeText || textParts.join('\n')).trim();
         if (!joinedText && attachments.length === 0) continue;
 
         finalizeCurrentAssistant(false);
@@ -350,6 +540,7 @@ export function parseHistoryEntries(
           text: joinedText,
           ...(attachments.length > 0 ? { attachments } : {}),
           startedAt: msgTimestamp,
+          ...(itemAttr ? { attribution: itemAttr } : {}),
         });
         continue;
       }
@@ -416,7 +607,8 @@ export function parseHistoryEntries(
           continue;
         }
 
-        const acc = ensureAssistant(`${String(item.id ?? i)}-${mIdx}`, numericId, msgTimestamp);
+        const acc = ensureAssistant(`${String(item.id ?? i)}-${mIdx}`, numericId, msgTimestamp, itemAttr);
+        if (itemAttr && itemAttr.channel !== 'primary') acc.turn.collaborative = true;
         if (Number.isFinite(numericId) && numericId > acc.turn.entryId) {
           acc.turn.entryId = numericId;
         }
@@ -500,7 +692,7 @@ export function parseHistoryEntries(
 
         const fallbackStart =
           msgTimestamp !== undefined ? Math.max(0, msgTimestamp - (msgDurationMs ?? 0)) : undefined;
-        const acc = ensureAssistant(`${String(item.id ?? i)}-${mIdx}`, numericId, fallbackStart);
+        const acc = ensureAssistant(`${String(item.id ?? i)}-${mIdx}`, numericId, fallbackStart, itemAttr);
         if (Number.isFinite(numericId) && numericId > acc.turn.entryId) {
           acc.turn.entryId = numericId;
         }
@@ -553,7 +745,11 @@ export function parseHistoryEntries(
   let activeAcc: AssistantTurnAccumulator | null = currentAssistant;
   if (isBusy && (liveTools.length > 0 || streamingText !== '') && !activeAcc) {
     const lastEntryId = turns.at(-1)?.entryId ?? 0;
-    activeAcc = ensureAssistant('live-assistant', lastEntryId + 0.5, activeUserStartMs);
+    activeAcc = ensureAssistant('live-assistant', lastEntryId + 0.5, activeUserStartMs, options?.liveAttribution);
+  }
+  // 流式活轮的归属来自 LiveGeneration.attribution：dm/room 触发的生成同样是协作过程。
+  if (activeAcc && options?.liveAttribution && options.liveAttribution.channel !== 'primary') {
+    activeAcc.turn.collaborative = true;
   }
 
   if (activeAcc && isBusy) {

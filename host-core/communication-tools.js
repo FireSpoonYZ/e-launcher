@@ -110,7 +110,7 @@ function replyPage(identity, page, status) {
   return previewPage(metadata, page, 'reply:' + digest([identity.botId, page.requestMessageId]));
 }
 
-export function createCommunicationTools({ host, getHarness, getMessageLog, publishWork, collaboration }) {
+export function createCommunicationTools({ host, getHarness, getMessageLog, publishWork, collaboration, sessions }) {
   function tool({ name, description, properties, required = [], deferred, run }) {
     return defineTool({
       name,
@@ -166,12 +166,20 @@ export function createCommunicationTools({ host, getHarness, getMessageLog, publ
       text: args.text,
       replyTo: args.replyTo,
     };
-    const stored = identity.scopeId !== null
-      ? await publishWork(publication, api, context)
+    // 统一主会话下，工作来源由冻结 turn 判定；旧原生工作会话仍按会话身份走同一路径。
+    const turn = await sessions.getTurn(api, context);
+    // 冻结路由是默认回复去向而非目标白名单：显式寻址的跨 scope DM 请求/通知合法，
+    // 目标成员资格与作者校验由账本承担；只有源自工作决策的轮（带 workNativeId）才把
+    // 原始轮传给 driver，由其工作 scope 做 stale-source/成员/预算门禁。
+    const workTurn = turn !== null && typeof turn.workNativeId === 'number';
+    const stored = workTurn || identity.scopeId !== null
+      ? await publishWork(publication, api, context, turn)
       : await api.commit(() => {
           context.abortSignal?.throwIfAborted();
           return log.publish(publication);
         }, context);
+    // 记录本 Bot 原始 request 的来源 replyTarget：迟到回复据此回流原请求上下文（重放安全）。
+    if (publication.category === 'request') await sessions.recordOutgoing(api, stored, context);
     const message = stored.message;
     return {
       messageId: message.messageId,
@@ -567,10 +575,12 @@ export function createCommunicationTools({ host, getHarness, getMessageLog, publ
       description: 'Read counterpart replies directly linked to this Bot\'s original DM requestMessageId. Returns previews and a continuation cursor; does not send another request or start inference.',
       properties: { requestMessageId: ID_SCHEMA, limit: LIMIT_SCHEMA, cursor: CURSOR_SCHEMA },
       required: ['requestMessageId'],
-      run(args, identity, log) {
-        return replyPage(identity, log.replies(identity.botId, args.requestMessageId, {
+      async run(args, identity, log, api, context) {
+        const page = log.replies(identity.botId, args.requestMessageId, {
           limit: args.limit, cursor: args.cursor,
-        }));
+        });
+        if (page.items.length > 0) await sessions.markRepliesObserved(api, page.items, context);
+        return replyPage(identity, page);
       },
     }),
     tool({
@@ -587,7 +597,10 @@ export function createCommunicationTools({ host, getHarness, getMessageLog, publ
           context.abortSignal?.throwIfAborted();
           const page = log.replies(identity.botId, args.requestMessageId, { limit: 1 });
           // Check stored replies before the deadline, including replies received during downtime.
-          if (page.items.length > 0) return replyPage(identity, page, 'replied');
+          if (page.items.length > 0) {
+            await sessions.markRepliesObserved(api, page.items, context);
+            return replyPage(identity, page, 'replied');
+          }
           const remaining = deadline - Date.now();
           if (remaining <= 0) return replyPage(identity, page, 'timeout');
           await delay(Math.min(1000, remaining), undefined, { signal: context.abortSignal });

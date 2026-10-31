@@ -1,0 +1,147 @@
+/* scope-ui lane 增量样式：统一主会话视图的消息流增强。
+ * 全部限定在 .scope-shell 内，沿用 Scopes.css 的 .desktop-shell 前缀约定
+ * （无 .desktop-shell 祖先的移动容器同样不命中，保持移动单列语义）。 */
+
+/* 消息列表自身滚动：prepend/吸底/新消息指示的滚动容器。 */
+.desktop-shell .scope-shell .scope-message-list {
+  max-height: 60vh;
+  overflow-y: auto;
+  position: relative;
+}
+
+/* 顶部按 Bot 筛选胶囊（与 member-chip 同一视觉语言，尺寸更小）。 */
+.desktop-shell .scope-shell .scope-msg-filter {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-left: auto;
+  margin-right: 6px;
+}
+.desktop-shell .scope-shell .scope-filter-chip {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  border-radius: 999px;
+  min-height: 22px;
+  padding: 1px 10px;
+  font-size: 11px;
+  color: var(--muted);
+}
+.desktop-shell .scope-shell .scope-filter-chip.active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  font-weight: 600;
+}
+.desktop-shell .scope-shell .member-chip.member-chip-filtered {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent) inset;
+}
+.desktop-shell .scope-shell .member-chip-filterclear {
+  border-style: dashed;
+  color: var(--muted);
+}
+
+/* 方向徽标与中文分类标签。 */
+.desktop-shell .scope-shell .scope-dir-badge {
+  font-size: 10.5px;
+  padding: 0 7px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+.desktop-shell .scope-shell .scope-dir-badge.scope-dir-in {
+  background: var(--surface);
+  color: var(--muted);
+  border: 1px solid var(--line);
+}
+
+/* 引用块：作者 + 截断正文。 */
+.desktop-shell .scope-shell .scope-reply-quote-text {
+  display: block;
+  margin-top: 2px;
+  overflow-wrap: anywhere;
+}
+
+/* 本机发出的消息右向气泡。 */
+.desktop-shell .scope-shell .scope-message-out .scope-message-bubble {
+  background: var(--accent-soft);
+  border-color: color-mix(in srgb, var(--accent) 30%, var(--line));
+  border-radius: 14px 4px 14px 14px;
+  align-self: flex-end;
+}
+.desktop-shell .scope-shell .scope-message-out .scope-message-body {
+  align-items: flex-end;
+}
+
+/* 可读详情折叠：默认只剩一行摘要。 */
+.desktop-shell .scope-shell .scope-message-detail {
+  font-size: 11px;
+  color: var(--muted);
+}
+.desktop-shell .scope-shell .scope-message-detail > summary {
+  cursor: pointer;
+  list-style: none;
+  overflow-wrap: anywhere;
+}
+.desktop-shell .scope-shell .scope-message-detail > summary::-webkit-details-marker {
+  display: none;
+}
+.desktop-shell .scope-shell .scope-message-detail > summary::before {
+  content: '▸ ';
+}
+.desktop-shell .scope-shell .scope-message-detail[open] > summary::before {
+  content: '▾ ';
+}
+.desktop-shell .scope-shell .scope-message-detail-body {
+  margin: 4px 0 2px;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  overflow-wrap: anywhere;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 新消息指示：钉在滚动容器底部。 */
+.desktop-shell .scope-shell .scope-new-banner {
+  position: sticky;
+  bottom: 8px;
+  display: block;
+  margin: 6px auto 0;
+  padding: 6px 16px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--accent);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+  box-shadow: 0 4px 14px rgb(0 0 0 / 0.18);
+  z-index: 3;
+}
+
+/* 成员观察面板：旧 work 记录提示 + 跳统一主 Bot 会话入口（沿用 .desktop-shell 前缀约定）。 */
+.desktop-shell .scope-shell .member-work-legacy-note {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 4px 0 6px;
+}
+.desktop-shell .scope-shell .member-open-bot {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  border-radius: 999px;
+  padding: 1px 10px;
+  font-size: 11px;
+  color: var(--accent-strong);
+  cursor: pointer;
+}
+.desktop-shell .scope-shell .member-open-bot:hover {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}

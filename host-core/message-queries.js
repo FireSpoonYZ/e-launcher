@@ -2,6 +2,7 @@ import {
   assertId,
   messageError,
   normalizePageOptions,
+  normalizeScopeHistoryOptions,
   digest,
   streamIdForScope,
 } from './message-protocol.js';
@@ -63,6 +64,12 @@ export function createMessageQueries(db, { deviceId }) {
   );
   const stmtHistoryAfter = db.prepare(
     'SELECT * FROM message_events WHERE scope_id = ? AND local_id > ? ORDER BY local_id ASC LIMIT ?'
+  );
+  const stmtHistoryDesc = db.prepare(
+    'SELECT * FROM message_events WHERE scope_id = ? ORDER BY local_id DESC LIMIT ?'
+  );
+  const stmtHistoryBefore = db.prepare(
+    'SELECT * FROM message_events WHERE scope_id = ? AND local_id < ? ORDER BY local_id DESC LIMIT ?'
   );
   const stmtInbox = db.prepare(
     `SELECT e.* FROM message_events e
@@ -133,7 +140,9 @@ export function createMessageQueries(db, { deviceId }) {
       cursor.deviceId !== deviceId ||
       cursor.kind !== kind ||
       cursor.key !== key ||
-      typeof cursor.afterLocalId !== 'number'
+      (kind === 'history-before'
+        ? typeof cursor.beforeLocalId !== 'number'
+        : typeof cursor.afterLocalId !== 'number')
     ) {
       throw messageError('INVALID_ARGUMENT', 'cursor does not match this query');
     }
@@ -254,24 +263,50 @@ export function createMessageQueries(db, { deviceId }) {
     if (!stmtScopeExists.get(scopeId)) {
       throw messageError('SCOPE_NOT_FOUND', 'scope not found');
     }
-    const { limit, cursor } = normalizePageOptions(options ?? {});
-    bindCursor(cursor, 'history', scopeId, false);
-    const rows = cursor
-      ? stmtHistoryAfter.all(scopeId, cursor.afterLocalId, limit + 1)
-      : stmtHistory.all(scopeId, limit + 1);
+    const { limit, cursor, order } = normalizeScopeHistoryOptions(options ?? {});
+    let rows;
+    if (order === 'descending') {
+      bindCursor(cursor, 'history-before', scopeId, false);
+      rows = cursor
+        ? stmtHistoryBefore.all(scopeId, cursor.beforeLocalId, limit + 1)
+        : stmtHistoryDesc.all(scopeId, limit + 1);
+    } else {
+      bindCursor(cursor, 'history', scopeId, false);
+      rows = cursor
+        ? stmtHistoryAfter.all(scopeId, cursor.afterLocalId, limit + 1)
+        : stmtHistory.all(scopeId, limit + 1);
+    }
     const pageRows = rows.length > limit ? rows.slice(0, limit) : rows;
     const items = pageRows.map(toStoredMessage);
     const streams = collectPageStreams(pageRows);
+    // nextCursor 延续请求方向：升序翻更新、history-before 翻更旧；tailCursor 总是
+    // 本页最高 localId 的升序游标，增量轮询从最新页锚点续读而不回卷起点。
     const nextCursor =
       rows.length > limit
+        ? order === 'descending'
+          ? {
+              deviceId,
+              kind: 'history-before',
+              key: scopeId,
+              beforeLocalId: pageRows[pageRows.length - 1].local_id,
+            }
+          : {
+              deviceId,
+              kind: 'history',
+              key: scopeId,
+              afterLocalId: pageRows[pageRows.length - 1].local_id,
+            }
+        : null;
+    const tailCursor =
+      pageRows.length > 0
         ? {
             deviceId,
             kind: 'history',
             key: scopeId,
-            afterLocalId: pageRows[pageRows.length - 1].local_id,
+            afterLocalId: pageRows[order === 'descending' ? 0 : pageRows.length - 1].local_id,
           }
         : null;
-    return { deviceId, scopeId, items, nextCursor, streams };
+    return { deviceId, scopeId, items, nextCursor, tailCursor, streams };
   }
 
   function inbox(botId, options) {

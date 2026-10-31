@@ -7,9 +7,20 @@ import type {
   HistoryEntryChunk,
   RuntimeExtensionsConfig,
 } from '../../../host-core/index.js';
+import type {
+  Attribution,
+  BotLiveEnd,
+  BotLiveSnapshot,
+  BotLiveState,
+  BotLiveUpdate,
+  LiveGeneration,
+  RemoteControlOutcome,
+  WorkLiveEnd,
+  WorkLiveSnapshot,
+} from '../../../host-core/index.js';
 import { createTauriBotHost, mobileLocalRequest } from './tauri-host';
 
-export interface PluginListenerHandle { remove(): Promise<void> }
+export interface PluginListenerHandle { remove(): Promise<void>; readonly removed?: Promise<void> }
 type ListenerPromise = Promise<PluginListenerHandle>;
 
 export type HostPhase = 'stopped'|'starting'|'running'|'stopping'|'failed';
@@ -70,17 +81,14 @@ export type TurnAdmissionStatus = {
 export type HostSubmission = { botId: string; conversationId: string|null; requestId: string; submissionId: number|null; status: 'queued'|'placed'|'done'|'unanswered'; admission?: TurnAdmissionStatus|null; answerText: string|null; reason: string|null };
 export type HostHistoryPage = { botId: string; conversationId: string; items: Array<Record<string, unknown>>; nextCursor: Record<string, unknown>|null; entryChunk?: HistoryEntryChunk };
 export type HostCallResult = { type: 'result'; id: string; result: unknown };
-export type HostLiveFrame = {
-  type: 'snapshot'|'update'|'end';
-  botId: string;
-  conversationId?: string|null;
-  scopeId?: string;
-  sequence: number;
-  reason?: string;
-  changes?: Record<string, unknown>;
-  state?: { history?: unknown[]; historyTruncated?: boolean; lastEntryId?: number|null; generation?: {text:string; truncated:boolean}|null; tools?: unknown[]; toolsTruncated?: boolean; busy?: boolean; queuedCount?: number; turnAdmission?: TurnAdmissionStatus|null };
-};
+// 本地 Host live 帧：真实共享帧联合（与 DesktopLiveFrame 同形），不伪造字段。
+// primary 快照/更新（BotLiveSnapshot/BotLiveUpdate）、work 快照（WorkLiveSnapshot，携带 scopeId）、
+// 以及各自的终态帧 BotLiveEnd/WorkLiveEnd。update 臂只有 changes 没有 state，
+// end 臂只有 type/reason/ids 没有 state——按 type 分别取对应字段。
+export type HostLiveFrame = BotLiveSnapshot | BotLiveUpdate | WorkLiveSnapshot | BotLiveEnd | WorkLiveEnd;
 export type HostFrameEvent = { observationId: string; frame?: HostLiveFrame; error?: {code:string; outcome:string; message:string} };
+// Re-export shared live types so Host.tsx / local-scope-api.ts use the same DTO names.
+export type { Attribution, BotLiveEnd, BotLiveSnapshot, BotLiveState, BotLiveUpdate, LiveGeneration, RemoteControlOutcome, WorkLiveEnd, WorkLiveSnapshot };
 export type HostVoiceEngine = 'system'|'remote';
 export type HostVoiceRemote = { baseUrl: string; model: string; voice: string; configured: boolean; hasApiKey?: boolean };
 export type HostVoiceSettings = { sttEngine: HostVoiceEngine; ttsEngine: HostVoiceEngine; language: string; speechRate: number; stt: HostVoiceRemote; tts: HostVoiceRemote };

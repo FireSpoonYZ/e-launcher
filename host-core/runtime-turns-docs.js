@@ -3,6 +3,9 @@ import { defineDocFamily } from '@earendil-works/pi-durable';
 // Host 每轮准入的持久化文档，均为 session 级 doc family，key = bot.primaryConversationId
 // （公开 UUID，不依赖 Durable 数字会话 ID，因此会话尚未创建时也能持久化队列/钉）。
 // TurnQueue：按序保存 Host 已受理、尚未原生提交的用户输入；原生提交成功后删除条目。
+// 条目可携带可信 origin（sender.kind 'user'|'host'、展示名、replyTo）：仅由可信输入边界
+// 写入（已鉴权 HTTP/control submit 记 user、计划任务记 host，wire origin/author 不采信）。
+// 原生提交时恒生成 host.user-message 入口归属与冻结轮（缺席 origin 的遗留条目按 Host 记）。
 // TurnPin：每个已接纳轮一条 admissionId -> pin 记录，保存原准予的 setId 与安全快照引用，
 // 供冷启动 restoreTurns 复用；绝不保存正文、凭据值或快照全文的敏感字段。
 export const TurnQueue = defineDocFamily({

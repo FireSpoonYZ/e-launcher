@@ -32,6 +32,7 @@ import { WorkIndex, WorkContextState, workInstructions } from './work-context-do
 import { WorkDecisionState } from './work-decision-state.js';
 import { createWorkDecisionRuntime } from './runtime-work-decisions.js';
 import { createTurnAdmission } from './runtime-turns.js';
+import { createBotSessionRuntime } from './runtime-bot-session.js';
 import { normalizeUserMessage } from './scope-protocol.js';
 import { createCommunicationTools } from './communication-tools.js';
 import { createCollaborationService } from './collaboration-service.js';
@@ -50,6 +51,14 @@ import {
 
 const CTX = BACKGROUND_CONTEXT;
 const BOTS_SYNC_THROTTLE_MS = 1000;
+// 手动 /compact 的附加保留指令：统一主会话跨 scope 共享，摘要必须保留消息来源
+//（发送者/设备/scope/messageId/replyTo）与未决外发请求的回复去向，
+// 否则压缩后迟到回复会失去可续接的原始渠道。
+const BOT_SESSION_COMPACT_INSTRUCTIONS = [
+  'Preserve for every relevant message its real sender (user/bot/host, botId, deviceId), channel/scope, messageId and replyTo linkage; names are display only.',
+  'Preserve every outstanding outgoing request and its originating reply target (primary user chat, bot DM or room scope) so late replies can resume the right destination.',
+  'Do not drop notices or self-echo facts that explain why no acknowledgement was sent.',
+].join(' ');
 const ARCHIVE_RETENTION_MS = 14 * 24 * 60 * 60 * 1000;
 const ARCHIVE_PURGE_INTERVAL_MS = 6 * 3600 * 1000;
 
@@ -242,7 +251,38 @@ export async function openRuntime(options) {
   // 每 Bot 准入队列归本 Runtime：send/设置/工作操作共用，关闭时先拒新准入再排空。
   const bots = createBotAdmission();
   bots.suspend();
+  // 统一 Bot 主会话：用户私聊、Bot 私聊与普通群聊共用既有 primary Durable 会话；
+  // scope 账本仍是消息事实源，sessions 负责增量导入、冻结轮来源/回复目标与请求/回复对账。
+  // 全部下游依赖（decisions/通信工具/work contexts/turns 准入）经 sessions 注入；
+  // getMessageLog/getPrimary 走惰性回调，被调用时 workContexts/模型选择必然已就绪。
+  const sessions = createBotSessionRuntime({
+    host,
+    getHarness: () => harness,
+    getMessageLog: () => workContexts.getMessageLog(),
+    context: CTX,
+    // 与准入泵同口径解析/配置主会话：已映射直接返回；未映射用当前 Center 模型选择
+    // 与 profile 创建（导入需要可写目标），随后应用人格/工具，保证导入与执行同一会话。
+    getPrimary: async (bot) => {
+      const profile = botProfile(host, plugins, botModels, coreExtensions, codemodeExtension, finalBudgetExtension, bot.botId, null);
+      let conversation = await getPrimaryConversation(harness, bot, {}, CTX);
+      if (!conversation) {
+        const modelRef = botModels[bot.botId]?.modelRef;
+        if (!modelRef) throw errWithCode('center model is required', 'MODEL_REQUIRED');
+        conversation = await getPrimaryConversation(harness, { ...bot, modelRef }, {
+          create: true,
+          defaultModel: modelRef,
+          thinkingLevel: profile.thinkingLevel,
+          instructions: profile.instructions,
+          removeTools: profile.removeTools,
+          codemodeOnly: profile.codemodeOnly,
+        }, CTX);
+      }
+      await applyAgentProfile(harness, conversation.id, profile, CTX);
+      return conversation;
+    },
+  });
   const decisions = createWorkDecisionRuntime({
+    sessions,
     host,
     getHarness: () => harness,
     getWorkContexts: () => workContexts,
@@ -251,7 +291,7 @@ export async function openRuntime(options) {
     context: CTX,
     // 工作决策的 stop/resume/advance 在同一 Bot 队列内执行；scope lane 在前，Bot lane 在后。
     admitBot: bots.admit,
-    getProfile: (botId, workMeta) => botProfile(host, plugins, botModels, coreExtensions, finalBudgetExtension, botId, workMeta),
+    getProfile: (botId, workMeta) => botProfile(host, plugins, botModels, coreExtensions, codemodeExtension, finalBudgetExtension, botId, workMeta),
   });
 
   // 统一图形环境：管理器按注入的可信原生桥接（Android）或当前平台（Windows/Linux）选后端；
@@ -290,6 +330,7 @@ export async function openRuntime(options) {
       getMessageLog: () => workContexts.getMessageLog(),
       publishWork: decisions.publishWork,
       collaboration,
+      sessions,
     }),
     sections: [section('host-collaboration', async (input, context) => renderCollaborationPrompt({
       device: await collaboration.getCurrentDevice(),
@@ -380,8 +421,11 @@ export async function openRuntime(options) {
           const task = await harness.getTask(api.taskId, context);
           const actual = task?.state?.checkpoint?.model;
           if (!actual || actual.provider !== expected.provider || actual.modelId !== expected.modelId) throw errWithCode('center model changed', 'INVALID_STATE');
-          await decisions.beforeRequest(request, api, context);
-          const requestView = await plugins.prepareContext(request, api, context);
+          // 统一会话冻结轮最先：sessions 判定/恢复本轮来源与回复目标并把可信路由指引写入请求，
+          // 之后才轮到工作决策、插件上下文管线与预算计数（它们看到的已是带路由指引的请求）。
+          const routed = await sessions.beforeRequest(request, api, context);
+          await decisions.beforeRequest(routed, api, context);
+          const requestView = await plugins.prepareContext(routed, api, context);
           const checkpoint = task.state.checkpoint;
           const model = models.getModel(actual.provider, actual.modelId);
           if (!model || checkpoint.cutoff === undefined) throw errWithCode('request checkpoint is unavailable', 'INVALID_STATE');
@@ -476,6 +520,7 @@ export async function openRuntime(options) {
     host,
     harness,
     context: CTX,
+    sessions,
     getProfile: (botId, workMeta) => botProfile(host, plugins, botModels, coreExtensions, codemodeExtension, finalBudgetExtension, botId, workMeta),
     // sync 提交成功后附着等待中的 work watch（事务外，观察失败不影响导入）。
     onBound: (botId, scopeId, binding) => live.bindWork(botId, scopeId, binding),
@@ -491,6 +536,7 @@ export async function openRuntime(options) {
     live,
     workContexts,
     decisions,
+    sessions,
     plugins,
     coreExtensions,
     codemodeExtension,
@@ -558,7 +604,7 @@ function parseBindingKey(key) {
   }
 }
 
-function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseOwner, cleanupEnvs, live, workContexts, decisions, plugins, coreExtensions, codemodeExtension, finalBudgetExtension, centerRuntime, setOnline, setBotModels, getBotModels, setWatermarkReader, botAdmissions, collaboration, onBotsChanged, onBotsSync, shower, schedules }) {
+function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseOwner, cleanupEnvs, live, workContexts, decisions, sessions, plugins, coreExtensions, codemodeExtension, finalBudgetExtension, centerRuntime, setOnline, setBotModels, getBotModels, setWatermarkReader, botAdmissions, collaboration, onBotsChanged, onBotsSync, shower, schedules }) {
   let closePromise = null;
   let closing = false;
   let centerOnline = false;
@@ -785,6 +831,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
     host,
     getHarness: () => harness,
     context: CTX,
+    sessions,
     centerRuntime,
     plugins,
     models,
@@ -805,7 +852,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
     initializeBot,
     attachments: attachmentStore,
   });
-  decisions.setTurnGate(turns.admitWorkDecision, turns.pump);
+  decisions.setTurnGate(turns.admitWorkDecision, turns.pump, turns.canRunWork);
 
   // 统一图形环境的 Runtime 门面：Actor 只来自可信主会话或工作绑定，绝不采信调用方会话。
   const showerRuntime = createRuntimeShower({
@@ -1415,8 +1462,22 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
     // 实际 prepare→原子切换→confirm→pin→原生提交由准入泵异步完成。
     // 同 requestId 重复调用返回同一条受理（绝不产生第二条消息），不同正文冲突。
     // 附件仅传 id 数组；图片-only 消息允许空文本。
+    // 本机可信输入边界统一记 sender.kind=user（已鉴权 HTTP/control submit 是唯一的
+    // 人类入口）；计划任务等内部调用显式传 origin.sender.kind=host 覆盖。
+    // wire 上调用方自带的任意 origin/author 字段绝不采信，由本边界重写。
     submit: async (botId, input) => {
       assertNonBlank(botId, 'botId');
+      const trustedInput = {
+        ...input,
+        origin: {
+          sender: {
+            kind: input?.origin?.sender?.kind === 'host' ? 'host' : 'user',
+            name: typeof input?.origin?.sender?.name === 'string' ? input.origin.sender.name : null,
+          },
+          replyTo: typeof input?.origin?.replyTo === 'string' ? input.origin.replyTo : null,
+        },
+      };
+      input = trustedInput;
       // 离线或恢复未完成：准入 lane 挂起，泵不可能在飞——直接持久化受理（已鉴权本地动作）。
       // nudge 由恢复后的 resume/nudgeAll 重新发起；绝不调用会隐式 resume 的路径。
       if (!centerOnline || turns.isRecoveryPending()) {
@@ -1483,7 +1544,9 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
       if (!conversation) {
         return { botId, conversationId: bot.primaryConversationId, items: [], nextCursor: null };
       }
-      const page = await readPrimaryHistory(conversation, historyOptions, CTX, { afterReset: true });
+      // 传 harness 让 helper 读取 BotSessionState 并给原始 entry 补 data.attribution；
+      // 不传会让 raw 历史覆盖 live 归属时丢来源。helper 第4参为 {afterReset,sessionState?,harness?}。
+      const page = await readPrimaryHistory(conversation, historyOptions, CTX, { afterReset: true, harness });
       return { botId, conversationId: bot.primaryConversationId, ...page };
     },
 
@@ -1497,7 +1560,15 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
       const conversation = await idlePrimaryConversation(bot);
       const conversationId = bot.primaryConversationId;
       if (!conversation) return { botId, conversationId, clearedThroughEntryId: 0 };
+      // reset 前先把未导入的账本消息推进水位：lastImportedLocalId 是 reset 保留的
+      // 唯一导入边界，不先捕获会让旧账本条在 reset 后当作「新消息」重现。
+      // 此处 Bot lane 已持、会话空闲，是安全边界；新追加的条目随即被 pi.reset 翻篇，
+      // 只起水位捕获作用。
+      await sessions.sync(botId);
       await conversation.reset(undefined, CTX);
+      // 统一会话状态随 pi.reset 一起翻篇：保留账本导入水位与未决请求来源（迟到回复
+      // 仍可续接、旧账本绝不重导入），只清理已过期的活动轮状态。reset 失败则状态原样保留。
+      await sessions.reset(botId);
       // 空闲且无并发主会话操作时，reset 就是新的 head 标记；不猜其他条目 id。
       const head = (await conversation.context(CTX)).head;
       if (head?.kind !== durable.ResetEntry.kind) {
@@ -1518,7 +1589,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
         const conversation = await idlePrimaryConversation(bot);
         const conversationId = bot.primaryConversationId;
         if (!conversation) return { conversationId, taskId: null };
-        return { conversationId, taskId: await conversation.compact(undefined, CTX) };
+        return { conversationId, taskId: await conversation.compact(BOT_SESSION_COMPACT_INSTRUCTIONS, CTX) };
       });
       if (started.taskId === null) return { botId, conversationId: started.conversationId, compacted: false };
       const settled = await harness.waitForTask(started.taskId, CTX);
@@ -1652,7 +1723,11 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
   // 离线/恢复暂停只放行本地已鉴权动作：持久 enqueue、被动回执/状态与取消。
   // 这些路径只用 Harness snapshot/commit/abortTask，不隐式 resume 调度器；
   // 模型、工具、问卷等执行路径仍受 Center 门禁（运行时本就对 SDK 抛离线错）。
-  const offlineMethods = new Set(['submit', 'getSubmission', 'wait', 'abort', 'turns', 'inspect', 'history', 'watch', 'uploadAttachment', 'getAttachment']);
+  // scope 查询是纯本地账本读取（不调度、不触碰模型），离线也放行给被动浏览 UI；
+  // createScope/updateScope/publishUserMessage 等写路径仍受 Center 门禁。
+  const offlineMethods = new Set(['submit', 'getSubmission', 'wait', 'abort', 'turns', 'inspect', 'history', 'watch',
+    'uploadAttachment', 'getAttachment',
+    'scopeHistory', 'getScopeMessage', 'getScopeMessageDelivery', 'getScopeState', 'listScopeStates', 'listScopeReplicas']);
   return new Proxy(runtime, {
     get(target, key) {
       const value = target[key];

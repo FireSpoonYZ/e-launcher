@@ -2,7 +2,7 @@
 // 查询，不触碰 harness/Native/BC/模型。历史响应强制 1MiB 串行化上限：超限时通过有界
 // 二分缩小 limit 重查，保整条消息前缀且 streams/nextCursor 仍由原查询生成；一条都放不下
 // 时报 RESPONSE_TOO_LARGE。绝不截断文本或跳过记录。
-import { assertId, messageError, normalizePageOptions } from './message-protocol.js';
+import { assertId, messageError, normalizeScopeHistoryOptions } from './message-protocol.js';
 
 const MAX_HISTORY_RESPONSE_BYTES = 1024 * 1024;
 
@@ -16,15 +16,15 @@ function serializedSize(page) {
  */
 export function readScopeHistory(log, scopeId, options = {}) {
   assertId(scopeId, 'scopeId');
-  const { limit, cursor } = normalizePageOptions(options);
-  const page = log.history(scopeId, { limit, cursor });
+  const { limit, cursor, order } = normalizeScopeHistoryOptions(options);
+  const page = log.history(scopeId, { limit, cursor, order });
   if (serializedSize(page) <= MAX_HISTORY_RESPONSE_BYTES) return page;
   let lo = 1;
   let hi = limit;
   let best = 0;
   while (lo <= hi) {
     const mid = (lo + hi) >> 1;
-    const candidate = log.history(scopeId, { limit: mid, cursor });
+    const candidate = log.history(scopeId, { limit: mid, cursor, order });
     if (serializedSize(candidate) <= MAX_HISTORY_RESPONSE_BYTES) {
       best = mid;
       lo = mid + 1;
@@ -35,7 +35,7 @@ export function readScopeHistory(log, scopeId, options = {}) {
   if (best === 0) {
     throw messageError('RESPONSE_TOO_LARGE', 'scope history exceeds 1 MiB even for a single message');
   }
-  return log.history(scopeId, { limit: best, cursor });
+  return log.history(scopeId, { limit: best, cursor, order });
 }
 
 function requireScopeMessage(log, scopeId, messageId) {

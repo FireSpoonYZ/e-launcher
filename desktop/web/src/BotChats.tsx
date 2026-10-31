@@ -933,6 +933,7 @@ function PrimaryChatPane({
   onBotUpdated,
   onBotDeleted,
   onLiveActivity,
+  onOpenCommunications,
   pageActive = true,
 }: {
   api: DesktopPanelApi;
@@ -945,6 +946,8 @@ function PrimaryChatPane({
   onBotUpdated: (patch: Partial<BotRecord> & { botId: string }) => void;
   onBotDeleted: (botId: string) => void;
   onLiveActivity?: () => void;
+  /** 打开该 Bot 的通信（DM/群聊）视图；deviceId 指向其真实设备。 */
+  onOpenCommunications?: (botId: string, scopeId?: string, deviceId?: string) => void;
   pageActive?: boolean;
 }) {
   const t = useText();
@@ -1866,6 +1869,16 @@ function PrimaryChatPane({
           >
             人设与能力
           </button>
+          {onOpenCommunications ? (
+            <button
+              type="button"
+              className="secondary-button chat-action-pill"
+              onClick={() => onOpenCommunications(bot.botId, undefined, bot.deviceId)}
+              title="查看该 Bot 的通信（智能体私聊 / 群聊与最新消息）"
+            >
+              通信
+            </button>
+          ) : null}
           {live && live.busy ? (
             <button
               type="button"
@@ -2246,7 +2259,15 @@ function PrimaryChatPane({
   );
 }
 
-export function BotChats({ api, pageActive = true }: { api: DesktopPanelApi; pageActive?: boolean }) {
+export function BotChats({ api, pageActive = true, onOpenCommunications, initialBotId, initialDeviceId }: {
+  api: DesktopPanelApi;
+  pageActive?: boolean;
+  onOpenCommunications?: (botId: string, scopeId?: string, deviceId?: string) => void;
+  /** Scopes「打开 Bot」导航：按稳定 botId + deviceId 选中 Bot（同名 Bot 靠 ID 区分）；
+   *  initialDeviceId 缺省时只在当前目录中按 botId 匹配。 */
+  initialBotId?: string;
+  initialDeviceId?: string;
+}) {
   const identity = api.identity;
   const sess = sessionKey(identity);
   const online = api.transportConnected;
@@ -2478,6 +2499,27 @@ export function BotChats({ api, pageActive = true }: { api: DesktopPanelApi; pag
     : undefined;
 
   const onlineDevices = useMemo(() => devices.filter((d) => d.online), [devices]);
+
+  // Scopes onOpenBot → initialBotId/initialDeviceId：目录到达后按稳定 ID 选中 Bot，
+  // 并切到该 Bot 所在设备筛选；同 botId 跨设备时以 deviceId 为准（身份可核对）。
+  const initialNavRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!initialBotId) {
+      initialNavRef.current = null;
+      return;
+    }
+    const key = `${initialDeviceId ?? ''}:${initialBotId}`;
+    if (initialNavRef.current === key) return;
+    const target = bots.find(
+      (b) =>
+        b.botId === initialBotId &&
+        (initialDeviceId === undefined || b.deviceId === initialDeviceId),
+    );
+    if (!target) return;
+    initialNavRef.current = key;
+    setDeviceFilter(target.deviceId);
+    setSelected({ deviceId: target.deviceId, botId: target.botId });
+  }, [initialBotId, initialDeviceId, bots]);
 
   function deviceNameOf(deviceId: string): string {
     return devices.find((d) => d.deviceId === deviceId)?.displayName || deviceId;
@@ -2728,6 +2770,7 @@ export function BotChats({ api, pageActive = true }: { api: DesktopPanelApi; pag
               triggerLoadBots();
             }}
             onLiveActivity={handleLiveActivity}
+            onOpenCommunications={onOpenCommunications}
             pageActive={pageActive}
           />
         ) : (

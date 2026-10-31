@@ -9,6 +9,9 @@ const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 200;
 const CATEGORIES = new Set(['public', 'notice', 'request', 'reply']);
 const PAGE_KINDS = new Set(['history', 'inbox', 'outbox']);
+// history-before 是 scope 历史专用倒序游标，inbox/outbox 只保留原 'history' 升序游标。
+const HISTORY_PAGE_KINDS = new Set(['history', 'history-before']);
+const SCOPE_HISTORY_ORDERS = new Set(['ascending', 'descending']);
 const ISO_MS_Z_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const SHA256_HEX_RE = /^[0-9a-f]{64}$/;
 
@@ -326,22 +329,92 @@ function normalizeCursor(cursor) {
   return normalized;
 }
 
+function normalizeHistoryCursor(cursor) {
+  if (!isPlainObject(cursor)) throw invalid('cursor must be an object');
+  rejectUnknownFields(
+    cursor,
+    new Set(['deviceId', 'kind', 'key', 'afterLocalId', 'beforeLocalId']),
+    'cursor'
+  );
+  assertId(cursor.deviceId, 'cursor.deviceId');
+  if (typeof cursor.kind !== 'string' || !HISTORY_PAGE_KINDS.has(cursor.kind)) {
+    throw invalid("cursor.kind must be 'history' or 'history-before'");
+  }
+  assertId(cursor.key, 'cursor.key');
+  if (cursor.kind === 'history') {
+    assertRevision(cursor.afterLocalId, 'afterLocalId');
+    if (cursor.beforeLocalId !== undefined) {
+      throw invalid("'history' cursor must not include beforeLocalId");
+    }
+    return {
+      deviceId: cursor.deviceId,
+      kind: 'history',
+      key: cursor.key,
+      afterLocalId: cursor.afterLocalId,
+    };
+  }
+  assertRevision(cursor.beforeLocalId, 'beforeLocalId');
+  if (cursor.afterLocalId !== undefined) {
+    throw invalid("'history-before' cursor must not include afterLocalId");
+  }
+  return {
+    deviceId: cursor.deviceId,
+    kind: 'history-before',
+    key: cursor.key,
+    beforeLocalId: cursor.beforeLocalId,
+  };
+}
+
+function normalizePageLimit(value) {
+  let limit = DEFAULT_LIMIT;
+  if (value !== undefined) {
+    if (!Number.isSafeInteger(value) || value < 1 || value > MAX_LIMIT) {
+      throw invalid('limit must be a positive integer between 1 and 200');
+    }
+    limit = value;
+  }
+  return limit;
+}
+
 export function normalizePageOptions(options) {
   if (options === undefined || options === null) options = {};
   if (!isPlainObject(options)) throw invalid('page options must be an object');
   rejectUnknownFields(options, new Set(['limit', 'cursor']), 'page options');
-  let limit = DEFAULT_LIMIT;
-  if (options.limit !== undefined) {
-    if (!Number.isSafeInteger(options.limit) || options.limit < 1 || options.limit > MAX_LIMIT) {
-      throw invalid('limit must be a positive integer between 1 and 200');
-    }
-    limit = options.limit;
-  }
+  const limit = normalizePageLimit(options.limit);
   let cursor = null;
   if (options.cursor !== undefined && options.cursor !== null) {
     cursor = normalizeCursor(options.cursor);
   }
   return { limit, cursor };
+}
+
+/**
+ * scopeHistory 专用：在原分页基础上允许 order。默认 'ascending' 保持既有行为；
+ * 'descending' 配 kind:'history-before' 游标向更旧翻页，tailCursor 始终为升序续读游标。
+ */
+export function normalizeScopeHistoryOptions(options) {
+  if (options === undefined || options === null) options = {};
+  if (!isPlainObject(options)) throw invalid('page options must be an object');
+  rejectUnknownFields(options, new Set(['limit', 'cursor', 'order']), 'page options');
+  const limit = normalizePageLimit(options.limit);
+  let order = 'ascending';
+  if (options.order !== undefined) {
+    if (typeof options.order !== 'string' || !SCOPE_HISTORY_ORDERS.has(options.order)) {
+      throw invalid("order must be 'ascending' or 'descending'");
+    }
+    order = options.order;
+  }
+  let cursor = null;
+  if (options.cursor !== undefined && options.cursor !== null) {
+    cursor = normalizeHistoryCursor(options.cursor);
+    if (cursor.kind === 'history' && order === 'descending') {
+      throw invalid("descending order requires no cursor or a 'history-before' cursor");
+    }
+    if (cursor.kind === 'history-before' && order === 'ascending') {
+      throw invalid("ascending order requires no cursor or a 'history' cursor");
+    }
+  }
+  return { limit, cursor, order };
 }
 
 function sameMembers(a, b) {

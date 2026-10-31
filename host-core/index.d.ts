@@ -650,7 +650,7 @@ export interface Runtime {
    */
   restoreTurns(): Promise<void>;
   /** Passive, authorized scope history; strict paging with the shared message cursor. */
-  scopeHistory(scopeId: string, options?: MessagePageOptions): Promise<MessageHistoryPage>;
+  scopeHistory(scopeId: string, options?: ScopeHistoryOptions): Promise<MessageHistoryPage>;
   /** Exact stored message; foreign-scope IDs reject MESSAGE_NOT_FOUND. */
   getScopeMessage(scopeId: string, messageId: string): Promise<StoredMessage>;
   getScopeMessageDelivery(scopeId: string, messageId: string): Promise<MessageDeliveryStatus>;
@@ -777,6 +777,27 @@ export interface LiveMessageToolCall {
   name: string;
 }
 
+/**
+ * Safe UI attribution for a history/live item: frozen turn origin and message
+ * identity only. Never carries native control IDs, tool parameters, unrelated
+ * documents or credentials; names are display only.
+ */
+export interface Attribution {
+  kind: 'user' | 'bot' | 'host';
+  botId?: string;
+  deviceId?: string;
+  /** Display-only sender name; never an identity or routing key. */
+  name?: string;
+  channel: 'primary' | 'dm' | 'room';
+  scopeId?: string;
+  messageId?: string;
+  replyTo?: string;
+  rootId?: string;
+  category?: 'public' | 'notice' | 'request' | 'reply';
+  direction?: 'incoming' | 'outgoing';
+  createdAt?: string;
+}
+
 export interface LiveMessage {
   role: 'user' | 'assistant' | 'toolResult';
   text: string;
@@ -797,6 +818,8 @@ export interface LiveHistoryItem {
   id: number;
   kind: string;
   messages: LiveMessage[];
+  /** Frozen turn origin of the entry; absent on older Hosts and unattributed host entries. */
+  attribution?: Attribution;
 }
 
 export interface LiveTool {
@@ -816,6 +839,8 @@ export interface LiveTool {
 export interface LiveGeneration {
   text: string;
   truncated: boolean;
+  /** Frozen origin of the running generation; absent on older Hosts. */
+  attribution?: Attribution;
 }
 
 /**
@@ -1012,7 +1037,7 @@ export interface ControlClient {
   live(botId: string, options?: ControlClientCallOptions): AsyncIterable<BotLiveFrame>;
   workLive(botId: string, scopeId: string, options?: ControlClientCallOptions): AsyncIterable<WorkLiveFrame>;
   getModelCatalog(options?: ControlClientCallOptions): Promise<ModelCatalog>;
-  scopeHistory(scopeId: string, options?: MessagePageOptions & ControlClientCallOptions): Promise<MessageHistoryPage>;
+  scopeHistory(scopeId: string, options?: ScopeHistoryOptions & ControlClientCallOptions): Promise<MessageHistoryPage>;
   getScopeMessage(scopeId: string, messageId: string, options?: ControlClientCallOptions): Promise<StoredMessage>;
   getScopeMessageDelivery(scopeId: string, messageId: string, options?: ControlClientCallOptions): Promise<MessageDeliveryStatus>;
   getLocalSettings(options?: ControlClientCallOptions): Promise<LocalSettingsSnapshot>;
@@ -1344,9 +1369,26 @@ export interface MessageCursor {
   afterTargetDeviceId?: string;
 }
 
+/** Descending scope-history cursor; continues a 'descending' page toward older localIds. */
+export interface MessageHistoryBeforeCursor {
+  deviceId: string;
+  kind: 'history-before';
+  key: string;
+  beforeLocalId: number;
+}
+
+export type MessageHistoryCursor = MessageCursor | MessageHistoryBeforeCursor;
+
 export interface MessagePageOptions {
   limit?: number;
   cursor?: MessageCursor | null;
+}
+
+/** scopeHistory only; default order is 'ascending'. */
+export interface ScopeHistoryOptions {
+  limit?: number;
+  cursor?: MessageHistoryCursor | null;
+  order?: 'ascending' | 'descending';
 }
 
 export interface MessageInboxOptions extends MessagePageOptions {
@@ -1373,8 +1415,12 @@ export interface MessageStreamStatus {
 export interface MessageHistoryPage {
   deviceId: string;
   scopeId: string;
+  /** Follow the requested order (default ascending). */
   items: StoredMessage[];
-  nextCursor: MessageCursor | null;
+  /** Continues the requested order; 'history-before' variant for descending pages. */
+  nextCursor: MessageHistoryCursor | null;
+  /** Ascending 'history' cursor at the highest localId returned; null only when no items. */
+  tailCursor: MessageCursor | null;
   /** Only streams represented by items on this page. */
   streams: MessageStreamStatus[];
 }
@@ -1637,7 +1683,7 @@ export interface MessageLog {
     envelope: MessageEnvelope,
   ): { message: StoredMessage; ack: MessageAck; duplicate: boolean };
   acknowledge(peer: MessagePeer, ack: MessageAck): MessageDeliveryStatus;
-  history(scopeId: string, options?: MessagePageOptions): MessageHistoryPage;
+  history(scopeId: string, options?: ScopeHistoryOptions): MessageHistoryPage;
   inbox(botId: string, options?: MessageInboxOptions): MessageInboxPage;
   /** Passive, authorized direct replyTo query; default limit 50, maximum 200. */
   replies(botId: string, requestMessageId: string, options?: MessagePageOptions): MessageRepliesPage;
@@ -1850,7 +1896,7 @@ export interface RemoteControlMethodMap {
   updateScope: { params: { scopeId: string; input: ScopeUpdateInput }; result: ScopeInfo };
   publishUserMessage: { params: { scopeId: string; input: UserMessageInput }; result: StoredMessage };
   listScopeReplicas: { params: { scopeId: string; limit?: number; cursor?: ReplicaListCursor | null }; result: ReplicaListPage };
-  scopeHistory: { params: { scopeId: string; limit?: number; cursor?: MessageCursor | null }; result: MessageHistoryPage };
+  scopeHistory: { params: { scopeId: string; limit?: number; cursor?: MessageHistoryCursor | null; order?: 'ascending' | 'descending' }; result: MessageHistoryPage };
   getScopeMessage: { params: { scopeId: string; messageId: string }; result: StoredMessage };
   getScopeMessageDelivery: { params: { scopeId: string; messageId: string }; result: MessageDeliveryStatus };
   memoryStatus: { params: { botId: string; input?: MemoryStatusInput }; result: MemoryStatus };

@@ -42,7 +42,6 @@ import {
   type HostBot,
   type HostFrameEvent,
   type HostHistoryPage,
-  type HostLiveFrame,
   type HostSettings,
   type HostSettingsPayload,
   type HostSnapshot,
@@ -57,9 +56,12 @@ import { useDrafts } from '../../desktop/web/src/drafts';
 import { PendingPanel } from '../../desktop/web/src/PendingPanel';
 import { readHistoryPage } from '../../desktop/web/src/history';
 import { Scopes } from '../../desktop/web/src/Scopes';
+import { createLocalScopeReadApi } from './local-scope-api';
+import { MessageAttribution } from './MessageAttribution';
+import './bot-communications-mobile.css';
 import type { DesktopDraftEntry, DesktopIdentity, DesktopPanelApi } from '../../desktop/web/src/types';
 import type { DesktopConnectionInput, DesktopUiProfile } from '../../host-core/desktop-client.js';
-import type { ClearHistoryResult, CompactResult, DevicesDirectoryItem, PendingCursor, PendingListPage, ShowerTarget } from '../../host-core/index.js';
+import type { BotLiveState, ClearHistoryResult, CompactResult, DevicesDirectoryItem, PendingCursor, PendingListPage, ShowerTarget } from '../../host-core/index.js';
 import type { ShowerCall } from './ShowerPreview';
 import { Markdown } from './Markdown';
 import { BotScreenPanel } from './BotScreenPanel';
@@ -168,6 +170,7 @@ export type HubScreen =
   | 'bot-model'
   | 'settings'
   | 'scopes'
+  | 'bot-scopes'
   | 'pending';
 
 export interface UnifiedBotItem {
@@ -374,7 +377,6 @@ interface TurnAdmissionStatus {
   error?: { code: string; message: string };
 }
 type TurnAdmissionCarrier = { admission?: TurnAdmissionStatus | null };
-type TurnAdmissionLiveState = { turnAdmission?: TurnAdmissionStatus | null };
 
 interface ChatPending {
   botKey: string;
@@ -1132,6 +1134,9 @@ export function HostPage({
 
   // Local Host state (managed transparently in background)
   const [localHost, setLocalHost] = useState<HostSnapshot>();
+  // 最新 localHost 的 ref：让 hostRunning/phase 读取始终拿到当前值，不依赖 useMemo 闭包快照。
+  const localHostRef = useRef<HostSnapshot | undefined>(localHost);
+  localHostRef.current = localHost;
   const [localBots, setLocalBots] = useState<HostBot[]>(() => {
     try {
       const raw = localStorage.getItem('e-launcher:cached-local-bots-v1');
@@ -1166,6 +1171,23 @@ export function HostPage({
   };
   const [remoteDevices, setRemoteDevices] = useState<DevicesDirectoryItem[]>(() => readCachedRemoteDevices());
   const remoteClientRef = useRef<{ api: DesktopPanelApi; invalidate(): void; dispose(): void } | null>(null);
+  // Bot 通信页：本机只读适配器按（设备ID+代际）重建，换设备/重进页面即换 sessionKey。
+  // hostRunning 从 localHostRef 读最新相位（不闭包捕获旧快照）；deviceId 变才重建适配器。
+  const localScopeApiGen = useRef(0);
+  const localScopeApi = useMemo(() => {
+    const deviceId = localHost?.deviceId;
+    if (!deviceId) return null;
+    return createLocalScopeReadApi({
+      deviceId,
+      generation: ++localScopeApiGen.current,
+      hostRunning: () => localHostRef.current?.phase === 'running',
+      reportError: () => {},
+    });
+  }, [localHost?.deviceId]);
+  // 适配器替换/卸载时 dispose：置失效旗标、移除共享原生 listener 并取消在途观察，不泄漏。
+  useEffect(() => {
+    return () => { void localScopeApi?.dispose().catch(() => {}); };
+  }, [localScopeApi]);
 
   // Bot preview metadata & clear cutoff map
   const [botMetaMap, setBotMetaMap] = useState<Record<string, BotPreviewMeta>>(() => readBotMetaMap());
@@ -1175,7 +1197,10 @@ export function HostPage({
   // Active Bot & Chat state
   const [activeBotKey, setActiveBotKey] = useState<string | null>(null);
   const [chatHistory, setChatHistory] = useState<Array<Record<string, unknown>>>([]);
-  const [chatLive, setChatLive] = useState<HostLiveFrame>();
+  // chatLive 保存累计的实时会话状态（BotLiveState），不是原始帧联合：
+    // snapshot 全量替换、update 只把 changes 合并进现有快照，end 清空。
+    // 字段访问直接读 BotLiveState，真实类型不含 state 包装。
+  const [chatLive, setChatLive] = useState<BotLiveState | undefined>();
   const [chatReceipt, setChatReceipt] = useState<HostSubmission>();
   const [chatPending, setChatPending] = useState<ChatPending>();
   const pendingByBot = useRef(new Map<string, ChatPendingEntry>());
@@ -1703,16 +1728,14 @@ export function HostPage({
         }
         const f = ev.frame;
         if (!f) return;
-        if (f.type === 'snapshot') setChatLive(f);
-        else if (f.type === 'update') {
-          setChatLive(prev =>
-            prev && prev.type !== 'end'
-              ? { ...prev, state: { ...(prev.state ?? {}), ...(f.changes ?? {}) } as HostLiveFrame['state'] }
-              : prev,
-          );
+        if (f.type === 'snapshot') {
+          setChatLive(f.state);
+        } else if (f.type === 'update') {
+          // update 只把 changes 合并进已有快照；观察首帧必为 snapshot，update 不单独入栈。
+          setChatLive(prev => (prev ? { ...prev, ...f.changes } : prev));
         } else if (f.type === 'end') {
           observeIdRef.current = undefined;
-          setChatLive(f);
+          setChatLive(undefined);
         }
       }),
       BotHost.addListener('voiceEvent', (ev: HostVoiceEvent) => {
@@ -1920,16 +1943,13 @@ export function HostPage({
           const handle = api.observe(identity, { kind: 'primary', botId: bot.botId }, ev => {
             if (!current()) return;
             if ('error' in ev) { setChatObservationError(t('连接中断，正在恢复…', 'Connection interrupted; recovering…')); return; }
-            const frame = ev.frame as unknown as HostLiveFrame;
-            if (frame.type === 'snapshot') setChatLive(frame);
-            else if (frame.type === 'update') {
-              setChatLive(prev =>
-                prev && prev.type !== 'end'
-                  ? { ...prev, state: { ...(prev.state ?? {}), ...(frame.changes ?? {}) } as HostLiveFrame['state'] }
-                  : prev,
-              );
+            const frame = ev.frame;
+            if (frame.type === 'snapshot') {
+              setChatLive(frame.state);
+            } else if (frame.type === 'update') {
+              setChatLive(prev => (prev ? { ...prev, ...frame.changes } : prev));
             } else if (frame.type === 'end') {
-              setChatLive(frame);
+              setChatLive(undefined);
             }
           });
           remoteObserveRef.current = handle;
@@ -2165,6 +2185,14 @@ export function HostPage({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [launchTarget, allBotItems, localBots, localHost?.deviceId, remoteIdentity?.generation, remoteConnected, chatResumeEpoch]);
 
+  /** Scopes 内“打开该 Bot 主聊天”入口：按稳定 (botId, deviceId) 在 allBotItems 中定位后复用 openBotChat。 */
+  const handleOpenBot = useCallback((botId: string, deviceId: string) => {
+    const bot = allBotItems.find(item => item.botId === botId &&
+      (item.hostKind === 'remote' ? item.hostId === deviceId :
+        (localBots.find(local => local.botId === item.botId)?.deviceId || localHost?.deviceId) === deviceId));
+    if (bot) openBotChat(bot);
+  }, [allBotItems, localBots, localHost?.deviceId]);
+
   const openBotProfile = (bot: UnifiedBotItem) => {
     setChatTopMenuOpen(false);
     setComposerMenuOpen(false);
@@ -2353,7 +2381,7 @@ export function HostPage({
         ...(attachmentIds.length ? { attachments: attachmentIds } : {}),
         phase: 'sending' as const,
         submittedAt: Date.now(),
-        afterEntryId: Math.max(maxHistoryEntryId(chatHistory), Number(chatLive?.state?.lastEntryId) || 0, clearedMap[bot.key] ?? 0),
+        afterEntryId: Math.max(maxHistoryEntryId(chatHistory), Number(chatLive?.lastEntryId) || 0, clearedMap[bot.key] ?? 0),
       };
       chatSubmissionRef.current = submission;
       updatePending({ pending: submission }, false);
@@ -2946,10 +2974,15 @@ ${newer}` : draftSnapshot;
       : undefined;
 
   const recoveringChat = chatPending?.botKey === activeBot?.key && chatPending?.phase === 'recovering';
-  const liveGeneratingText = recoveringChat ? '' : chatLive?.state?.generation?.text ?? '';
+  // peer/room 轮仍在生成：公共 LiveGeneration 带 attribution 时按来源标记，
+  // 不能让协作过程的流式文本被当成发给用户的普通回答。
+  const liveGenerationAttr = chatLive?.generation?.attribution;
+  const liveGeneratingIsPeer = !!liveGenerationAttr && liveGenerationAttr.kind !== 'host' &&
+    liveGenerationAttr.channel !== undefined && liveGenerationAttr.channel !== 'primary';
+  const liveGeneratingText = recoveringChat ? '' : chatLive?.generation?.text ?? '';
 
   // 当前会话的按轮受理状态：优先 live turnAdmission，其次提交回执/持久化 pending 上的 admission。
-  const liveTurnAdmission = (chatLive?.state as TurnAdmissionLiveState | undefined)?.turnAdmission ?? null;
+  const liveTurnAdmission = chatLive?.turnAdmission ?? null;
   const pendingAdmission = chatPending?.botKey === activeBot?.key
     ? (chatPending?.admission ?? (chatReceipt as TurnAdmissionCarrier | undefined)?.admission ?? null)
     : null;
@@ -2973,7 +3006,7 @@ ${newer}` : draftSnapshot;
   const isBotBusy = !recoveringChat && Boolean(
     (chatPending?.botKey === activeBot?.key && chatPending?.phase === 'sending') ||
     ((chatHostKind !== 'remote' || (chatRemoteConnected && activeBot?.online !== false)) &&
-      (chatLive?.state?.busy || (chatLive?.state?.queuedCount ?? 0) > 0)) ||
+      (chatLive?.busy || (chatLive?.queuedCount ?? 0) > 0)) ||
       (submission?.botKey === activeBot?.key && chatPending?.phase !== 'recovering' && chatReceipt &&
         (chatReceipt.status === 'queued' || chatReceipt.status === 'placed')) ||
       (chatTurnAdmission && chatTurnAdmission.phase !== 'failed'),
@@ -3013,7 +3046,7 @@ ${newer}` : draftSnapshot;
   );
 
   const activeLiveToolName = useMemo(() => {
-    const tools = array<Record<string, unknown>>(chatLive?.state?.tools);
+    const tools = array<Record<string, unknown>>(chatLive?.tools);
     for (let i = tools.length - 1; i >= 0; i--) {
       const slot = tools[i];
       const name = typeof slot?.name === 'string' ? slot.name.trim() : '';
@@ -3023,10 +3056,10 @@ ${newer}` : draftSnapshot;
       }
     }
     const last = tools[tools.length - 1];
-    return typeof last?.name === 'string' && chatLive?.state?.busy && !liveGeneratingText
+    return typeof last?.name === 'string' && chatLive?.busy && !liveGeneratingText
       ? last.name.trim()
       : null;
-  }, [chatLive?.state?.tools, chatLive?.state?.busy, liveGeneratingText]);
+  }, [chatLive?.tools, chatLive?.busy, liveGeneratingText]);
 
   const prevChatBusyRef = useRef(false);
   useEffect(() => {
@@ -3077,7 +3110,7 @@ ${newer}` : draftSnapshot;
     const clearedAfter = clearedMap[activeBot.key] ?? 0;
     // raw history 是旧页，live 投影是新窗口：按 entry id 去重排序；同 id 保留 raw（工具/思考细节更全）。
     const byId = new Map<string, Record<string, unknown>>();
-    for (const item of array<Record<string, unknown>>(chatLive?.state?.history)) {
+    for (const item of array<Record<string, unknown>>(chatLive?.history)) {
       byId.set(String(item.id), item);
     }
     for (const item of chatHistory) byId.set(String(item.id), item);
@@ -3106,11 +3139,14 @@ ${newer}` : draftSnapshot;
       }
     }
     return parseHistoryEntries(sorted, clearedAfter, {
-      liveTools: recoveringChat ? undefined : array<Record<string, unknown>>(chatLive?.state?.tools),
+      liveTools: recoveringChat ? undefined : array<Record<string, unknown>>(chatLive?.tools),
       isBusy: isBotBusy,
       liveGeneratingText,
+      // 当前 Bot 为 self echo（outgoing）判定锚点；live 流式轮的 attribution 由生成帧携带。
+      selfBotId: activeBot.botId,
+      liveAttribution: liveGenerationAttr,
     });
-  }, [chatHistory, chatLive, activeBot, clearedMap, chatPending, recoveringChat, isBotBusy, liveGeneratingText]);
+  }, [chatHistory, chatLive, activeBot, clearedMap, chatPending, recoveringChat, isBotBusy, liveGeneratingText, liveGenerationAttr]);
 
   const activeTurnStartedAt = useMemo(
     () =>
@@ -3235,6 +3271,10 @@ ${newer}` : draftSnapshot;
       cancelActiveObservation();
       setChatTopMenuOpen(false);
       setScreen('hub');
+      return true;
+    }
+    if (screen === 'bot-scopes') {
+      setScreen('chat');
       return true;
     }
     if (screen === 'settings' || screen === 'scopes' || screen === 'pending') {
@@ -3976,6 +4016,17 @@ ${newer}` : draftSnapshot;
                     <Search size={19} />
                     <span>{t('在聊天中查找', 'Search in Chat')}</span>
                   </button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      setChatTopMenuOpen(false);
+                      setScreen('bot-scopes');
+                    }}
+                  >
+                    <MessageSquare size={19} />
+                    <span>{t('Bot 通信', 'Bot Comm')}</span>
+                  </button>
                   {!activeBot.isPrimary && !activeBot.archivedAt && (
                     <button
                       type="button"
@@ -4101,11 +4152,23 @@ ${newer}` : draftSnapshot;
                   typeof turn.durationMs === 'number' &&
                   turn.durationMs > 0 &&
                   !(isLastAssistantTurn && isBotBusy);
+                const attribution = turn.attribution;
+                // peer = 来自 dm/room 的导入消息；host 触发/主会话普通消息不套 peer 样式。
+                const isPeer = !!attribution && attribution.kind !== 'host' &&
+                  attribution.channel !== undefined && attribution.channel !== 'primary';
+
+                // 外层 peer 气泡（dm/room 消息）保留统一署名行，与消息原文一起进主聊天。
                 return (
                   <article
                     key={turn.id}
-                    className={`bot-chat-bubble ${turn.role}${turn.isStreaming ? ' streaming' : ''}`}
+                    className={`bot-chat-bubble ${turn.role}${turn.isStreaming ? ' streaming' : ''}${isPeer ? ' is-peer' : ''}`}
                   >
+                    {attribution && attribution.kind !== 'host' && (
+                      <MessageAttribution
+                        attribution={attribution}
+                        className="bot-chat-attribution"
+                      />
+                    )}
                     {turn.thinking && (
                       <details className="bot-chat-thinking">
                         <summary>{t('思考过程', 'Thinking')}</summary>
@@ -4152,6 +4215,17 @@ ${newer}` : draftSnapshot;
                 );
               })
             )}
+            {liveGeneratingIsPeer && liveGenerationAttr ? (
+              <div className="bot-chat-peer-working" role="status">
+                <MessageAttribution
+                  attribution={liveGenerationAttr}
+                  className="bot-chat-attribution"
+                />
+                <span className="bot-chat-peer-working-text">
+                  {t('协作回复生成中…', 'Collaboration reply generating…')}
+                </span>
+              </div>
+            ) : null}
             <GrokBotWorkingSlot
               key={activeBot.key}
               botKey={activeBot.key}
@@ -4159,14 +4233,14 @@ ${newer}` : draftSnapshot;
               isBusy={isBotBusy}
               isSending={chatPending?.botKey === activeBot.key && chatPending.phase === 'sending'}
               isRecovering={chatPending?.botKey === activeBot.key && chatPending.phase === 'recovering'}
-              isStreaming={Boolean(liveGeneratingText)}
+              isStreaming={Boolean(liveGeneratingText) && !liveGeneratingIsPeer}
               activeToolName={activeLiveToolName}
               hasThinking={Boolean(
                 visibleTurns[visibleTurns.length - 1]?.role === 'assistant' &&
                   visibleTurns[visibleTurns.length - 1]?.thinking &&
                   !liveGeneratingText,
               )}
-              queuedCount={chatLive?.state?.queuedCount ?? 0}
+              queuedCount={chatLive?.queuedCount ?? 0}
               hasError={Boolean(submissionFailure) || chatReceipt?.status === 'unanswered'}
               startedAt={activeTurnStartedAt}
               t={t}
@@ -4268,7 +4342,7 @@ ${newer}` : draftSnapshot;
                   const pending: ChatPending = old?.requestId === requestId ? old : {
                     botKey: activeBot.key, scopeKey: activeChatScope, requestId, text, draft, phase: 'sending',
                     submittedAt: Date.now(),
-                    afterEntryId: Math.max(maxHistoryEntryId(chatHistory), Number(chatLive?.state?.lastEntryId) || 0, clearedMap[activeBot.key] ?? 0),
+                    afterEntryId: Math.max(maxHistoryEntryId(chatHistory), Number(chatLive?.lastEntryId) || 0, clearedMap[activeBot.key] ?? 0),
                   };
                   if (currentChatScope.current === activeChatScope) chatSubmissionRef.current = pending;
                   const entry = pendingByBot.current.get(activeChatScope);
@@ -4435,7 +4509,7 @@ ${newer}` : draftSnapshot;
                             botKey: activeBot.key,
                             requestId: uuid(),
                             afterEntryId: Math.max(
-                              maxHistoryEntryId(chatHistory), Number(chatLive?.state?.lastEntryId) || 0,
+                              maxHistoryEntryId(chatHistory), Number(chatLive?.lastEntryId) || 0,
                               clearedMap[activeBot.key] ?? 0,
                             ),
                           };
@@ -5854,24 +5928,65 @@ ${newer}` : draftSnapshot;
         </main>
       )}
 
-      {(screen === 'scopes' || screen === 'pending') && (
+      {(screen === 'scopes' || screen === 'bot-scopes' || screen === 'pending') && (
         <main className="grok-subpage grok-page-enter">
           <header className="grok-subpage-topbar">
             <button
               type="button"
               className="grok-floating-circle-btn"
-              onClick={() => setScreen('hub')}
+              onClick={() => setScreen(screen === 'bot-scopes' ? 'chat' : 'hub')}
               aria-label={t('返回', 'Back')}
             >
               <ArrowLeft size={20} />
             </button>
             <h2 className="grok-subpage-header-title">
-              {screen === 'scopes' ? t('群聊与 Bot 私聊', 'Rooms and DMs') : t('待发送', 'Pending')}
+              {screen === 'pending' ? t('待发送', 'Pending') : screen === 'bot-scopes' ? t('Bot 通信', 'Bot Comm') : t('群聊与 Bot 私聊', 'Rooms and DMs')}
             </h2>
             <span style={{ width: 44 }} />
           </header>
           <div className="grok-subpage-scroll">
-            {remoteClientRef.current && remoteIdentity ? (
+            {screen === 'bot-scopes' ? (
+              // 单个 Bot 的通信页：本机 Bot 用只读适配器（本地 ledger，无需远端），
+              // 远端 Bot 复用既有远程 DesktopViewApi（房间发送保留原行为）。
+              activeBot?.hostKind === 'remote' ? (
+                remoteClientRef.current && activeBot.remoteIdentity ? (
+                  <div className="grok-scopes-mobile-container">
+                    <Scopes
+                      key={`botcomm-r-${activeBot.remoteIdentity.profileId}|${activeBot.remoteIdentity.kind}|${activeBot.remoteIdentity.generation}|${activeBot.remoteIdentity.targetDeviceId}|${activeBot.botId}`}
+                      api={remoteClientRef.current.api}
+                      pageActive={active}
+                      initialBotId={activeBot.botId}
+                      onOpenBot={handleOpenBot}
+                    />
+                  </div>
+                ) : (
+                  <section className="grok-card-group grok-schedule-empty" style={{ marginTop: 12 }}>
+                    <Globe size={28} className="grok-row-icon" />
+                    <h4>{t('远端节点未连接', 'Remote node not connected')}</h4>
+                    <p>{t('连接远端节点后可查看该 Bot 的群聊与私聊。', 'Connect to the remote node to view this Bot\'s rooms and DMs.')}</p>
+                  </section>
+                )
+              ) : activeBot ? (
+                localScopeApi ? (
+                  <div className="grok-scopes-mobile-container">
+                    <Scopes
+                      key={`botcomm-l-${localScopeApi.identity?.targetDeviceId ?? 'nodevice'}|${localScopeApi.identity?.generation ?? 0}|${activeBot.botId}`}
+                      api={localScopeApi}
+                      pageActive={active}
+                      readOnly
+                      initialBotId={activeBot.botId}
+                      onOpenBot={handleOpenBot}
+                    />
+                  </div>
+                ) : (
+                  <section className="grok-card-group grok-schedule-empty" style={{ marginTop: 12 }}>
+                    <Globe size={28} className="grok-row-icon" />
+                    <h4>{t('本机 Host 未就绪', 'Local host not ready')}</h4>
+                    <p>{t('Host 启动后即可查看该 Bot 的群聊与私聊记录。', 'Once the host is running you can view this Bot\'s rooms and DMs.')}</p>
+                  </section>
+                )
+              ) : null
+            ) : remoteClientRef.current && remoteIdentity ? (
               <>
                 <div className="grok-field-section">
                   <label className="grok-section-label">{t('当前操作节点', 'Target Node')}</label>
@@ -5921,6 +6036,7 @@ ${newer}` : draftSnapshot;
                       key={`${remoteIdentity.profileId}|${remoteIdentity.kind}|${remoteIdentity.targetDeviceId}`}
                       api={remoteClientRef.current.api}
                       pageActive={active}
+                      onOpenBot={handleOpenBot}
                     />
                   </div>
                 ) : (
