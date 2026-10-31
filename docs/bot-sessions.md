@@ -58,13 +58,15 @@ scope 消息账本（MessageLog）仍是消息事实的唯一权威，主会话�
 ## 迟到回复、Reset 与旧行为
 
 - **迟到回复**：`sessions.replyOrigin` 用外发请求的来源记账定位原始本地请求的
-  replyTarget；对已观察请求的新回复可续接其原始渠道（主会话或发起 scope）。
+  replyTarget；尚未被 read/wait 消费的新回复可续接其原始渠道（主会话或发起 scope）。
 - **Reset（/clear）**：先 `sessions.sync(botId)` 把未导入的账本消息推进水位
   （`lastImportedLocalId` 是 reset 唯一保留的导入边界），再 `conversation.reset()`，
   随后 `sessions.reset(botId)` — 账本导入水位、既有 ID/数据、回复回执与未决外发
   请求的来源记账全部保留（旧账本消息绝不重现，迟到回复仍可续接），只清理过期活动轮状态。
 - **Compact**：自动压缩保持关闭；手动 `/compact` 追加来源/scope/未决请求的保留指令
-  （`BOT_SESSION_COMPACT_INSTRUCTIONS`），摘要必须保留路由事实。
+  （`BOT_SESSION_COMPACT_INSTRUCTIONS`）；路由事实以 Durable 状态为准，不依赖摘要正文。
+- **Scope Stop**：只取消所选 scope 当前请求及其所属任务，不中断其他 scope 或用户轮；
+  释放 Bot 准入后唤醒用户队列。恢复 scope 时同样优先处理排队用户。
 - **旧数据**：work 原生会话历史不删除；成员工作 API 继续可读旧历史，新的共享执行
   在主会话中呈现并带正确归属，不把其他 scope 的工作标成所选 scope。
 - **离线**：`scopeHistory`/`getScopeMessage`/`getScopeMessageDelivery`/`getScopeState`/
@@ -93,3 +95,8 @@ scope 消息账本（MessageLog）仍是消息事实的唯一权威，主会话�
 - 后端 history/live 只在安全 schema 内投影 attribution；ChatTurn 增加可选
   attribution；scope 事件 UI 渲染原始消息正文与发送者/设备/渠道/回复归属；
   host 触发记录不渲染为普通气泡。
+
+- 同名 Bot 显示短 ID，完整 Bot/设备 ID 可通过标题和无障碍标签读取；发送者设备取消息的 `sourceDeviceId`。
+- 通信历史先显示最近一页，再向前加载；旧页不会改写增量读取游标，每页按整条消息返回。
+- 成员工作面板默认收起，选择成员后打开；收起或离开页面会停止该面板的实时观察。
+- 用户附件元数据与来源标记同时保留；历史传输剥离内嵌图片字节后再计量和分块。
