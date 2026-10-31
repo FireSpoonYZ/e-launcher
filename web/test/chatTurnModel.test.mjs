@@ -158,7 +158,7 @@ test('parseHistoryEntries shows tool calls immediately on initiation and updates
   });
   assert.equal(step2Turns.length, 2);
   assert.deepEqual(step2Turns[1].tools, [
-    { id: 'call_1', name: 'bash', status: 'done', durationMs: 500 },
+    { id: 'call_1', name: 'bash', status: 'done', durationMs: 500, output: 'ok' },
     { id: 'call_2', name: 'read', status: 'running' },
   ]);
   assert.equal(step2Turns[1].text, 'Analyzing output...');
@@ -214,8 +214,8 @@ test('parseHistoryEntries shows tool calls immediately on initiation and updates
   const finalTurns = parseHistoryEntries(completedHistory, 0, { isBusy: false });
   assert.equal(finalTurns.length, 2);
   assert.deepEqual(finalTurns[1].tools, [
-    { id: 'call_1', name: 'bash', status: 'done', durationMs: 500 },
-    { id: 'call_2', name: 'read', status: 'error', durationMs: 300 },
+    { id: 'call_1', name: 'bash', status: 'done', durationMs: 500, output: 'ok' },
+    { id: 'call_2', name: 'read', status: 'error', durationMs: 300, output: 'permission denied' },
   ]);
   assert.equal(finalTurns[1].text, 'Diagnostics complete.');
   // Total duration from user timestamp (10_000) to end of last assistant message (12_600 + 1_900 = 14_500) = 4_500ms

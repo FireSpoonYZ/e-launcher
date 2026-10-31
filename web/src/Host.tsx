@@ -83,6 +83,7 @@ import {
   formatTurnDuration,
   parseHistoryEntries,
   resolveActiveTurnStartedAt,
+  type ChatToolCallItem,
 } from './chatTurnModel';
 import {
   readToolPresentation,
@@ -553,6 +554,386 @@ function maxHistoryEntryId(items: Array<Record<string, unknown>>): number {
 }
 
 // 聊天 slash 命令：只有 /clear 与 /compact；执行全部走后端控制方法，不经过模型 submit。
+function formatToolStepDuration(ms: number): string {
+  const safe = Math.max(0, Math.round(ms));
+  if (safe < 1000) return `${safe}ms`;
+  if (safe < 10_000) {
+    const sec = Math.round(safe / 100) / 10;
+    return Number.isInteger(sec) ? `${sec}s` : `${sec.toFixed(1)}s`;
+  }
+  const totalSec = Math.round(safe / 1000);
+  if (totalSec < 60) return `${totalSec}s`;
+  const mins = Math.floor(totalSec / 60);
+  const secs = totalSec % 60;
+  return secs > 0 ? `${mins}m ${String(secs).padStart(2, '0')}s` : `${mins}m`;
+}
+
+function copyTextToClipboard(value: string): void {
+  if (!value) return;
+  try {
+    void navigator.clipboard?.writeText(value);
+  } catch {
+    // Ignore clipboard permission errors in webview
+  }
+}
+
+function renderToolStepIcon(status: ChatToolCallItem['status']) {
+  if (status === 'running') {
+    return (
+      <svg viewBox="0 0 16 16" fill="none">
+        <circle cx="8" cy="8" r="5.75" stroke="currentColor" strokeOpacity="0.24" strokeWidth="1.75" />
+        <path d="M8 2.25A5.75 5.75 0 0 1 13.75 8" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" />
+      </svg>
+    );
+  }
+  if (status === 'error') {
+    return (
+      <svg viewBox="0 0 16 16" fill="none">
+        <circle cx="8" cy="8" r="6" stroke="currentColor" strokeWidth="1.6" />
+        <path d="M8 5v3.5M8 11h.01" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" />
+      </svg>
+    );
+  }
+  return (
+    <svg viewBox="0 0 16 16" fill="none">
+      <path
+        d="M3.75 8.25 6.6 11.1 12.25 5.25"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function extractSmartArgEntries(
+  toolName: string,
+  args?: Record<string, unknown>,
+): Array<{ label: string; value: string; mono?: boolean }> {
+  if (!args) return [];
+  const lower = toolName.toLowerCase();
+  const entries: Array<{ label: string; value: string; mono?: boolean }> = [];
+  const addStr = (key: string, label: string, mono = true) => {
+    const val = args[key];
+    if (typeof val === 'string' && val.trim()) {
+      entries.push({ label, value: val.trim(), mono });
+    }
+  };
+
+  if (lower === 'bash' || lower.endsWith('_bash') || lower === 'shell' || lower === 'exec') {
+    addStr('command', '$');
+    addStr('cmd', '$');
+    if (typeof args.timeout === 'number') {
+      entries.push({ label: 'timeout', value: `${args.timeout}s`, mono: true });
+    }
+    return entries;
+  }
+
+  if (lower === 'read' || lower === 'write' || lower === 'edit' || lower === 'lsp_fix') {
+    addStr('path', 'path');
+    addStr('file_path', 'path');
+    addStr('filePath', 'path');
+    if (typeof args.offset === 'number' || typeof args.limit === 'number') {
+      const range = [
+        typeof args.offset === 'number' ? `offset=${args.offset}` : '',
+        typeof args.limit === 'number' ? `limit=${args.limit}` : '',
+      ]
+        .filter(Boolean)
+        .join(', ');
+      if (range) entries.push({ label: 'range', value: range, mono: true });
+    }
+    if (Array.isArray(args.edits)) {
+      entries.push({ label: 'edits', value: `${args.edits.length} block(s)`, mono: true });
+    }
+    return entries;
+  }
+
+  if (lower === 'grep' || lower === 'find' || lower === 'ls' || lower === 'search') {
+    addStr('pattern', 'pattern');
+    addStr('query', 'query');
+    addStr('path', 'path');
+    addStr('glob', 'glob');
+    return entries;
+  }
+
+  if (lower === 'codemode') {
+    addStr('code', 'script');
+    return entries;
+  }
+
+  for (const [k, v] of Object.entries(args)) {
+    if (entries.length >= 4) break;
+    if (typeof v === 'string' && v.trim()) {
+      entries.push({ label: k, value: v.trim(), mono: true });
+    } else if (typeof v === 'number' || typeof v === 'boolean') {
+      entries.push({ label: k, value: String(v), mono: true });
+    }
+  }
+  return entries;
+}
+
+function ToolCallStepCard({
+  tool,
+  botKey,
+  isBotBusy,
+  disabled,
+  onSubmitQuestionnaire,
+  t,
+}: {
+  tool: ChatToolCallItem;
+  botKey: string;
+  isBotBusy: boolean;
+  disabled: boolean;
+  onSubmitQuestionnaire: (presentation: { installationId: string }, input: QuestionnaireSubmitPayload) => Promise<unknown>;
+  t: (zh: string, en: string) => string;
+}) {
+  const [expanded, setExpanded] = useState(() => tool.status === 'error');
+  const [showRawJson, setShowRawJson] = useState(false);
+  const [copiedPart, setCopiedPart] = useState<'args' | 'output' | null>(null);
+
+  const presentation = tool.presentation ? readToolPresentation(tool.presentation) : null;
+  const hasArgs = Boolean(tool.args && Object.keys(tool.args).length > 0);
+  const hasOutput = Boolean(tool.output && tool.output.trim());
+  const smartEntries = useMemo(() => extractSmartArgEntries(tool.name, tool.args), [tool.name, tool.args]);
+  const rawArgsJson = useMemo(
+    () => (hasArgs ? JSON.stringify(tool.args, null, 2) : ''),
+    [hasArgs, tool.args],
+  );
+
+  const stateLabel =
+    tool.status === 'running'
+      ? t('调用中', 'Calling')
+      : tool.status === 'error'
+        ? t('失败', 'Failed')
+        : typeof tool.durationMs === 'number' && tool.durationMs > 0
+          ? formatToolStepDuration(tool.durationMs)
+          : t('已完成', 'Done');
+
+  const triggerCopy = (part: 'args' | 'output', text: string) => {
+    copyTextToClipboard(text);
+    setCopiedPart(part);
+    window.setTimeout(() => {
+      setCopiedPart(current => (current === part ? null : current));
+    }, 1400);
+  };
+
+  return (
+    <div role="listitem" className="bot-chat-tool-wrap">
+      <button
+        type="button"
+        className={`bot-chat-tool-chip is-${tool.status}${expanded ? ' is-expanded' : ''}`}
+        aria-expanded={expanded}
+        onClick={() => setExpanded(v => !v)}
+      >
+        <span className="bot-tool-step-icon" aria-hidden="true">
+          {renderToolStepIcon(tool.status)}
+        </span>
+        <span className="bot-tool-step-name">{tool.name}</span>
+        {tool.argSummary ? (
+          <span className="bot-tool-step-summary" title={tool.argSummary}>
+            {tool.argSummary}
+          </span>
+        ) : null}
+        <span className="bot-tool-step-state">{stateLabel}</span>
+        <ChevronDown size={13} className={`bot-tool-step-chevron${expanded ? ' is-open' : ''}`} aria-hidden="true" />
+      </button>
+
+      {expanded && (
+        <div className={`bot-tool-detail-panel is-${tool.status}`} role="region" aria-label={`${tool.name} ${t('调用详情', 'Call details')}`}>
+          {hasArgs ? (
+            <div className="bot-tool-detail-section">
+              <div className="bot-tool-detail-head">
+                <span className="bot-tool-detail-label">{t('参数', 'ARGS')}</span>
+                <div className="bot-tool-detail-actions">
+                  {smartEntries.length > 0 && (
+                    <button
+                      type="button"
+                      className="bot-tool-detail-mini-btn"
+                      onClick={() => setShowRawJson(v => !v)}
+                    >
+                      {showRawJson ? t('智能摘要', 'Summary') : t('原始 JSON', 'Raw JSON')}
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    className="bot-tool-detail-mini-btn"
+                    onClick={() => triggerCopy('args', rawArgsJson)}
+                  >
+                    {copiedPart === 'args' ? t('已复制', 'Copied') : t('复制', 'Copy')}
+                  </button>
+                </div>
+              </div>
+              {!showRawJson && smartEntries.length > 0 ? (
+                <div className="bot-tool-smart-args">
+                  {smartEntries.map((entry, idx) => (
+                    <div key={idx} className="bot-tool-smart-row">
+                      <span className="bot-tool-smart-key">{entry.label}</span>
+                      <code className="bot-tool-smart-val">{entry.value}</code>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <pre className="bot-tool-detail-pre">{rawArgsJson}</pre>
+              )}
+            </div>
+          ) : null}
+
+          {hasOutput ? (
+            <div className="bot-tool-detail-section">
+              <div className="bot-tool-detail-head">
+                <span className="bot-tool-detail-label">
+                  {tool.status === 'error'
+                    ? t('错误输出', 'ERROR')
+                    : tool.status === 'running'
+                      ? t('实时输出', 'LIVE OUTPUT')
+                      : t('输出', 'RESULT')}
+                  {tool.outputTruncated ? ` · ${t('已截断', 'Truncated')}` : ''}
+                </span>
+                <div className="bot-tool-detail-actions">
+                  <button
+                    type="button"
+                    className="bot-tool-detail-mini-btn"
+                    onClick={() => triggerCopy('output', tool.output ?? '')}
+                  >
+                    {copiedPart === 'output' ? t('已复制', 'Copied') : t('复制', 'Copy')}
+                  </button>
+                </div>
+              </div>
+              <pre className="bot-tool-detail-pre is-output">{tool.output}</pre>
+            </div>
+          ) : null}
+
+          {!hasArgs && !hasOutput ? (
+            <div className="bot-tool-detail-empty">
+              {tool.status === 'running'
+                ? t('正在执行工具，等待输出返回…', 'Running tool, waiting for output…')
+                : t('该工具调用已执行完成（无额外参数或文本输出）', 'Completed with no additional text output')}
+            </div>
+          ) : null}
+        </div>
+      )}
+
+      {presentation ? (
+        <ToolPresentationCard
+          key={`${botKey}:${presentation.kind === 'questionnaire' ? presentation.requestId : tool.id}`}
+          presentation={presentation}
+          active={tool.presentationLive === true && isBotBusy}
+          disabled={disabled}
+          onSubmit={
+            presentation.kind === 'questionnaire'
+              ? input => onSubmitQuestionnaire(presentation, input)
+              : undefined
+          }
+        />
+      ) : null}
+    </div>
+  );
+}
+
+function TurnToolCallsSection({
+  tools,
+  botKey,
+  isBotBusy,
+  disabled,
+  onSubmitQuestionnaire,
+  t,
+}: {
+  tools: ChatToolCallItem[];
+  botKey: string;
+  isBotBusy: boolean;
+  disabled: boolean;
+  onSubmitQuestionnaire: (presentation: { installationId: string }, input: QuestionnaireSubmitPayload) => Promise<unknown>;
+  t: (zh: string, en: string) => string;
+}) {
+  const hasActiveOrErrorOrInteractive = tools.some(
+    tool =>
+      tool.status === 'running' ||
+      tool.status === 'error' ||
+      Boolean(tool.presentation && readToolPresentation(tool.presentation)),
+  );
+  const shouldAggregate = tools.length >= 3;
+  const [groupOpen, setGroupOpen] = useState(() => !shouldAggregate || hasActiveOrErrorOrInteractive);
+
+  useEffect(() => {
+    if (hasActiveOrErrorOrInteractive) {
+      setGroupOpen(true);
+    }
+  }, [hasActiveOrErrorOrInteractive]);
+
+  const totalDurationMs = useMemo(
+    () => tools.reduce((sum, item) => sum + (typeof item.durationMs === 'number' && item.durationMs > 0 ? item.durationMs : 0), 0),
+    [tools],
+  );
+  const runningTool = tools.find(item => item.status === 'running');
+  const errorCount = tools.filter(item => item.status === 'error').length;
+
+  if (!shouldAggregate) {
+    return (
+      <div className="bot-chat-tools" role="list" aria-label={t('工具调用', 'Tool calls')}>
+        {tools.map(tool => (
+          <ToolCallStepCard
+            key={tool.id}
+            tool={tool}
+            botKey={botKey}
+            isBotBusy={isBotBusy}
+            disabled={disabled}
+            onSubmitQuestionnaire={onSubmitQuestionnaire}
+            t={t}
+          />
+        ))}
+      </div>
+    );
+  }
+
+  return (
+    <div className="bot-chat-tools-group">
+      <button
+        type="button"
+        className={`bot-chat-tools-group-bar${runningTool ? ' is-running' : errorCount > 0 ? ' is-error' : ''}`}
+        aria-expanded={groupOpen}
+        onClick={() => setGroupOpen(v => !v)}
+      >
+        <span className="bot-tool-step-icon" aria-hidden="true">
+          {renderToolStepIcon(runningTool ? 'running' : errorCount > 0 ? 'error' : 'done')}
+        </span>
+        <span className="bot-tools-group-title">
+          {runningTool
+            ? t(`正在调用 ${runningTool.name} (${tools.length} 个工具)`, `Running ${runningTool.name} (${tools.length} tools)`)
+            : t(`已使用 ${tools.length} 个工具`, `Used ${tools.length} tools`)}
+        </span>
+        {totalDurationMs > 0 && !runningTool ? (
+          <span className="bot-tools-group-meta">
+            {t(`耗时 ${formatToolStepDuration(totalDurationMs)}`, formatToolStepDuration(totalDurationMs))}
+          </span>
+        ) : null}
+        {errorCount > 0 ? (
+          <span className="bot-tools-group-error">
+            {t(`${errorCount} 失败`, `${errorCount} failed`)}
+          </span>
+        ) : null}
+        <ChevronDown size={14} className={`bot-tool-step-chevron${groupOpen ? ' is-open' : ''}`} aria-hidden="true" />
+      </button>
+
+      {groupOpen && (
+        <div className="bot-chat-tools is-grouped" role="list" aria-label={t('工具调用', 'Tool calls')}>
+          {tools.map(tool => (
+            <ToolCallStepCard
+              key={tool.id}
+              tool={tool}
+              botKey={botKey}
+              isBotBusy={isBotBusy}
+              disabled={disabled}
+              onSubmitQuestionnaire={onSubmitQuestionnaire}
+              t={t}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 const SLASH_COMMANDS = [
   { name: '/clear', zh: '清空当前对话并重置模型上下文', en: 'Clear history and reset model context' },
   { name: '/compact', zh: '压缩较早的上下文', en: 'Compact earlier context' },
@@ -2571,6 +2952,50 @@ ${newer}` : draftSnapshot;
       : null;
   }, [chatLive?.state?.tools, chatLive?.state?.busy, liveGeneratingText]);
 
+  const prevChatBusyRef = useRef(false);
+  useEffect(() => {
+    const wasBusy = prevChatBusyRef.current;
+    prevChatBusyRef.current = isBotBusy;
+    if (!wasBusy || isBotBusy || screen !== 'chat' || !active || !activeBot || document.hidden) return;
+    const targetBot = activeBot;
+    const scopeKey = currentChatScope.current;
+    void (async () => {
+      try {
+        if (targetBot.hostKind === 'local') {
+          const items = await fetchBotHistoryPages(async (cursor, limit, chunked) => {
+            if (currentChatScope.current !== scopeKey) return null;
+            const env = await BotHost.call({
+              method: 'history',
+              params: { botId: targetBot.botId, limit, ...(chunked ? { chunked: true } : {}), ...(cursor ? { cursor } : {}) },
+            });
+            return (env.result as HostHistoryPage) ?? null;
+          });
+          if (currentChatScope.current === scopeKey && items.length > 0) {
+            setChatHistory(previous => mergeHistory(previous, items));
+          }
+        } else if (targetBot.hostKind === 'remote' && targetBot.remoteIdentity && remoteClientRef.current?.api.transportConnected) {
+          const api = remoteClientRef.current.api;
+          const identity = targetBot.remoteIdentity;
+          const items = await fetchBotHistoryPages(async (cursor, limit, chunked) => {
+            if (currentChatScope.current !== scopeKey) return null;
+            const page = await api.call(identity, 'history', {
+              botId: targetBot.botId,
+              limit,
+              ...(chunked ? { chunked: true } : {}),
+              ...(cursor ? { cursor } : {}),
+            });
+            return (page as unknown as HostHistoryPage) ?? null;
+          });
+          if (currentChatScope.current === scopeKey && items.length > 0) {
+            setChatHistory(previous => mergeHistory(previous, items));
+          }
+        }
+      } catch {
+        // Ignore background refresh error
+      }
+    })();
+  }, [isBotBusy, screen, active, activeBot]);
+
   const allChatTurns = useMemo(() => {
     if (!activeBot) return [];
     const clearedAfter = clearedMap[activeBot.key] ?? 0;
@@ -2625,7 +3050,14 @@ ${newer}` : draftSnapshot;
     return allChatTurns.filter(
       turn =>
         turn.text.toLowerCase().includes(q) ||
-        Boolean(turn.tools?.some(tool => tool.name.toLowerCase().includes(q))),
+        Boolean(
+          turn.tools?.some(
+            tool =>
+              tool.name.toLowerCase().includes(q) ||
+              (tool.argSummary && tool.argSummary.toLowerCase().includes(q)) ||
+              (tool.output && tool.output.toLowerCase().includes(q)),
+          ),
+        ),
     );
   }, [allChatTurns, chatSearchOpen, chatSearchQuery]);
 
@@ -3501,87 +3933,14 @@ ${newer}` : draftSnapshot;
                       </details>
                     )}
                     {turn.tools && turn.tools.length > 0 && (
-                      <div className="bot-chat-tools" role="list" aria-label={t('工具调用', 'Tool calls')}>
-                        {turn.tools.map(tool => {
-                          const presentation = tool.presentation ? readToolPresentation(tool.presentation) : null;
-                          return (
-                          <span key={tool.id} role="listitem" className="bot-chat-tool-wrap">
-                          <span
-                            role="presentation"
-                            className={`bot-chat-tool-chip is-${tool.status}`}
-                          >
-                            <span className="bot-tool-step-icon" aria-hidden="true">
-                              {tool.status === 'running' ? (
-                                <svg viewBox="0 0 16 16" fill="none">
-                                  <circle
-                                    cx="8"
-                                    cy="8"
-                                    r="5.75"
-                                    stroke="currentColor"
-                                    strokeOpacity="0.24"
-                                    strokeWidth="1.75"
-                                  />
-                                  <path
-                                    d="M8 2.25A5.75 5.75 0 0 1 13.75 8"
-                                    stroke="currentColor"
-                                    strokeWidth="1.75"
-                                    strokeLinecap="round"
-                                  />
-                                </svg>
-                              ) : tool.status === 'error' ? (
-                                <svg viewBox="0 0 16 16" fill="none">
-                                  <circle
-                                    cx="8"
-                                    cy="8"
-                                    r="6"
-                                    stroke="currentColor"
-                                    strokeWidth="1.6"
-                                  />
-                                  <path
-                                    d="M8 5v3.5M8 11h.01"
-                                    stroke="currentColor"
-                                    strokeWidth="1.75"
-                                    strokeLinecap="round"
-                                  />
-                                </svg>
-                              ) : (
-                                <svg viewBox="0 0 16 16" fill="none">
-                                  <path
-                                    d="M3.75 8.25 6.6 11.1 12.25 5.25"
-                                    stroke="currentColor"
-                                    strokeWidth="1.8"
-                                    strokeLinecap="round"
-                                    strokeLinejoin="round"
-                                  />
-                                </svg>
-                              )}
-                            </span>
-                            <span className="bot-tool-step-name">{tool.name}</span>
-                            <span className="bot-tool-step-state">
-                              {tool.status === 'running'
-                                ? t('调用中', 'Calling')
-                                : tool.status === 'error'
-                                  ? t('失败', 'Failed')
-                                  : t('已完成', 'Done')}
-                            </span>
-                          </span>
-                          {presentation ? (
-                            <ToolPresentationCard
-                              key={`${activeBot?.key ?? 'chat'}:${presentation.kind === 'questionnaire' ? presentation.requestId : tool.id}`}
-                              presentation={presentation}
-                              active={tool.presentationLive === true && isBotBusy}
-                              disabled={Boolean(activeBot?.archivedAt)}
-                              onSubmit={
-                                presentation.kind === 'questionnaire'
-                                  ? input => submitQuestionnaire(presentation, input)
-                                  : undefined
-                              }
-                            />
-                          ) : null}
-                          </span>
-                          );
-                        })}
-                      </div>
+                      <TurnToolCallsSection
+                        tools={turn.tools}
+                        botKey={activeBot?.key ?? 'chat'}
+                        isBotBusy={isBotBusy}
+                        disabled={Boolean(activeBot?.archivedAt)}
+                        onSubmitQuestionnaire={submitQuestionnaire}
+                        t={t}
+                      />
                     )}
                     {turn.text && <Markdown text={turn.text} />}
                     <ErrorNotice

@@ -3,6 +3,14 @@ export interface ChatToolCallItem {
   name: string;
   status: 'running' | 'done' | 'error';
   durationMs?: number;
+  /** 工具调用参数（来自 raw history entry.model 中的 toolCall.arguments）。 */
+  args?: Record<string, unknown>;
+  /** 语义胶囊单行关键参数摘要（如命令、文件路径、搜索词等）。 */
+  argSummary?: string;
+  /** 工具执行输出文本（来自 liveTools.output 或 toolResult 文本内容）。 */
+  output?: string;
+  /** 输出是否因长度预算被截断。 */
+  outputTruncated?: boolean;
   /** host 投影的工具交互结构（todo/问卷）；来自 live slot 或历史 toolResult，未验证形状，渲染前需 readToolPresentation。 */
   presentation?: Record<string, unknown>;
   /** presentation 来自仍活跃 live slot 时为 true，历史结果替换后为 false。 */
@@ -38,6 +46,117 @@ function asRecord(value: unknown): Record<string, unknown> {
 
 function asArray<T = unknown>(value: unknown): T[] {
   return Array.isArray(value) ? (value as T[]) : [];
+}
+
+function compactSingleLine(value: string, maxLen = 56): string {
+  const clean = value.replace(/\s+/g, ' ').trim();
+  if (!clean) return '';
+  return clean.length > maxLen ? `${clean.slice(0, maxLen - 1)}…` : clean;
+}
+
+function shortenPath(rawPath: string, maxLen = 44): string {
+  const clean = rawPath.trim();
+  if (!clean || clean.length <= maxLen) return clean;
+  const parts = clean.split(/([\\/])/).filter(Boolean);
+  if (parts.length >= 3) {
+    const tail = parts.slice(-3).join('');
+    if (tail.length + 2 <= maxLen) return `…${tail}`;
+  }
+  return `…${clean.slice(-(maxLen - 1))}`;
+}
+
+export function summarizeToolArgs(
+  name: string,
+  args?: Record<string, unknown>,
+): string | undefined {
+  if (!args) return undefined;
+  const keys = Object.keys(args);
+  if (keys.length === 0) return undefined;
+  const lower = name.toLowerCase();
+
+  const pickStr = (...candidates: string[]): string => {
+    for (const key of candidates) {
+      const val = args[key];
+      if (typeof val === 'string' && val.trim()) return val.trim();
+    }
+    return '';
+  };
+
+  if (lower === 'bash' || lower.endsWith('_bash') || lower === 'shell' || lower === 'exec') {
+    const cmd = pickStr('command', 'cmd', 'script');
+    if (cmd) return compactSingleLine(cmd, 52);
+  }
+
+  if (lower === 'read' || lower === 'write' || lower === 'edit' || lower === 'lsp_fix') {
+    const p = pickStr('path', 'file_path', 'filePath', 'file');
+    if (p) {
+      const short = shortenPath(p, 42);
+      if (lower === 'read' && (typeof args.offset === 'number' || typeof args.limit === 'number')) {
+        const start = typeof args.offset === 'number' ? args.offset : 1;
+        const lim = typeof args.limit === 'number' ? `+${args.limit}` : '';
+        return `${short} :${start}${lim}`;
+      }
+      return short;
+    }
+  }
+
+  if (lower === 'grep' || lower === 'search') {
+    const pat = pickStr('pattern', 'query', 'q');
+    const p = pickStr('path', 'glob');
+    if (pat && p) return `"${compactSingleLine(pat, 26)}" in ${shortenPath(p, 24)}`;
+    if (pat) return `"${compactSingleLine(pat, 44)}"`;
+  }
+
+  if (lower === 'find' || lower === 'ls' || lower === 'glob') {
+    const pat = pickStr('pattern', 'glob');
+    const p = pickStr('path', 'dir', 'directory');
+    if (pat && p) return `${compactSingleLine(pat, 26)} · ${shortenPath(p, 24)}`;
+    if (pat) return compactSingleLine(pat, 44);
+    if (p) return shortenPath(p, 44);
+  }
+
+  if (lower === 'codemode') {
+    const code = pickStr('code');
+    if (code) {
+      const firstMeaningful =
+        code
+          .split(/\r?\n/)
+          .map((l) => l.trim())
+          .find((l) => l && !l.startsWith('//')) ?? code;
+      return compactSingleLine(firstMeaningful, 48);
+    }
+  }
+
+  if (lower.includes('websearch') || lower.includes('search')) {
+    const q = pickStr('query', 'q', 'prompt');
+    if (q) return `"${compactSingleLine(q, 44)}"`;
+  }
+
+  const primary = pickStr(
+    'command',
+    'path',
+    'file',
+    'query',
+    'pattern',
+    'url',
+    'action',
+    'prompt',
+    'title',
+    'name',
+    'id',
+  );
+  if (primary) return compactSingleLine(primary, 46);
+
+  for (const key of keys) {
+    const v = args[key];
+    if (typeof v === 'string' && v.trim()) {
+      return `${key}: ${compactSingleLine(v, 36)}`;
+    }
+    if (typeof v === 'number' || typeof v === 'boolean') {
+      return `${key}=${String(v)}`;
+    }
+  }
+  return undefined;
 }
 
 export function formatTurnDuration(
@@ -209,7 +328,7 @@ export function parseHistoryEntries(
         const content = entry.content;
         const textParts: string[] = [];
         const thinkingParts: string[] = [];
-        const extractedTools: Array<{ callId: string; name: string }> = [];
+        const extractedTools: Array<{ callId: string; name: string; args?: Record<string, unknown> }> = [];
 
         if (typeof content === 'string') {
           textParts.push(content);
@@ -227,9 +346,11 @@ export function parseHistoryEntries(
             } else if (part.type === 'thinking' && typeof part.thinking === 'string') {
               thinkingParts.push(part.thinking);
             } else if (part.type === 'toolCall' && typeof part.name === 'string' && part.name.trim()) {
+              const rawArgs = asRecord(part.arguments ?? part.args ?? part.input);
               extractedTools.push({
                 callId: typeof part.id === 'string' ? part.id : '',
                 name: part.name.trim(),
+                ...(Object.keys(rawArgs).length > 0 ? { args: rawArgs } : {}),
               });
             }
           }
@@ -239,16 +360,20 @@ export function parseHistoryEntries(
           for (const tc of entry.toolCalls) {
             const call = asRecord(tc);
             if (typeof call.name === 'string' && call.name.trim()) {
+              const rawArgs = asRecord(call.arguments ?? call.args ?? call.input);
               extractedTools.push({
                 callId: typeof call.callId === 'string' ? call.callId : '',
                 name: call.name.trim(),
+                ...(Object.keys(rawArgs).length > 0 ? { args: rawArgs } : {}),
               });
             }
           }
         } else if (extractedTools.length === 0 && typeof entry.toolName === 'string' && entry.toolName.trim()) {
+          const rawArgs = asRecord(entry.arguments ?? entry.args ?? entry.input);
           extractedTools.push({
             callId: typeof entry.toolCallId === 'string' ? entry.toolCallId : '',
             name: entry.toolName.trim(),
+            ...(Object.keys(rawArgs).length > 0 ? { args: rawArgs } : {}),
           });
         }
 
@@ -277,12 +402,19 @@ export function parseHistoryEntries(
         for (let tIdx = 0; tIdx < extractedTools.length; tIdx++) {
           const tc = extractedTools[tIdx];
           const toolId = tc.callId || `${String(item.id ?? i)}-${mIdx}-tool-${tIdx}`;
-          if (!acc.tools.some((existing) => existing.id === toolId)) {
+          const summary = summarizeToolArgs(tc.name, tc.args);
+          const existing = acc.tools.find((itemTool) => itemTool.id === toolId);
+          if (!existing) {
             acc.tools.push({
               id: toolId,
               name: tc.name,
               status: 'running',
+              ...(tc.args ? { args: tc.args } : {}),
+              ...(summary ? { argSummary: summary } : {}),
             });
+          } else {
+            if (tc.args && !existing.args) existing.args = tc.args;
+            if (summary && !existing.argSummary) existing.argSummary = summary;
           }
         }
         if (acc.startMs === undefined && msgTimestamp !== undefined) {
@@ -303,6 +435,25 @@ export function parseHistoryEntries(
         const toolCallId = typeof entry.toolCallId === 'string' ? entry.toolCallId : '';
         const toolName = typeof entry.toolName === 'string' ? entry.toolName.trim() : '';
         const isError = entry.isError === true;
+        const resultTextParts: string[] = [];
+        if (typeof entry.content === 'string') {
+          resultTextParts.push(entry.content);
+        } else if (typeof entry.text === 'string') {
+          resultTextParts.push(entry.text);
+        } else if (Array.isArray(entry.content)) {
+          for (const block of entry.content) {
+            if (typeof block === 'string') {
+              resultTextParts.push(block);
+              continue;
+            }
+            const part = asRecord(block);
+            if (part.type === 'text' && typeof part.text === 'string') {
+              resultTextParts.push(part.text);
+            }
+          }
+        }
+        const resultOutput = resultTextParts.join('\n').trim();
+        const resultTruncated = entry.truncated === true;
         // 历史结果上的白名单 presentation 投影（data/details 两种位置都认）。
         const presentation = asRecord(entry.presentation);
         const projectedPresentation = Object.keys(presentation).length > 0
@@ -331,6 +482,8 @@ export function parseHistoryEntries(
         if (matched) {
           matched.status = resolvedStatus;
           if (msgDurationMs !== undefined) matched.durationMs = msgDurationMs;
+          if (resultOutput) matched.output = resultOutput;
+          if (resultTruncated) matched.outputTruncated = true;
           if (projectedPresentation) {
             matched.presentation = projectedPresentation;
             matched.presentationLive = false;
@@ -343,6 +496,8 @@ export function parseHistoryEntries(
             name: toolName,
             status: resolvedStatus,
             durationMs: msgDurationMs,
+            ...(resultOutput ? { output: resultOutput } : {}),
+            ...(resultTruncated ? { outputTruncated: true } : {}),
             ...(projectedPresentation ? { presentation: projectedPresentation, presentationLive: false } : {}),
           });
           acc.settledToolIds.add(id);
@@ -381,6 +536,8 @@ export function parseHistoryEntries(
       const name = typeof slot.name === 'string' ? slot.name.trim() : '';
       if (!name) continue;
       const slotStatus: ChatToolCallItem['status'] = slot.status === 'done' ? 'done' : 'running';
+      const slotOutput = typeof slot.output === 'string' ? slot.output.trim() : '';
+      const slotTruncated = slot.truncated === true;
       const slotPresentation = asRecord(slot.presentation);
       const hasPresentation = Object.keys(slotPresentation).length > 0;
       const existing = callId
@@ -388,8 +545,16 @@ export function parseHistoryEntries(
         : acc.tools.find((t) => t.name === name && !acc.settledToolIds.has(t.id));
       if (existing) {
         activeLiveIds.add(existing.id);
+        if (slotOutput && !existing.output) {
+          existing.output = slotOutput;
+          if (slotTruncated) existing.outputTruncated = true;
+        }
         if (!acc.settledToolIds.has(existing.id)) {
           existing.status = slotStatus;
+          if (slotOutput) {
+            existing.output = slotOutput;
+            if (slotTruncated) existing.outputTruncated = true;
+          }
           if (hasPresentation) {
             existing.presentation = slotPresentation;
             existing.presentationLive = true;
@@ -402,6 +567,8 @@ export function parseHistoryEntries(
           id,
           name,
           status: slotStatus,
+          ...(slotOutput ? { output: slotOutput } : {}),
+          ...(slotTruncated ? { outputTruncated: true } : {}),
           ...(hasPresentation ? { presentation: slotPresentation, presentationLive: true } : {}),
         });
       }
